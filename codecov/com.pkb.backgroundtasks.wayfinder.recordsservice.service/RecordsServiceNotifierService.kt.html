@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RecordsServiceNotifierService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.backgroundtasks.wayfinder.recordsservice.service</a> &gt; <span class="el_source">RecordsServiceNotifierService.kt</span></div><h1>RecordsServiceNotifierService.kt</h1><pre class="source lang-java linenums">package com.pkb.backgroundtasks.wayfinder.recordsservice.service
+
+import com.pkb.backgroundtasks.config.BackgroundTasksProperties
+import com.pkb.backgroundtasks.config.WayfinderRecordsServiceProperties
+import com.pkb.backgroundtasks.routing.DownstreamChangeNotification
+import com.pkb.backgroundtasks.wayfinder.recordsservice.provider.NhsNumberProvider
+import com.pkb.backgroundtasks.wayfinder.recordsservice.provider.OdsCodeProvider
+import com.pkb.backgroundtasks.wayfinder.recordsservice.entity.PendingNhsNumber
+import com.pkb.backgroundtasks.wayfinder.recordsservice.repository.PendingNhsNumberRepository
+import com.pkb.entities.enums.NationalIdType
+import com.pkb.entities.enums.ValidNationalId
+import org.apache.camel.Exchange
+import org.apache.camel.ExchangeProperty
+import org.hl7.fhir.r4.model.IdType
+import org.springframework.stereotype.Service
+import java.net.URI
+import javax.transaction.Transactional
+
+<span class="fc" id="L19">@Service</span>
+<span class="fc" id="L20">class RecordsServiceNotifierService(</span>
+    backgroundTasksProperties: BackgroundTasksProperties,
+<span class="fc" id="L22">    private val nhsNumberProvider: NhsNumberProvider,</span>
+<span class="fc" id="L23">    private val pendingNhsNumberRepository: PendingNhsNumberRepository,</span>
+<span class="fc" id="L24">    private val odsCodeProvider: OdsCodeProvider</span>
+) {
+
+    companion object {
+        const val PROPERTY_RECORD_IDS = &quot;recordIds&quot;
+    }
+
+<span class="fc" id="L31">    private val properties: WayfinderRecordsServiceProperties = backgroundTasksProperties.recordsService</span>
+
+    fun findNhsNumber(notification: DownstreamChangeNotification, exchange: Exchange): List&lt;ValidNationalId&gt; {
+<span class="fc" id="L34">        val resourceId = getResourceId(notification)</span>
+<span class="fc" id="L35">        exchange.properties[&quot;resourceId&quot;] = resourceId</span>
+
+<span class="pc bpc" id="L37" title="1 of 2 branches missed.">        return nhsNumberProvider.findNhsNumberByAppointmentResource(resourceId).orElse(null)</span>
+<span class="pc bpc" id="L38" title="1 of 2 branches missed.">                ?.let { listOf(it) } ?: emptyList()</span>
+    }
+
+    fun findOdsCode(notification: DownstreamChangeNotification, exchange: Exchange): String? {
+<span class="fc" id="L42">        val resourceId = getResourceId(notification)</span>
+<span class="fc" id="L43">        exchange.properties[&quot;resourceId&quot;] = resourceId</span>
+
+<span class="fc" id="L45">        return odsCodeProvider.findOdsCodeByAppointmentResource(resourceId)</span>
+    }
+
+    fun buildHttpMessage(nhsNumbers: List&lt;ValidNationalId&gt;, exchange: Exchange): NotificationRequest? {
+<span class="pc bpc" id="L49" title="1 of 2 branches missed.">        if (nhsNumbers.isEmpty()) {</span>
+<span class="nc" id="L50">            exchange.isRouteStop = true</span>
+<span class="nc" id="L51">            return null</span>
+        }
+
+<span class="fc" id="L54">        exchange.message.headers[&quot;Authorization&quot;] = &quot;Bearer ${properties.apiKey}&quot;</span>
+<span class="fc" id="L55">        return NotificationRequest(properties.clientId, nhsNumbers.map { it.value })</span>
+    }
+
+    fun mapSqlToValidNationalId(sqlResult: List&lt;Map&lt;String, Any&gt;&gt;, exchange: Exchange): List&lt;ValidNationalId&gt; {
+<span class="pc bpc" id="L59" title="1 of 2 branches missed.">        exchange.properties[PROPERTY_RECORD_IDS] = sqlResult.mapNotNull { it[&quot;id&quot;] as? Long }</span>
+
+<span class="pc bpc" id="L61" title="1 of 2 branches missed.">        return sqlResult.mapNotNull { it[&quot;nhs_number&quot;] as? String }</span>
+<span class="fc" id="L62">                .mapNotNull { NationalIdType.NHS_NUMBER.getValidNationalIdAndType(it).orElse(null) }</span>
+    }
+
+    @Transactional
+    fun markAsSent(@ExchangeProperty(PROPERTY_RECORD_IDS) recordIds: List&lt;Long&gt;) {
+<span class="fc" id="L67">        pendingNhsNumberRepository.updateDeliveryStatus(recordIds, PendingNhsNumber.DeliveryStatus.SENT)</span>
+<span class="fc" id="L68">    }</span>
+
+    @Transactional
+    fun handleFailure(@ExchangeProperty(PROPERTY_RECORD_IDS) recordIds: List&lt;Long&gt;) {
+<span class="fc" id="L72">        pendingNhsNumberRepository.updateDeliveryStatus(recordIds, PendingNhsNumber.DeliveryStatus.FAILED)</span>
+<span class="fc" id="L73">    }</span>
+
+    private fun getResourceId(notification: DownstreamChangeNotification): IdType {
+<span class="fc" id="L76">        val serverUrl = URI(notification.data)</span>
+<span class="fc" id="L77">        return IdType(serverUrl.path.removePrefix(&quot;/fhir/&quot;))</span>
+    }
+
+<span class="fc" id="L80">    data class NotificationRequest(val clientId: String, val nhsNumbers: List&lt;String&gt;)</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

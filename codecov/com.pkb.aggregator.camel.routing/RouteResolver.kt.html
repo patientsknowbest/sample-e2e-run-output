@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RouteResolver.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel.routing</a> &gt; <span class="el_source">RouteResolver.kt</span></div><h1>RouteResolver.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel.routing
+
+import com.pkb.aggregator.R4IdType
+import com.pkb.aggregator.camel.GooglePubSubHelper.Companion.ATTRIBUTE_ACTION
+import com.pkb.aggregator.camel.GooglePubSubHelper.Companion.PUBSUB_ACTION_CREATE_RESOURCE
+import com.pkb.aggregator.camel.GooglePubSubHelper.Companion.PUBSUB_ACTION_DELETE_RESOURCE
+import com.pkb.aggregator.camel.GooglePubSubHelper.Companion.PUBSUB_ACTION_UPDATE_RESOURCE
+import com.pkb.aggregator.camel.NEXT_ROUTE_PROPERTY
+import com.pkb.aggregator.camel.UPSTREAM_SOURCE_ID_PROPERTY
+import com.pkb.aggregator.camel.routing.dto.UpstreamChangeNotification
+import com.pkb.aggregator.camel.routing.resource.ResourceUpdateRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.aggregated.MedicationRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.aggregated.OrganizationRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.aggregated.PatientRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.aggregated.PersonRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.aggregated.PractitionerRoleRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.aggregated.PractitionerRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.AllergyIntoleranceRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.AppointmentRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.CodeSystemRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.ConditionRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.ConsentRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.EncounterRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.MedicationStatementRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.ObservationRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.ProvenanceRouteBuilder
+import com.pkb.aggregator.camel.routing.resource.single.ValueSetRouteBuilder
+import com.pkb.aggregator.configuration.FhirConfiguration
+import com.pkb.aggregator.configuration.FhirEndpoint
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamResource
+import com.pkb.aggregator.service.FHIR_TYPE_ALLERGY_INTOLERANCE
+import com.pkb.aggregator.service.FHIR_TYPE_APPOINTMENT
+import com.pkb.aggregator.service.FHIR_TYPE_CODE_SYSTEM
+import com.pkb.aggregator.service.FHIR_TYPE_CONDITION
+import com.pkb.aggregator.service.FHIR_TYPE_CONSENT
+import com.pkb.aggregator.service.FHIR_TYPE_ENCOUNTER
+import com.pkb.aggregator.service.FHIR_TYPE_MEDICATION
+import com.pkb.aggregator.service.FHIR_TYPE_MEDICATION_STATEMENT
+import com.pkb.aggregator.service.FHIR_TYPE_OBSERVATION
+import com.pkb.aggregator.service.FHIR_TYPE_ORGANIZATION
+import com.pkb.aggregator.service.FHIR_TYPE_PATIENT
+import com.pkb.aggregator.service.FHIR_TYPE_PERSON
+import com.pkb.aggregator.service.FHIR_TYPE_PRACTITIONER
+import com.pkb.aggregator.service.FHIR_TYPE_PRACTITIONER_ROLE
+import com.pkb.aggregator.service.FHIR_TYPE_PROVENANCE
+import com.pkb.aggregator.service.FHIR_TYPE_VALUE_SET
+import com.pkb.aggregator.service.dto.ResourceWithSourceId
+import org.apache.camel.Body
+import org.apache.camel.ExchangeProperties
+import org.hl7.fhir.instance.model.api.IDomainResource
+import org.hl7.fhir.instance.model.api.IIdType
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Component
+import java.lang.invoke.MethodHandles
+import java.net.URI
+
+/**
+ * Knows how to dynamically resolve the next endpoint in a route for various operations. Each method will return the
+ * body so that it appears 'transparent' to the overall route (i.e. the body is unaffected by the journey through here)
+ * but an exchange property [NEXT_ROUTE_PROPERTY] will be populated with where to go next, which can be routed with e.g.
+ * [org.apache.camel.model.ProcessorDefinition.toD(java.lang.String)]
+ */
+<span class="fc" id="L64">@Component</span>
+<span class="fc" id="L65">class RouteResolver(</span>
+<span class="fc" id="L66">    private val fhirConfiguration: FhirConfiguration,</span>
+) {
+
+<span class="fc" id="L69">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+<span class="pc" id="L71">    private data class EndpointAndResourceId(val fhirEndpoint: FhirEndpoint, val resourceId: IIdType)</span>
+
+    /**
+     * Expects an [UpstreamChangeNotification] body, and uses it to set up a request to the appropriate upstream
+     * to retrieve the relevant resource. Returns the target route
+     */
+    fun resolveUpstreamRouteForNotification(
+        @Body notification: UpstreamChangeNotification,
+        @ExchangeProperties properties: MutableMap&lt;String, Any&gt;,
+    ): UpstreamChangeNotification {
+
+<span class="fc" id="L82">        val (fhirEndpoint, id) = findEndpointAndResourceId(notification)</span>
+
+<span class="fc" id="L84">        properties[UPSTREAM_SOURCE_ID_PROPERTY] = UpstreamResource(fhirEndpoint.sourceId, &quot;${id.resourceType}/${id.idPart}&quot;)</span>
+<span class="fc" id="L85">        properties[NEXT_ROUTE_PROPERTY] = createFhirReadRoute(fhirEndpoint, id)</span>
+
+<span class="fc" id="L87">        return notification</span>
+    }
+
+    /**
+     * Resovles a pubsub notification action into a route that can handle it.
+     *
+     * See https://cloud.google.com/healthcare-api/docs/concepts/pubsub#fhir_resource_data_and_attributes
+     */
+    fun resolvePubsubUpdateAction(
+        @Body notification: UpstreamChangeNotification,
+        @ExchangeProperties properties: MutableMap&lt;String, Any&gt;,
+    ): UpstreamChangeNotification {
+<span class="pc bpc" id="L99" title="2 of 6 branches missed.">        properties[NEXT_ROUTE_PROPERTY] = when (val action = notification.attributes[ATTRIBUTE_ACTION]) {</span>
+<span class="fc" id="L100">            PUBSUB_ACTION_CREATE_RESOURCE -&gt; ResourceUpdateRouteBuilder.REQUEST_CREATE</span>
+<span class="fc" id="L101">            PUBSUB_ACTION_UPDATE_RESOURCE -&gt; ResourceUpdateRouteBuilder.REQUEST_UPDATE</span>
+<span class="fc" id="L102">            PUBSUB_ACTION_DELETE_RESOURCE -&gt; ResourceUpdateRouteBuilder.REQUEST_DELETE</span>
+<span class="pc" id="L103">            else -&gt; throw RuntimeException(&quot;Cannot resolve a route for action $action&quot;)</span>
+        }
+
+<span class="fc" id="L106">        log.debug(&quot;Resolved route {} for notification {}&quot;, properties[NEXT_ROUTE_PROPERTY], notification)</span>
+<span class="fc" id="L107">        return notification</span>
+    }
+
+    fun resolveResourceProcessor(
+        @Body resourceWithSourceId: ResourceWithSourceId&lt;IDomainResource&gt;,
+        @ExchangeProperties properties: MutableMap&lt;String, Any&gt;,
+    ): ResourceWithSourceId&lt;IDomainResource&gt; {
+<span class="fc" id="L114">        properties[NEXT_ROUTE_PROPERTY] = when (val type = resourceWithSourceId.type()) {</span>
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">            FHIR_TYPE_ALLERGY_INTOLERANCE -&gt; AllergyIntoleranceRouteBuilder.PROCESS_ALLERGY</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">            FHIR_TYPE_APPOINTMENT -&gt; AppointmentRouteBuilder.PROCESS_APPOINTMENT</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">            FHIR_TYPE_CODE_SYSTEM -&gt; CodeSystemRouteBuilder.PROCESS_CODE_SYSTEM</span>
+<span class="fc bfc" id="L118" title="All 2 branches covered.">            FHIR_TYPE_CONDITION -&gt; ConditionRouteBuilder.PROCESS_CONDITION</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">            FHIR_TYPE_CONSENT -&gt; ConsentRouteBuilder.PROCESS_CONSENT</span>
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">            FHIR_TYPE_ENCOUNTER -&gt; EncounterRouteBuilder.PROCESS_ENCOUNTER</span>
+<span class="pc bpc" id="L121" title="1 of 2 branches missed.">            FHIR_TYPE_MEDICATION -&gt; MedicationRouteBuilder.PROCESS_MEDICATION</span>
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">            FHIR_TYPE_MEDICATION_STATEMENT -&gt; MedicationStatementRouteBuilder.PROCESS_MEDICATIONSTATEMENT</span>
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">            FHIR_TYPE_OBSERVATION -&gt; ObservationRouteBuilder.PROCESS_OBSERVATION</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">            FHIR_TYPE_ORGANIZATION -&gt; OrganizationRouteBuilder.PROCESS_ORGANIZATION</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">            FHIR_TYPE_PATIENT -&gt; PatientRouteBuilder.PROCESS_PATIENT</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">            FHIR_TYPE_PERSON -&gt; PersonRouteBuilder.PROCESS_PERSON</span>
+<span class="fc bfc" id="L127" title="All 2 branches covered.">            FHIR_TYPE_PRACTITIONER -&gt; PractitionerRouteBuilder.PROCESS_PRACTITIONER</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">            FHIR_TYPE_PRACTITIONER_ROLE -&gt; PractitionerRoleRouteBuilder.PROCESS_PRACTITIONER_ROLE</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">            FHIR_TYPE_PROVENANCE -&gt; ProvenanceRouteBuilder.PROCESS_PROVENANCE</span>
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">            FHIR_TYPE_VALUE_SET -&gt; ValueSetRouteBuilder.PROCESS_VALUE_SET</span>
+<span class="pc" id="L131">            else -&gt; throw RuntimeException(&quot;Cannot resolve a route for type $type&quot;)</span>
+        }
+
+<span class="fc" id="L134">        log.debug(&quot;Resolved processor route {} for resource {}&quot;, properties[NEXT_ROUTE_PROPERTY], resourceWithSourceId)</span>
+<span class="fc" id="L135">        return resourceWithSourceId</span>
+    }
+
+    fun resolveResourceDeleter(
+        @Body notification: UpstreamChangeNotification,
+        @ExchangeProperties properties: MutableMap&lt;String, Any&gt;,
+    ): UpstreamChangeNotification {
+
+<span class="fc" id="L143">        val (fhirEndpoint, id) = findEndpointAndResourceId(notification)</span>
+
+<span class="fc" id="L145">        properties[UPSTREAM_SOURCE_ID_PROPERTY] = UpstreamResource(fhirEndpoint.sourceId, &quot;${id.resourceType}/${id.idPart}&quot;)</span>
+<span class="fc" id="L146">        properties[NEXT_ROUTE_PROPERTY] = when (id.resourceType) {</span>
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">            FHIR_TYPE_ALLERGY_INTOLERANCE -&gt; AllergyIntoleranceRouteBuilder.DELETE_ALLERGY</span>
+<span class="fc bfc" id="L148" title="All 2 branches covered.">            FHIR_TYPE_APPOINTMENT -&gt; AppointmentRouteBuilder.DELETE_APPOINTMENT</span>
+<span class="pc bpc" id="L149" title="1 of 2 branches missed.">            FHIR_TYPE_CODE_SYSTEM -&gt; CodeSystemRouteBuilder.DELETE_CODE_SYSTEM</span>
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">            FHIR_TYPE_CONDITION -&gt; ConditionRouteBuilder.DELETE_CONDITION</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">            FHIR_TYPE_CONSENT -&gt; ConsentRouteBuilder.DELETE_CONSENT</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">            FHIR_TYPE_ENCOUNTER -&gt; EncounterRouteBuilder.DELETE_ENCOUNTER</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">            FHIR_TYPE_MEDICATION -&gt; MedicationRouteBuilder.DELETE_MEDICATION</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">            FHIR_TYPE_MEDICATION_STATEMENT -&gt; MedicationStatementRouteBuilder.DELETE_MEDICATIONSTATEMENT</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">            FHIR_TYPE_OBSERVATION -&gt; ObservationRouteBuilder.DELETE_OBSERVATION</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            FHIR_TYPE_ORGANIZATION -&gt; OrganizationRouteBuilder.PROCESS_DELETE_ORGANIZATION</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            FHIR_TYPE_PATIENT -&gt; PatientRouteBuilder.PROCESS_DELETE_PATIENT</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">            FHIR_TYPE_PERSON -&gt; PersonRouteBuilder.PROCESS_DELETE_PERSON</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            FHIR_TYPE_PRACTITIONER -&gt; PractitionerRouteBuilder.PROCESS_DELETE_PRACTITIONER</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            FHIR_TYPE_PRACTITIONER_ROLE -&gt; PractitionerRoleRouteBuilder.PROCESS_DELETE_PRACTITIONER_ROLE</span>
+<span class="nc bnc" id="L161" title="All 2 branches missed.">            FHIR_TYPE_PROVENANCE -&gt; ProvenanceRouteBuilder.DELETE_PROVENANCE</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">            FHIR_TYPE_VALUE_SET -&gt; ValueSetRouteBuilder.DELETE_VALUE_SET</span>
+<span class="pc" id="L163">            else -&gt; throw RuntimeException(&quot;Cannot resolve a route for type ${id.resourceType}&quot;)</span>
+        }
+
+<span class="fc" id="L166">        log.debug(&quot;Resolved route {} for notification {}&quot;, properties[NEXT_ROUTE_PROPERTY], notification)</span>
+<span class="fc" id="L167">        return notification</span>
+    }
+
+    private fun findEndpointAndResourceId(notification: UpstreamChangeNotification): EndpointAndResourceId {
+        // Look up the relevant upstream based on the URL in the notification, and remember source details for later
+        // in the processing pipeline
+<span class="fc" id="L173">        val serverUrl = URI(notification.data)</span>
+<span class="fc" id="L174">        return EndpointAndResourceId(</span>
+<span class="fc" id="L175">            fhirEndpoint = findEndpointFromUrl(serverUrl),</span>
+<span class="fc" id="L176">            resourceId = R4IdType(serverUrl.path.removePrefix(&quot;/fhir/&quot;))</span>
+        )
+    }
+
+    private fun findEndpointFromUrl(serverUrl: URI) =
+<span class="pc bpc" id="L181" title="2 of 6 branches missed.">        fhirConfiguration.upstream.endpoints.find {</span>
+<span class="fc" id="L182">            URI(it.serverUrl).authority == serverUrl.authority</span>
+<span class="pc" id="L183">        } ?: throw RuntimeException(&quot;Cannot find upstream configuration for $serverUrl&quot;)</span>
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

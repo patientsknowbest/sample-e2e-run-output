@@ -1,0 +1,335 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PersonContactManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.user.impl</a> &gt; <span class="el_source">PersonContactManager.java</span></div><h1>PersonContactManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.user.impl;
+
+import com.pkb.VersionDetails;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.Email;
+import com.pkb.entities.enums.ContactType;
+import com.pkb.entities.enums.UserType;
+import com.pkb.repository.legacy.LegacyPersonContactRepository;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.user.entity.PersonContact.Lazy;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.pkb.user.entity.PersonContact.Lazy.NATIONAL_AND_LOCAL_IDS;
+import static com.pkb.user.entity.PersonContact.Lazy.PERSON_W_CONTACTS;
+import static com.pkb.user.entity.PersonContact.Lazy.PROPERTIES;
+import static io.vavr.API.None;
+import static io.vavr.API.Some;
+import static java.lang.String.format;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
+import static java.util.Objects.nonNull;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+@SuppressWarnings(&quot;ClassWithTooManyMethods&quot;)
+public class PersonContactManager extends TransactionManager {
+
+<span class="fc" id="L47">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final LegacyPersonContactRepository personContactRepository;
+
+    public PersonContactManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, LegacyPersonContactRepository personContactRepository) {
+<span class="fc" id="L52">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L53">        this.personContactRepository = personContactRepository;</span>
+<span class="fc" id="L54">    }</span>
+
+    /**
+     * Confirm the email contact as valid for a human. If persons other than the one associated with the specified
+     * contact have an equivalent email contact, then those contacts will be confirmed too.
+     *
+     * @param personEmailContactId
+     *            The ID of the email contact to confirm
+     */
+    public void confirmEmailContactForHuman(EHRRequestContext requestContext, PersonContact personEmail) {
+<span class="fc" id="L64">        transactional(() -&gt; {</span>
+<span class="fc" id="L65">            personEmail.getContactIfEmail().flatMap(email -&gt; Option.ofOptional(findPersonByConfirmedOrPrimaryEmail(email).stream().findFirst())).peek(existingPersonWithEmailConfirmed -&gt; {</span>
+<span class="nc" id="L66">                throw new IllegalArgumentException(&quot;personEmailContactId=[%d] is for an email address that is already confirmed&quot;);</span>
+            });
+
+<span class="fc" id="L69">            var humanUUID = personEmail.getPerson().getHumanUUID();</span>
+
+<span class="fc bfc" id="L71" title="All 2 branches covered.">            List&lt;PersonContact&gt; contactsToConfirm = isBlank(humanUUID)</span>
+<span class="fc" id="L72">                    ? singletonList(personEmail)</span>
+<span class="pc bpc" id="L73" title="1 of 2 branches missed.">                    : personEmail.getContactIfEmail().isDefined()</span>
+<span class="fc" id="L74">                    ? personContactRepository.getContactsByHumanUuidAndContactValueAndContactType(humanUUID, personEmail.getContactIfEmail().get().address(), ContactType.EMAIL)</span>
+<span class="pc" id="L75">                    : Collections.emptyList();</span>
+
+<span class="fc bfc" id="L77" title="All 2 branches covered.">            for (PersonContact contactToConfirm : contactsToConfirm) {</span>
+<span class="fc" id="L78">                contactToConfirm.setConfirmed(true);</span>
+<span class="fc" id="L79">                contactToConfirm.setVersionDetails(VersionDetails.of(requestContext, dateTimeService.now()));</span>
+<span class="fc" id="L80">                save(contactToConfirm, VersionDetails.of(requestContext, dateTimeService.now()));</span>
+<span class="fc" id="L81">            }</span>
+
+<span class="fc" id="L83">            LOGGER.info(&quot;Confirmed email contacts for person id {}&quot;, personEmail.getPerson().getId());</span>
+<span class="fc" id="L84">        });</span>
+<span class="fc" id="L85">    }</span>
+
+    /**
+     * Get the list of contacts for a person, excluding CONTACT_WITH or any other indirect contact details.
+     */
+    public List&lt;PersonContact&gt; getContactListDirect(long userId) {
+<span class="fc" id="L91">        return personContactRepository.getContactsByUserId(userId).stream()</span>
+<span class="fc" id="L92">                .filter(pc -&gt; pc.findAlsoContactPerson().isEmpty())</span>
+<span class="fc" id="L93">                .collect(toList());</span>
+    }
+
+    /**
+     * Gets the {@link PersonContact}s for the given contacts.
+     */
+    @NotNull List&lt;PersonContact&gt; getPersonsByConfirmedOrPrimaryEmails(Collection&lt;Email&gt; emails, Lazy... fields) {
+<span class="nc" id="L100">        return findPersonsByConfirmedOrPrimaryEmails(emails, fields);</span>
+    }
+
+    public @NotNull List&lt;PersonContact&gt; findPersonByConfirmedOrPrimaryEmail(@NotNull Email email, Lazy... fields) {
+<span class="fc" id="L104">        return findPersonsByConfirmedOrPrimaryEmails(singleton(email), fields);</span>
+    }
+
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findPKBPersonByConfirmedOrPrimaryEmail(Email email, Lazy... fields) {
+<span class="fc bfc" id="L108" title="All 2 branches covered.">        if (email != null) {</span>
+<span class="fc" id="L109">            List&lt;PersonContact&gt; contacts = findPersonByConfirmedOrPrimaryEmail(email, fields);</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">            if (contacts.isEmpty()) {</span>
+<span class="fc" id="L111">                return Either.left(Option.none());</span>
+            }
+
+<span class="pc bpc" id="L114" title="1 of 2 branches missed.">            if (contacts.size() &gt; 1) {</span>
+<span class="nc" id="L115">                return Either.right(contacts.stream().map(PersonContact::getPerson).collect(toList()));</span>
+            }
+
+<span class="fc" id="L118">            return Either.left(Option.of(contacts.get(0).getPerson()));</span>
+
+        } else {
+<span class="fc" id="L121">            return Either.left(Option.none());</span>
+        }
+    }
+
+    private @NotNull List&lt;PersonContact&gt; findPersonsByConfirmedOrPrimaryEmails(@NotNull Collection&lt;Email&gt; emails, Lazy... fields) {
+<span class="fc" id="L126">        var contactValues = emails.stream().filter(Objects::nonNull).map(Email::address).collect(Collectors.toList());</span>
+<span class="pc bpc" id="L127" title="1 of 2 branches missed.">        if(contactValues.isEmpty()) {</span>
+<span class="nc" id="L128">            return Collections.emptyList();</span>
+        }
+<span class="fc" id="L130">        var requestedSubgraphs = PersonContact.Lazy.getSubgraphs(fields);</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">        if (requestedSubgraphs.equals(PersonContact.Lazy.getSubgraphs(NATIONAL_AND_LOCAL_IDS, PERSON_W_CONTACTS, PROPERTIES))) {</span>
+<span class="fc" id="L132">            return personContactRepository.getContactsByContactTypeAndContactValuesWithPersonAndContactsAndIdsAndProperties(ContactType.EMAIL, contactValues);</span>
+        }
+<span class="fc bfc" id="L134" title="All 2 branches covered.">        if (requestedSubgraphs.equals(PersonContact.Lazy.getSubgraphs(PERSON_W_CONTACTS, NATIONAL_AND_LOCAL_IDS))) {</span>
+<span class="fc" id="L135">            return personContactRepository.getContactsByContactTypeAndContactValuesWithPersonAndContactsAndIds(ContactType.EMAIL, contactValues);</span>
+        }
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">        if (requestedSubgraphs.equals(PersonContact.Lazy.getSubgraphs(PERSON_W_CONTACTS, PROPERTIES))) {</span>
+<span class="nc" id="L138">            return personContactRepository.getContactsByContactTypeAndContactValuesWithPersonAndContactsAndProperties(ContactType.EMAIL, contactValues);</span>
+        }
+<span class="fc bfc" id="L140" title="All 2 branches covered.">        if (requestedSubgraphs.equals(PersonContact.Lazy.getSubgraphs(PERSON_W_CONTACTS))) {</span>
+<span class="fc" id="L141">            return personContactRepository.getContactsByContactTypeAndContactValuesWithPersonAndContacts(ContactType.EMAIL, contactValues);</span>
+        }
+<span class="fc bfc" id="L143" title="All 2 branches covered.">        if (requestedSubgraphs.equals(PersonContact.Lazy.getSubgraphs(PROPERTIES))) {</span>
+<span class="fc" id="L144">            return personContactRepository.getContactsByContactTypeAndContactValuesWithPersonAndProperties(ContactType.EMAIL, contactValues);</span>
+        }
+<span class="fc" id="L146">        return personContactRepository.getContactsByContactTypeAndContactValuesWithPerson(ContactType.EMAIL, contactValues);</span>
+    }
+
+    @NotNull
+    public Option&lt;PKBPerson&gt; getPersonForConfirmedOrPrimaryPatientContact(Email email) {
+<span class="fc" id="L151">        List&lt;PersonContact&gt; contacts = findPersonByConfirmedOrPrimaryEmail(email, PERSON_W_CONTACTS);</span>
+<span class="fc" id="L152">        contacts.forEach(personContact -&gt; {</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">            if (UserType.PATIENT != personContact.getPerson().getUserType()) {</span>
+<span class="fc" id="L154">                LOGGER.warn(&quot;search for patient by contact {} included non-patient person {}&quot;, email.address(), personContact.getPerson());</span>
+            }
+<span class="fc" id="L156">        });</span>
+<span class="fc" id="L157">        return Option.ofOptional(contacts.stream().findFirst().map(PersonContact::getPerson));</span>
+    }
+
+    /**
+     * Save the contact for the person
+     */
+    public PersonContact save(PersonContact personContact, VersionDetails versionDetails) {
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if (personContact.getId() != null) {</span>
+<span class="fc" id="L165">            checkArgument(nonNull(personContact.getPerson()), &quot;personContact.person&quot;);</span>
+        }
+
+<span class="fc" id="L168">        return transactional(() -&gt; {</span>
+            try {
+<span class="fc bfc" id="L170" title="All 2 branches covered.">                var msg = personContact.getId() == null ? &quot;Saved&quot; : &quot;Updated&quot;;</span>
+<span class="fc" id="L171">                personContact.setVersionDetails(versionDetails);</span>
+<span class="fc" id="L172">                var savedContact = personContactRepository.saveAndFlush(personContact);</span>
+<span class="fc" id="L173">                LOGGER.info(&quot;{} contact {} for person {}&quot;, msg, savedContact.getId(), savedContact.getPerson().getId());</span>
+<span class="fc" id="L174">                return savedContact;</span>
+<span class="nc" id="L175">            } catch (Exception e) {</span>
+<span class="nc" id="L176">                throw new RuntimeException(&quot;Exception while saving person contact&quot;, e);</span>
+            }
+        });
+    }
+
+    public void saveContactList(EHRRequestContext requestContext, List&lt;PersonContact&gt; personContactList) {
+<span class="fc" id="L182">        transactional(() -&gt; {</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">            for (PersonContact personContact : personContactList) {</span>
+<span class="fc" id="L184">                save(personContact, VersionDetails.of(requestContext, dateTimeService.now()));</span>
+<span class="fc" id="L185">            }</span>
+<span class="fc" id="L186">        });</span>
+<span class="fc" id="L187">    }</span>
+
+    public PersonContact saveNewPrimaryEmail(EHRRequestContext requestContext, long personId, @NotNull Email email, boolean newEmailConfirmed) {
+<span class="fc" id="L190">        return transactional(() -&gt; {</span>
+<span class="fc" id="L191">            var person = beanFactory.getPKBPersonBean().getPKBPerson(personId, PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L192">            findPrimaryContact(person.getId()).peek(primaryContact -&gt; {</span>
+<span class="fc" id="L193">                primaryContact.setPrimary(false);</span>
+<span class="fc" id="L194">                save(primaryContact, primaryContact.getVersionDetails());</span>
+<span class="fc" id="L195">            });</span>
+<span class="fc" id="L196">            var details = VersionDetails.of(requestContext, dateTimeService.now());</span>
+<span class="fc" id="L197">            details.setSourcePersonId(person.getId());</span>
+<span class="fc" id="L198">            var contact = findEmailContact(personId, email).getOrElse(() -&gt; {</span>
+<span class="fc" id="L199">                var newContact = new PersonContact();</span>
+<span class="fc" id="L200">                newContact.setPublicId(UUID.randomUUID());</span>
+<span class="fc" id="L201">                newContact.setPerson(person);</span>
+<span class="fc" id="L202">                newContact.setContactAsEmail(email);</span>
+<span class="fc" id="L203">                newContact = save(newContact, details);</span>
+<span class="fc" id="L204">                person.getContacts().add(newContact);</span>
+<span class="fc" id="L205">                return newContact;</span>
+            });
+<span class="fc" id="L207">            contact.setConfirmed(newEmailConfirmed);</span>
+<span class="fc" id="L208">            contact.setVersionDetails(details);</span>
+<span class="fc" id="L209">            contact.setPrimary(true);</span>
+<span class="fc" id="L210">            save(contact, details);</span>
+<span class="fc" id="L211">            LOGGER.info(&quot;Saved new primary email for person {}&quot;, personId);</span>
+<span class="fc" id="L212">            return contact;</span>
+        });
+    }
+
+    private Option&lt;PersonContact&gt; findEmailContact(long personId, @NotNull Email email) {
+<span class="fc" id="L217">        return Option.of(personContactRepository.getContactByContactTypeAndContactValueAndPersonId(ContactType.EMAIL, email.address(), personId));</span>
+    }
+
+    /**
+     * Get the primary contact for user
+     */
+    public Option&lt;PersonContact&gt; findPrimaryContact(long userId) {
+        try {
+<span class="fc" id="L225">            var contacts = personContactRepository.getPrimaryPersonContacts(userId);</span>
+<span class="fc bfc" id="L226" title="All 2 branches covered.">            if (contacts.isEmpty()) {</span>
+<span class="fc" id="L227">                return None();</span>
+            }
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">            if (contacts.size() != 1) {</span>
+<span class="nc" id="L230">                LOGGER.error(&quot;got {} results for primary contact - userid {}&quot;, contacts.size(), userId);</span>
+            }
+<span class="fc" id="L232">            return Some(contacts.get(0));</span>
+<span class="nc" id="L233">        } catch (Exception e) {</span>
+<span class="nc" id="L234">            throw new RuntimeException(&quot;Exception while getting primary contact for user-&quot; + userId, e);</span>
+        }
+    }
+
+    /**
+     * Delete the given contact
+     *
+     * @param contactId
+     *            contact to delete
+     */
+    public void deleteContact(Long contactId) {
+<span class="pc bpc" id="L245" title="1 of 2 branches missed.">        if (contactId == null) {</span>
+<span class="nc" id="L246">            LOGGER.warn(&quot;got null contactId in deleteContact()...&quot;);</span>
+<span class="nc" id="L247">            return;</span>
+        }
+
+<span class="fc" id="L250">        transactional(() -&gt; {</span>
+<span class="fc" id="L251">            personContactRepository.deleteContactByContactId(contactId);</span>
+<span class="fc" id="L252">            LOGGER.info(&quot;Deleted contact {}&quot;, contactId);</span>
+<span class="fc" id="L253">        });</span>
+<span class="fc" id="L254">    }</span>
+
+    /**
+     * Delete the given contact
+     */
+    public void deleteContact(long userId, long refUserId, ContactType contactType) {
+<span class="fc" id="L260">        transactional(() -&gt; {</span>
+            try {
+<span class="fc" id="L262">                var deleted = personContactRepository.deleteContactsByUserIdAndRefUserIdAndContactType(userId, refUserId, contactType);</span>
+<span class="fc" id="L263">                LOGGER.info(&quot;Deleted {} contacts for user {} having ref user {}&quot;, deleted, userId, refUserId);</span>
+<span class="nc" id="L264">            } catch (Exception e) {</span>
+<span class="nc" id="L265">                throw new RuntimeException(&quot;Exception while deleting contacts for user&quot;, e);</span>
+<span class="fc" id="L266">            }</span>
+<span class="fc" id="L267">        });</span>
+<span class="fc" id="L268">    }</span>
+
+    /**
+     * Fetch the contact by contact id
+     *
+     * @return {@link PersonContact}
+     */
+    @Nullable
+    public PersonContact getPersonContact(long contactId) {
+        try {
+<span class="nc" id="L278">            return personContactRepository.getContactByContactId(contactId);</span>
+<span class="nc" id="L279">        } catch (Exception e) {</span>
+<span class="nc" id="L280">            throw new RuntimeException(&quot;Exception while getting contact for id &quot; + contactId, e);</span>
+        }
+    }
+
+    @Nullable
+    public PersonContact getPersonEmailContactByPublicId(UUID publicId) {
+        try {
+<span class="fc" id="L287">            return personContactRepository.getContactByContactTypeAndPublicId(ContactType.EMAIL, publicId);</span>
+<span class="nc" id="L288">        } catch (Exception e) {</span>
+<span class="nc" id="L289">            throw new RuntimeException(&quot;Exception while getting contact for publicId &quot; + publicId, e);</span>
+        }
+    }
+
+    /**
+     * Fetch the contact by owner id and contact id: for access control
+     *
+     * @return {@link PersonContact}
+     */
+    public PersonContact getPersonContact(@NotNull Long ownerId, @NotNull Long contactId) {
+        try {
+<span class="fc" id="L300">            return personContactRepository.getContactByContactIdAndOwnerId(contactId, ownerId);</span>
+<span class="nc" id="L301">        } catch (Exception e) {</span>
+<span class="nc" id="L302">            throw new RuntimeException(&quot;Exception while getting contact for id &quot; + contactId, e);</span>
+        }
+    }
+
+    /**
+     * Delete all contacts of a user
+     */
+    public void deleteAllContacts(long userId) {
+<span class="fc" id="L310">        transactional(() -&gt; {</span>
+            try {
+<span class="fc" id="L312">                var deleted = personContactRepository.deleteAllContactsByUserId(userId);</span>
+<span class="fc" id="L313">                LOGGER.info(&quot;Deleted {} contacts for user {}&quot;, deleted, userId);</span>
+<span class="nc" id="L314">            } catch (Exception e) {</span>
+<span class="nc" id="L315">                throw new RuntimeException(&quot;Exception while deleting all contacts for user-&quot; + userId, e);</span>
+<span class="fc" id="L316">            }</span>
+<span class="fc" id="L317">        });</span>
+<span class="fc" id="L318">    }</span>
+
+    /**
+     * Find contacts that have the ref person
+     */
+    @NotNull public List&lt;PersonContact&gt; findContactsThatHaveTheRefPerson(long personId) {
+        try {
+<span class="fc" id="L325">            return personContactRepository.getContactsByRefPersonId(personId);</span>
+<span class="nc" id="L326">        } catch (Exception e) {</span>
+<span class="nc" id="L327">            throw new RuntimeException(format(&quot;Exception while getting contacts with the reference person (id=%d)&quot;, personId), e);</span>
+        }
+    }
+
+    List&lt;PersonContact&gt; getContactsWithRefPersonInOrder(long userId) {
+<span class="fc" id="L332">        return personContactRepository.getContactsWithRefPersonInOrder(userId);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

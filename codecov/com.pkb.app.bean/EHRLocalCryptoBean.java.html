@@ -1,0 +1,384 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EHRLocalCryptoBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.app.bean</a> &gt; <span class="el_source">EHRLocalCryptoBean.java</span></div><h1>EHRLocalCryptoBean.java</h1><pre class="source lang-java linenums">package com.pkb.app.bean;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.HashBasedTable;
+import com.google.common.collect.Sets;
+import com.google.common.collect.Table;
+import com.pkb.app.EHREncryptedDataDtoMapper;
+import com.pkb.app.bean.accountkey.AccountKeyService;
+import com.pkb.app.dto.AccountSymmetricKeyDto;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.crypto.EHRDecryptionHelper;
+import com.pkb.core.DatapointSymmetricKeyLocal;
+import com.pkb.core.entity.DatapointSymmetricKey;
+import com.pkb.crypto.AccountKeys;
+import com.pkb.crypto.EncryptedBytesAndNonce;
+import com.pkb.crypto.SymmetricKey;
+import com.pkb.crypto.decryptionhelper.provider.accountkeys.AccountKeysKeyProvider;
+import com.pkb.crypto.document.EncryptedDocument;
+import com.pkb.crypto.document.ImmutableEncryptedDocument;
+import com.pkb.crypto.document.PlaintextDocument;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.model.RecordWithId;
+import com.pkb.tolven.PKBAccountDAOLocal;
+import com.pkb.user.PKBPersonLocal;
+import io.prometheus.client.Counter;
+import io.vavr.Tuple2;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+
+import javax.annotation.Nullable;
+import javax.inject.Inject;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.crypto.AccountKeys.accountKeys;
+import static com.pkb.crypto.CryptoConstants.AES_GCM_NOPADDING_ALGORITHM;
+import static com.pkb.crypto.CryptoConstants.AES_SHORT_NAME;
+import static com.pkb.crypto.CryptoConstants.DESEDE_SHORT_NAME;
+import static com.pkb.util.EncryptedDocumentMapperHelper.ACCOUNT_ID;
+import static com.pkb.util.EncryptedDocumentMapperHelper.ACCOUNT_ID_PROVIDER;
+import static java.lang.String.format;
+import static java.util.stream.Collectors.joining;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+<span class="fc" id="L58">public class EHRLocalCryptoBean {</span>
+
+    private static final String ENCRYPTED_SECRET_KEY_ID = &quot;encryptedSecretKeyId&quot;;
+    private static final String DATAPOINT_LEVEL_ENCRYPTED = &quot;datapointLevelEncrypted&quot;;
+    private static final String DATAPOINT_LEVEL_ENCRYPTED_TRUE = &quot;true&quot;;
+    private static final String DATAPOINT_LEVEL_KEY_ID = &quot;datapointLevelKeyId&quot;;
+
+    @Inject
+    private AccountKeyService accountKeyService;
+
+    @Inject
+    private EHREncryptedDataDtoMapper decryptorDtoMapper;
+
+    @Inject
+    private EHRDecryptionHelper decryptionHelper;
+
+    @Inject
+    private DatapointSymmetricKeyLocal datapointSymmetricKeyBean;
+
+    @Inject
+    private PKBPersonLocal personBean;
+
+    @Inject
+    private PKBAccountDAOLocal pkbAccountDAOLocal;
+
+    @VisibleForTesting
+<span class="fc" id="L84">    static final Counter symmetricKeyTypeCounter = Counter.build()</span>
+<span class="fc" id="L85">            .name(&quot;phr_symmetric_key_type_counter&quot;)</span>
+<span class="fc" id="L86">            .help(&quot;Count of usages of each type of key&quot;)</span>
+<span class="fc" id="L87">            .labelNames(&quot;key_type&quot;, &quot;source_table&quot;)</span>
+<span class="fc" id="L88">            .register();</span>
+
+
+    void decryptEHRData(EHRData ed, AccountKeysKeyProvider&lt;EHRData&gt; keyProvider) {
+<span class="fc" id="L92">        byte[] encryptedData = ed.getEncryptedData();</span>
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">        if (encryptedData == null) {</span>
+<span class="nc" id="L94">            return;</span>
+        }
+
+<span class="fc" id="L97">        byte[] plainText = decryptionHelper.decrypt(ed,</span>
+                keyProvider,
+                keyProvider,
+                decryptorDtoMapper);
+
+<span class="fc" id="L102">        ed.unmarshalEncryptedFields(plainText);</span>
+<span class="fc" id="L103">    }</span>
+
+    void decryptEHRData(AccountKeysDTO accountKeysDTO, EHRData ed) {
+
+<span class="fc" id="L107">        byte[] encryptedData = ed.getEncryptedData();</span>
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">        if (encryptedData == null) {</span>
+<span class="nc" id="L109">            return;</span>
+        }
+
+<span class="fc" id="L112">        AccountKeysKeyProvider&lt;EHRData&gt; keyProvider = new AccountKeysKeyProvider&lt;&gt;(accountKeys(accountKeysDTO));</span>
+<span class="fc" id="L113">        byte[] plainText = decryptionHelper.decrypt(ed,</span>
+                keyProvider,
+                keyProvider,
+                decryptorDtoMapper);
+
+<span class="fc" id="L118">        ed.unmarshalEncryptedFields(plainText);</span>
+<span class="fc" id="L119">    }</span>
+
+    void decryptEHRDataBatch(io.vavr.collection.Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys, List&lt;EHRData&gt; eds) {
+<span class="fc" id="L122">        eds.forEach(ed -&gt; {</span>
+<span class="fc" id="L123">            AccountKeysDTO accountKeysDTO = accountIdToAccountKeys.get(ed.getAccountId())</span>
+<span class="pc" id="L124">                    .getOrElseThrow(() -&gt; new IllegalStateException(&quot;Can't find accountKeys for account id: &quot; + ed.getAccountId()));</span>
+<span class="fc" id="L125">            decryptEHRData(accountKeysDTO, ed);</span>
+<span class="fc" id="L126">        });</span>
+<span class="fc" id="L127">    }</span>
+
+    Map&lt;Long, AccountSymmetricKeyDto&gt; getAccountSymmetricKeysForEncryption(@NotNull EHRRequestContext context, Set&lt;Long&gt; accountIds) {
+<span class="nc" id="L130">        return accountKeyService.getAccountSymmetricKeysForEncryption(context, accountIds);</span>
+    }
+
+    Table&lt;EHRRequestContext, Long, AccountSymmetricKeyDto&gt; getAccountSymmetricKeysForEncryption(Map&lt;EHRRequestContext, Set&lt;Long&gt;&gt; accountIdsByRequestContext) {
+<span class="fc" id="L134">        return accountKeyService.getAccountSymmetricKeysForEncryption(accountIdsByRequestContext);</span>
+    }
+
+
+    void encryptEHRData(EHRRequestContext requestContext, EHRData ed) {
+<span class="fc" id="L139">        encryptEHRData(requestContext, ed, (context, accountId) -&gt; accountKeyService.getAccountSymmetricKeyForEncryption(context, accountId));</span>
+<span class="fc" id="L140">    }</span>
+
+    void encryptEHRData(EHRRequestContext requestContext, EHRData ed, BiFunction&lt;EHRRequestContext, Long, AccountSymmetricKeyDto&gt; accountKeyDtoSupplier) {
+        // if encrypted fields have changed, marshal into XML, and encrypt
+<span class="fc" id="L144">        byte[] unencryptedData = ed.marshalEncryptedFieldsIfEdited();</span>
+
+<span class="fc bfc" id="L146" title="All 2 branches covered.">        if (unencryptedData != null) {</span>
+            // encrypt and store content in encryptedData, secret key in secretKey
+            try {
+<span class="fc" id="L149">                AccountSymmetricKeyDto accountKeyDto = accountKeyDtoSupplier.apply(requestContext, ed.getAccountId());</span>
+<span class="fc" id="L150">                EncryptedBytesAndNonce encryptedBytesAndNonce = accountKeyDto.key().encrypt(unencryptedData);</span>
+
+<span class="fc" id="L152">                ed.setEncryptedData(encryptedBytesAndNonce.encryptedBytes()); // resets the &quot;edited&quot; flag</span>
+<span class="fc" id="L153">                ed.setSecretKey(null); // we'll store the secret key in a separate table</span>
+<span class="fc" id="L154">                ed.setSecretKeyAlgorithm(AES_GCM_NOPADDING_ALGORITHM); // don't need the length to decrypt</span>
+<span class="fc" id="L155">                ed.setNonce(encryptedBytesAndNonce.nonce());</span>
+<span class="fc" id="L156">                ed.setSymmetricEncryptionKeyId(accountKeyDto.id());</span>
+<span class="nc" id="L157">            } catch (Exception e) {</span>
+<span class="nc" id="L158">                throw new RuntimeException(&quot;Error saving extended fields to EHRData: &quot; + ed.getId(), e);</span>
+<span class="fc" id="L159">            }</span>
+        }
+<span class="fc" id="L161">    }</span>
+
+    public PlaintextDocument decryptDoc(EncryptedDocument doc, LoggedInEHRRequestContext context) {
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if (isDatapointLevelEncrypted(doc)) {</span>
+<span class="fc" id="L165">            return decryptDocWithDatapointLevelKey(doc, context, getKeyIdFromDocument(doc.metadata(), context));</span>
+        } else {
+<span class="fc" id="L167">            return decryptDocWithAccountKey(doc, context);</span>
+        }
+    }
+
+    /**
+     * Decrypt documents in batch.
+     *
+     * @param encryptedDocs {@link Collection} of {@link EncryptedDocument} and the {@link LoggedInEHRRequestContext} for them.
+     * @param &lt;ID&gt;          used to identiy the record
+     * @return
+     */
+    public &lt;ID&gt; Stream&lt;RecordWithId&lt;ID, PlaintextDocument&gt;&gt; decryptDoc(Collection&lt;RecordWithId&lt;ID, Tuple2&lt;EncryptedDocument, LoggedInEHRRequestContext&gt;&gt;&gt; encryptedDocs) {
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">        if (isEmpty(encryptedDocs)) {</span>
+<span class="nc" id="L180">            return Stream.empty();</span>
+        }
+<span class="fc" id="L182">        List&lt;RecordWithId&lt;ID, Tuple2&lt;EncryptedDocument, LoggedInEHRRequestContext&gt;&gt;&gt; dplEncrypted = new ArrayList&lt;&gt;(encryptedDocs.size());</span>
+<span class="fc" id="L183">        List&lt;RecordWithId&lt;ID, Tuple2&lt;EncryptedDocument, LoggedInEHRRequestContext&gt;&gt;&gt; accountEncrypted = new ArrayList&lt;&gt;(encryptedDocs.size());</span>
+<span class="fc bfc" id="L184" title="All 2 branches covered.">        for (RecordWithId&lt;ID, Tuple2&lt;EncryptedDocument, LoggedInEHRRequestContext&gt;&gt; actual : encryptedDocs) {</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">            if (isDatapointLevelEncrypted(actual.record()._1)) {</span>
+<span class="fc" id="L186">                dplEncrypted.add(actual);</span>
+            } else {
+<span class="nc" id="L188">                accountEncrypted.add(actual);</span>
+            }
+<span class="fc" id="L190">        }</span>
+
+<span class="pc" id="L192">        return Stream.concat(decryptDocsWithDatapointLevelKey(dplEncrypted), accountEncrypted.stream().map(t -&gt; t.switchRecord(decryptDocWithAccountKey(t.record()._1, t.record()._2))));</span>
+    }
+
+    static boolean isDatapointLevelEncrypted(Map&lt;String, String&gt; metadata) {
+<span class="fc" id="L196">        String dpl = metadata.get(DATAPOINT_LEVEL_ENCRYPTED);</span>
+<span class="fc" id="L197">        return DATAPOINT_LEVEL_ENCRYPTED_TRUE.equals(dpl);</span>
+    }
+
+    static boolean isDatapointLevelEncrypted(EncryptedDocument doc) {
+<span class="fc" id="L201">        return isDatapointLevelEncrypted(doc.metadata());</span>
+    }
+
+    private UUID getKeyIdFromDocument(Tuple2&lt;EncryptedDocument, LoggedInEHRRequestContext&gt; input) {
+<span class="fc" id="L205">        return getKeyIdFromDocument(input._1.metadata(), input._2);</span>
+    }
+
+    private UUID getKeyIdFromDocument(Map&lt;String, String&gt; metadata, LoggedInEHRRequestContext context) {
+<span class="fc" id="L209">        return Optional.ofNullable(metadata.get(DATAPOINT_LEVEL_KEY_ID)).map(UUID::fromString).orElseThrow(</span>
+<span class="nc" id="L210">                () -&gt; new RuntimeException(format(&quot;No datapoint symmetric key ID available while trying to decrypt document for user %d&quot;,</span>
+<span class="nc" id="L211">                        context.getAccessingUserId())));</span>
+    }
+
+    private PlaintextDocument decryptDocWithAccountKey(EncryptedDocument doc, LoggedInEHRRequestContext context) {
+<span class="fc" id="L215">        long accountId = ACCOUNT_ID_PROVIDER.apply(doc);</span>
+<span class="fc" id="L216">        UUID accountPublicId = pkbAccountDAOLocal.getAccountPublicId(accountId);</span>
+<span class="fc" id="L217">        return accountKeyService.tryGetAccountKeys(context, accountId, accountPublicId)</span>
+<span class="fc" id="L218">                .map(accountKeys -&gt; accountKeys.decryptDocument(doc))</span>
+<span class="pc" id="L219">                .orElseThrow(() -&gt; new RuntimeException(format(&quot;No account keys available for account %d while trying to decrypt document for user %d&quot;,</span>
+<span class="nc" id="L220">                        accountId, context.getAccessingUserId())));</span>
+
+    }
+
+    private PlaintextDocument decryptDocWithDatapointLevelKey(EncryptedDocument doc, LoggedInEHRRequestContext context, UUID keyId) {
+<span class="fc" id="L225">        var defaultAccountIds = personBean.getDefaultAccountIds(context.getContextAndAccessingUserIds()).values();</span>
+
+<span class="fc" id="L227">        var docAccountId = ACCOUNT_ID_PROVIDER.apply(doc);</span>
+<span class="fc" id="L228">        var everyAccountId = Stream.concat(defaultAccountIds.stream(), Stream.of(docAccountId))</span>
+<span class="fc" id="L229">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L230">                .collect(Collectors.toSet());</span>
+
+<span class="fc" id="L232">        var publicAccountIdsByAccountIds = pkbAccountDAOLocal.accountPublicIdByAccountIdMap(everyAccountId);</span>
+
+
+<span class="fc" id="L235">        DatapointSymmetricKey dsk = findDatapointSymmetricKey(context, defaultAccountIds, docAccountId, keyId);</span>
+<span class="fc" id="L236">        AccountKeys accountKeys = getAccountKeys(context, dsk.getAccountId(), publicAccountIdsByAccountIds.get(dsk.getAccountId()));</span>
+<span class="fc" id="L237">        return decryptWithDpl(doc, accountKeys, dsk);</span>
+    }
+
+    private &lt;ID&gt; Stream&lt;RecordWithId&lt;ID, PlaintextDocument&gt;&gt; decryptDocsWithDatapointLevelKey(Collection&lt;RecordWithId&lt;ID, Tuple2&lt;EncryptedDocument, LoggedInEHRRequestContext&gt;&gt;&gt; dplEncrypted) {
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">        if (isEmpty(dplEncrypted)) {</span>
+<span class="nc" id="L242">            return Stream.empty();</span>
+        }
+<span class="fc" id="L244">        Set&lt;Long&gt; userIds = new HashSet&lt;&gt;(dplEncrypted.size());</span>
+<span class="fc" id="L245">        Set&lt;UUID&gt; dplKeyIds = new HashSet&lt;&gt;(dplEncrypted.size());</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">        for (RecordWithId&lt;ID, Tuple2&lt;EncryptedDocument, LoggedInEHRRequestContext&gt;&gt; actual : dplEncrypted) {</span>
+<span class="fc" id="L247">            userIds.add(actual.record()._2.getContextOrAccessingUserId());</span>
+<span class="fc" id="L248">            userIds.add(actual.record()._2.getAccessingUserId());</span>
+<span class="fc" id="L249">            dplKeyIds.add(getKeyIdFromDocument(actual.record()));</span>
+<span class="fc" id="L250">        }</span>
+<span class="fc" id="L251">        Map&lt;Long, Long&gt; userIdsToAccountIds = personBean.getDefaultAccountIds(userIds);</span>
+<span class="pc bpc" id="L252" title="1 of 2 branches missed.">        if (userIds.size() != userIdsToAccountIds.size()) {</span>
+<span class="nc" id="L253">            throw new IllegalStateException(&quot;Couldn't find default account ids for: &quot; + Sets.difference(userIds, userIdsToAccountIds.keySet()).stream().map(l -&gt; l.toString()).collect(joining(&quot;,&quot;)));</span>
+        }
+
+<span class="fc" id="L256">        Table&lt;UUID, Long, DatapointSymmetricKey&gt; dplKeyTable = HashBasedTable.create();</span>
+<span class="fc" id="L257">        datapointSymmetricKeyBean.findDatapointLevelKeys(dplKeyIds, userIdsToAccountIds.values())</span>
+<span class="fc" id="L258">                .forEach(dpl -&gt; dplKeyTable.put(dpl.getKeyId(), dpl.getAccountId(), dpl));</span>
+
+<span class="fc" id="L260">        var accountPublicIdByAccountIdMap = pkbAccountDAOLocal.accountPublicIdByAccountIdMap(Sets.newHashSet(userIdsToAccountIds.values()));</span>
+
+<span class="fc" id="L262">        return dplEncrypted.stream().map(t -&gt; {</span>
+<span class="fc" id="L263">            UUID dplKey = getKeyIdFromDocument(t.record());</span>
+<span class="fc" id="L264">            DatapointSymmetricKey dsk = dplKeyTable.get(dplKey, userIdsToAccountIds.get(t.record()._2.getContextOrAccessingUserId()));</span>
+<span class="pc bpc" id="L265" title="1 of 2 branches missed.">            if (dsk == null) {</span>
+<span class="nc" id="L266">                dsk = dplKeyTable.get(dplKey, userIdsToAccountIds.get(t.record()._2.getAccessingUserId()));</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">                if (dsk == null) {</span>
+<span class="nc" id="L268">                    throw new IllegalStateException(&quot;Cannot find DPL key &quot; + dplKey + &quot; for &quot; + t.record()._2.getContextOrAccessingUserId() + &quot; or &quot; + t.record()._2.getAccessingUserId() + &quot;!&quot;);</span>
+                }
+            }
+<span class="fc" id="L271">            AccountKeys accountKeys = getAccountKeys(t.record()._2, dsk.getAccountId(), accountPublicIdByAccountIdMap.get(dsk.getAccountId())); //This could be done in batches too, but KMS doesn't have a batch call for this yet.</span>
+<span class="fc" id="L272">            return t.switchRecord(decryptWithDpl(t.record()._1, accountKeys, dsk));</span>
+        });
+    }
+
+    private PlaintextDocument decryptWithDpl(EncryptedDocument doc, AccountKeys accountKeys, DatapointSymmetricKey dsk) {
+<span class="fc" id="L277">        byte[] decryptedBytes = accountKeys.getSymmetricKeys().get(dsk.getAccountLevelKeyId()).decrypt(dsk.getEncryptedKey(), dsk.getNonce());</span>
+<span class="fc" id="L278">        SymmetricKey dplKey = SymmetricKey.symmetricKey(decryptedBytes, dsk.getEncryptionAlgorithm().toString());</span>
+<span class="fc" id="L279">        return dplKey.decrypt(doc);</span>
+    }
+
+    private DatapointSymmetricKey findDatapointSymmetricKey(LoggedInEHRRequestContext context, long accountId, UUID keyId) {
+<span class="fc" id="L283">        return datapointSymmetricKeyBean.findDatapointLevelKey(keyId, accountId)</span>
+<span class="pc" id="L284">                .orElseThrow(() -&gt; new RuntimeException(format(&quot;No datapoint symmetric key available for account %d while trying to decrypt document for user %d&quot;,</span>
+<span class="nc" id="L285">                        accountId, context.getAccessingUserId())));</span>
+    }
+
+    private DatapointSymmetricKey findDatapointSymmetricKey(LoggedInEHRRequestContext context, Collection&lt;Long&gt; accountIds, @Nullable Long docAccountId, UUID keyId) {
+<span class="fc" id="L289">        return datapointSymmetricKeyBean.findDatapointLevelKey(keyId, accountIds)</span>
+<span class="fc" id="L290">                .or(() -&gt; Optional.ofNullable(docAccountId).flatMap(accountId -&gt; datapointSymmetricKeyBean.findDatapointLevelKey(keyId, accountId)))</span>
+<span class="pc" id="L291">                .orElseThrow(() -&gt; new RuntimeException(format(&quot;No datapoint symmetric key available for account %d while trying to decrypt document for user %d&quot;,</span>
+<span class="nc" id="L292">                        context.getContextOrAccessingUserId(), context.getAccessingUserId())));</span>
+    }
+
+    private AccountKeys getAccountKeys(LoggedInEHRRequestContext context, long accountId, UUID accountPublicId) {
+<span class="fc" id="L296">        return accountKeyService.tryGetAccountKeys(context, accountId, accountPublicId)</span>
+<span class="fc" id="L297">                .orElseThrow(() -&gt; new RuntimeException(format(&quot;No account keys available for account %d while trying to decrypt document for user %d&quot;,</span>
+<span class="fc" id="L298">                        accountId, context.getAccessingUserId())));</span>
+    }
+
+
+    EncryptedDocument encryptDocWithDatapointLevelKey(PlaintextDocument document, long accountId, EHRRequestContext requestContext) {
+<span class="fc" id="L303">        AccountSymmetricKeyDto accountLevelKey = accountKeyService.getAccountSymmetricKeyForEncryption(requestContext, accountId);</span>
+
+<span class="fc" id="L305">        SymmetricKey symmetricKey = SymmetricKey.newInstance();</span>
+<span class="fc" id="L306">        DatapointSymmetricKey dsk = datapointSymmetricKeyBean.saveDatapointLevelKey(accountId, symmetricKey, accountLevelKey);</span>
+<span class="fc" id="L307">        EncryptedDocument encryptedDocument = symmetricKey.encrypt(document);</span>
+
+<span class="fc" id="L309">        return ImmutableEncryptedDocument.builder().from(encryptedDocument)</span>
+<span class="fc" id="L310">                .putMetadata(ACCOUNT_ID, String.valueOf(accountId))</span>
+<span class="fc" id="L311">                .putMetadata(DATAPOINT_LEVEL_KEY_ID, String.valueOf(dsk.getKeyId()))</span>
+<span class="fc" id="L312">                .putMetadata(DATAPOINT_LEVEL_ENCRYPTED, DATAPOINT_LEVEL_ENCRYPTED_TRUE)</span>
+<span class="fc" id="L313">                .build();</span>
+    }
+
+    EncryptedDocument encryptDocWithDatapointLevelKey(PlaintextDocument document, long accountId, LoggedInEHRRequestContext requestContext, UUID parentDplKeyId, String algorithm) {
+<span class="fc" id="L317">        UUID accountPublicId = pkbAccountDAOLocal.getAccountPublicId(accountId);</span>
+<span class="fc" id="L318">        AccountKeys accountKeys = getAccountKeys(requestContext, accountId, accountPublicId);</span>
+<span class="fc" id="L319">        DatapointSymmetricKey dsk = findDatapointSymmetricKey(requestContext, accountId, parentDplKeyId);</span>
+<span class="fc" id="L320">        byte[] decryptedBytes = accountKeys.getSymmetricKeys().get(dsk.getAccountLevelKeyId()).decrypt(dsk.getEncryptedKey(), dsk.getNonce());</span>
+
+<span class="fc" id="L322">        SymmetricKey symmetricKey = SymmetricKey.symmetricKey(decryptedBytes, algorithm);</span>
+<span class="fc" id="L323">        EncryptedDocument encryptedDocument = symmetricKey.encrypt(document);</span>
+
+<span class="fc" id="L325">        return ImmutableEncryptedDocument.builder().from(encryptedDocument)</span>
+<span class="fc" id="L326">                .putMetadata(ACCOUNT_ID, String.valueOf(accountId))</span>
+<span class="fc" id="L327">                .putMetadata(DATAPOINT_LEVEL_KEY_ID, String.valueOf(dsk.getKeyId()))</span>
+<span class="fc" id="L328">                .putMetadata(DATAPOINT_LEVEL_ENCRYPTED, DATAPOINT_LEVEL_ENCRYPTED_TRUE)</span>
+<span class="fc" id="L329">                .build();</span>
+    }
+
+    void copyDatapointLevelKeys(LoggedInEHRRequestContext context,
+                                List&lt;UUID&gt; dplKeyIds,
+                                Set&lt;Long&gt; newAccountIds) {
+<span class="fc bfc" id="L335" title="All 2 branches covered.">        if (dplKeyIds.isEmpty()) {</span>
+<span class="fc" id="L336">            return;</span>
+        }
+
+<span class="fc" id="L339">        Long accountId = personBean.getDefaultAccountId(context.getContextOrAccessingUserId());</span>
+<span class="fc" id="L340">        UUID accountPublicId = pkbAccountDAOLocal.getAccountPublicId(accountId);</span>
+<span class="fc" id="L341">        AccountKeys accountKeys = getAccountKeys(context, accountId, accountPublicId);</span>
+<span class="fc" id="L342">        Map&lt;Long, AccountSymmetricKeyDto&gt; newAccountLevelKeys = accountKeyService.getAccountSymmetricKeysForEncryption(context, newAccountIds);</span>
+
+<span class="fc" id="L344">        datapointSymmetricKeyBean.copyDatapointLevelKeys(dplKeyIds, accountId, accountKeys, newAccountLevelKeys);</span>
+<span class="fc" id="L345">    }</span>
+
+    EncryptedDocument encryptDocWithAccountLevelKey(PlaintextDocument document, long accountId, EHRRequestContext requestContext) {
+<span class="fc" id="L348">        AccountSymmetricKeyDto accountKeyDto = accountKeyService.getAccountSymmetricKeyForEncryption(requestContext, accountId);</span>
+<span class="fc" id="L349">        EncryptedDocument encryptedDocument = accountKeyDto.key().encrypt(document);</span>
+<span class="fc" id="L350">        return ImmutableEncryptedDocument.builder().from(encryptedDocument)</span>
+<span class="fc" id="L351">                .putMetadata(ACCOUNT_ID, String.valueOf(accountId))</span>
+<span class="fc" id="L352">                .putMetadata(ENCRYPTED_SECRET_KEY_ID, String.valueOf(accountKeyDto.id()))</span>
+<span class="fc" id="L353">                .build();</span>
+    }
+
+    Consumer&lt;List&lt;EHRData&gt;&gt; getEHRListDecryptor(LoggedInEHRRequestContext context) {
+<span class="fc" id="L357">        return (ehrDataList) -&gt; {</span>
+            // Batch calls to the KMS to get the account keys, per account
+<span class="fc" id="L359">            var ehrDataByAccountId = io.vavr.collection.List.ofAll(ehrDataList)</span>
+<span class="fc" id="L360">                    .groupBy(EHRData::getAccountId);</span>
+
+<span class="fc" id="L362">            var accountPublicIdByAccountId = pkbAccountDAOLocal.accountPublicIdByAccountIdMap(ehrDataByAccountId.keySet().toJavaSet());</span>
+
+<span class="fc" id="L364">            ehrDataByAccountId.forEach((accountId, dataList) -&gt; {</span>
+<span class="fc" id="L365">                AccountKeysKeyProvider&lt;EHRData&gt; keyProvider = new AccountKeysKeyProvider&lt;&gt;(accountKeyService.getAccountKeys(context, accountId, accountPublicIdByAccountId.get(accountId)));</span>
+<span class="fc" id="L366">                dataList.forEach(it -&gt; {</span>
+<span class="fc" id="L367">                    incremementCountersForLocalDecryption(it);</span>
+<span class="fc" id="L368">                    decryptEHRData(it, keyProvider);</span>
+<span class="fc" id="L369">                });</span>
+<span class="fc" id="L370">            });</span>
+<span class="fc" id="L371">        };</span>
+    }
+
+    private void incremementCountersForLocalDecryption(EHRData ed) {
+<span class="fc" id="L375">        String secretKeyAlgorithm = ed.getSecretKeyAlgorithm();</span>
+<span class="pc bpc" id="L376" title="1 of 2 branches missed.">        if (StringUtils.isNotEmpty(secretKeyAlgorithm)) {</span>
+<span class="fc bfc" id="L377" title="All 2 branches covered.">            String shortAlgoName = AES_GCM_NOPADDING_ALGORITHM.equals(secretKeyAlgorithm) ? AES_SHORT_NAME : DESEDE_SHORT_NAME;</span>
+
+<span class="fc" id="L379">            symmetricKeyTypeCounter.labels(shortAlgoName, &quot;app.menu_data&quot;).inc();</span>
+        }
+<span class="fc" id="L381">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

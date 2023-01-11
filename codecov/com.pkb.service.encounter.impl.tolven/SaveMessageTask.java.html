@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SaveMessageTask.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.encounter.impl.tolven</a> &gt; <span class="el_source">SaveMessageTask.java</span></div><h1>SaveMessageTask.java</h1><pre class="source lang-java linenums">package com.pkb.service.encounter.impl.tolven;
+
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.document.entity.Attachment;
+import com.pkb.document.entity.DocumentsByIdAndAccount;
+import com.pkb.encounter.entity.Message;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.service.notification.nhs.NhsAppNotificationManager;
+import com.pkb.service.notification.nhs.pubsub.payload.NhsApiNotificationTriggerType;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+/**
+ * This class represents the task of saving the message for each participant for compose and reply flow
+ */
+public class SaveMessageTask implements Runnable {
+
+<span class="fc" id="L30">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private static final String DOCUMENT_TIMER_NAME = &quot;phr_save_message_document_copy_timer&quot;;
+    private static final String MESSAGE_TIMER_NAME = &quot;phr_save_message_message_copy_timer&quot;;
+    private static final String NOTIFICATION_TIMER_NAME = &quot;phr_save_message_notification_timer&quot;;
+
+<span class="fc" id="L35">    private static final Timer DOCUMENT_TIMER = Timer.builder(DOCUMENT_TIMER_NAME)</span>
+<span class="fc" id="L36">            .description(&quot;Latencies of copying all documents of a new message to all recipients&quot;)</span>
+<span class="fc" id="L37">            .publishPercentileHistogram()</span>
+<span class="fc" id="L38">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L39">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L41">    private static final Timer MESSAGE_TIMER = Timer.builder(MESSAGE_TIMER_NAME)</span>
+<span class="fc" id="L42">            .description(&quot;Latencies of copying a new message to all recipients&quot;)</span>
+<span class="fc" id="L43">            .publishPercentileHistogram()</span>
+<span class="fc" id="L44">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L45">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L47">    private static final Timer NOTIFICATION_TIMER = Timer.builder(NOTIFICATION_TIMER_NAME)</span>
+<span class="fc" id="L48">            .description(&quot;Latencies of sending notifications to all recipients of a new message&quot;)</span>
+<span class="fc" id="L49">            .publishPercentileHistogram()</span>
+<span class="fc" id="L50">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L51">            .register(Metrics.globalRegistry);</span>
+
+    private final EncounterManager encounterManager;
+    private final UserManager userManager;
+    private final PKBEmailMessageManager pkbEmailMessageManager;
+    private final MessageThreadDTO messageThreadDTO;
+    private final LoggedInEHRRequestContext requestContext;
+    private final PatientConsentManager patientConsentManager;
+    private final NhsAppNotificationManager nhsAppNotificationManager;
+    private final ChunkedDocManager chunkedDocManager;
+
+    SaveMessageTask(LoggedInEHRRequestContext requestContext,
+                    EncounterManager encounterManager,
+                    UserManager userManager,
+                    PKBEmailMessageManager pkbEmailMessageManager,
+                    MessageThreadDTO messageThreadDTO,
+                    PatientConsentManager patientConsentManager,
+                    NhsAppNotificationManager nhsAppNotificationManager,
+<span class="fc" id="L69">                    ChunkedDocManager chunkedDocManager) {</span>
+
+<span class="fc" id="L71">        this.encounterManager = encounterManager;</span>
+<span class="fc" id="L72">        this.userManager = userManager;</span>
+<span class="fc" id="L73">        this.messageThreadDTO = messageThreadDTO;</span>
+<span class="fc" id="L74">        this.requestContext = requestContext;</span>
+<span class="fc" id="L75">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L76">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L77">        this.nhsAppNotificationManager = nhsAppNotificationManager;</span>
+<span class="fc" id="L78">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L79">    }</span>
+
+    @Override
+    public void run() {
+        try {
+<span class="fc" id="L84">            saveMessage();</span>
+<span class="nc" id="L85">        } catch (Exception e) {</span>
+<span class="nc" id="L86">            LOGGER.error(&quot;PHRZ-667 Exception while saving message for participants for existing message uniqueID {}&quot;,</span>
+<span class="nc" id="L87">                    messageThreadDTO.getExistingMessageUniqueId(), e);</span>
+<span class="fc" id="L88">        }</span>
+<span class="fc" id="L89">    }</span>
+
+    private void saveMessage() {
+
+<span class="fc" id="L93">        UUID uniqueId = messageThreadDTO.getExistingMessageUniqueId();</span>
+
+<span class="fc" id="L95">        LOGGER.info(&quot;Entered saveMessage for existing message unique ID {} &quot;, uniqueId);</span>
+
+<span class="fc" id="L97">        Message message = messageThreadDTO.getMessage();</span>
+<span class="fc" id="L98">        Long senderMessageId = messageThreadDTO.getSenderMessageId();</span>
+<span class="fc" id="L99">        List&lt;String&gt; participants = message.getParticipants();</span>
+<span class="fc" id="L100">        List&lt;String&gt; skipParticipants = messageThreadDTO.getSkipParticipants();</span>
+<span class="fc" id="L101">        long currentUserId = requestContext.getAccessingUserId();</span>
+
+        //participants list is a total list but we already have saved in sender's account
+        // and possibly context user account which need to be skipped
+        // For other participants explicitly set the message id to null
+        // must have a working txn to log this...
+<span class="fc" id="L107">        Set&lt;Long&gt; receivers = participants</span>
+<span class="fc" id="L108">                .stream()</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">                .filter(receiverId -&gt; !skipParticipants.contains(receiverId))</span>
+<span class="fc" id="L110">                .map(Long::parseLong)</span>
+<span class="fc" id="L111">                .collect(Collectors.toSet());</span>
+
+        try {
+<span class="fc" id="L114">            DocumentsByIdAndAccount tmpDocumentIdMap = null;</span>
+<span class="fc" id="L115">            var defaultAccountIds = userManager.getDefaultAccountId(receivers);</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">            if (message.getAttachments() != null) {</span>
+<span class="fc" id="L117">                List&lt;UUID&gt; documentIds = message.getAttachments().stream()</span>
+<span class="fc" id="L118">                        .map(Attachment::getDocMetadataId)</span>
+<span class="fc" id="L119">                        .collect(Collectors.toList());</span>
+
+<span class="fc" id="L121">                tmpDocumentIdMap = Metrics.timer(DOCUMENT_TIMER_NAME)</span>
+<span class="fc" id="L122">                        .record(() -&gt; chunkedDocManager.copyDocuments(requestContext, documentIds, currentUserId, Set.copyOf(defaultAccountIds.values()), false));</span>
+            }
+<span class="fc" id="L124">            DocumentsByIdAndAccount documentIdMap = tmpDocumentIdMap;</span>
+
+<span class="fc" id="L126">            Set&lt;Long&gt; sendNotificationTo = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L127">            Metrics.timer(MESSAGE_TIMER_NAME).record(() -&gt; receivers.forEach(receiverId -&gt; {</span>
+                // For other participants explicitly set the message id to null
+<span class="fc" id="L129">                message.setId(null);</span>
+                try {
+<span class="fc" id="L131">                    encounterManager.transactional(() -&gt; {</span>
+<span class="fc" id="L132">                        message.getBaseFields().setUniqueId(uniqueId);</span>
+<span class="fc" id="L133">                        encounterManager.saveSingleMessage(requestContext, receiverId.toString(), defaultAccountIds.get(receiverId), message, message.getAttachments(), documentIdMap);</span>
+<span class="fc" id="L134">                    });</span>
+<span class="fc" id="L135">                    sendNotificationTo.add(receiverId);</span>
+<span class="fc" id="L136">                    LOGGER.info(&quot;Saving message complete for receiver-{}&quot;, receiverId.toString());</span>
+<span class="nc" id="L137">                } catch (Exception e) {</span>
+<span class="nc" id="L138">                    LOGGER.error(&quot;PHRZ-667 Exception while saving the message for receiver-{} for existing message unique ID {}&quot;, receiverId, uniqueId, e);</span>
+<span class="nc" id="L139">                    encounterManager.logFailedDeliveryOfMessage(requestContext, senderMessageId, message.getEncounterUniqueId(),</span>
+<span class="nc" id="L140">                            message.getBaseFields().getUniqueId(), message.getSenderId(), message.getSource(), receiverId.toString());</span>
+<span class="fc" id="L141">                }</span>
+<span class="fc" id="L142">            }));</span>
+
+<span class="fc" id="L144">            Metrics.timer(NOTIFICATION_TIMER_NAME).record(() -&gt; sendNotificationTo.forEach(receiverId -&gt; sendNotification(receiverId.toString())));</span>
+<span class="nc" id="L145">        } catch (Exception e) {</span>
+<span class="nc" id="L146">            LOGGER.error(&quot;PHRZ-667 Exception while saving the message for all receivers for existing message unique ID {}&quot;, uniqueId, e);</span>
+<span class="nc" id="L147">            receivers.forEach(receiverId -&gt; encounterManager.logFailedDeliveryOfMessage(requestContext, senderMessageId, message.getEncounterUniqueId(),</span>
+<span class="nc" id="L148">                    message.getBaseFields().getUniqueId(), message.getSenderId(), message.getSource(), receiverId.toString()));</span>
+<span class="fc" id="L149">        }</span>
+
+<span class="fc" id="L151">        LOGGER.info(&quot;Finished saveMessage for existing message unique ID {} &quot;, uniqueId);</span>
+<span class="fc" id="L152">    }</span>
+
+    private void sendNotification(String receiverId) {
+<span class="fc" id="L155">        PKBPerson recipient = messageThreadDTO.getPersonMap().get(receiverId);</span>
+<span class="fc" id="L156">        PKBPerson patientReferredTo = messageThreadDTO.getReferredPatient();</span>
+<span class="fc" id="L157">        PKBPerson composer = messageThreadDTO.getComposer();</span>
+<span class="fc" id="L158">        UUID conversationId = messageThreadDTO.getMessage().getEncounterUniqueId();</span>
+
+<span class="fc bfc" id="L160" title="All 2 branches covered.">        if (shouldNotifyReceiverAboutPatient(recipient, patientReferredTo, composer)) {</span>
+<span class="fc" id="L161">            pkbEmailMessageManager.notifyReceiverOnlyAboutPatient(</span>
+                    composer, recipient, patientReferredTo, conversationId);
+        } else {
+<span class="fc" id="L164">            boolean caregivingRecipient = isCaregivingRecipient(receiverId, patientReferredTo);</span>
+<span class="fc bfc" id="L165" title="All 2 branches covered.">            if (caregivingRecipient) {</span>
+<span class="fc" id="L166">                pkbEmailMessageManager.notifyCarerOnly(composer, recipient, conversationId);</span>
+            } else {
+<span class="fc" id="L168">                pkbEmailMessageManager.notifyReceiverOnly(composer, recipient, conversationId);</span>
+
+                // Send NHS notification
+<span class="fc bfc" id="L171" title="All 2 branches covered.">                if (recipient.isPatient()) {</span>
+<span class="fc" id="L172">                    nhsAppNotificationManager.sendNotification(</span>
+                            requestContext, recipient, NhsApiNotificationTriggerType.NEW_MESSAGE_RECEIVED);
+                }
+            }
+        }
+<span class="fc" id="L177">    }</span>
+
+    private boolean isCaregivingRecipient(String receiverId, PKBPerson patientReferredTo) {
+<span class="fc" id="L180">        boolean caregivingRecipient = false;</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">        if (patientReferredTo != null) {</span>
+<span class="fc" id="L182">            caregivingRecipient = patientConsentManager.getCaregivers(patientReferredTo.getId(), PKBPerson.Lazy.CONTACTS)</span>
+<span class="fc" id="L183">                    .stream()</span>
+<span class="fc" id="L184">                    .anyMatch(carer -&gt; receiverId.equals(carer.getIdString()));</span>
+        }
+<span class="fc" id="L186">        return caregivingRecipient;</span>
+    }
+
+    private boolean shouldNotifyReceiverAboutPatient(PKBPerson recipient, PKBPerson patientReferredTo, PKBPerson composer) {
+<span class="fc bfc" id="L190" title="All 4 branches covered.">        return recipient.isPro()</span>
+                &amp;&amp; (patientReferredTo != null) &amp;&amp;
+<span class="fc bfc" id="L192" title="All 2 branches covered.">                (!composer.getId().equals(patientReferredTo.getId()));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MigrationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration.migrators</a> &gt; <span class="el_source">MigrationManager.java</span></div><h1>MigrationManager.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration.migrators;
+
+import ca.uhn.fhir.rest.api.MethodOutcome;
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import ca.uhn.fhir.rest.client.exceptions.FhirClientConnectionException;
+import ca.uhn.fhir.rest.server.exceptions.ForbiddenOperationException;
+import com.google.common.collect.Ordering;
+import com.pkb.entities.enums.FhirStoreSyncSourceTable;
+import com.pkb.entities.enums.FhirStoreSyncStatus;
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.fhir.common.configuration.EhrmigratorConfig;
+import com.pkb.fhir.common.exception.DecryptionKeysNotFoundException;
+import com.pkb.fhir.common.exception.MigrationEntityNotFoundException;
+import com.pkb.fhir.common.exception.MigrationException;
+import io.vavr.Predicates;
+import io.vavr.control.Either;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.util.List;
+import java.util.Optional;
+
+import static com.pkb.entities.enums.FhirStoreSyncStatus.ERROR;
+import static com.pkb.entities.enums.FhirStoreSyncStatus.ERROR_SILENTLY;
+import static com.pkb.entities.enums.FhirStoreSyncStatus.SKIPPED;
+import static com.pkb.entities.enums.FhirStoreSyncStatus.SYNCED;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.CREATE_OR_UPDATE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.DELETE;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.API.Tuple;
+
+/**
+ * Is called into from {@link com.pkb.migration.fhir.FhirStoreSyncRunnerService} to perform a transformation and
+ * sync to the FHIR store.
+ *
+ * Subsequently calls into the relevant FHIR migrator for the entity being migrated, and gets a List of resources back.
+ * These are then sent to the migration FHIR server as create/updates or deletes.
+ */
+public class MigrationManager {
+
+<span class="fc" id="L47">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private final PKBPersonMigrator pkbPersonMigrator;
+    private final TeamMigrator teamMigrator;
+    private final OrgMigrator orgMigrator;
+    private final InstituteUserMigrator instituteUserMigrator;
+    private final PatientOptOutMigrator patientOptOutMigrator;
+    private final PatientConsentMigrator patientConsentMigrator;
+    private final MenuDataMigrator menuDataMigrator;
+    private final ReferenceDatumMigrator referenceDatumMigrator;
+    private final EhrmigratorConfig config;
+    private final IGenericClient client;
+
+    public MigrationManager(PKBPersonMigrator pkbPersonMigrator,
+                            TeamMigrator teamMigrator,
+                            OrgMigrator orgMigrator,
+                            InstituteUserMigrator instituteUserMigrator,
+                            PatientOptOutMigrator patientOptOutMigrator,
+                            PatientConsentMigrator patientConsentMigrator,
+                            MenuDataMigrator menuDataMigrator,
+                            ReferenceDatumMigrator referenceDatumMigrator,
+                            EhrmigratorConfig config,
+<span class="fc" id="L69">                            IGenericClient client) {</span>
+<span class="fc" id="L70">        this.pkbPersonMigrator = pkbPersonMigrator;</span>
+<span class="fc" id="L71">        this.teamMigrator = teamMigrator;</span>
+<span class="fc" id="L72">        this.orgMigrator = orgMigrator;</span>
+<span class="fc" id="L73">        this.instituteUserMigrator = instituteUserMigrator;</span>
+<span class="fc" id="L74">        this.patientOptOutMigrator = patientOptOutMigrator;</span>
+<span class="fc" id="L75">        this.patientConsentMigrator = patientConsentMigrator;</span>
+<span class="fc" id="L76">        this.menuDataMigrator = menuDataMigrator;</span>
+<span class="fc" id="L77">        this.referenceDatumMigrator = referenceDatumMigrator;</span>
+<span class="fc" id="L78">        this.config = config;</span>
+<span class="fc" id="L79">        this.client = client;</span>
+<span class="fc" id="L80">    }</span>
+
+    public MigrationOutcome migrateEntity(PublicFhirStoreSync fhirStoreSync) {
+        try {
+<span class="fc" id="L84">            BaseFhirMigrator migrator = getMigratorForEntity(fhirStoreSync.getSyncDetails().getSourceTable());</span>
+<span class="fc" id="L85">            Either&lt;MigrationException, List&lt;BaseFhirMigrator.ResourceAndOperation&gt;&gt; result = migrator.migrate(fhirStoreSync);</span>
+<span class="fc" id="L86">            MigrationOutcome migrationOutcome = result.fold(error -&gt;  Match(error).of(</span>
+<span class="fc" id="L87">                            Case($(Predicates.instanceOf(MigrationEntityNotFoundException.class)),</span>
+<span class="fc" id="L88">                                    ImmutableMigrationOutcome.migrationOutcome(SKIPPED, Optional.of(error))),</span>
+<span class="fc" id="L89">                            Case($(), ImmutableMigrationOutcome.migrationOutcome(ERROR, Optional.of(error)))),</span>
+                    this::sendToFhirServer);
+
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">            if (migrationOutcome.status() == ERROR) {</span>
+<span class="nc" id="L93">                LOGGER.error(&quot;Error when migrating entity of type {} and id {}; fhir_store_sync id is {}&quot;, fhirStoreSync.getSyncDetails().getSourceTable(),</span>
+<span class="nc" id="L94">                        fhirStoreSync.getSyncDetails().getSourceTableId(), fhirStoreSync.getId());</span>
+            }
+<span class="fc" id="L96">            return migrationOutcome;</span>
+<span class="nc" id="L97">        } catch (MigrationEntityNotFoundException | DecryptionKeysNotFoundException e) {</span>
+<span class="nc" id="L98">            return ImmutableMigrationOutcome.migrationOutcome(SKIPPED, Optional.of(e));</span>
+<span class="nc" id="L99">        } catch (Exception e) {</span>
+<span class="nc" id="L100">            LOGGER.error(&quot;Error when migrating entity of type {} and id {}; fhir_store_sync id is {}&quot;, fhirStoreSync.getSyncDetails().getSourceTable(),</span>
+<span class="nc" id="L101">                    fhirStoreSync.getSyncDetails().getSourceTableId(), fhirStoreSync.getId(), e);</span>
+<span class="nc" id="L102">            return ImmutableMigrationOutcome.migrationOutcome(ERROR, Optional.of(e));</span>
+        }
+    }
+
+    private MigrationOutcome sendToFhirServer(List&lt;BaseFhirMigrator.ResourceAndOperation&gt; operations) {
+<span class="fc" id="L107">        var opToResources = io.vavr.collection.List.ofAll(operations)</span>
+<span class="fc" id="L108">                .groupBy(BaseFhirMigrator.ResourceAndOperation::operation)</span>
+<span class="fc" id="L109">                .map((op, resourcesForOp) -&gt; Tuple(op, resourcesForOp.map(BaseFhirMigrator.ResourceAndOperation::resource)))</span>
+                // Updates must be processed before deletes to allow references to be cleared
+<span class="fc" id="L111">                .toSortedMap(Ordering.explicit(CREATE_OR_UPDATE, DELETE), k -&gt; k);</span>
+
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        for (var operationResourceList : opToResources) {</span>
+<span class="fc" id="L114">            MigrationOutcome migrationOutcome = Match(operationResourceList._1).of(</span>
+<span class="fc" id="L115">                Case($(CREATE_OR_UPDATE), () -&gt; sendUpdateToFhirServer(operationResourceList._2.toJavaList())),</span>
+<span class="fc" id="L116">                Case($(DELETE), () -&gt; sendDeleteToFhirServer(operationResourceList._2.toJavaList())));</span>
+<span class="pc bpc" id="L117" title="1 of 4 branches missed.">            if (migrationOutcome.status() == ERROR || migrationOutcome.status() == ERROR_SILENTLY) {</span>
+<span class="fc" id="L118">                return migrationOutcome;</span>
+            }
+<span class="fc" id="L120">        }</span>
+
+<span class="fc" id="L122">        return ImmutableMigrationOutcome.migrationOutcome(SYNCED, Optional.empty());</span>
+    }
+
+    @NotNull
+    private BaseFhirMigrator getMigratorForEntity(FhirStoreSyncSourceTable sourceTable) {
+<span class="pc bpc" id="L127" title="1 of 9 branches missed.">        switch (sourceTable) {</span>
+            case PKBPERSON:
+            case PERSONCONTACT:
+            case NATIONALID:
+            case ORGLEVELID:
+            case TEAMLEVELID:
+            case PERSON_GUID:
+<span class="fc" id="L134">                return pkbPersonMigrator;</span>
+            case TEAM:
+<span class="fc" id="L136">                return teamMigrator;</span>
+            case ORG:
+            case ORGEXTERNALID:
+<span class="fc" id="L139">                return orgMigrator;</span>
+            case INSTITUTEUSER:
+<span class="fc" id="L141">                return instituteUserMigrator;</span>
+            case PATIENTOPTOUT:
+<span class="fc" id="L143">                return patientOptOutMigrator;</span>
+            case PATIENTCONSENT:
+<span class="fc" id="L145">                return patientConsentMigrator;</span>
+            case MENU_DATA:
+<span class="fc" id="L147">                return menuDataMigrator;</span>
+            case REFERENCEDATUM:
+<span class="fc" id="L149">                return referenceDatumMigrator;</span>
+            default:
+<span class="nc" id="L151">                throw new IllegalArgumentException(&quot;Trying to migrate entity to FHIR for unexpected class: &quot; + sourceTable);</span>
+        }
+    }
+
+    private MigrationOutcome sendUpdateToFhirServer(@NotNull List&lt;IBaseResource&gt; resources) {
+        try {
+<span class="fc bfc" id="L157" title="All 2 branches covered.">            for (IBaseResource resource : resources) {</span>
+                //Update as create is fine in aidbox
+<span class="fc" id="L159">                MethodOutcome response = client.update().resource(resource).execute();</span>
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">                if (config.getFhirSyncDebugLoggingEnabled()) {</span>
+<span class="fc" id="L161">                    LOGGER.info(&quot;Sent a CREATE/UPDATE of type {} with id {} to fhir server. Created was: {}&quot;, resource.getClass(),</span>
+<span class="pc bpc" id="L162" title="1 of 4 branches missed.">                            resource.getIdElement().getIdPart(), (response.getCreated() != null &amp;&amp; response.getCreated()));</span>
+                }
+<span class="fc" id="L164">            }</span>
+<span class="fc" id="L165">            return ImmutableMigrationOutcome.migrationOutcome(SYNCED, Optional.empty());</span>
+<span class="fc" id="L166">        } catch (FhirClientConnectionException | ForbiddenOperationException e) {</span>
+            // There is little point alerting us to these. They happen sporadically while the FHIR server is under high or low load, and
+            // we retry indefinitely so there's literally no consequence. They always succeed on a retry, and we've never seen them
+            // anywhere other than the migrator. This is a cheap way of reducing the noise in our alerts channel.
+            // If this were to persistantly fail, we would have this flagged via other metrics such as a low processing rate, or a
+            // fhir_store_sync queue that was backing up.
+<span class="fc" id="L172">            LOGGER.warn(&quot;Unexpected CONNECTION ERROR sending resources to FHIR server for create/update. See underneath for more details&quot;, e);</span>
+<span class="fc" id="L173">            resources.forEach(resource -&gt; LOGGER.info(&quot;Resource in connection error! Type {} with id {}&quot;, resource.getClass(),</span>
+<span class="fc" id="L174">                    resource.getIdElement().getIdPart()));</span>
+<span class="fc" id="L175">            return ImmutableMigrationOutcome.migrationOutcome(ERROR_SILENTLY, Optional.of(e));</span>
+<span class="nc" id="L176">        } catch (Exception e) {</span>
+<span class="nc" id="L177">            LOGGER.error(&quot;Unexpected ERROR sending resources to FHIR server for create/update. See underneath for more details&quot;, e);</span>
+<span class="nc" id="L178">            resources.forEach(resource -&gt; LOGGER.info(&quot;Resource in error! Type {} with id {}&quot;, resource.getClass(), resource.getIdElement().getIdPart()));</span>
+<span class="nc" id="L179">            return ImmutableMigrationOutcome.migrationOutcome(ERROR, Optional.of(e));</span>
+        }
+    }
+
+    private MigrationOutcome sendDeleteToFhirServer(@NotNull List&lt;IBaseResource&gt; resources) {
+        //Could do resourceById but this forces an explicit construction of the resource so you can't
+        // e.g. pass in the wrong id with a resource type.
+        try {
+<span class="fc bfc" id="L187" title="All 2 branches covered.">            for (IBaseResource resource : resources) {</span>
+<span class="fc" id="L188">                client.delete().resource(resource).execute();</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">                if (config.getFhirSyncDebugLoggingEnabled()) {</span>
+<span class="fc" id="L190">                    LOGGER.info(&quot;Sent a DELETE of type {} with id {} to fhir server&quot;, resource.getClass(),</span>
+<span class="fc" id="L191">                            resource.getIdElement().getIdPart());</span>
+                }
+<span class="fc" id="L193">            }</span>
+<span class="fc" id="L194">            return ImmutableMigrationOutcome.migrationOutcome(SYNCED, Optional.empty());</span>
+<span class="nc" id="L195">        } catch (FhirClientConnectionException | ForbiddenOperationException e) {</span>
+            // There is little point alerting us to these. They happen sporadically while the FHIR server is under high or low load, and
+            // we retry indefinitely so there's literally no consequence. They always succeed on a retry, and we've never seen them
+            // anywhere other than the migrator. This is a cheap way of reducing the noise in our alerts channel.
+            // If this were to persistantly fail, we would have this flagged via other metrics such as a low processing rate, or a
+            // fhir_store_sync queue that was backing up.
+<span class="nc" id="L201">            LOGGER.warn(&quot;Unexpected CONNECTION ERROR sending resources to FHIR server for deletion. See underneath for more details&quot;, e);</span>
+<span class="nc" id="L202">            resources.forEach(resource -&gt; LOGGER.info(&quot;Resource in connection error! Type {} with id {}&quot;, resource.getClass(),</span>
+<span class="nc" id="L203">                    resource.getIdElement().getIdPart()));</span>
+<span class="nc" id="L204">            return ImmutableMigrationOutcome.migrationOutcome(ERROR_SILENTLY, Optional.of(e));</span>
+<span class="nc" id="L205">        } catch (Exception e) {</span>
+<span class="nc" id="L206">            LOGGER.error(&quot;Unexpected ERROR sending resources to FHIR server for deletion. See underneath for more details&quot;, e);</span>
+<span class="nc" id="L207">            resources.forEach(resource -&gt; LOGGER.info(&quot;Resource in error! Type {} with id {}&quot;, resource.getClass(), resource.getIdElement().getIdPart()));</span>
+<span class="nc" id="L208">            return ImmutableMigrationOutcome.migrationOutcome(ERROR, Optional.of(e));</span>
+        }
+    }
+
+    @Value.Immutable
+    @Value.Style(allParameters = true, of = &quot;migrationOutcome&quot;)
+    public interface MigrationOutcome {
+        FhirStoreSyncStatus status();
+        Optional&lt;Exception&gt; exception();
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

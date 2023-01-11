@@ -1,0 +1,606 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MessageWebBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.bean.impl</a> &gt; <span class="el_source">MessageWebBean.java</span></div><h1>MessageWebBean.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: MessageWebBean.java May 27, 2009 6:05:39 PM mahendera$
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.bean.impl;
+
+import com.google.common.collect.Lists;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.bean.IMedicationWebBean;
+import com.pkb.bean.IMessageWebBean;
+import com.pkb.bean.IPlanWebBean;
+import com.pkb.calendar.entity.AvailabilityDTO;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.document.entity.Attachment;
+import com.pkb.dto.PersonAvailabilityDTO;
+import com.pkb.dto.PersonDto;
+import com.pkb.dto.TeamCliniciansDTO;
+import com.pkb.encounter.entity.Encounter;
+import com.pkb.encounter.entity.Message;
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.InstituteUser;
+import com.pkb.institute.entity.InstituteUserEntity.ContactOptions;
+import com.pkb.institute.entity.Team;
+import com.pkb.mappers.PKBPersonToPersonDtoMapper;
+import com.pkb.mappers.TeamMapper;
+import com.pkb.messaging.workflow.ConversationWorkflowFilterDTO;
+import com.pkb.service.calendar.impl.CalendarManager;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.encounter.impl.tolven.EncounterManager;
+import com.pkb.service.medication.MedicationManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.phplan.PlanManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.Constants;
+import com.pkb.util.PKBConstants;
+import com.pkb.util.Pager;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.pkb.encounter.entity.InlineContentTypes.MSG_INLINE_CALL;
+import static com.pkb.encounter.entity.InlineContentTypes.MSG_INLINE_MED;
+import static java.util.stream.Collectors.toList;
+
+@Component
+public class MessageWebBean implements IMessageWebBean {
+
+<span class="fc" id="L85">    public static final Pattern MED_PATTERN = Pattern.compile(&quot;\\[MED=\\d+\\]&quot;);</span>
+<span class="fc" id="L86">    public static final Pattern CALL_PATTERN = Pattern.compile(&quot;\\[CALL=#]&quot;);</span>
+<span class="fc" id="L87">    public static final Pattern QUESTIONNAIRE_PATTERN = Pattern.compile(&quot;\\[SURVEY=[\\w-,]+\\]&quot;);</span>
+<span class="fc" id="L88">    public static final Pattern PLAN_PATTERN = Pattern.compile(&quot;\\[PLAN=[\\w-,]+\\]&quot;);</span>
+    private final UserManager userManager;
+
+    private final TeamUserManager teamUserManager;
+
+    private final TeamManager teamManager;
+
+    private TeamMapper teamMapper;
+
+    private final EncounterManager encounterManager;
+
+    private final PKBEmailMessageManager pkbEmailMessageManager;
+
+    private final CalendarManager calendarManager;
+
+    private final UserAccessManager userAccessManager;
+
+    private final PlanManager planManager;
+
+    private final MedicationManager medicationManager;
+
+    private final PKBPersonToPersonDtoMapper pkbPersonMapper;
+
+    private final IMedicationWebBean medicationWebBean;
+
+    private final IPlanWebBean planWebBean;
+
+    private final PatientConsentManager patientConsentManager;
+
+    private final DateTimeService dateTimeService;
+
+<span class="fc" id="L119">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    /**
+     * This implements IMessageWebBean interface
+     *
+     * @param userManager
+     * @param teamUserManager
+     * @param teamManager
+     * @param encounterManager
+     * @param pkbEmailMessageManager
+     * @param calendarManager
+     * @param userAccessManager
+     * @param planManager
+     * @param medicationManager
+     * @param medicationWebBean
+     * @param planWebBean
+     */
+    @Autowired
+    public MessageWebBean(UserManager userManager, TeamUserManager teamUserManager, TeamManager teamManager,
+            EncounterManager encounterManager, PKBEmailMessageManager pkbEmailMessageManager,
+            CalendarManager calendarManager,
+            UserAccessManager userAccessManager, PlanManager planManager, MedicationManager medicationManager,
+            PKBPersonToPersonDtoMapper pkbPersonMapper, TeamMapper teamMapper,
+            IMedicationWebBean medicationWebBean,
+            IPlanWebBean planWebBean,
+                          DateTimeService dateTimeService,
+<span class="fc" id="L145">                          PatientConsentManager patientConsentManager) {</span>
+<span class="fc" id="L146">        this.userManager = userManager;</span>
+
+<span class="fc" id="L148">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L149">        this.teamManager = teamManager;</span>
+<span class="fc" id="L150">        this.encounterManager = encounterManager;</span>
+<span class="fc" id="L151">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L152">        this.calendarManager = calendarManager;</span>
+<span class="fc" id="L153">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L154">        this.planManager = planManager;</span>
+<span class="fc" id="L155">        this.medicationManager = medicationManager;</span>
+<span class="fc" id="L156">        this.pkbPersonMapper = pkbPersonMapper;</span>
+<span class="fc" id="L157">        this.teamMapper = teamMapper;</span>
+<span class="fc" id="L158">        this.medicationWebBean = medicationWebBean;</span>
+<span class="fc" id="L159">        this.planWebBean = planWebBean;</span>
+<span class="fc" id="L160">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L161">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L162">    }</span>
+
+    /**
+     * Get the patient being referred to in the conversation
+     *
+     * @param requestContext
+     * @param composerId
+     * @param conversation
+     * @return {@link PKBPerson} object
+     */
+    @Override
+    public PKBPerson getReferredPatient(@NotNull LoggedInEHRRequestContext requestContext, String composerId, Long accountId,
+            Encounter conversation) {
+<span class="nc" id="L175">        return encounterManager.getReferredPatient(requestContext, accountId, conversation);</span>
+    }
+
+    @Override
+    @Nullable
+    public Long getDefaultAccountId(long userId) {
+<span class="fc" id="L181">        return userManager.getDefaultAccountId(userId);</span>
+    }
+
+    @Override
+    public long getInboxCount(@NotNull LoggedInEHRRequestContext requestContext, long accountId, String filterPatientId, Instant filterDateFrom, Instant filterDateTo,
+            ConversationWorkflowFilterDTO conversationWorkflowFilterDTO) {
+<span class="fc" id="L187">        return encounterManager.getConversationCount(requestContext, requestContext.getAccessingUserId(),</span>
+<span class="fc" id="L188">                accountId, filterPatientId, filterDateFrom, filterDateTo, conversationWorkflowFilterDTO);</span>
+    }
+
+    @Override
+    public Attachment getAttachment(@NotNull LoggedInEHRRequestContext requestContext, Long attachmentId, String currentUserId) {
+<span class="nc" id="L193">        return encounterManager.getAttachmentContent(requestContext, attachmentId);</span>
+    }
+
+    @Override
+    public List&lt;Attachment&gt; getAttachments(EHRRequestContext requestContext, Long messageId) {
+<span class="nc" id="L198">        return encounterManager.getAttachments(messageId);</span>
+    }
+
+    @Override
+    public void removeAttachmentsFromSession(Map&lt;String, Object&gt; session) {
+<span class="fc" id="L203">        session.remove(PKBConstants.MAIL_ATTACHMENTS);</span>
+<span class="fc" id="L204">    }</span>
+
+    @Override
+    public List&lt;Attachment&gt; getAttachmentsFromSession(
+            Map&lt;String, Object&gt; session) {
+<span class="fc" id="L209">        return (List) session.get(PKBConstants.MAIL_ATTACHMENTS);</span>
+    }
+
+    @Override
+    public List&lt;Attachment&gt; getNullSafeAttachmentsFromSession(Map&lt;String, Object&gt; session) {
+
+        @SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L216">        List&lt;Attachment&gt; attachments = (List) session.get(PKBConstants.MAIL_ATTACHMENTS);</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">        if (attachments == null) {</span>
+<span class="fc" id="L218">            attachments = Lists.newArrayList();</span>
+        }
+
+<span class="fc" id="L221">        return attachments;</span>
+    }
+
+    @Override
+    public void setAttachmentsInSession(List&lt;Attachment&gt; attachments,
+            Map&lt;String, Object&gt; session) {
+<span class="fc" id="L227">        session.put(PKBConstants.MAIL_ATTACHMENTS, attachments);</span>
+<span class="fc" id="L228">    }</span>
+
+    @Override
+    public void removeMessageTextFromSession(Map&lt;String, Object&gt; session) {
+<span class="nc" id="L232">        session.remove(PKBConstants.MAIL_MESSAGE_TEXT);</span>
+<span class="nc" id="L233">    }</span>
+
+    @Override
+    public String getMessageTextFromSession(Map&lt;String, Object&gt; session) {
+<span class="nc" id="L237">        return (String) session.get(PKBConstants.MAIL_MESSAGE_TEXT);</span>
+    }
+
+    @Override
+    public void setMessageTextInSession(String messageText,
+            Map&lt;String, Object&gt; session) {
+<span class="nc" id="L243">        session.put(PKBConstants.MAIL_MESSAGE_TEXT, messageText);</span>
+<span class="nc" id="L244">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L247">        return userManager;</span>
+    }
+
+    public TeamManager getTeamManager() {
+<span class="nc" id="L251">        return teamManager;</span>
+    }
+
+    public EncounterManager getEncounterManager() {
+<span class="nc" id="L255">        return encounterManager;</span>
+    }
+
+    public PlanManager getPlanManager() {
+<span class="nc" id="L259">        return planManager;</span>
+    }
+
+    public MedicationManager getMedicationManager() {
+<span class="nc" id="L263">        return medicationManager;</span>
+    }
+
+    @Deprecated
+    @Override
+    public List&lt;PKBPerson&gt; getPatientsForClinician(LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L269">        UserType userType = requestContext.getAccessingUser().getUserType();</span>
+
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">        if (userType != UserType.REG_CLINICIAN) {</span>
+<span class="nc" id="L272">            throw new PKBException(&quot;current user is not a clinician! &quot; + userType);</span>
+        }
+
+<span class="pc bpc" id="L275" title="1 of 2 branches missed.">        if (requestContext.getTeamId().isPresent()) {</span>
+<span class="fc" id="L276">            return patientConsentManager.findConsentingPatientsForTeam(requestContext.getTeamId().get());</span>
+        } else {
+<span class="nc" id="L278">            return teamUserManager.getAssignedPatients(requestContext.getAccessingUserId(),</span>
+                    PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS_DEEP, PKBPerson.Lazy.PROPERTIES);
+        }
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; getCliniciansForPatient(EHRRequestContext requestContext, PKBPerson patient,
+            ContactOptions requireOptionOrNull) {
+<span class="fc" id="L286">        return getCliniciansForMigratedPatient(requestContext, patient, requireOptionOrNull);</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; getCliniciansForMigratedPatient(EHRRequestContext requestContext, PKBPerson patient,
+            ContactOptions requireOptionOrNull) {
+        // TODO this whole flow needs more cleanup -- we fetch clinicians by team here, and then *elsewhere* group them by team.  :(
+        // see ComposeMessageAction etc.
+
+<span class="fc" id="L295">        PatientConsentManager.ConsentLinks grantedConsents = patientConsentManager.getConsentLinks(requestContext, patient.getId(), false);</span>
+
+<span class="fc" id="L297">        Set&lt;PKBPerson&gt; clinicianSet = new HashSet&lt;&gt;();</span>
+
+        // need to merge in list of all clinicians on teams where we've granted consent (TODO: this will get rough with massive &quot;share-em-all&quot; teams!)
+        // plus indiv links to non-team clinicians
+<span class="fc" id="L301">        List&lt;Long&gt; teamIds = grantedConsents.getTeams().stream().map(Team::getId).collect(Collectors.toUnmodifiableList());</span>
+        // only take the active ones!
+<span class="fc" id="L303">        teamUserManager.getInstituteUsersByType(teamIds, UserType.REG_CLINICIAN, EnumSet.of(SponsorshipStatus.ACTIVE), Pager.ALL, 0)</span>
+<span class="fc" id="L304">                .stream()</span>
+                // person status: only EMAIL_CONFIRMED.  CREATED means they haven't registered yet.
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">                .filter(iu -&gt; iu.getPerson().getStatus() == UserStatus.EMAIL_CONFIRMED)</span>
+<span class="pc bpc" id="L307" title="1 of 4 branches missed.">                .filter(iu -&gt; (requireOptionOrNull == null) || requireOptionOrNull == iu.getContactable()</span>
+<span class="fc bfc" id="L308" title="All 2 branches covered.">                        || iu.getContactable() == ContactOptions.All)</span>
+<span class="fc" id="L309">                .map(InstituteUser::getPerson).forEach(clinicianSet::add);</span>
+
+        // TODO: this *should* cover all indiv links as well (we shouldn't need to check AccountUser directly!)
+        // but until the data is tested to see if this assumption is good... we'll check via AccountUser as well (below)
+<span class="fc" id="L313">        grantedConsents.getIndividuals()</span>
+<span class="fc" id="L314">                .stream()</span>
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">                .filter(p -&gt; p.getStatus() == UserStatus.EMAIL_CONFIRMED)</span>
+<span class="fc" id="L316">                .forEach(clinicianSet::add);</span>
+
+        // convert to list for return type
+<span class="fc" id="L319">        return new ArrayList&lt;&gt;(clinicianSet);</span>
+    }
+
+    @Override
+    /**
+     * Only post-consent-migration TODO TODAY: move into MessageBaseAction - only called from ComposeMessageAction and
+     * ConversationParticipantAction
+     * TODO TODAY TWO: THEN USE FROM EVERYTHING THAT EXTENDS MessageBaseAction
+     */
+    public void getProGroupsForPatient(LoggedInEHRRequestContext requestContext, PKBPerson patient, Set&lt;String&gt; excludeIds,
+            ContactOptions requireOptionOrNull,
+            List&lt;TeamCliniciansDTO&gt; fillProsByTeam, List&lt;PersonAvailabilityDTO&gt; fillNonTeamPros, List&lt;PersonDto&gt; fillCarers) {
+
+<span class="fc" id="L332">        Map&lt;Long, List&lt;PKBPerson&gt;&gt; teamIdToProsMap = new HashMap&lt;&gt;();</span>
+
+        // Exclude the would-be sender
+<span class="fc" id="L335">        excludeIds.add(Long.toString(requestContext.getAccessingUserId()));</span>
+
+<span class="fc" id="L337">        PatientConsentManager.ConsentLinks grantedConsents = patientConsentManager.getConsentLinks(requestContext, patient.getId(), false);</span>
+
+
+<span class="fc bfc" id="L340" title="All 2 branches covered.">        for (Team team : grantedConsents.getTeams()) {</span>
+<span class="fc" id="L341">            List&lt;InstituteUser&gt; proIUList = teamUserManager.getInstituteUsersByType(team.getId(),</span>
+                    UserType.REG_CLINICIAN,
+                    Pager.ALL, 0);
+            // only take the active ones!
+<span class="fc" id="L345">            proIUList.stream()</span>
+<span class="fc bfc" id="L346" title="All 2 branches covered.">                    .filter(iu -&gt; !excludeIds.contains(iu.getPerson().getIdString()))</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">                    .filter(iu -&gt; iu.getSponsorshipStatus() == SponsorshipStatus.ACTIVE)</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">                    .filter(iu -&gt; iu.getPerson().getStatus() == UserStatus.EMAIL_CONFIRMED)</span>
+<span class="pc bpc" id="L349" title="1 of 4 branches missed.">                    .filter(iu -&gt; (requireOptionOrNull == null) || requireOptionOrNull == iu.getContactable()</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">                            || ContactOptions.All == iu.getContactable())</span>
+<span class="fc" id="L351">                    .forEach(iu -&gt; {</span>
+<span class="fc" id="L352">                        teamIdToProsMap.putIfAbsent(team.getId(), new LinkedList&lt;&gt;());</span>
+<span class="fc" id="L353">                        List&lt;PKBPerson&gt; proList = teamIdToProsMap.get(team.getId());</span>
+<span class="fc" id="L354">                        proList.add(iu.getPerson());</span>
+<span class="fc" id="L355">                        excludeIds.add(iu.getPersonId().toString());//Add to exclude to avoid duplicating if team pro also has individual link</span>
+<span class="fc" id="L356">                    });</span>
+<span class="fc" id="L357">        }</span>
+
+<span class="pc bpc" id="L359" title="1 of 4 branches missed.">        Predicate&lt;PKBPerson&gt; notExcludedAndEmailConfirmed = pkbPerson -&gt; !excludeIds.contains(pkbPerson.getIdString()) &amp;&amp; pkbPerson.getStatus() == UserStatus.EMAIL_CONFIRMED;</span>
+
+        // TODO: this *should* cover all indiv links as well (we shouldn't need to check AccountUser directly!)
+        // but until the data is tested to see if this assumption is good... we'll check via AccountUser as well (below)
+<span class="fc" id="L363">        List&lt;PKBPerson&gt; nonTeamPros = grantedConsents.getIndividuals().stream().filter(notExcludedAndEmailConfirmed).collect(toImmutableList());</span>
+
+<span class="fc" id="L365">        grantedConsents.getCarers().stream().filter(notExcludedAndEmailConfirmed).map(pkbPersonMapper::personToPersonDto).forEach(fillCarers::add);</span>
+
+
+        // now fill in the real lists -- with Team objects and clinician availability
+<span class="fc bfc" id="L369" title="All 2 branches covered.">        for (Team team : grantedConsents.getTeams()) {</span>
+
+<span class="fc" id="L371">            List&lt;PKBPerson&gt; proList = teamIdToProsMap.get(team.getId()); // may be null</span>
+<span class="fc" id="L372">            List&lt;PersonAvailabilityDTO&gt; availabilityDTOs = getClinicianAvailability(requestContext, proList);</span>
+
+<span class="fc" id="L374">            TeamCliniciansDTO teamCliniciansDTO = new TeamCliniciansDTO();</span>
+<span class="fc" id="L375">            teamCliniciansDTO.setCliniciansList(availabilityDTOs);</span>
+<span class="fc" id="L376">            teamCliniciansDTO.setTeam(teamMapper.teamToTeamDTO(team));</span>
+
+<span class="fc" id="L378">            fillProsByTeam.add(teamCliniciansDTO);</span>
+<span class="fc" id="L379">        }</span>
+
+<span class="fc bfc" id="L381" title="All 2 branches covered.">        if (!nonTeamPros.isEmpty()) {</span>
+<span class="fc" id="L382">            fillNonTeamPros.addAll(getClinicianAvailability(requestContext, nonTeamPros));</span>
+        }
+<span class="fc" id="L384">    }</span>
+
+    @Override
+    public void expandInlineContents(@NotNull LoggedInEHRRequestContext requestContext, long currentUserId, Long accountId,
+            Message message, boolean changeMessageContents) {
+<span class="fc" id="L389">        StringBuilder result2 = new StringBuilder();</span>
+<span class="fc" id="L390">        Matcher tagMatcher = MED_PATTERN.matcher(</span>
+<span class="fc" id="L391">                message.getContent());</span>
+
+<span class="fc bfc" id="L393" title="All 2 branches covered.">        while (tagMatcher.find()) {</span>
+<span class="fc" id="L394">            String tag = tagMatcher.group();</span>
+<span class="fc" id="L395">            Long medicationId = Long.valueOf(tag.substring(5, tag.length() - 1));</span>
+<span class="fc" id="L396">            String medicationAsHtml = medicationWebBean.getMedicationAsHtml(requestContext,</span>
+                    accountId, medicationId, Locale.UK, Constants.APPLICATION_TZ);
+<span class="fc" id="L398">            tagMatcher.appendReplacement(result2, medicationAsHtml);</span>
+
+<span class="fc" id="L400">            message.setInlineContentType(MSG_INLINE_MED);</span>
+<span class="fc" id="L401">            message.setInlineContentId(medicationId.toString());</span>
+<span class="fc" id="L402">            message.setInlineContentText(medicationAsHtml);</span>
+<span class="fc" id="L403">            message.setHtmlAllowed(true);</span>
+
+<span class="fc" id="L405">        }</span>
+<span class="fc" id="L406">        tagMatcher.appendTail(result2);</span>
+
+        // Currently just remove [CALL=#]
+
+<span class="fc" id="L410">        StringBuilder result3 = new StringBuilder();</span>
+<span class="fc" id="L411">        tagMatcher = CALL_PATTERN.matcher(result2.toString());</span>
+
+<span class="fc bfc" id="L413" title="All 2 branches covered.">        while (tagMatcher.find()) {</span>
+<span class="fc" id="L414">            tagMatcher.group();</span>
+<span class="fc" id="L415">            tagMatcher.appendReplacement(result3, &quot;&quot;);</span>
+<span class="fc" id="L416">            message.setInlineContentType(MSG_INLINE_CALL);</span>
+
+<span class="fc" id="L418">            PKBPerson receiver = userManager.getPKBPerson(Long.parseLong(message.getReceiverId()));</span>
+<span class="pc bpc" id="L419" title="3 of 4 branches missed.">            if (StringUtils.isEmpty(receiver.getSkypeId()) || receiver.getSkypeId().contains(&quot;@&quot;)) {</span>
+<span class="fc" id="L420">                message.setReceiverSkypeId(&quot;&quot;);</span>
+            } else {
+<span class="nc" id="L422">                message.setReceiverSkypeId(receiver.getSkypeId());</span>
+            }
+<span class="fc" id="L424">            message.setReceiverPhoneNumber(receiver.getPhone());</span>
+<span class="fc" id="L425">        }</span>
+<span class="fc" id="L426">        tagMatcher.appendTail(result3);</span>
+
+        // Expand [PLAN=&lt;planId&gt;[,&lt;version&gt;]] as usual
+
+<span class="fc" id="L430">        StringBuilder result5 = new StringBuilder();</span>
+<span class="fc" id="L431">        tagMatcher = PLAN_PATTERN.matcher(</span>
+<span class="fc" id="L432">                result3.toString());</span>
+
+<span class="fc bfc" id="L434" title="All 2 branches covered.">        while (tagMatcher.find()) {</span>
+<span class="fc" id="L435">            String tag = tagMatcher.group();</span>
+<span class="fc" id="L436">            String[] fields = tag.substring(6, tag.length() - 1).split(&quot;,&quot;);</span>
+<span class="fc" id="L437">            UUID planUniqueId = UUID.fromString(fields[0]);</span>
+<span class="pc bpc" id="L438" title="1 of 2 branches missed.">            Long planVersionNumber = fields.length &gt; 1 ? Long.parseLong(fields[1]) : null;</span>
+
+            String planAsHtml;
+<span class="pc bpc" id="L441" title="1 of 2 branches missed.">            if (planVersionNumber == null) {</span>
+<span class="nc" id="L442">                planAsHtml = planWebBean.getPHPlanAsHtml(requestContext, accountId, planUniqueId);</span>
+            } else {
+<span class="fc" id="L444">                planAsHtml = planWebBean.getPHPlanAsHtml(requestContext, accountId, planUniqueId, planVersionNumber);</span>
+            }
+
+<span class="fc" id="L447">            tagMatcher.appendReplacement(result5, planAsHtml);</span>
+
+<span class="fc" id="L449">            message.setInlineContentId(planUniqueId.toString());</span>
+<span class="fc" id="L450">            message.setInlineContentText(planAsHtml);</span>
+<span class="fc" id="L451">            message.setHtmlAllowed(true);</span>
+<span class="fc" id="L452">        }</span>
+<span class="fc" id="L453">        tagMatcher.appendTail(result5);</span>
+
+        // Two parter - surveyId,patientId
+        // Currently just remove [SURVEY=\\d+\\]
+        // This is only used to display the 'remind patient' button if this is
+        // the first message
+        // in the clinician's copy of the discussion
+
+<span class="fc" id="L461">        StringBuilder result6 = new StringBuilder();</span>
+<span class="fc" id="L462">        tagMatcher = QUESTIONNAIRE_PATTERN.matcher(</span>
+<span class="fc" id="L463">                result5.toString());</span>
+
+<span class="fc bfc" id="L465" title="All 2 branches covered.">        while (tagMatcher.find()) {</span>
+<span class="fc" id="L466">            String tag = tagMatcher.group();</span>
+<span class="fc" id="L467">            String[] value = tag.substring(8, tag.length() - 1).split(&quot;,&quot;);</span>
+<span class="fc" id="L468">            tagMatcher.appendReplacement(result6, &quot;&quot;);</span>
+
+<span class="fc" id="L470">            message.setInlineContentType(Message.MSG_QUESTIONNAIRE);</span>
+<span class="fc" id="L471">            message.setInlineContentId(value[0]);</span>
+<span class="fc" id="L472">            message.setPatientIdString(value[1]);</span>
+<span class="fc" id="L473">        }</span>
+<span class="fc" id="L474">        tagMatcher.appendTail(result6);</span>
+
+<span class="fc bfc" id="L476" title="All 2 branches covered.">        if (changeMessageContents) {</span>
+<span class="fc" id="L477">            message.setContent(result6.toString());</span>
+        }
+
+<span class="fc" id="L480">    }</span>
+
+    public PKBEmailMessageManager getPkbEmailMessageManager() {
+<span class="nc" id="L483">        return pkbEmailMessageManager;</span>
+    }
+
+    public TeamUserManager getTeamUserManager() {
+<span class="nc" id="L487">        return teamUserManager;</span>
+    }
+
+    @Override
+    @Nullable
+    public Team getClinicianInstitute(PKBPerson clinician) {
+
+        // TODO: replace with this?
+        // return teamUserManager.getPrimaryInstitute(clinician.getIdString());
+
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">        if (clinician.isPatient()) {</span>
+<span class="nc" id="L498">            return null;</span>
+        }
+<span class="fc" id="L500">        List&lt;Team&gt; institutes = teamManager</span>
+<span class="fc" id="L501">                .getUserTeamsByStatus(clinician.getId(),</span>
+                        SponsorshipStatus.ACTIVE);
+<span class="pc bpc" id="L503" title="1 of 2 branches missed.">        if (institutes.size() &gt; 1) {</span>
+            // TODO Put some better error handling here
+<span class="nc" id="L505">            LOGGER.info(&quot;Clinician-{} has more than one active institutes&quot;, clinician.getId());</span>
+<span class="nc" id="L506">            return null;</span>
+        }
+<span class="pc bpc" id="L508" title="1 of 2 branches missed.">        if (institutes.size() == 1) {</span>
+<span class="fc" id="L509">            return institutes.get(0);</span>
+        } else {
+            // Non - institute clinician
+<span class="nc" id="L512">            return null;</span>
+        }
+    }
+
+    @Override
+    @Deprecated // use InstitituteUserManager.getColleagues() directly
+    @Nullable
+    public List&lt;InstituteUser&gt; getColleagues(EHRRequestContext requestContext, PKBPerson clinician) {
+<span class="fc" id="L520">        Team team = getClinicianInstitute(clinician);</span>
+<span class="pc bpc" id="L521" title="1 of 2 branches missed.">        if (team == null) {</span>
+<span class="nc" id="L522">            return null;</span>
+        }
+<span class="fc" id="L524">        List&lt;InstituteUser&gt; users = teamUserManager</span>
+<span class="fc" id="L525">                .getInstituteUsersByType(team.getId(), UserType.REG_CLINICIAN, -1, 0);</span>
+        // TODO: Need to add query to get colleagues to filter out the logged in
+        // clinician
+        // TODO: merge with getColleagues() in TeamUserManager......
+<span class="fc" id="L529">        List&lt;InstituteUser&gt; colleagues = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L530">        String clinicianId = clinician.getIdString();</span>
+        // set team here; no need to load it in Hibernate
+<span class="fc" id="L532">        users.stream()</span>
+<span class="pc bpc" id="L533" title="1 of 2 branches missed.">                .filter(instituteUser -&gt; (instituteUser.getSponsorshipStatus() == SponsorshipStatus.ACTIVE) &amp;&amp;</span>
+<span class="fc bfc" id="L534" title="All 2 branches covered.">                        !clinicianId.equals(instituteUser.getPerson().getIdString()))</span>
+<span class="fc" id="L535">                .forEach(instituteUser -&gt; {</span>
+                    // set team here; no need to load it in Hibernate
+<span class="fc" id="L537">                    instituteUser.setInstitute(team);</span>
+<span class="fc" id="L538">                    colleagues.add(instituteUser);</span>
+<span class="fc" id="L539">                });</span>
+<span class="fc" id="L540">        return colleagues;</span>
+    }
+
+    @Override
+    public List&lt;PersonAvailabilityDTO&gt; getClinicianAvailability(EHRRequestContext requestContext,
+            List&lt;PKBPerson&gt; acceptedClinicians) {
+        // shortcut for no acceptedClinicians (may be null)
+<span class="fc bfc" id="L547" title="All 2 branches covered.">        if (CollectionUtils.isEmpty(acceptedClinicians)) {</span>
+<span class="fc" id="L548">            return Collections.emptyList();</span>
+        }
+
+        List&lt;PersonAvailabilityDTO&gt; clinicianList;
+        HashMap&lt;String, AvailabilityDTO&gt; availabilityMap;
+<span class="fc" id="L553">        List&lt;Long&gt; userIdList = acceptedClinicians.stream().map(PKBPerson::getId).collect(toList());</span>
+<span class="fc" id="L554">        Instant referenceDate = dateTimeService.today().atStartOfDay(Constants.APPLICATION_TZ).toInstant();</span>
+<span class="fc" id="L555">        Instant tomorrow = dateTimeService.tomorrow().atStartOfDay(Constants.APPLICATION_TZ).toInstant();</span>
+        // Get each clinicians availability
+<span class="fc" id="L557">        List&lt;AvailabilityDTO&gt; userAvailabilityList = calendarManager</span>
+<span class="fc" id="L558">                .getAvailability(requestContext, userIdList, referenceDate);</span>
+
+<span class="fc" id="L560">        availabilityMap = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L561" title="All 2 branches covered.">        for (AvailabilityDTO availabilityDTO : userAvailabilityList) {</span>
+<span class="fc" id="L562">            availabilityMap.put(availabilityDTO.getUserId(), availabilityDTO);</span>
+<span class="fc" id="L563">        }</span>
+        PersonAvailabilityDTO personAvailabilityDTO;
+<span class="fc" id="L565">        clinicianList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L566">        LocalDate tomorrowDate = LocalDateTime.ofInstant(tomorrow, Constants.APPLICATION_TZ).toLocalDate();</span>
+<span class="fc bfc" id="L567" title="All 2 branches covered.">        for (PKBPerson clinician : acceptedClinicians) {</span>
+<span class="fc" id="L568">            personAvailabilityDTO = new PersonAvailabilityDTO();</span>
+<span class="fc" id="L569">            personAvailabilityDTO.setPerson(pkbPersonMapper.personToPersonDto(clinician));</span>
+<span class="fc" id="L570">            AvailabilityDTO availabilityDTO = availabilityMap.get(clinician</span>
+<span class="fc" id="L571">                    .getIdString());</span>
+<span class="fc" id="L572">            personAvailabilityDTO.setAvailabilityDTO(availabilityDTO);</span>
+
+<span class="pc bpc" id="L574" title="1 of 2 branches missed.">            if (availabilityDTO.getNextAvailable() == null) {</span>
+<span class="nc" id="L575">                personAvailabilityDTO.setTomorrowAvailable(false);</span>
+            } else {
+<span class="fc" id="L577">                LocalDate nextAvailableDate = LocalDateTime.ofInstant(availabilityDTO.getNextAvailable().toInstant(), Constants.APPLICATION_TZ).toLocalDate();</span>
+<span class="fc bfc" id="L578" title="All 2 branches covered.">                if (tomorrowDate.isEqual(nextAvailableDate)) {</span>
+<span class="fc" id="L579">                    personAvailabilityDTO.setTomorrowAvailable(true);</span>
+                } else {
+<span class="fc" id="L581">                    personAvailabilityDTO.setTomorrowAvailable(false);</span>
+                }
+            }
+<span class="fc" id="L584">            clinicianList.add(personAvailabilityDTO);</span>
+<span class="fc" id="L585">        }</span>
+<span class="fc" id="L586">        return clinicianList;</span>
+    }
+
+    public CalendarManager getCalendarManager() {
+<span class="nc" id="L590">        return calendarManager;</span>
+    }
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L594">        return userAccessManager;</span>
+    }
+
+    public IMedicationWebBean getMedicationWebBean() {
+<span class="nc" id="L598">        return medicationWebBean;</span>
+    }
+
+    public IPlanWebBean getPlanWebBean() {
+<span class="nc" id="L602">        return planWebBean;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

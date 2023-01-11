@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FhirPatientHL7PatientMapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir</a> &gt; <span class="el_source">FhirPatientHL7PatientMapper.java</span></div><h1>FhirPatientHL7PatientMapper.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir;
+
+import static com.pkb.entities.enums.NationalIdType.NHS_NUMBER;
+
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Date;
+import java.util.List;
+import java.util.Optional;
+import java.util.TimeZone;
+import java.util.stream.Collectors;
+
+import org.hl7.fhir.dstu3.model.Address;
+import org.hl7.fhir.dstu3.model.BooleanType;
+import org.hl7.fhir.dstu3.model.CodeableConcept;
+import org.hl7.fhir.dstu3.model.Coding;
+import org.hl7.fhir.dstu3.model.ContactPoint;
+import org.hl7.fhir.dstu3.model.HumanName;
+import org.hl7.fhir.dstu3.model.Identifier;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.hl7.fhir.dstu3.model.Period;
+import org.hl7.fhir.dstu3.model.PrimitiveType;
+import org.hl7.fhir.dstu3.model.StringType;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jooq.tools.StringUtils;
+
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.ImmutableDisclosingEmail;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.dataupload.hl7.field.HL7Code;
+import com.pkb.service.dataupload.hl7.segment.HL7Patient;
+import com.pkb.service.dataupload.hl7.value.HL7Date;
+
+import ca.uhn.fhir.util.ElementUtil;
+
+/**
+ * Does a unidirectional mapping from a STU3 (with some CareConnect extensions) Patient resource to HL7Patient
+ * DTO so we can hook into the HL7 registration and patient creation flows from the FHIR API.
+ *
+ * This is initially a limited subset of the fields possible within FHIR.
+ */
+public class FhirPatientHL7PatientMapper {
+
+    private final DateTimeService dateTimeService;
+
+<span class="fc" id="L49">    public FhirPatientHL7PatientMapper(DateTimeService dateTimeService) {</span>
+<span class="fc" id="L50">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L51">    }</span>
+
+    @NotNull
+    HL7Patient map(@NotNull Patient fhirPatient, @NotNull HL7ConnContext hl7ConnContext) {
+        //We have validated and enforced only one name element in the resource
+<span class="fc" id="L56">        HumanName name = fhirPatient.getNameFirstRep();</span>
+
+<span class="fc" id="L58">        HL7Patient hl7 = new HL7Patient(null);</span>
+
+        //We dispose of anything apart from the first title
+<span class="fc" id="L61">        hl7.setTitle(name.getPrefix().stream().findFirst().map(PrimitiveType::getValue).orElse(&quot;&quot;));</span>
+<span class="fc" id="L62">        hl7.setFirstName(getValueOrThrow(name.getGiven().stream().map(StringType::getValueNotNull)</span>
+<span class="fc" id="L63">                .collect(Collectors.joining(&quot; &quot;)).trim(), &quot;Given name&quot;));</span>
+<span class="fc" id="L64">        hl7.setLastName(getValueOrThrow(name.getFamily(), &quot;Family name&quot;));</span>
+
+<span class="pc bpc" id="L66" title="1 of 2 branches missed.">        hl7.setGender(fhirPatient.getGender() == null ? &quot;&quot; : fhirPatient.getGender().toCode());</span>
+<span class="fc" id="L67">        setDob(fhirPatient, hl7);</span>
+<span class="fc" id="L68">        setDeathIndicators(fhirPatient, hl7);</span>
+
+<span class="fc" id="L70">        processNationalId(fhirPatient, hl7ConnContext, hl7);</span>
+
+<span class="fc" id="L72">        processAddresses(fhirPatient, hl7);</span>
+<span class="fc" id="L73">        processEmails(fhirPatient, hl7);</span>
+<span class="fc" id="L74">        processPhones(fhirPatient, hl7);</span>
+<span class="fc" id="L75">        processLanguage(fhirPatient, hl7);</span>
+
+<span class="fc" id="L77">        return hl7;</span>
+    }
+
+    private void processNationalId(@NotNull Patient fhirPatient, @NotNull HL7ConnContext hl7ConnContext, @NotNull HL7Patient hl7) {
+<span class="fc" id="L81">        Identifier nhsIdentifier = fhirPatient.getIdentifier().stream()</span>
+<span class="fc" id="L82">                .filter(identifier -&gt; identifier.getSystem().equals(NHS_NUMBER.getFhirIdentifierSystem()))</span>
+<span class="fc" id="L83">                .findFirst()</span>
+<span class="pc" id="L84">                .orElseThrow(() -&gt; new RuntimeException(&quot;No NHS number identifier is present&quot;));</span>
+
+<span class="fc" id="L86">        hl7.createAndAddNationalId(hl7ConnContext, dateTimeService, nhsIdentifier.getValue(), &quot;&quot;, NHS_NUMBER);</span>
+<span class="fc" id="L87">    }</span>
+
+    private void processLanguage(@NotNull Patient fhirPatient, @NotNull HL7Patient hl7) {
+<span class="fc" id="L90">        String languageId = fhirPatient.getExtension().stream()</span>
+<span class="pc bpc" id="L91" title="1 of 2 branches missed.">                .filter(extension -&gt; extension.getUrl() != null</span>
+<span class="fc bfc" id="L92" title="All 2 branches covered.">                        &amp;&amp; extension.getUrl().equals(&quot;https://fhir.hl7.org.uk/STU3/StructureDefinition/Extension-CareConnect-NHSCommunication-1&quot;)</span>
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">                        &amp;&amp; extension.hasValue())</span>
+<span class="fc" id="L94">                .map(extension -&gt; ((CodeableConcept) extension.getValue()).getCoding().stream()</span>
+<span class="pc bpc" id="L95" title="2 of 4 branches missed.">                        .filter(coding -&gt; coding.hasSystem() &amp;&amp; coding.getSystem().equals(&quot;https://fhir.hl7.org.uk/STU3/CodeSystem/CareConnect-HumanLanguage-1&quot;))</span>
+<span class="fc" id="L96">                        .findFirst()</span>
+<span class="fc" id="L97">                        .map(Coding::getCode).orElse(&quot;&quot;))</span>
+<span class="fc" id="L98">                .findFirst().orElse(&quot;&quot;);</span>
+
+        //If the language code is empty, this will be deleted
+<span class="fc" id="L101">        HL7Code languageCode = new HL7Code();</span>
+<span class="fc" id="L102">        languageCode.setId(languageId);</span>
+<span class="fc" id="L103">        hl7.setLanguageCode(languageCode);</span>
+<span class="fc" id="L104">    }</span>
+
+    private void processAddresses(@NotNull Patient fhirPatient, @NotNull HL7Patient hl7) {
+<span class="fc" id="L107">        List&lt;Address&gt; addresses = fhirPatient.getAddress()</span>
+<span class="fc" id="L108">                .stream()</span>
+<span class="fc" id="L109">                .filter(address -&gt; {</span>
+<span class="fc" id="L110">                    Period period = address.getPeriod();</span>
+<span class="pc bpc" id="L111" title="2 of 6 branches missed.">                    return period.getEnd() == null || !period.hasEnd() || period.getEnd().after(Date.from(dateTimeService.now()));</span>
+                })
+<span class="fc" id="L113">                .collect(Collectors.toList());</span>
+
+        //Addresses: we can only store one. We prioritise home &gt; work &gt; temp seems reasonable, then fall back on whatever.
+        // If there are multiple unended for a given type, just get the first in the array, we can't do any better.
+<span class="pc bpc" id="L117" title="1 of 4 branches missed.">        Optional&lt;Address&gt; addressToUse = addresses.stream().filter(address -&gt; address.getUse() == Address.AddressUse.HOME &amp;&amp; addressHasData(address)).findFirst()</span>
+<span class="pc bpc" id="L118" title="1 of 4 branches missed.">                .or(() -&gt; addresses.stream().filter(address -&gt; address.getUse() == Address.AddressUse.WORK &amp;&amp; addressHasData(address)).findFirst())</span>
+<span class="pc bpc" id="L119" title="3 of 4 branches missed.">                .or(() -&gt; addresses.stream().filter(address -&gt; address.getUse() == Address.AddressUse.TEMP &amp;&amp; addressHasData(address)).findFirst())</span>
+<span class="fc" id="L120">                .or(() -&gt; addresses.stream().filter(this::addressHasData).findFirst()); //If we don't have any of these, just use whatever they've provided as a fallback</span>
+<span class="fc" id="L121">        addressToUse.ifPresent(address -&gt; {</span>
+<span class="fc" id="L122">            hl7.setAddress1(getAddressLine(address, 0));</span>
+<span class="fc" id="L123">            hl7.setAddress2(getAddressLine(address, 1));</span>
+
+<span class="fc" id="L125">            hl7.setCity(getValueOrEmpty(address.getCity()));</span>
+<span class="fc" id="L126">            hl7.setState(getValueOrEmpty(address.getState()));</span>
+<span class="fc" id="L127">            hl7.setZip(getValueOrEmpty(address.getPostalCode()));</span>
+<span class="fc" id="L128">            hl7.setCountry3char(getValueOrEmpty(address.getCountry()));</span>
+<span class="fc" id="L129">        });</span>
+<span class="fc" id="L130">    }</span>
+
+    private boolean addressHasData(Address address) {
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">        return !ElementUtil.isEmpty(address.getLine(), address.getCity(), address.getState(), address.getPostalCode(), address.getCountry());</span>
+    }
+
+    private void processPhones(@NotNull Patient fhirPatient, @NotNull HL7Patient hl7) {
+<span class="fc" id="L137">        Optional&lt;ContactPoint&gt; homePhone = getContactPointForSystemAndUse(fhirPatient,</span>
+                ContactPoint.ContactPointSystem.PHONE, ContactPoint.ContactPointUse.HOME);
+<span class="fc" id="L139">        homePhone.ifPresentOrElse(phone -&gt; hl7.setHomePhone(phone.getValue()),</span>
+<span class="fc" id="L140">                () -&gt; hl7.setHomePhone(&quot;&quot;));</span>
+
+<span class="fc" id="L142">        Optional&lt;ContactPoint&gt; mobilePhone = getContactPointForSystemAndUse(fhirPatient,</span>
+                ContactPoint.ContactPointSystem.PHONE, ContactPoint.ContactPointUse.MOBILE);
+<span class="pc" id="L144">        mobilePhone.ifPresentOrElse(phone -&gt; hl7.setMobilePhone(phone.getValue()),</span>
+<span class="fc" id="L145">                () -&gt; hl7.setMobilePhone(&quot;&quot;));</span>
+
+<span class="fc" id="L147">        Optional&lt;ContactPoint&gt; workPhone = getContactPointForSystemAndUse(fhirPatient,</span>
+                ContactPoint.ContactPointSystem.PHONE, ContactPoint.ContactPointUse.WORK);
+<span class="fc" id="L149">        workPhone.ifPresentOrElse(phone -&gt; hl7.setWorkPhone(phone.getValue()),</span>
+<span class="fc" id="L150">                () -&gt; hl7.setWorkPhone(&quot;&quot;));</span>
+
+        //If we don't have any of these, just use whatever they've provided as the home as a fallback
+<span class="pc bpc" id="L153" title="1 of 6 branches missed.">        if (homePhone.isEmpty() &amp;&amp; mobilePhone.isEmpty() &amp;&amp; workPhone.isEmpty()) {</span>
+<span class="fc" id="L154">            Optional&lt;ContactPoint&gt; anyPhone = getContactPointForSystemAndUse(fhirPatient, ContactPoint.ContactPointSystem.PHONE, null);</span>
+<span class="fc" id="L155">            anyPhone.ifPresent(phone -&gt; hl7.setHomePhone(phone.getValue()));</span>
+        }
+<span class="fc" id="L157">    }</span>
+
+    private void processEmails(@NotNull Patient fhirPatient, @NotNull HL7Patient hl7) {
+<span class="fc" id="L160">        Optional&lt;String&gt; homeEmailValue = getContactPointForSystemAndUse(fhirPatient,</span>
+                ContactPoint.ContactPointSystem.EMAIL, ContactPoint.ContactPointUse.HOME)
+<span class="fc" id="L162">                        .map(ContactPoint::getValue);</span>
+
+<span class="fc" id="L164">        homeEmailValue.ifPresent(emailValue -&gt; hl7.setHomeEmail(ImmutableDisclosingEmail.disclosingEmail(emailValue)));</span>
+
+<span class="fc" id="L166">        Optional&lt;String&gt; workEmailValue = getContactPointForSystemAndUse(fhirPatient,</span>
+                ContactPoint.ContactPointSystem.EMAIL, ContactPoint.ContactPointUse.WORK)
+<span class="fc" id="L168">                        .map(ContactPoint::getValue);</span>
+
+<span class="fc" id="L170">        workEmailValue.ifPresent(emailValue -&gt; hl7.setWorkEmail(ImmutableDisclosingEmail.disclosingEmail(emailValue)));</span>
+
+        //If we don't have an email of either of these types, just use whatever they've provided as the home as a fallback
+<span class="fc bfc" id="L173" title="All 4 branches covered.">        if (homeEmailValue.isEmpty() &amp;&amp; workEmailValue.isEmpty()) {</span>
+<span class="fc" id="L174">            Optional&lt;String&gt; anyEmailValue = getContactPointForSystemAndUse(fhirPatient, ContactPoint.ContactPointSystem.EMAIL, null)</span>
+<span class="fc" id="L175">                    .map(ContactPoint::getValue);</span>
+<span class="fc" id="L176">            anyEmailValue.ifPresent(emailValue -&gt; hl7.setHomeEmail(ImmutableDisclosingEmail.disclosingEmail(emailValue)));</span>
+        }
+<span class="fc" id="L178">    }</span>
+
+    private void setDob(@NotNull Patient fhirPatient, @NotNull HL7Patient hl7) {
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">        if (fhirPatient.getBirthDate() != null) {</span>
+<span class="fc" id="L182">            ZoneId zoneId = ZoneId.of(TimeZone.getDefault().getID());</span>
+            //The HAPI Fhir server uses the timezone supplied with the date if there is one, otherwise it defaults
+            //to the system timezone to create a Date object. You can't send timezones with birthdays, so we know 
+            //it will have used the system timezone
+<span class="fc" id="L186">            var formatter = DateTimeFormatter.BASIC_ISO_DATE; //eg 20090714</span>
+<span class="fc" id="L187">            var birthdateAsZonedDateTime = ZonedDateTime.ofInstant(fhirPatient.getBirthDate().toInstant(), zoneId);</span>
+
+<span class="fc" id="L189">            hl7.setDob(new HL7Date(birthdateAsZonedDateTime.toLocalDate().format(formatter), birthdateAsZonedDateTime));</span>
+<span class="fc" id="L190">        } else {</span>
+<span class="nc" id="L191">            throw new ApiCallMalformedException(&quot;Birth date cannot be null&quot;);</span>
+        }
+<span class="fc" id="L193">    }</span>
+
+    @NotNull
+    private Optional&lt;ContactPoint&gt; getContactPointForSystemAndUse(@NotNull Patient fhirPatient, @NotNull ContactPoint.ContactPointSystem system,
+            @Nullable ContactPoint.ContactPointUse use) {
+<span class="fc" id="L198">        return fhirPatient.getTelecom()</span>
+<span class="fc" id="L199">                .stream()</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">                .filter(telecom -&gt; telecom.getSystem() == system</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">                        &amp;&amp; telecom.getUse() == use)</span>
+<span class="fc" id="L202">                .filter(telecom -&gt; {</span>
+<span class="fc" id="L203">                    Period period = telecom.getPeriod();</span>
+<span class="pc bpc" id="L204" title="2 of 6 branches missed.">                    return period.getEnd() == null || !period.hasEnd() || period.getEnd().after(Date.from(dateTimeService.now()));</span>
+                })
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">                .filter(telecom -&gt; !StringUtils.isBlank(telecom.getValue()))</span>
+<span class="fc" id="L207">                .findFirst(); //Multiple unended for a given type? Just get the first in the array.</span>
+    }
+
+    private void setDeathIndicators(@NotNull Patient fhirPatient, @NotNull HL7Patient hl7) {
+        //The deceased field can be either a DateTimeType, in which case it has a death timestamp, or BooleanType
+        // If unset, it is null, and neither.
+<span class="fc bfc" id="L213" title="All 2 branches covered.">        if (fhirPatient.hasDeceasedDateTimeType()) {</span>
+<span class="fc" id="L214">            var suppliedTimezone = fhirPatient.getDeceasedDateTimeType().getTimeZone();</span>
+            //If no timezone has been suppplied, use the configured one
+            //HAPI Fhir server tries to convert the date supplied into a java Date object. It uses the time zone supplied,
+            //and if no time zone was supplied then it defaults to the system timezone.
+<span class="fc bfc" id="L218" title="All 2 branches covered.">            ZoneId zoneId = suppliedTimezone != null ? suppliedTimezone.toZoneId() : ZoneId.of(TimeZone.getDefault().getID());</span>
+<span class="fc" id="L219">            var deceasedDate = fhirPatient.getDeceasedDateTimeType().getValue();</span>
+<span class="fc" id="L220">            var deceasedZonedDateTime = ZonedDateTime.ofInstant(deceasedDate.toInstant(), zoneId);</span>
+<span class="fc" id="L221">            DateTimeFormatter hl7ValueFormatter = DateTimeFormatter.ofPattern(&quot;yyyyMMddHHmmssZ&quot;).withZone(zoneId);</span>
+<span class="fc" id="L222">            hl7.setDeathTimestamp(new HL7Date(</span>
+<span class="fc" id="L223">                    deceasedZonedDateTime.format(hl7ValueFormatter),</span>
+                    deceasedZonedDateTime));
+<span class="fc bfc" id="L225" title="All 2 branches covered.">        } else if (fhirPatient.hasDeceasedBooleanType()) {</span>
+<span class="fc" id="L226">            BooleanType deceased = fhirPatient.getDeceasedBooleanType();</span>
+<span class="pc bpc" id="L227" title="3 of 6 branches missed.">            String deathIndicator = deceased != null &amp;&amp; deceased.getValue() != null &amp;&amp; deceased.getValue() ? &quot;Y&quot; : &quot;N&quot;;</span>
+<span class="fc" id="L228">            hl7.setDeathIndicatorYN(deathIndicator);</span>
+        }
+        //The absence of death does not resurrect someone who has previously been marked as dead. Only an affirmative
+        // provision of the death flag in a false state is sufficient to reverse this, consistent with HL7 behaviour.
+<span class="fc" id="L232">    }</span>
+
+    @NotNull
+    private String getAddressLine(@NotNull Address address, int index) {
+<span class="fc" id="L236">        List&lt;StringType&gt; lines = address.getLine();</span>
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">        return lines.size() &gt; index ? lines.get(index).toString() : &quot;&quot;;</span>
+    }
+
+    @NotNull
+    private String getValueOrEmpty(@Nullable String value) {
+<span class="fc bfc" id="L242" title="All 2 branches covered.">        return value != null ? value : &quot;&quot;;</span>
+    }
+
+    @NotNull
+    private String getValueOrThrow(@Nullable String value, @NotNull String valueDescription) {
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">        if (StringUtils.isBlank(value)) {</span>
+<span class="nc" id="L248">            throw new ApiCallMalformedException(valueDescription + &quot; cannot be null or whitespace&quot;);</span>
+        } else {
+<span class="fc" id="L250">            return value;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

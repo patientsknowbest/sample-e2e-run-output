@@ -1,0 +1,349 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>V1SymptomReportService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.v1</a> &gt; <span class="el_source">V1SymptomReportService.java</span></div><h1>V1SymptomReportService.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.api.v1;
+
+import com.pkb.api.aspect.annotation.RequiresScope;
+import com.pkb.api.aspect.annotation.Timed;
+import com.pkb.api.error.ApiAuthError;
+import com.pkb.api.error.ApiValidationError;
+import com.pkb.api.error.RestError;
+import com.pkb.api.util.PKBApiHelper;
+import com.pkb.api.util.PKBCommonApiParams;
+import com.pkb.api.util.SymptomApiHelper;
+import com.pkb.api.util.v2.RestUtil;
+import com.pkb.api.v1.model.ApiReadResponse;
+import com.pkb.api.v1.model.ApiSymptom;
+import com.pkb.api.v1.model.ApiSymptomReport;
+import com.pkb.api.v1.model.ApiTeamSymptoms;
+import com.pkb.api.v1.model.ApiWriteResponse;
+import com.pkb.api.v1.model.ApiWriteResponse.OperationEnum;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.symptom.entity.Symptom;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.DateUtil;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
+import io.swagger.annotations.ApiResponse;
+import io.swagger.annotations.ApiResponses;
+import io.swagger.annotations.Authorization;
+import io.swagger.annotations.AuthorizationScope;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.ws.rs.Consumes;
+import javax.ws.rs.GET;
+import javax.ws.rs.HeaderParam;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
+import javax.ws.rs.Produces;
+import javax.ws.rs.QueryParam;
+import javax.ws.rs.core.Context;
+import javax.ws.rs.core.MediaType;
+import javax.xml.bind.DatatypeConverter;
+import java.sql.Date;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+
+import static com.pkb.entities.enums.api.ApiClientScope.CLINICIAN;
+import static com.pkb.entities.enums.api.ApiClientScope.PATIENT;
+import static com.pkb.entities.enums.api.ApiClientScope.PUBLIC;
+
+/**
+ * Service to upload patient symptom status reports
+ *
+ * @author robwhelan
+ */
+@Path(&quot;/v1/symptoms&quot;)
+@Consumes(MediaType.APPLICATION_JSON)
+@Produces(MediaType.APPLICATION_JSON)
+@Component
+@Api(tags = {&quot;Symptoms&quot;}, value = &quot;Add/remove/update or find symptoms&quot;)
+<span class="fc" id="L75">public class V1SymptomReportService {</span>
+
+<span class="fc" id="L77">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private PatientConsentManager patientConsentManager;
+    private SymptomApiHelper symptomApiHelper;
+    private RestUtil restUtil;
+    private DateUtil dateUtil;
+
+    @Context
+    private HttpServletRequest httpRequest;
+
+    @Autowired
+    public void setSymptomApiHelper(SymptomApiHelper symptomApiHelper) {
+<span class="fc" id="L89">        this.symptomApiHelper = symptomApiHelper;</span>
+<span class="fc" id="L90">    }</span>
+
+    @Autowired
+    private void setRestUtil(RestUtil restUtil) {
+<span class="fc" id="L94">        this.restUtil = restUtil;</span>
+<span class="fc" id="L95">    }</span>
+
+    @Autowired
+    public void setPatientConsentManager(PatientConsentManager patientConsentManager) {
+<span class="fc" id="L99">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L100">    }</span>
+
+    @Autowired
+    public void setDateUtil(DateUtil dateUtil) {
+<span class="fc" id="L104">        this.dateUtil = dateUtil;</span>
+<span class="fc" id="L105">    }</span>
+
+    /**
+     * Retrieves patient symptom reports by specified by patientid, a list of
+     * symptom apiRefs, and optionally a from date. Note, the apiRef for each
+     * symptom can be discovered by calling /all.
+     * &lt;p/&gt;
+     * &lt;br/&gt;
+     * &lt;a href=&quot;http://dev.patientsknowbest.com/home/rest-api/scopes&quot;&gt;&lt;b&gt;Scope&lt;/b&gt;&lt;/a&gt;: PATIENT, CLINICIAN
+     *
+     * @param patientId
+     * @param afterDateString
+     * @param apiRefs
+     * @param authToken       Your bearer token, in the form: Bearer myBearerToken
+     */
+    @GET
+    @Path(&quot;/reports/forPatient/bySymptoms&quot;)
+    @Timed(hideParams = &quot;patientId&quot;)
+    @RequiresScope(scopes = {PATIENT, CLINICIAN})
+    @ApiOperation(value = &quot;Scope: PATIENT, CLINICIAN&quot;)
+    public ApiReadResponse&lt;ApiSymptomReport&gt; getSymptomReportsForPatientByApiRef(
+            @QueryParam(&quot;patientid&quot;) long patientId,
+            @QueryParam(&quot;after&quot;) String afterDateString,
+            @QueryParam(&quot;apiRefs&quot;) List&lt;String&gt; apiRefs) {
+
+        try {
+<span class="nc" id="L131">            PKBCommonApiParams params = restUtil.getCommonParams(patientId, true);</span>
+<span class="nc" id="L132">            PKBPerson loggedInUser = params.getPerson();</span>
+
+<span class="nc bnc" id="L134" title="All 4 branches missed.">            if ((apiRefs == null) || (apiRefs.isEmpty())) {</span>
+<span class="nc" id="L135">                throw new ApiValidationError(&quot;At least one apiRef must be supplied&quot;);</span>
+            }
+
+<span class="nc" id="L138">            List&lt;Long&gt; symptomIds = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">            for (String apiRef : apiRefs) {</span>
+<span class="nc" id="L140">                Symptom symptom = Symptom.getByApiRef(apiRef);</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">                if (symptom == null) {</span>
+<span class="nc" id="L142">                    throw new ApiValidationError(&quot;Unrecognized apiRef: &quot; + apiRef);</span>
+                }
+<span class="nc" id="L144">                symptomIds.add(symptom.getId());</span>
+<span class="nc" id="L145">            }</span>
+
+<span class="nc" id="L147">            Instant afterDate = null;</span>
+<span class="nc bnc" id="L148" title="All 4 branches missed.">            if ((afterDateString != null) &amp;&amp; !afterDateString.isEmpty()) {</span>
+                try {
+<span class="nc" id="L150">                    afterDate = DatatypeConverter.parseDateTime(afterDateString).toInstant();</span>
+<span class="nc" id="L151">                } catch (IllegalArgumentException ignored) {</span>
+<span class="nc" id="L152">                    throw new ApiValidationError(&quot;Couldn't read timestamp. It must be formatted in ISO format&quot;);</span>
+<span class="nc" id="L153">                }</span>
+            }
+
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (!patientConsentManager.hasAccessToUser(params.getRequestContext(), patientId)) {</span>
+<span class="nc" id="L157">                LOGGER.error(&quot;current user {} does not have access to patient {}&quot;, loggedInUser.getId(), patientId);</span>
+<span class="nc" id="L158">                throw new ApiAuthError(&quot;current user &quot; + loggedInUser.getId() + &quot; does not have access to patient &quot; + patientId);</span>
+            }
+
+<span class="nc" id="L161">            return PKBApiHelper.buildReadResponse(symptomApiHelper.getSymptomReports(params.getRequestContext(), symptomIds, patientId, afterDate));</span>
+
+<span class="nc" id="L163">        } catch (Exception e) {</span>
+<span class="nc" id="L164">            throw PKBApiHelper.wrapError(&quot;error getting symptom reports by refs for patient &quot; + patientId, e);</span>
+        }
+    }
+
+    /**
+     * Get a list of symptom reports after the given timestamp
+     * &lt;p/&gt;
+     * &lt;br/&gt;
+     * &lt;a href=&quot;http://dev.patientsknowbest.com/home/rest-api/scopes&quot;&gt;&lt;b&gt;Scope&lt;/b&gt;&lt;/a&gt;: PATIENT, CLINICIAN
+     *
+     * @param afterDateString
+     * @param limit
+     * @param authToken       Your bearer token, in the form: Bearer myBearerToken
+     * @return List of the matching reports.
+     */
+    @GET
+    @Path(&quot;/reports/after/{timestamp}&quot;)
+    @Timed(hideParams = &quot;timestamp&quot;)
+    @RequiresScope(scopes = {PATIENT, CLINICIAN})
+    @ApiOperation(value = &quot;Scope: PATIENT, CLINICIAN&quot;)
+    public ApiReadResponse&lt;ApiSymptomReport&gt; getSymptomReportsAfter(
+            @PathParam(&quot;timestamp&quot;) String timestamp,
+            @QueryParam(&quot;limit&quot;) int limit) {
+<span class="fc" id="L187">        PKBCommonApiParams params = restUtil.getCommonParams();</span>
+<span class="fc" id="L188">        PKBPerson loggedInUser = params.getPerson();</span>
+<span class="fc" id="L189">        return getSymptomReports(params.getRequestContext(),</span>
+<span class="fc" id="L190">                loggedInUser.getId(), timestamp, null, limit);</span>
+    }
+
+    @SuppressWarnings(&quot;ThrowInsideCatchBlockWhichIgnoresCaughtException&quot;)
+    private ApiReadResponse&lt;ApiSymptomReport&gt; getSymptomReports(@NotNull LoggedInEHRRequestContext requestContext, long userId,
+                                                                String afterDateString,
+                                                                String beforeDateString, int limit) {
+
+<span class="fc" id="L198">        Instant beforeDate = null;</span>
+<span class="fc" id="L199">        Instant afterDate = null;</span>
+
+        try {
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">            if (limit &lt; 0) {</span>
+<span class="nc" id="L203">                throw new ApiValidationError(&quot;Can't have negative limit&quot;);</span>
+            }
+
+<span class="pc bpc" id="L206" title="3 of 4 branches missed.">            if ((beforeDateString != null) &amp;&amp; !beforeDateString.isEmpty()) {</span>
+<span class="nc" id="L207">                beforeDate = DatatypeConverter.parseDateTime(beforeDateString).toInstant();</span>
+            }
+<span class="pc bpc" id="L209" title="2 of 4 branches missed.">            if ((afterDateString != null) &amp;&amp; !afterDateString.isEmpty()) {</span>
+<span class="fc" id="L210">                afterDate = DatatypeConverter.parseDateTime(afterDateString).toInstant();</span>
+            }
+
+<span class="fc" id="L213">            return PKBApiHelper.buildReadResponse(symptomApiHelper.getSymptomReports(requestContext, userId, afterDate, beforeDate, limit));</span>
+
+<span class="nc" id="L215">        } catch (IllegalArgumentException ignored) {</span>
+<span class="nc" id="L216">            throw PKBApiHelper.wrapError(&quot;validation&quot;,</span>
+                    new ApiValidationError(&quot;Couldn't read timestamp. It must be formatted in ISO format&quot;));
+<span class="nc" id="L218">        } catch (Exception e) {</span>
+<span class="nc" id="L219">            throw PKBApiHelper.wrapError(&quot;error getting symptom reports&quot;, e);</span>
+        }
+
+    }
+
+    /**
+     * Create a symptom report.
+     * &lt;p/&gt;
+     * &lt;br/&gt;
+     * &lt;a href=&quot;http://dev.patientsknowbest.com/home/rest-api/scopes&quot;&gt;&lt;b&gt;Scope&lt;/b&gt;&lt;/a&gt;: PATIENT
+     *
+     * @param symptomReport The symptom report to create
+     * @param authToken     Your bearer token, in the form: Bearer myBearerToken
+     */
+    @POST
+    @Path(&quot;/reports/&quot;)
+    @Timed
+    @RequiresScope(scopes = PATIENT)
+    @ApiOperation(value = &quot;Scope: PATIENT&quot;, notes = &quot;Reports new symptom for referred patient according to parameters.&quot;)
+    @Authorization(value = &quot;patient_oauth&quot;, scopes = {
+            @AuthorizationScope(scope = &quot;PATIENT&quot;, description = &quot;Allows patient to report symptom&quot;)})
+    @ApiResponses(value = {
+            @ApiResponse(code = 200, response = String.class, message = &quot;Symptom reported successfully.&quot;),
+            @ApiResponse(code = 400, response = RestError.class, message = &quot;Invalid request!&quot;)
+    })
+    public ApiWriteResponse createSymptomReport(
+            ApiSymptomReport symptomReport) {
+<span class="fc" id="L246">        PKBCommonApiParams params = restUtil.getCommonParams();</span>
+<span class="fc" id="L247">        PKBPerson loggedInUser = params.getPerson();</span>
+<span class="fc" id="L248">        Long id = createSymptomReportForUser(params.getRequestContext(),</span>
+<span class="fc" id="L249">                symptomReport, loggedInUser, loggedInUser.getId());</span>
+
+<span class="fc" id="L251">        ApiWriteResponse response = new ApiWriteResponse();</span>
+<span class="fc" id="L252">        response.setOperationPerformed(OperationEnum.CREATED);</span>
+<span class="fc" id="L253">        response.setId(&quot;&quot; + id);</span>
+<span class="fc" id="L254">        return response;</span>
+    }
+
+    private Long createSymptomReportForUser(@NotNull LoggedInEHRRequestContext requestContext, ApiSymptomReport symptomReport,
+                                            PKBPerson loggedInUser,
+                                            long userId) {
+
+        try {
+
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">            if (!patientConsentManager.hasAccessToUser(requestContext, userId)) {</span>
+<span class="nc" id="L264">                throw new ApiAuthError(&quot;current user &quot; + loggedInUser.getId() + &quot; does not have access to patient &quot; + userId);</span>
+            }
+
+            // gather info, validate
+<span class="pc bpc" id="L268" title="1 of 4 branches missed.">            if (symptomReport.getSymptomApiRef() == null || symptomReport.getSymptomApiRef().isEmpty()) {</span>
+<span class="fc" id="L269">                throw new ApiValidationError(&quot;Missing symptomApiRef. Please provide a valid symptomApiRef.&quot;);</span>
+            }
+<span class="fc" id="L271">            Symptom symptom = Symptom.getByApiRef(symptomReport.getSymptomApiRef());</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">            if (symptom == null) {</span>
+<span class="fc" id="L273">                throw new ApiValidationError(&quot;Unrecognized symptomApiRef: &quot; + symptomReport.getSymptomApiRef());</span>
+            }
+
+<span class="pc bpc" id="L276" title="1 of 4 branches missed.">            if (symptomReport.getReportDateISO() == null || StringUtils.isBlank(symptomReport.getReportDateISO())) {</span>
+<span class="fc" id="L277">                throw new ApiValidationError(&quot;Missing reportDateISO. Please provide a valid reportDateISO.&quot;);</span>
+            }
+            try {
+<span class="fc" id="L280">                symptomReport.setReportDate(dateUtil.parseTimestampIso8601(symptomReport.getReportDateISO()).map(Date::from).orElse(null));</span>
+<span class="fc" id="L281">            } catch (Exception ignored) {</span>
+<span class="fc" id="L282">                throw new ApiValidationError(&quot;Couldn't parse reportDateISO.  Example: 2012-01-10T01:33:51.055+01:00&quot;);</span>
+<span class="fc" id="L283">            }</span>
+
+<span class="fc bfc" id="L285" title="All 2 branches covered.">            if (symptomReport.getSeverity0to3() == null) {</span>
+<span class="fc" id="L286">                throw new ApiValidationError(&quot;Missing severity. Please provide severity between 0-3.&quot;);</span>
+            }
+<span class="fc bfc" id="L288" title="All 4 branches covered.">            if (symptomReport.getSeverity0to3() &lt; 0 || symptomReport.getSeverity0to3() &gt; 3) {</span>
+<span class="fc" id="L289">                throw new ApiValidationError(String.format(&quot;Invalid severity %s. Please provide severity between 0-3.&quot;, symptomReport.getSeverity0to3()));</span>
+            }
+<span class="fc" id="L291">            return symptomApiHelper.createSymptomReport(requestContext, symptomReport, userId);</span>
+
+<span class="fc" id="L293">        } catch (Exception e) {</span>
+<span class="fc" id="L294">            throw PKBApiHelper.wrapError(&quot;failed saving new symptom report&quot;, e);</span>
+        }
+
+    }
+
+    /**
+     * Return the symptoms that are monitored for each team the patient belongs to
+     * &lt;p/&gt;
+     * &lt;br/&gt;
+     * &lt;a href=&quot;http://dev.patientsknowbest.com/home/rest-api/scopes&quot;&gt;&lt;b&gt;Scope&lt;/b&gt;&lt;/a&gt;: PATIENT
+     *
+     * @param authToken Your bearer token, in the form: Bearer myBearerToken
+     * @return
+     */
+    @GET
+    @Path(&quot;/monitored&quot;)
+    @Timed
+    @RequiresScope(scopes = PATIENT)
+    @ApiOperation(value = &quot;Scope: PATIENT&quot;)
+    public ApiReadResponse&lt;ApiTeamSymptoms&gt; getMonitoredSymptomsByTeam() {
+        try {
+<span class="nc" id="L315">            PKBCommonApiParams params = restUtil.getCommonParams();</span>
+<span class="nc" id="L316">            PKBPerson loggedInUser = params.getPerson();</span>
+
+<span class="nc" id="L318">            return PKBApiHelper.buildReadResponse(symptomApiHelper.getMonitoredSymptomsByTeam(params.getRequestContext(),</span>
+<span class="nc" id="L319">                    loggedInUser.getId()));</span>
+<span class="nc" id="L320">        } catch (Exception e) {</span>
+<span class="nc" id="L321">            throw PKBApiHelper.wrapError(&quot;failed saving new symptom report&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Return the symptoms that are monitored for each team the patient belongs to
+     * &lt;p/&gt;
+     * &lt;br/&gt;
+     * &lt;a href=&quot;http://dev.patientsknowbest.com/home/rest-api/scopes&quot;&gt;&lt;b&gt;Scope&lt;/b&gt;&lt;/a&gt;: PUBLIC
+     *
+     * @param authToken Your bearer token, in the form: Bearer myBearerToken
+     * @return
+     */
+    @GET
+    @Path(&quot;/all&quot;)
+    @Timed
+    @RequiresScope(scopes = PUBLIC)
+    @ApiOperation(value = &quot;Scope: PUBLIC&quot;)
+    public ApiReadResponse&lt;ApiSymptom&gt; getAllSymptoms(
+            @HeaderParam(value = &quot;Authorization&quot;) String authToken) {
+
+        try {
+<span class="nc" id="L343">            return PKBApiHelper.buildReadResponse(symptomApiHelper.getAllSymptoms());</span>
+<span class="nc" id="L344">        } catch (Exception e) {</span>
+<span class="nc" id="L345">            throw PKBApiHelper.wrapError(&quot;Error getting all symptoms&quot;, e);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

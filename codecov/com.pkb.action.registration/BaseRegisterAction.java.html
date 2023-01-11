@@ -1,0 +1,618 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BaseRegisterAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.registration</a> &gt; <span class="el_source">BaseRegisterAction.java</span></div><h1>BaseRegisterAction.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: BaseRegisterAction.java May 2, 2013 10:38:10 PM pravinam$
+//
+//---------------------------------------------------------------------------
+package com.pkb.action.registration;
+
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.ImmutableLoggedInUserEHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.bean.IUserWebBean;
+import com.pkb.common.base.Error;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.ImmutableRegistrationEventNew;
+import com.pkb.domain.RegistrationEventService;
+import com.pkb.domain.duplicate.person.PersonService;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.entities.enums.Gender;
+import com.pkb.entities.enums.RegistrationMethod;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.PKBException;
+import com.pkb.exception.SetContextNotAuthorisedException;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.model.PKBSecurityQuestion;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.invitation.impl.InvitationManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PKBPersonProperty;
+import com.pkb.util.FormValidationErrors;
+import com.pkb.util.FormValidator;
+import com.pkb.util.PKBConstants;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.struts2.interceptor.I18nInterceptor;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.inject.Inject;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.entities.enums.InvitationStatus.EXPIRED;
+import static com.pkb.entities.enums.InvitationStatus.NEW;
+import static com.pkb.entities.enums.PropertyName.EMAIL_NEWS_LETTER;
+import static com.pkb.util.Validators.maxLength;
+import static com.pkb.util.Validators.minLength;
+import static com.pkb.util.Validators.phoneNumberMandatory;
+import static com.pkb.util.Validators.phoneNumberOptional;
+import static com.pkb.util.Validators.required;
+import static java.util.Arrays.asList;
+
+<span class="fc" id="L66">public class BaseRegisterAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+
+    protected static final String PASSWORD_PENDING = &quot;passwordPending&quot;;
+
+    protected List&lt;PKBSecurityQuestion&gt; securityQuestions;
+
+    protected String confirmPassword;
+
+    protected TeamUserManager teamUserManager;
+
+    protected InvitationManager invitationManager;
+
+    protected TeamManager teamManager;
+
+    protected IUserWebBean userWebBean;
+
+    protected PKBEmailMessageManager pkbEmailMessageManager;
+
+    protected String securityQuestion;
+
+    protected String answer;
+
+    protected String icode;
+
+    protected Long uid;
+
+    protected boolean emailNewsLetter;
+
+    protected String j_username;
+
+    protected String j_password;
+
+    protected String msg;
+
+    protected String gender;
+
+    private String day;
+
+    private String month;
+
+    private String year;
+
+    @Inject
+    protected RegistrationEventService registrationEventService;
+
+    @Inject
+    PersonService personService;
+
+    /**
+     * specialty ID for clinician -- comes in from emailed URL
+     */
+    private String sid;
+
+<span class="fc" id="L121">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    /**
+     * adds action error and throws exception in case of failure
+     * if sending email notification to team coord, that will log the failure but NOT break the flow
+     */
+    protected void backupPassword(Long userId, String icode, Optional&lt;UUID&gt; invitationPublicId, Optional&lt;Long&gt; invitationPrivateId) {
+<span class="fc" id="L128">        LOGGER.info(&quot;Attempting to back up password&quot;);</span>
+        try {
+<span class="fc" id="L130">            PKBPerson user = userManager.getPKBPerson(userId, PKBPerson.Lazy.CONTACTS);</span>
+<span class="pc bpc" id="L131" title="1 of 2 branches missed.">            if (user == null) {</span>
+<span class="nc" id="L132">                addActionError(getText(&quot;baseRegisterAction.err.unable_register_user&quot;));</span>
+<span class="nc" id="L133">                throw new PKBException(&quot;user not found by getPKBPerson &quot; + userId);</span>
+            }
+
+            // user found... and icode is valid, and user signing in matches UID
+            // if auth fails, null currentUser value (and actionerror is added).
+
+<span class="fc" id="L139">            PersonAuthInfo currentUser = verifyCredentials(user.getId(), confirmPassword);</span>
+
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">            if (currentUser == null) {</span>
+<span class="nc" id="L142">                addActionError(getText(&quot;baseRegisterAction.err.unable_register_user&quot;));</span>
+<span class="nc" id="L143">                throw new PKBException(&quot;failed to verify credentials for &quot; + userId);</span>
+            }
+
+<span class="fc" id="L146">            LoggedInEHRRequestContext context = ImmutableLoggedInUserEHRRequestContext.builder().from(getEHRRequestContext().afterUserLoggedIn(currentUser)).accessRoute(Route.WEBAPP).build();</span>
+<span class="fc" id="L147">            boolean isTeamCoord = user.isTeamCoordinator();</span>
+            // linked to a team? check if already activated! if so, pass error
+            // message through sign-in?
+<span class="fc" id="L150">            boolean isTeamUser = teamUserManager.isTeamUser(user.getId());</span>
+<span class="fc" id="L151">            Team team = teamManager.getTeamByCode(icode);</span>
+
+            // they already have the account, etc. -- just activate
+<span class="fc" id="L154">            user.setStatus(UserStatus.EMAIL_CONFIRMED, dateTimeService.now());</span>
+            // confirm the primary and the only contact
+<span class="fc" id="L156">            user.getPrimaryContact().setConfirmed(true);</span>
+<span class="fc" id="L157">            userManager.updateUser(context, user);</span>
+
+<span class="fc" id="L159">            userManager.backUpPassword(user.getId(), confirmPassword, securityQuestion, answer);</span>
+
+<span class="fc" id="L161">            doPostConfirmationTasks(user, isTeamCoord, context);</span>
+
+<span class="fc" id="L163">            registrationEventService.create(buildRegistrationEvent(user, invitationPublicId, invitationPrivateId));</span>
+
+<span class="fc" id="L165">            boolean isVerified = teamUserManager.isUserIdentified(userId);</span>
+
+            try {
+                // Send the notification to team coordinator to activate
+                // the newly registered user
+<span class="fc bfc" id="L170" title="All 4 branches covered.">                if (isTeamUser &amp;&amp; !isTeamCoord) {</span>
+<span class="pc bpc" id="L171" title="1 of 4 branches missed.">                    if (!isVerified &amp;&amp; team != null/*not a carer*/) {</span>
+<span class="nc" id="L172">                        teamManager.notifyTeamCoordToActivateUser(user, team);</span>
+                    }
+                }
+<span class="nc" id="L175">            } catch (Exception e) {</span>
+                // Log the error, but DON'T throw -- this isn't an essential step
+<span class="nc" id="L177">                LOGGER.info(&quot;Error while notifying the team coordinator&quot;, e);</span>
+<span class="fc" id="L178">            }</span>
+
+<span class="fc" id="L180">            setJ_username(user.findEmail().map(Email::address).getOrNull());</span>
+<span class="fc" id="L181">            setJ_password(confirmPassword);</span>
+<span class="fc" id="L182">            setMsg(&quot;regComplete&quot;);</span>
+
+<span class="nc" id="L184">        } catch (Exception e) {</span>
+<span class="nc" id="L185">            addActionError(getText(&quot;baseRegisterAction.err.could_not_update_security&quot;));</span>
+<span class="nc" id="L186">            throw new PKBException(&quot;Error while saving backup j_password; returning input&quot;, e);</span>
+        } finally {
+<span class="fc" id="L188">            LOGGER.info(&quot;Exiting back up password step&quot;);</span>
+        }
+
+<span class="fc" id="L191">        LOGGER.info(&quot;Exiting : backupPassword&quot;);</span>
+<span class="fc" id="L192">    }</span>
+
+    protected void populateDTOFromPerson(PKBPersonDTO dto, PKBPerson person, Team team) {
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">        if (StringUtils.isBlank(person.getFirstName())) {</span>
+<span class="nc" id="L196">            return;</span>
+        }
+
+<span class="fc" id="L199">        dto.setTitle(person.getTitle());</span>
+<span class="fc" id="L200">        dto.setFirstName(person.getFirstName());</span>
+<span class="fc" id="L201">        dto.setLastName(person.getLastName());</span>
+<span class="fc" id="L202">        dto.setJobTitle(person.getJobTitle()); // will be just empty for patients</span>
+
+        // locale.  TODO: session apparently can be null!  see https://support.patientsknowbest.com/helpdesk/tickets/2262
+<span class="pc bpc" id="L205" title="2 of 4 branches missed.">        if (StringUtils.isNotBlank(person.getLanguageCode()) &amp;&amp; (session != null)) {</span>
+<span class="fc" id="L206">            session.put(I18nInterceptor.DEFAULT_SESSION_ATTRIBUTE, new Locale(person.getLanguageCode())); // WW_TRANS_I18N_LOCALE</span>
+        }
+
+<span class="fc" id="L209">        dto.setPhone(person.getPhone());</span>
+<span class="fc" id="L210">        dto.setAddress1(person.getAddress1());</span>
+<span class="fc" id="L211">        dto.setAddress2(person.getAddress2());</span>
+<span class="fc" id="L212">        dto.setCity(person.getCity());</span>
+<span class="fc" id="L213">        dto.setState(person.getState());</span>
+<span class="fc" id="L214">        dto.setPostalCode(person.getPostalCode());</span>
+<span class="fc" id="L215">        dto.setCountry(person.getCountry());</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">        if (StringUtils.isBlank(person.getCountry())) {</span>
+<span class="pc bpc" id="L217" title="1 of 4 branches missed.">            if ((team != null) &amp;&amp; StringUtils.isNotBlank(team.getCountry())) {</span>
+<span class="fc" id="L218">                dto.setCountry(team.getCountry());</span>
+            }
+        }
+        // We're not interested in what the timezone is currently set to (probably created as UTC)
+        // Instead, show the team default, since this is the first point of user interaction
+<span class="fc bfc" id="L223" title="All 2 branches covered.">        if (team != null) {</span>
+<span class="fc" id="L224">            dto.setTimeZoneId(team.getTimeZoneId());</span>
+        } else {
+<span class="fc" id="L226">            dto.setTimeZoneId(PKBConstants.DEFAULT_TIMEZONE_ID);</span>
+        }
+
+<span class="fc" id="L229">        dto.setEmailId(person.getEmail());</span>
+<span class="fc" id="L230">    }</span>
+
+    /**
+     * API is used to authenticate the user with respect to the given credentials
+     */
+    PersonAuthInfo verifyCredentials(long id, String password) {
+<span class="fc" id="L236">        PersonAuthInfo authUser = null;</span>
+        try {
+            // note: this is not an error; this method takes id, NOT username
+<span class="fc" id="L239">            authUser = userManager.authenticateUser(id, password);</span>
+
+<span class="fc bfc" id="L241" title="All 2 branches covered.">            if (StringUtils.isNotBlank(icode)) {</span>
+<span class="fc" id="L242">                Org org = teamManager.getOrgByCode(icode).orElse(null);</span>
+<span class="fc" id="L243">                Team team = teamManager.getTeamByCode(icode);</span>
+<span class="pc bpc" id="L244" title="1 of 4 branches missed.">                if ((org == null) &amp;&amp; (team == null)) {</span>
+<span class="nc" id="L245">                    addActionError(getText(&quot;baseRegisterAction.err.sorry_unknown_code&quot;));</span>
+<span class="nc" id="L246">                    authUser = null;</span>
+                }
+            }
+
+<span class="nc" id="L250">        } catch (PKBException e) {</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">            String logPasswordIfTest = (getConfig().isDisplayOfSensitiveErrorInformationEnabled()) ? &quot; (&quot; + password + &quot;)&quot; : &quot;&quot;;</span>
+<span class="nc" id="L252">            LOGGER.error(&quot;Exception while authenticating user {} while verifying credentials : possibly invalid password{}&quot;,</span>
+<span class="nc" id="L253">                    id, logPasswordIfTest, e);</span>
+<span class="nc" id="L254">            authUser = null;</span>
+<span class="fc" id="L255">        }</span>
+
+<span class="fc" id="L257">        return authUser;</span>
+    }
+
+    private void doPostConfirmationTasks(PKBPerson user, boolean isTeamCoord, LoggedInEHRRequestContext context) {
+
+<span class="fc bfc" id="L262" title="All 2 branches covered.">        if (!isTeamCoord) {</span>
+<span class="fc" id="L263">            acceptPendingInvitations(user, context);</span>
+        }
+
+        // save specialty (clinicians only)
+<span class="fc bfc" id="L267" title="All 2 branches covered.">        if (user.isPro()) {</span>
+
+            // sid will be populated if this is from an emailed URL during
+            // clinician registration
+<span class="fc" id="L271">            String specialtyId = StringUtils.trimToEmpty(sid);</span>
+<span class="pc bpc" id="L272" title="3 of 4 branches missed.">            if (StringUtils.isNumeric(specialtyId) &amp;&amp; !StringUtils.isEmpty(specialtyId)) {</span>
+<span class="nc" id="L273">                userManager.saveClinicianSpecialty(user.getId(), Long.parseLong(specialtyId));</span>
+            }
+        }
+
+<span class="fc" id="L277">        userManager.triggerCryptoSync(user.getId());</span>
+
+<span class="fc" id="L279">    }</span>
+
+    private ImmutableRegistrationEventNew buildRegistrationEvent(PKBPerson user, Optional&lt;UUID&gt; invitationPublicId, Optional&lt;Long&gt; invitationPrivateId) {
+<span class="fc" id="L282">        return ImmutableRegistrationEventNew.builder()</span>
+<span class="fc" id="L283">                .registrationMethod(RegistrationMethod.EMAIL_LINK)</span>
+<span class="fc" id="L284">                .registeredOn(dateTimeService.now())</span>
+<span class="fc" id="L285">                .registeredOnConfirmed(true)</span>
+<span class="fc" id="L286">                .personId(user.getId())</span>
+<span class="fc" id="L287">                .invitationPublicId(Option.ofOptional(invitationPublicId))</span>
+<span class="fc" id="L288">                .invitationPrivateId(Option.ofOptional(invitationPrivateId)).build();</span>
+    }
+
+    private void acceptPendingInvitations(PKBPerson currentUser, LoggedInEHRRequestContext context) {
+        // this gets invitations TO and FROM current user -- we only want
+        // invitations TO this user
+<span class="fc" id="L294">        List&lt;PKBInvitation&gt; invitations = invitationManager.getInvitations(currentUser.getId());</span>
+
+<span class="fc bfc" id="L296" title="All 2 branches covered.">        if (invitations.isEmpty()) {</span>
+<span class="fc" id="L297">            LOGGER.info(&quot;No invitations found to be accepted by user: {}&quot;, currentUser.getId());</span>
+        }
+
+<span class="fc bfc" id="L300" title="All 2 branches covered.">        for (PKBInvitation invitation : invitations) {</span>
+            // only process new invitations where this user is target
+<span class="fc bfc" id="L302" title="All 2 branches covered.">            if (invitation.getInvitationStatus() == NEW</span>
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">                    &amp;&amp; currentUser.findEmail().map(email -&gt; email.equals(invitation.getTargetEmail())).getOrElse(false)</span>
+<span class="fc bfc" id="L304" title="All 2 branches covered.">                    &amp;&amp; (!invitation.isAccountKeyRequired() /*Otherwise needs invitationKey from invitation email*/)) {</span>
+
+<span class="fc" id="L306">                PKBPerson author = userManager.getPKBPerson(invitation.getAuthorUserId(), PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L307">                PKBPerson invitee = invitation.getTargetUser();</span>
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">                PKBPerson accountOwner = invitation.getAccountId() == null ? null</span>
+<span class="fc" id="L309">                        : userManager.getAccountOwner(invitation.getAccountId(), PKBPerson.Lazy.CONTACTS);</span>
+
+                // for invitations that fail, notify the user and cancel them
+                try {
+<span class="fc" id="L313">                    userWebBean.acceptInvitationAndNotify(context, invitation.getPublicId(), accountOwner, author, invitee, currentUser);</span>
+<span class="nc" id="L314">                } catch (PKBException ignored) {</span>
+
+<span class="nc bnc" id="L316" title="All 2 branches missed.">                    if (author != null) {</span>
+<span class="nc" id="L317">                        List&lt;Object&gt; args = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L318">                        args.add(author.getFirstName());</span>
+<span class="nc" id="L319">                        args.add(author.getLastName());</span>
+<span class="nc" id="L320">                        args.add(author.getEmail());</span>
+<span class="nc" id="L321">                        addActionMessage(getText(&quot;baseMessageAction.err.invitation_cancelled&quot;, args));</span>
+                    }
+                    // really do expire it, so they can be re-invited
+<span class="nc" id="L324">                    invitationManager.updateInvitationStatus(invitation.getPublicId(), EXPIRED);</span>
+<span class="fc" id="L325">                }</span>
+            }
+<span class="fc" id="L327">        }</span>
+<span class="fc" id="L328">    }</span>
+
+    public void setSecurityQuestion(String securityQuestion) {
+<span class="fc" id="L331">        this.securityQuestion = securityQuestion;</span>
+<span class="fc" id="L332">    }</span>
+
+    public List&lt;PKBSecurityQuestion&gt; getSecurityQuestions() {
+        try {
+<span class="fc" id="L336">            securityQuestions = pkbWebUtil.getSecretQuestions(getLocale());</span>
+<span class="nc" id="L337">        } catch (Exception e) {</span>
+<span class="nc" id="L338">            securityQuestions = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L339">            addFieldError(&quot;securityQuestion&quot;, getText(&quot;baseRegisterAction.err.unable_to_load_question&quot;));</span>
+<span class="nc" id="L340">            LOGGER.error(&quot;unable to load security questions&quot;, e);</span>
+<span class="fc" id="L341">        }</span>
+<span class="fc" id="L342">        return securityQuestions;</span>
+    }
+
+    /*
+     * API is used to set the PKB person property for 'email news letter'
+     * subscription based on the boolean flag
+     */
+    void addUserProperties(PKBPersonDTO user, @Nullable PKBPerson existingPerson) {
+<span class="fc" id="L350">        Optional&lt;Long&gt; newsletterPropertyId = Optional.ofNullable(existingPerson)</span>
+<span class="fc" id="L351">                .map(PKBPerson::getProperties)</span>
+<span class="fc bfc" id="L352" title="All 2 branches covered.">                .flatMap(pSet -&gt; pSet.stream().filter(p -&gt; p.getPropertyName() == EMAIL_NEWS_LETTER).findFirst())</span>
+<span class="fc" id="L353">                .map(PKBPersonProperty::getId);</span>
+
+<span class="fc" id="L355">        PKBPersonProperty property = new PKBPersonProperty();</span>
+<span class="fc" id="L356">        property.setPropertyName(EMAIL_NEWS_LETTER);</span>
+<span class="fc" id="L357">        property.setPropertyValue(&quot;&quot; + isEmailNewsLetter());</span>
+<span class="fc" id="L358">        newsletterPropertyId.ifPresent(property::setId);</span>
+<span class="fc" id="L359">        user.addProperty(property);</span>
+<span class="fc" id="L360">    }</span>
+
+    FormValidationErrors performRegistrationValidationSetDobAndGender(PKBPersonDTO user) {
+<span class="fc" id="L363">        FormValidator.Builder&lt;PKBPersonDTO&gt; builder = FormValidator.builder();</span>
+<span class="fc" id="L364">        builder.addFieldValidators(&quot;user.title&quot;, PKBPersonDTO::getTitle, asList(</span>
+<span class="fc" id="L365">                required(() -&gt; new Error(&quot;user.required.title&quot;, &quot;title is required&quot;)),</span>
+<span class="fc" id="L366">                maxLength(50, maxLength -&gt; new Error(&quot;user.title.err.length&quot;, &quot;title is too long&quot;, maxLength))))</span>
+<span class="fc" id="L367">                .addFieldValidators(&quot;user.firstName&quot;, PKBPersonDTO::getFirstName, asList(</span>
+<span class="fc" id="L368">                        required(() -&gt; new Error(&quot;user.required.firstName&quot;, &quot;first name is required&quot;)),</span>
+<span class="fc" id="L369">                        maxLength(50, maxLength -&gt; new Error(&quot;user.err.firstName&quot;, &quot;first name is too long&quot;, maxLength))))</span>
+<span class="fc" id="L370">                .addFieldValidators(&quot;user.lastName&quot;, PKBPersonDTO::getLastName, asList(</span>
+<span class="fc" id="L371">                        required(() -&gt; new Error(&quot;user.required.lastName&quot;, &quot;last name is required&quot;)),</span>
+<span class="fc" id="L372">                        maxLength(50, maxLength -&gt; new Error(&quot;user.err.lastName&quot;, &quot;last name is too long&quot;, maxLength))))</span>
+<span class="fc" id="L373">                .addFieldValidators(&quot;user.address1&quot;, PKBPersonDTO::getAddress1, asList(</span>
+<span class="fc" id="L374">                        required(() -&gt; new Error(&quot;user.required.address1&quot;, &quot;must have the first address line&quot;)),</span>
+<span class="fc" id="L375">                        minLength(3, minLength -&gt; new Error(&quot;user.err.address.short&quot;, &quot;address line 1 is too short&quot;, minLength)),</span>
+<span class="fc" id="L376">                        maxLength(100, maxLength -&gt; new Error(&quot;user.err.address.long&quot;, &quot;address line 1 is too long&quot;, maxLength))))</span>
+<span class="fc" id="L377">                .addFieldValidator(&quot;user.address2&quot;, PKBPersonDTO::getAddress2,</span>
+<span class="fc" id="L378">                        maxLength(100, maxLength -&gt; new Error(&quot;user.err.address.long&quot;, &quot;address line 2 is too long&quot;, maxLength)))</span>
+<span class="fc" id="L379">                .addFieldValidators(&quot;user.city&quot;, PKBPersonDTO::getCity, asList(</span>
+<span class="fc" id="L380">                        required(() -&gt; new Error(&quot;user.required.city&quot;, &quot;city is required&quot;)),</span>
+<span class="fc" id="L381">                        minLength(2, minLength -&gt; new Error(&quot;user.err.city.short&quot;, &quot;city is too short&quot;, minLength)),</span>
+<span class="fc" id="L382">                        maxLength(50, maxLength -&gt; new Error(&quot;user.err.city.long&quot;, &quot;city is too long&quot;, maxLength))))</span>
+<span class="fc" id="L383">                .addFieldValidators(&quot;user.state&quot;, PKBPersonDTO::getState, asList(</span>
+<span class="fc" id="L384">                        required(() -&gt; new Error(&quot;user.required.state&quot;, &quot;state is required&quot;)),</span>
+<span class="fc" id="L385">                        minLength(2, minLength -&gt; new Error(&quot;user.err.state.short&quot;, &quot;state is too short&quot;, minLength)),</span>
+<span class="fc" id="L386">                        maxLength(50, maxLength -&gt; new Error(&quot;user.err.state.long&quot;, &quot;state is too long&quot;, maxLength))))</span>
+<span class="fc" id="L387">                .addFieldValidators(&quot;user.postalCode&quot;, PKBPersonDTO::getPostalCode, asList(</span>
+<span class="fc" id="L388">                        required(() -&gt; new Error(&quot;user.required.postalCode.required&quot;, &quot;postal code is required&quot;)),</span>
+<span class="fc" id="L389">                        maxLength(10, maxLength -&gt; new Error(&quot;user.required.postalCode.invalid.length&quot;, &quot;postal code is too long&quot;, maxLength))))</span>
+<span class="fc bfc" id="L390" title="All 2 branches covered.">                .addFieldValidator(&quot;user.emailId&quot;, pDTO -&gt; pDTO.getEmailId() == null ? null : pDTO.getEmailId().address(),</span>
+<span class="fc" id="L391">                        required(() -&gt; new Error(&quot;user.required.email&quot;, &quot;email is required&quot;)))</span>
+<span class="fc" id="L392">                .addFieldValidator(&quot;user.skypeId&quot;, PKBPersonDTO::getSkypeId,</span>
+<span class="fc" id="L393">                        maxLength(100, maxLength -&gt; new Error(&quot;user.err.skypeid.length&quot;, &quot;skype id is too long&quot;, maxLength)))</span>
+<span class="fc" id="L394">                .addFieldValidators(&quot;user.country&quot;, PKBPersonDTO::getCountry, asList(</span>
+<span class="pc" id="L395">                        required(() -&gt; new Error(&quot;user.required.country&quot;, &quot;country is required&quot;)),</span>
+<span class="pc" id="L396">                        maxLength(50, maxLength -&gt; new Error(&quot;user.err.country&quot;, &quot;country is too long&quot;, maxLength))));</span>
+
+<span class="fc bfc" id="L398" title="All 2 branches covered.">        if (user.getUserType() == UserType.PATIENT) {</span>
+<span class="fc" id="L399">            builder.addFieldValidators(&quot;user.phone&quot;, PKBPersonDTO::getPhone, asList(</span>
+<span class="fc" id="L400">                    phoneNumberOptional(() -&gt; new Error(&quot;user.error.phone&quot;, &quot;invalid phone&quot;)),</span>
+<span class="fc" id="L401">                    maxLength(40, maxLength -&gt; new Error(&quot;user.err.phone.length&quot;, &quot;phone number is too long&quot;, maxLength))));</span>
+        } else {
+<span class="fc" id="L403">            builder.addFieldValidators(&quot;user.phone&quot;, PKBPersonDTO::getPhone, asList(</span>
+<span class="fc" id="L404">                    required(() -&gt; new Error(&quot;user.required.phone&quot;, &quot;phone is required&quot;)),</span>
+<span class="fc" id="L405">                    phoneNumberMandatory(() -&gt; new Error(&quot;user.error.phone&quot;, &quot;invalid phone&quot;)),</span>
+<span class="fc" id="L406">                    maxLength(40, maxLength -&gt; new Error(&quot;user.err.phone.length&quot;, &quot;phone number is too long&quot;, maxLength))))</span>
+<span class="fc" id="L407">                    .addFieldValidators(&quot;user.jobTitle&quot;, PKBPersonDTO::getJobTitle, asList(</span>
+<span class="fc" id="L408">                            required(() -&gt; new Error(&quot;user.required.jobTitle&quot;, &quot;job title is required&quot;)),</span>
+<span class="fc" id="L409">                            minLength(2, minLength -&gt; new Error(&quot;user.err.jobTitle.short&quot;, &quot;job title is too short&quot;, minLength)),</span>
+<span class="fc" id="L410">                            maxLength(255, maxLength -&gt; new Error(&quot;user.err.jobTitle.long&quot;, &quot;job title is too long&quot;, maxLength))))</span>
+<span class="fc" id="L411">                    .addFieldValidators(&quot;user.organizationName&quot;, PKBPersonDTO::getOrganizationName, asList(</span>
+<span class="pc" id="L412">                            required(() -&gt; new Error(&quot;user.required.orgname&quot;, &quot;org name is required&quot;)),</span>
+<span class="pc" id="L413">                            maxLength(100, maxLength -&gt; new Error(&quot;user.length.orgname&quot;, &quot;org name is too long&quot;, maxLength))))</span>
+<span class="fc" id="L414">                    .addFieldValidators(&quot;user.organizationUnit&quot;, PKBPersonDTO::getOrganizationUnit, asList(</span>
+<span class="fc" id="L415">                            required(() -&gt; new Error(&quot;user.required.orgunit&quot;, &quot;org unit is required&quot;)),</span>
+<span class="fc" id="L416">                            maxLength(100, maxLength -&gt; new Error(&quot;user.length.orgunit&quot;, &quot;org unit is too long&quot;, maxLength))));</span>
+        }
+
+        //Validators for action variables, or those doing slightly more complex checks. All still common to registration.
+<span class="fc" id="L420">        FormValidationErrors errors = builder.build().validate(user)</span>
+<span class="fc" id="L421">                .plus(validateScreenVariableField(getAnswer(), &quot;answer&quot;, &quot;user.err.answer&quot;))</span>
+<span class="fc bfc" id="L422" title="All 2 branches covered.">                .plus(isPasswordMatchComplexityRequirements(user.getPassword()) ? FormValidationErrors.EMPTY</span>
+<span class="fc" id="L423">                        : new FormValidationErrors().addFieldError(&quot;user.password&quot;,</span>
+                        new Error(&quot;password.err.insecure&quot;, &quot;password insufficiently secure&quot;)))
+<span class="fc bfc" id="L425" title="All 2 branches covered.">                .plus(user.getPassword().equals(getConfirmPassword()) ? FormValidationErrors.EMPTY</span>
+<span class="fc" id="L426">                        : new FormValidationErrors().addFieldError(&quot;user.password&quot;,</span>
+                        new Error(&quot;confirmPassword.err&quot;, &quot;passwords do not match&quot;)))
+<span class="pc bpc" id="L428" title="1 of 4 branches missed.">                .plus(getSecurityQuestion() != null &amp;&amp; getSecurityQuestion().trim().equals(&quot;-1&quot;) ? new FormValidationErrors().addFieldError(&quot;securityQuestion&quot;,</span>
+                        new Error(&quot;user.required.secquestion&quot;, &quot;security question not chosen&quot;))
+<span class="fc" id="L430">                        : FormValidationErrors.EMPTY);</span>
+
+<span class="fc" id="L432">        return errors.plus(processDateOfBirth(user)).plus(processGender(user));</span>
+    }
+
+    private FormValidationErrors validateScreenVariableField(String value, String fieldName, String emptyFieldValidationError) {
+<span class="fc bfc" id="L436" title="All 4 branches covered.">        if (value == null || value.trim().isEmpty()) {</span>
+<span class="fc" id="L437">            return new FormValidationErrors().addFieldError(fieldName, new Error(emptyFieldValidationError, &quot;empty &quot; + fieldName));</span>
+        }
+<span class="fc" id="L439">        return FormValidationErrors.EMPTY;</span>
+    }
+
+    FormValidationErrors processDateOfBirth(PKBPersonDTO user) {
+        try {
+<span class="fc" id="L444">            LocalDate dateOfBirth = parseDOB(getYear(), getMonth(), getDay());</span>
+<span class="fc" id="L445">            LocalDate tomorrow = dateTimeService.tomorrow();</span>
+
+<span class="fc bfc" id="L447" title="All 2 branches covered.">            if (dateOfBirth.isAfter(tomorrow)) {</span>
+                // we are considering date &lt;= tomorrow as valid
+<span class="fc" id="L449">                return new FormValidationErrors().addFieldError(&quot;user.dob&quot;, new Error(&quot;user.err.dob&quot;, &quot;date after tomorrow&quot;));</span>
+            }
+<span class="fc" id="L451">            user.setDateOfBirthString(dateOfBirth.toString());</span>
+<span class="fc" id="L452">            return FormValidationErrors.EMPTY;</span>
+<span class="fc" id="L453">        } catch (Exception ignored) {</span>
+<span class="fc" id="L454">            return new FormValidationErrors().addFieldError(&quot;user.dob&quot;, new Error(&quot;user.err.dob&quot;, &quot;invalid date&quot;));</span>
+        }
+    }
+
+    protected void throwIfAnyUserLoggedIn() {
+<span class="pc bpc" id="L459" title="1 of 2 branches missed.">        if (loggedInUserUtil.isUserLoggedIn()) {</span>
+<span class="nc" id="L460">            throw new SetContextNotAuthorisedException(&quot;There is a logged in user: &quot; + loggedInUserUtil.getLoggedInUserId() + &quot;!&quot;);</span>
+        }
+<span class="fc" id="L462">    }</span>
+
+    private FormValidationErrors processGender(PKBPersonDTO user) {
+<span class="fc" id="L465">        FormValidationErrors errors = validateScreenVariableField(getGender(), &quot;gender&quot;, &quot;user.gender.required&quot;);</span>
+<span class="fc bfc" id="L466" title="All 2 branches covered.">        if (errors.isEmpty()) {</span>
+<span class="fc" id="L467">            Gender genderConst = Gender.valueOf(getGender().toUpperCase());</span>
+<span class="fc" id="L468">            user.setGender(genderConst.getId());</span>
+        }
+<span class="fc" id="L470">        return errors;</span>
+    }
+
+    public String getConfirmPassword() {
+<span class="fc" id="L474">        return confirmPassword;</span>
+    }
+
+    public void setConfirmPassword(String confirmPassword) {
+<span class="fc" id="L478">        this.confirmPassword = confirmPassword;</span>
+<span class="fc" id="L479">    }</span>
+
+    public TeamUserManager getTeamUserManager() {
+<span class="fc" id="L482">        return teamUserManager;</span>
+    }
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L486">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L487">    }</span>
+
+    public String getAnswer() {
+<span class="fc" id="L490">        return answer;</span>
+    }
+
+    public void setAnswer(String answer) {
+<span class="fc" id="L494">        this.answer = answer;</span>
+<span class="fc" id="L495">    }</span>
+
+    public String getIcode() {
+<span class="fc" id="L498">        return icode;</span>
+    }
+
+    public void setIcode(String icode) {
+<span class="fc" id="L502">        this.icode = icode;</span>
+<span class="fc" id="L503">    }</span>
+
+    public Long getUid() {
+<span class="fc" id="L506">        return uid;</span>
+    }
+
+    public void setUid(Long uid) {
+<span class="fc" id="L510">        this.uid = uid;</span>
+<span class="fc" id="L511">    }</span>
+
+    public String getSid() {
+<span class="fc" id="L514">        return sid;</span>
+    }
+
+    public void setSid(String sid) {
+<span class="fc" id="L518">        this.sid = sid;</span>
+<span class="fc" id="L519">    }</span>
+
+    public String getSecurityQuestion() {
+<span class="fc" id="L522">        return securityQuestion;</span>
+    }
+
+    public void setSecurityQuestions(List&lt;PKBSecurityQuestion&gt; securityQuestions) {
+<span class="fc" id="L526">        this.securityQuestions = securityQuestions;</span>
+<span class="fc" id="L527">    }</span>
+
+    public void setInvitationManager(InvitationManager invitationManager) {
+<span class="fc" id="L530">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L531">    }</span>
+
+    public void setTeamManager(TeamManager teamManager) {
+<span class="fc" id="L534">        this.teamManager = teamManager;</span>
+<span class="fc" id="L535">    }</span>
+
+    public IUserWebBean getUserWebBean() {
+<span class="fc" id="L538">        return userWebBean;</span>
+    }
+
+    public void setUserWebBean(IUserWebBean userWebBean) {
+<span class="fc" id="L542">        this.userWebBean = userWebBean;</span>
+<span class="fc" id="L543">    }</span>
+
+    public PKBEmailMessageManager getPkbEmailMessageManager() {
+<span class="fc" id="L546">        return pkbEmailMessageManager;</span>
+    }
+
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L550">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L551">    }</span>
+
+    public boolean isEmailNewsLetter() {
+<span class="fc" id="L554">        return emailNewsLetter;</span>
+    }
+
+    public void setEmailNewsLetter(boolean emailNewsLetter) {
+<span class="fc" id="L558">        this.emailNewsLetter = emailNewsLetter;</span>
+<span class="fc" id="L559">    }</span>
+
+    public String getJ_username() {
+<span class="fc" id="L562">        return j_username;</span>
+    }
+
+    public void setJ_username(String j_username) {
+<span class="fc" id="L566">        this.j_username = j_username;</span>
+<span class="fc" id="L567">    }</span>
+
+    public String getJ_password() {
+<span class="fc" id="L570">        return j_password;</span>
+    }
+
+    public void setJ_password(String j_password) {
+<span class="fc" id="L574">        this.j_password = j_password;</span>
+<span class="fc" id="L575">    }</span>
+
+    public String getMsg() {
+<span class="fc" id="L578">        return msg;</span>
+    }
+
+    public void setMsg(String msg) {
+<span class="fc" id="L582">        this.msg = msg;</span>
+<span class="fc" id="L583">    }</span>
+
+    public String getGender() {
+<span class="fc" id="L586">        return gender;</span>
+    }
+
+    public void setGender(String gender) {
+<span class="fc" id="L590">        this.gender = gender;</span>
+<span class="fc" id="L591">    }</span>
+
+    public String getDay() {
+<span class="fc" id="L594">        return day;</span>
+    }
+
+    public void setDay(String day) {
+<span class="fc" id="L598">        this.day = day;</span>
+<span class="fc" id="L599">    }</span>
+
+    public String getMonth() {
+<span class="fc" id="L602">        return month;</span>
+    }
+
+    public void setMonth(String month) {
+<span class="fc" id="L606">        this.month = month;</span>
+<span class="fc" id="L607">    }</span>
+
+    public String getYear() {
+<span class="fc" id="L610">        return year;</span>
+    }
+
+    public void setYear(String year) {
+<span class="fc" id="L614">        this.year = year;</span>
+<span class="fc" id="L615">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

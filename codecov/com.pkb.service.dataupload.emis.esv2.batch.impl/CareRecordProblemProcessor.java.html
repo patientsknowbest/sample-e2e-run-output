@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CareRecordProblemProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.batch.impl</a> &gt; <span class="el_source">CareRecordProblemProcessor.java</span></div><h1>CareRecordProblemProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.batch.impl;
+
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Table;
+import com.pkb.app.dto.DataPointSaveResult;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.dataupload.emis.esv2.EmisEsProcessedRow;
+import com.pkb.emis.es.entity.EmisEsObservationDelta;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.externalid.service.ExternalIdService;
+import com.pkb.institute.OrgMergeHelper;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.service.dataupload.emis.esv2.EmisEsManager;
+import com.pkb.service.dataupload.emis.esv2.EmisEsProcessedRowService;
+import com.pkb.service.dataupload.emis.esv2.EmisEsStatusService;
+import com.pkb.service.dataupload.emis.esv2.EmisOrgHelper;
+import com.pkb.service.dataupload.emis.esv2.EmisPersonStatHelper;
+import com.pkb.service.dataupload.emis.esv2.batch.EmisProcessorAborter;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.observation.ObservationDeltaHandler;
+import com.pkb.service.dataupload.emis.esv2.model.AdminPatient;
+import com.pkb.service.dataupload.emis.esv2.model.CareRecordProblem;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileType;
+import com.pkb.service.dataupload.emis.esv2.model.PKBPersonInfo;
+import com.pkb.service.dataupload.emis.esv2.sorting.ResultWithId;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import com.pkb.service.user.impl.UserManager;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.collection.Iterator;
+import io.vavr.collection.Map;
+import io.vavr.collection.Seq;
+import io.vavr.collection.Set;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static com.pkb.service.dataupload.emis.esv2.batch.FileProcessor.ProcessorType.NORMAL;
+import static com.pkb.service.dataupload.emis.esv2.batch.impl.ProcessingError.Severity.FATAL;
+
+public class CareRecordProblemProcessor extends BatchingBatchDataProcessor&lt;CareRecordProblem&gt; implements BatchProcessorHelperMixin&lt;CareRecordProblem&gt; {
+
+<span class="fc" id="L51">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L53">    private static final java.util.Map&lt;MenuDataType, EmisEsObservationDelta.DeltaType&gt; menuDataTypeToDeltaTypeMap = Maps.immutableEnumMap(</span>
+<span class="fc" id="L54">            ImmutableMap.of(</span>
+                    MenuDataType.allergy, EmisEsObservationDelta.DeltaType.ALLERGY,
+                    MenuDataType.diagnosis, EmisEsObservationDelta.DeltaType.DIAGNOSIS,
+                    MenuDataType.measurement, EmisEsObservationDelta.DeltaType.MEASUREMENT,
+                    MenuDataType.loincTestResult, EmisEsObservationDelta.DeltaType.TEST));
+
+<span class="fc" id="L60">    private static final EmisFileType TYPE = EmisFileType.CARE_RECORD_PROBLEM;</span>
+
+    private final CareRecordProblemCache problemCache;
+
+    private final ObservationDeltaHandler observationDeltaHandler;
+
+    private final UserManager userManager;
+
+    private final EmisPersonStatHelper emisPersonStatHelper;
+
+    private final AccountIdErrorHelper accountIdErrorHelper;
+
+    public CareRecordProblemProcessor(EmisEsProcessedRowService emisEsProcessedRowService, EmisEsManager emisEsManager, EmisProcessorAborter emisProcessAborter, Kms kmsClient, PhrConfig config, DateTimeService dateTimeService, ExternalIdService externalIdService, INotificationManager notificationManager, CareRecordProblemCache problemCache, ObservationDeltaHandler observationDeltaHandler, UserManager userManager, EmisEsStatusService emisEsStatusService, EmisOrgHelper emisOrgHelper, EmisPersonStatHelper emisPersonStatHelper, AccountIdErrorHelper accountIdErrorHelper) {
+<span class="fc" id="L73">        super(emisEsProcessedRowService, emisEsManager, emisProcessAborter, kmsClient, config, dateTimeService, externalIdService, notificationManager, emisEsStatusService, emisOrgHelper);</span>
+<span class="fc" id="L74">        this.problemCache = problemCache;</span>
+<span class="fc" id="L75">        this.observationDeltaHandler = observationDeltaHandler;</span>
+<span class="fc" id="L76">        this.userManager = userManager;</span>
+<span class="fc" id="L77">        this.emisPersonStatHelper = emisPersonStatHelper;</span>
+<span class="fc" id="L78">        this.accountIdErrorHelper = accountIdErrorHelper;</span>
+<span class="fc" id="L79">    }</span>
+
+    @Override
+    public Class&lt;CareRecordProblem&gt; interfaceClass() {
+<span class="fc" id="L83">        return CareRecordProblem.class;</span>
+    }
+
+    @Override
+    public boolean canProcess(@NotNull EmisFileType fileType) {
+<span class="pc bpc" id="L88" title="1 of 2 branches missed.">        return fileType == TYPE;</span>
+    }
+
+    @Override
+    public boolean process(List&lt;ResultWithId&lt;CareRecordProblem, Long&gt;&gt; rows, EmisEsProcessedRow fileState) {
+<span class="fc" id="L93">        problemCache.putAll(fileState.getBatchId(), rows);</span>
+<span class="fc" id="L94">        return true;</span>
+    }
+
+    @Override
+    protected boolean doPostProcess(EmisEsProcessedRow rowState) {
+<span class="fc" id="L99">        io.vavr.collection.List&lt;ResultWithId&lt;CareRecordProblem, Long&gt;&gt; careRecordProblems = io.vavr.collection.List</span>
+<span class="fc" id="L100">                .ofAll(problemCache.getUnProcessedCareRecordProblems(rowState.getBatchId()));</span>
+<span class="fc" id="L101">        Iterator&lt;io.vavr.collection.List&lt;ResultWithId&lt;CareRecordProblem, Long&gt;&gt;&gt; batches = careRecordProblems.grouped(getBatchSize());</span>
+<span class="fc" id="L102">        boolean result = batches.map((io.vavr.collection.List&lt;ResultWithId&lt;CareRecordProblem, Long&gt;&gt; batch) -&gt; {</span>
+<span class="fc" id="L103">            batch.forEach(r -&gt; emisProcessAborter.executeTestControl(TYPE, r.getRowId().getId()));</span>
+
+<span class="fc" id="L105">            var recordToOrgMergeHelper = getRecordToOrgMergeHelperMapTimed(batch, CareRecordProblem::organisationGuid);</span>
+
+<span class="fc" id="L107">            Table&lt;String, UUID, UUID&gt; guidToParentUniqueId = getExternalIdsTimed(recordToOrgMergeHelper.keySet().map(CareRecordProblem::observationGuid));</span>
+<span class="fc" id="L108">            Table&lt;UUID, Long, MenuDataType&gt; uniqueIdToMenuDataType = emisEsManager.getUniqueIdToDeltaOriginalDataTypeMap(new HashSet&lt;&gt;(guidToParentUniqueId.values()));</span>
+<span class="fc" id="L109">            Map&lt;OrgMergeHelper, Set&lt;CareRecordProblem&gt;&gt; recordsByOrg = recordToOrgMergeHelper.groupBy(t -&gt; t._2).mapValues(Map::keySet);</span>
+<span class="pc bpc" id="L110" title="2 of 4 branches missed.">            return recordsByOrg.map(orgAndProblems -&gt; processBatchForOrg(recordToOrgMergeHelper, orgAndProblems, guidToParentUniqueId, uniqueIdToMenuDataType)).fold(true, (l, r) -&gt; l &amp;&amp; r);</span>
+<span class="pc bpc" id="L111" title="2 of 4 branches missed.">        }).reduceOption((l, r) -&gt; l &amp;&amp; r).getOrElse(true);</span>
+<span class="pc bpc" id="L112" title="1 of 2 branches missed.">        if (result) {</span>
+<span class="fc" id="L113">            problemCache.clearCachedAndPersisted(rowState.getBatchId());</span>
+        }
+<span class="fc" id="L115">        return result;</span>
+    }
+
+    private boolean processBatchForOrg(Map&lt;CareRecordProblem, OrgMergeHelper&gt; recordToOrgMergeHelper,
+                                       Tuple2&lt;OrgMergeHelper, Set&lt;CareRecordProblem&gt;&gt; orgAndProblems,
+                                       Table&lt;String, UUID, UUID&gt; guidToParentUniqueId,
+                                       Table&lt;UUID, Long, MenuDataType&gt; uniqueIdToMenuDataType) {
+<span class="fc" id="L122">        OrgMergeHelper orgMergeHelper = orgAndProblems._1;</span>
+<span class="fc" id="L123">        Set&lt;CareRecordProblem&gt; problems = orgAndProblems._2;</span>
+
+<span class="fc" id="L125">        io.vavr.collection.List&lt;CareRecordProblem&gt; knownRecords = io.vavr.collection.List.ofAll(problems)</span>
+<span class="fc" id="L126">                .filter(crp -&gt; {</span>
+<span class="fc" id="L127">                    OrgMergeHelper orgMergeHelperInRecord = recordToOrgMergeHelper.get(crp).getOrNull();</span>
+<span class="fc" id="L128">                    var parentUniqueId = guidToParentUniqueId.get(crp.observationGuid(), orgMergeHelperInRecord.getOrg().getPublicId());</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">                    if (parentUniqueId == null) {</span>
+<span class="fc" id="L130">                        return false;</span>
+                    }
+<span class="fc" id="L132">                    return uniqueIdToMenuDataType.containsRow(parentUniqueId);</span>
+                });
+
+<span class="fc" id="L135">        Map&lt;CareRecordProblem, OrgMergeHelper&gt; recordToActualOrg = knownRecords.toMap(problem -&gt; problem, problem -&gt; orgMergeHelper);</span>
+
+<span class="fc" id="L137">        Map&lt;CareRecordProblem, Either&lt;ProcessingError&lt;CareRecordProblem&gt;, AdminPatient&gt;&gt; adminPatientsOrFailures = fetchAdminPatientsTimed(</span>
+                recordToActualOrg);
+<span class="fc" id="L139">        Seq&lt;ProcessingError&lt;CareRecordProblem&gt;&gt; failures = extractFailures(adminPatientsOrFailures).values();</span>
+<span class="fc" id="L140">        Map&lt;CareRecordProblem, AdminPatient&gt; adminPatients = extractSuccesses(adminPatientsOrFailures);</span>
+<span class="fc" id="L141">        Set&lt;CareRecordProblem&gt; saveableRecords = adminPatients.keySet();</span>
+<span class="fc" id="L142">        Map&lt;CareRecordProblem, Either&lt;ProcessingError&lt;CareRecordProblem&gt;, PKBPersonInfo&gt;&gt; pkbPersonsOrFailures = fetchPkbPersonsTimed(</span>
+<span class="fc" id="L143">                adminPatients.map((crp, ap) -&gt; Tuple.of(crp, Tuple.of(recordToActualOrg.mapValues(OrgMergeHelper::getOrg).apply(crp), ap))));</span>
+<span class="fc" id="L144">        failures = failures.appendAll(extractFailures(pkbPersonsOrFailures).values());</span>
+<span class="fc" id="L145">        Map&lt;CareRecordProblem, PKBPersonInfo&gt; pkbPersons = extractSuccesses(pkbPersonsOrFailures);</span>
+<span class="fc" id="L146">        saveableRecords = saveableRecords.intersect(pkbPersons.keySet());</span>
+<span class="fc" id="L147">        Map&lt;CareRecordProblem, Either&lt;ProcessingError&lt;CareRecordProblem&gt;, Long&gt;&gt; defaultAccountIdsOrFailures = fetchDefaultAccountIdsTimed(</span>
+<span class="fc" id="L148">                restrict(pkbPersons, saveableRecords));</span>
+<span class="fc" id="L149">        Map&lt;CareRecordProblem, Long&gt; defaultAccountIds = extractSuccesses(defaultAccountIdsOrFailures);</span>
+<span class="fc" id="L150">        failures = failures.appendAll(extractFailures(defaultAccountIdsOrFailures).values());</span>
+
+<span class="fc" id="L152">        Map&lt;CareRecordProblem, Long&gt; filteredAccountIds = defaultAccountIds.filter((crp, accountId) -&gt; {</span>
+<span class="pc" id="L153">            OrgMergeHelper orgMergeHelperInRecord = recordToOrgMergeHelper.get(crp).getOrElseThrow(() -&gt; new IllegalStateException(&quot;No OrgMergeHelper for record &quot; + crp));</span>
+<span class="fc" id="L154">            var parentUniqueId = guidToParentUniqueId.get(crp.observationGuid(), orgMergeHelperInRecord.getOrg().getPublicId());</span>
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">            if (parentUniqueId == null) {</span>
+<span class="nc" id="L156">                return false;</span>
+            }
+<span class="fc bfc" id="L158" title="All 2 branches covered.">            if (uniqueIdToMenuDataType.contains(parentUniqueId, accountId)) {</span>
+<span class="fc" id="L159">                return true;</span>
+            }
+<span class="fc" id="L161">            accountIdErrorHelper.reportUnmatchedAccountIdsAtCareRecordProblem(crp.observationGuid(), accountId);</span>
+<span class="fc" id="L162">            return false;</span>
+        });
+
+<span class="fc" id="L165">        saveableRecords = saveableRecords.intersect(filteredAccountIds.keySet());</span>
+
+<span class="fc" id="L167">        failures</span>
+<span class="fc" id="L168">                .groupBy(f -&gt; f.getSeverity())</span>
+<span class="fc" id="L169">                .forEach(f -&gt; {</span>
+<span class="fc" id="L170">                    Seq&lt;ProcessingError&lt;CareRecordProblem&gt;&gt; errors = f._2;</span>
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">                    if (f._1 == FATAL) {</span>
+<span class="nc" id="L172">                        incrementProcessedRowsCounter(ProcessedRowStatus.FAILED, errors.size());</span>
+<span class="nc" id="L173">                        String errorString = errors.map(pe -&gt; pe.getMessage()).collect(Collectors.joining(&quot;\n&quot;));</span>
+<span class="nc" id="L174">                        LOGGER.error(&quot;Failed to process {} CareRecordProblems w/o CareRecordObservation:\n{}&quot;, errors.size(), errorString);</span>
+<span class="nc" id="L175">                    } else {</span>
+<span class="fc" id="L176">                        incrementProcessedRowsCounter(ProcessedRowStatus.SKIPPED, errors.size());</span>
+<span class="fc" id="L177">                        String samples = errors.distinctBy(e -&gt; e.getMessageKey()).map(e -&gt; e.getMessage()).collect(Collectors.joining(&quot;\n&quot;));</span>
+<span class="fc" id="L178">                        LOGGER.warn(&quot;Skipping {} CareRecordproblems w/o CareRecordObservation\nmessages with samples:\n{}&quot;, errors.size(), samples);</span>
+                    }
+<span class="fc" id="L180">                });</span>
+
+<span class="fc bfc" id="L182" title="All 2 branches covered.">        if (saveableRecords.nonEmpty()) {</span>
+<span class="fc" id="L183">            var saveableRecords2 = saveableRecords;</span>
+<span class="fc" id="L184">            recordTime(&quot;save&quot;, () -&gt; {</span>
+<span class="fc" id="L185">                Map&lt;CareRecordProblem, UUID&gt; recordToUniqueIdMap = saveableRecords2</span>
+<span class="fc" id="L186">                        .toMap(Function.identity(),</span>
+                                crp -&gt; {
+<span class="fc" id="L188">                                    OrgMergeHelper orgMergeHelperInRecord = recordToOrgMergeHelper.get(crp).getOrNull();</span>
+<span class="fc" id="L189">                                    return guidToParentUniqueId.get(crp.observationGuid(), orgMergeHelperInRecord.getOrg().getPublicId());</span>
+                                });
+<span class="fc" id="L191">                Map&lt;CareRecordProblem, EmisEsObservationDelta.DeltaType&gt; recordToDeltaTypeMap = saveableRecords2</span>
+<span class="fc" id="L192">                        .toMap(Function.identity(),</span>
+                                careRecordProblem -&gt; {
+<span class="fc" id="L194">                                        EmisEsObservationDelta.DeltaType deltaType = menuDataTypeToDeltaTypeMap</span>
+<span class="fc" id="L195">                                                .get(uniqueIdToMenuDataType.get(recordToUniqueIdMap.apply(careRecordProblem), filteredAccountIds.apply(careRecordProblem)));</span>
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">                                        if (deltaType == null) {</span>
+<span class="nc" id="L197">                                            throw new IllegalStateException(&quot;No DeltaType for CareRecordProblem: &quot; + careRecordProblem);</span>
+                                        }
+<span class="fc" id="L199">                                        return deltaType;</span>
+                        });
+
+<span class="fc" id="L202">                DataPointSaveResult&lt;EmisEsObservationDelta&gt; saveResult = observationDeltaHandler</span>
+<span class="fc" id="L203">                        .handle(saveableRecords2, recordToDeltaTypeMap, recordToOrgMergeHelper.mapValues(OrgMergeHelper::getOrg), pkbPersons, adminPatients, defaultAccountIds, recordToUniqueIdMap);</span>
+
+<span class="fc" id="L205">                incrementProcessedRowsCounter(ProcessedRowStatus.SAVED, saveResult.persistedDataPointIds().size());</span>
+<span class="fc" id="L206">                incrementProcessedRowsCounter(ProcessedRowStatus.EXCLUDED_BY_CODE, saveResult.getExcludedDataPoints().size());</span>
+<span class="fc" id="L207">            });</span>
+        }
+
+<span class="fc" id="L210">        attemptKeyLookup(defaultAccountIds.values().distinct());</span>
+
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">        return failures.find(f -&gt; f.getSeverity() == FATAL).isEmpty();</span>
+    }
+
+    @Override
+    public EmisEsManager getEmisEsManager() {
+<span class="fc" id="L217">        return emisEsManager;</span>
+    }
+
+    @Override
+    public UserManager getUserManager() {
+<span class="fc" id="L222">        return userManager;</span>
+    }
+
+    @Override
+    public PhrConfig getConfig() {
+<span class="nc" id="L227">        return config;</span>
+    }
+
+    @Override
+    public EmisPersonStatHelper getEmisPersonStatHelper() {
+<span class="fc" id="L232">        return emisPersonStatHelper;</span>
+    }
+
+    @Override
+    public int getBatchSize() {
+<span class="fc" id="L237">        return config.getEmisEsProcessingBatchSize();</span>
+    }
+
+    @Override
+    public boolean isPostProcessingRequired() {
+<span class="fc" id="L242">        return true;</span>
+    }
+
+    @Override
+    public EmisFileType getSupportedType() {
+<span class="fc" id="L247">        return TYPE;</span>
+    }
+
+    @Override
+    public ProcessorType getProcessorType() {
+<span class="fc" id="L252">        return NORMAL;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PathCacheService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.kms.service.cache</a> &gt; <span class="el_source">PathCacheService.kt</span></div><h1>PathCacheService.kt</h1><pre class="source lang-java linenums">package com.pkb.kms.service.cache
+
+import com.pkb.common.ClearableInternalState
+import com.pkb.entities.core.CoreAccount
+import com.pkb.kms.service.AccountPath
+import com.pkb.kms.service.AccountPath.Companion.accountPath
+import com.pkb.kms.service.MetricsHelper
+import com.pkb.kms.service.extension.curried
+import com.pkb.kms.service.projection.OrgIds
+import com.pkb.kms.service.projection.PersonIds
+import com.pkb.kms.service.repository.AccountKeyLinkRepository
+import com.pkb.kms.service.repository.AccountOrgRepository
+import com.pkb.kms.shared.KMS_CACHE_PREFIX
+import com.pkb.kms.shared.representation.AccountPublicId
+import com.pkb.kms.shared.representation.KmsError
+import com.pkb.kms.shared.representation.OrgRequester
+import com.pkb.kms.shared.representation.PersonRequester
+import com.pkb.kms.shared.representation.Requester
+import io.vavr.control.Either
+import io.vavr.kotlin.left
+import io.vavr.kotlin.right
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.cache.annotation.CacheEvict
+import org.springframework.cache.annotation.CachePut
+import org.springframework.cache.annotation.Cacheable
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+import javax.transaction.Transactional
+
+<span class="fc" id="L31">@Service</span>
+<span class="fc" id="L32">class PathCacheService(</span>
+<span class="fc" id="L33">        private val accountCacheService: AccountCacheService,</span>
+<span class="fc" id="L34">        private val userCache: UserCacheService,</span>
+<span class="fc" id="L35">        private val orgCacheService: OrgCacheService,</span>
+<span class="fc" id="L36">        private val accountKeyLinkRepository: AccountKeyLinkRepository,</span>
+<span class="fc" id="L37">        private val accountOrgRepository: AccountOrgRepository,</span>
+        metrics: MetricsHelper) : ClearableInternalState, HasDeprecatedCaches {
+
+<span class="fc" id="L40">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+<span class="fc" id="L42">    init {</span>
+<span class="fc" id="L43">        metrics.registerCaches(PATH_CACHE_NAME)</span>
+<span class="fc" id="L44">    }</span>
+
+    /**
+     * Finds a crypto path between an accessing person and a target account. A crypto pathway exists if there is a
+     * chain of keys by which the user can decrypt the account key. Example pathways include:
+     *
+     * - direct access (user has an account_user record for the target account)
+     * - org access (user has an account_user record for an org account, and the org has an account_org record for the
+     *   target account)
+     *   
+     * If the requester is an org, then org access is the only option.
+     *
+     * The path is cached if found, and retrieved from the cache if present
+     */
+    @Cacheable(PATH_CACHE_NAME, unless = &quot;#result.isLeft()&quot;)
+    @Transactional
+    fun findPath(requester: Requester, accountPublicId: AccountPublicId)
+<span class="fc" id="L61">            : Either&lt;KmsError, AccountPath&gt; = doFindPath(requester, accountPublicId)</span>
+
+    /**
+     * Finds a crypto path between an accessing person and a target account. A crypto pathway exists if there is a
+     * chain of keys by which the user can decrypt the account key. Example pathways include:
+     *
+     * - direct access (user has an account_user record for the target account)
+     * - org access (user has an account_user record for an org account, and the org has an account_org record for the
+     *   target account)
+     *
+     * The path is cached if found, but is always loaded from the database and never returned from cache
+     */
+    @CachePut(PATH_CACHE_NAME, unless = &quot;#result.isLeft()&quot;)
+    @Transactional
+    fun findPathNoCache(requester: Requester, accountPublicId: AccountPublicId)
+<span class="fc" id="L76">            : Either&lt;KmsError, AccountPath&gt; = doFindPath(requester, accountPublicId)</span>
+
+    /**
+     * Removes all cached paths
+     */
+    @CacheEvict(PATH_CACHE_NAME, allEntries = true)
+    override fun clearState() {
+<span class="fc" id="L83">        log.warn(&quot;Cache cleared&quot;)</span>
+<span class="fc" id="L84">    }</span>
+
+<span class="fc" id="L86">    override val deprecatedCaches = DEPRECATED_PATH_CACHE_NAMES</span>
+
+    private fun doFindPath(requester: Requester, accountPublicId: AccountPublicId): Either&lt;KmsError, AccountPath&gt; =
+<span class="fc" id="L89">            when (requester) {</span>
+<span class="fc bfc" id="L90" title="All 2 branches covered.">                is PersonRequester -&gt; this::findByAccountAndPerson.curried() // @formatter:off</span>
+<span class="fc" id="L91">                        .let     { fn -&gt; accountCacheService.findAccount(accountPublicId).map(fn) }</span>
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">                        .flatMap { fn -&gt; userCache.findPerson(requester.personPublicId).flatMap(fn) }</span>
+<span class="fc" id="L93">                is OrgRequester -&gt; this::findByAccountAndOrg.curried()</span>
+<span class="fc" id="L94">                        .let { fn -&gt; accountCacheService.findAccount(accountPublicId).map(fn) }</span>
+<span class="pc bpc" id="L95" title="1 of 2 branches missed.">                        .flatMap { fn -&gt; orgCacheService.findOrg(requester.orgPublicId).flatMap(fn) }</span>
+<span class="fc" id="L96">            }.peek { </span>
+<span class="fc" id="L97">                log.debug(&quot;Loaded path $it&quot;) </span>
+<span class="fc" id="L98">            }</span>
+        
+    private fun findByAccountAndPerson(account: CoreAccount, person: PersonIds): Either&lt;KmsError, AccountPath&gt; =
+<span class="fc" id="L101">            accountKeyLinkRepository.findFirstByAccountIdAndPersonIdOrderByAccessTypeDesc(account.id, person.id)</span>
+<span class="fc" id="L102">                    .map { right&lt;KmsError, AccountPath&gt;(accountPath(PersonRequester(person.publicId), account.publicId, it)) }</span>
+<span class="fc" id="L103">                    .orElseGet {</span>
+<span class="fc" id="L104">                        log.warn(&quot;No crypto path from person ${person.publicId} to account ${account.publicId}&quot;)</span>
+<span class="fc" id="L105">                        left(KmsError.pathNotFound(PersonRequester(person.publicId), account.publicId))</span>
+<span class="fc" id="L106">                    }</span>
+
+    private fun findByAccountAndOrg(account: CoreAccount, org: OrgIds): Either&lt;KmsError, AccountPath&gt; =
+<span class="fc" id="L109">            accountOrgRepository.findByOrgIdAndPublicAccountId(org.id, account.publicId)</span>
+<span class="fc" id="L110">                    .map { right&lt;KmsError, AccountPath&gt;(accountPath(OrgRequester(org.publicId), account.publicId, it)) }</span>
+<span class="fc" id="L111">                    .orElseGet {</span>
+<span class="fc" id="L112">                        log.warn(&quot;No crypto path from org ${org.publicId} to account ${account.publicId}&quot;)</span>
+<span class="fc" id="L113">                        left(KmsError.pathNotFound(OrgRequester(org.publicId), account.publicId))</span>
+<span class="fc" id="L114">                    }</span>
+    
+
+    companion object {
+        const val PATH_CACHE_NAME = &quot;${KMS_CACHE_PREFIX}_path3&quot;
+<span class="pc" id="L119">        val DEPRECATED_PATH_CACHE_NAMES = setOf(&quot;${KMS_CACHE_PREFIX}_path&quot;, &quot;${KMS_CACHE_PREFIX}_path2&quot;)</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

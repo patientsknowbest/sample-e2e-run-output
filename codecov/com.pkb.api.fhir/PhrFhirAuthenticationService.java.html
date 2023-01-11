@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PhrFhirAuthenticationService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir</a> &gt; <span class="el_source">PhrFhirAuthenticationService.java</span></div><h1>PhrFhirAuthenticationService.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir;
+
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import com.pkb.oauth2.client.Oauth2Client;
+import com.pkb.oauth2.client.model.ThirdPartyClientJwtVerificationRequest;
+import org.hl7.fhir.dstu3.model.CodeableConcept;
+import org.hl7.fhir.dstu3.model.Coding;
+import org.hl7.fhir.dstu3.model.OperationOutcome;
+
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.api.fhir.PhrAuthenticationExtractingInterceptor.USER_DATA_AUTHN_COOKIE;
+import static com.pkb.api.fhir.PhrAuthenticationExtractingInterceptor.USER_DATA_AUTHN_HEADER;
+import static com.pkb.oauth2.client.model.ImmutableThirdPartyClientJwtVerificationRequest.thirdPartyClientJwtVerificationRequest;
+import static io.vavr.API.Try;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueSeverity.ERROR;
+
+/**
+ * PURPOSE
+ * A trimmed down version of the authentication flow we have in our separate fhir-api service, purely for authenticating
+ * the demographics API represented by PhrFhirApiServer.
+ *
+ * This flow mandates client credentials and therefore requires:
+ * 1. An x-org-public-id in the header of the message
+ * 2. A bearer access token to be provided for authentication
+ *
+ * Other mechanisms of authentication are not supported.
+ *
+ * DISCLAIMER
+ * A good bit of this auth layer is copied from the fhir-api code, which doesn't make me super happy.
+ * There was a broad understanding with this restructured approach discussed by Martin, Steven and myself that
+ * there would by necessity be a duplicate of this auth layer as part of the proposal. I've kept it as minimal as possible.
+ *
+ * This entire flow is temporary until FHIRWall is up (~October). At that point the FHIR endpoint will be that of the
+ * FHIR server backed by the FHIR data store, the auth will be in the FHIRWall layer, and most of this frontend facing
+ * code can be deleted. All that will remain will be the mapping to the HL7Patient DTO, and that will be interacted
+ * with probably via pub-sub. So it's not long term. We have contractural reasons why we need to deliver the demographics
+ * component of this API earlier than the FHIR data store/FHIRWall layer, otherwise a good chunk of this would not have be done.
+ */
+public class PhrFhirAuthenticationService {
+
+    private static final String ORG_PUBLIC_ID_HEADER_NAME = &quot;X-Org-Public-Id&quot;;
+    private static final String AUTHENTICATION_SCHEMA = &quot;bearer&quot;;
+
+    private final Oauth2Client oauth2Client;
+
+<span class="fc" id="L49">    public PhrFhirAuthenticationService(Oauth2Client oauth2Client) {</span>
+<span class="fc" id="L50">        this.oauth2Client = oauth2Client;</span>
+<span class="fc" id="L51">    }</span>
+
+    public void authenticate(RequestDetails request) {
+<span class="fc" id="L54">        findOrgPublicIdHeader(request).ifPresentOrElse(orgId -&gt; loginWithJwt(extractAccessToken(request), orgId), () -&gt; {</span>
+<span class="fc" id="L55">                    throw new InvalidRequestException(&quot;x-org-public-id not present&quot;, getBadAuthenticationOperationOutcome());</span>
+                });
+<span class="fc" id="L57">    }</span>
+
+    private Optional&lt;UUID&gt; findOrgPublicIdHeader(RequestDetails request) {
+<span class="fc" id="L60">        return Try(() -&gt; request.getHeader(ORG_PUBLIC_ID_HEADER_NAME))</span>
+<span class="fc" id="L61">                .map(UUID::fromString)</span>
+<span class="fc" id="L62">                .toJavaOptional();</span>
+    }
+
+    private void loginWithJwt(String clientJwt, UUID orgPublicId) {
+<span class="fc" id="L66">        ThirdPartyClientJwtVerificationRequest thirdPartyClientJwtVerificationRequest = thirdPartyClientJwtVerificationRequest()</span>
+<span class="fc" id="L67">                .orgPublicId(orgPublicId)</span>
+<span class="fc" id="L68">                .clientJWT(clientJwt)</span>
+<span class="fc" id="L69">                .build();</span>
+<span class="fc" id="L70">        oauth2Client.verifyThirdPartyClientJwt(thirdPartyClientJwtVerificationRequest)</span>
+<span class="fc" id="L71">                .mapLeft(error -&gt; {</span>
+<span class="fc" id="L72">                    throw new InvalidRequestException(error.getDescription(), getBadAuthenticationOperationOutcome());</span>
+                });
+<span class="fc" id="L74">    }</span>
+
+    private String extractAccessToken(RequestDetails request) {
+<span class="fc" id="L77">        String header = (String)request.getUserData().get(USER_DATA_AUTHN_HEADER);</span>
+<span class="fc" id="L78">        String tokenFromHeader = null;</span>
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">        if (header != null) {</span>
+<span class="pc bpc" id="L80" title="1 of 2 branches missed.">            if (header.toLowerCase().startsWith(AUTHENTICATION_SCHEMA)) {</span>
+<span class="fc" id="L81">                tokenFromHeader = header.substring(AUTHENTICATION_SCHEMA.length()).trim();</span>
+            } else {
+<span class="nc" id="L83">                throw new InvalidRequestException(&quot;invalid authorization header&quot;, getBadAuthenticationOperationOutcome());</span>
+            }
+        }
+<span class="fc" id="L86">        String tokenFromCookie = (String) request.getUserData().get(USER_DATA_AUTHN_COOKIE);</span>
+<span class="pc bpc" id="L87" title="2 of 4 branches missed.">        if (tokenFromHeader != null &amp;&amp; tokenFromCookie != null) {</span>
+<span class="nc" id="L88">            throw new InvalidRequestException(&quot;the Authorization header xor the ui-exchange cookie should be passed&quot;, getBadAuthenticationOperationOutcome());</span>
+        }
+<span class="pc bpc" id="L90" title="3 of 4 branches missed.">        else if (tokenFromHeader == null &amp;&amp; tokenFromCookie == null) {</span>
+<span class="nc" id="L91">            throw new InvalidRequestException(&quot;no authentication provided&quot;, getBadAuthenticationOperationOutcome());</span>
+        }
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">        return tokenFromCookie != null ? tokenFromCookie : tokenFromHeader;</span>
+    }
+
+    private OperationOutcome getBadAuthenticationOperationOutcome() {
+<span class="fc" id="L97">        OperationOutcome operationOutcome = new OperationOutcome();</span>
+<span class="fc" id="L98">        operationOutcome.setId(UUID.randomUUID().toString());</span>
+<span class="fc" id="L99">        operationOutcome.addIssue()</span>
+<span class="fc" id="L100">                .setSeverity(ERROR)</span>
+<span class="fc" id="L101">                .setDiagnostics(&quot;You did not provide a valid access token.&quot;)</span>
+<span class="fc" id="L102">                .setCode(OperationOutcome.IssueType.SECURITY)</span>
+<span class="fc" id="L103">                .setDetails(new CodeableConcept()</span>
+<span class="fc" id="L104">                        .addCoding(new Coding()</span>
+<span class="fc" id="L105">                                .setCode(&quot;BAD_AUTHENTICATION&quot;)</span>
+<span class="fc" id="L106">                                .setSystem(&quot;http://fhir.patientsknowbest.com/codesystem/response-code&quot;)</span>
+<span class="fc" id="L107">                                .setDisplay(&quot;Valid access token not provided&quot;)));</span>
+<span class="fc" id="L108">        return operationOutcome;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

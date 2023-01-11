@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TeamService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.team</a> &gt; <span class="el_source">TeamService.java</span></div><h1>TeamService.java</h1><pre class="source lang-java linenums">package com.pkb.service.team;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.datamodel.consent.PatientConsentUpdateDTO;
+import com.pkb.domain.CryptoModelSynchronisationService;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.model.RecordWithId;
+import com.pkb.service.emailmessage.impl.ImmutableEmailInfo;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.Tuple2;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+import static com.pkb.service.notification.impl.tolven.AccessUpdate.ACCESS_GRANT;
+import static io.micrometer.core.instrument.Metrics.counter;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+
+public class TeamService {
+
+    private static final String ADDED_TO_TEAM_COUNTER_NAME = &quot;pkb_phr_integration_addedtoteam&quot;;
+    private static final String ADDED_TO_TEAM_TAG_KEY = &quot;success&quot;;
+    private static final String ADDED_TO_TEAM_ROUTE_KEY = &quot;route&quot;;
+
+
+    private final PatientConsentManager patientConsentManager;
+    private final PKBEmailMessageManager emailMessageManager;
+
+    public TeamService(PatientConsentManager patientConsentManager, PKBEmailMessageManager emailMessageManager,
+<span class="fc" id="L41">                       CryptoModelSynchronisationService cryptoModelSynchronisationService) {</span>
+<span class="fc" id="L42">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L43">        this.emailMessageManager = emailMessageManager;</span>
+<span class="fc" id="L44">    }</span>
+
+    /**
+     * It adds an existing patient to creation teams by creating consent and institute user records.
+     * Patient and carers (if any) receive notifications.
+     *
+     * @return number of teams where the patient was added to
+     */
+    public long addToTeams(PKBPerson patient, Collection&lt;Team&gt; creationTeams, EHRRequestContext context) {
+<span class="pc bpc" id="L53" title="1 of 2 branches missed.">        if (patient == null) {</span>
+<span class="nc" id="L54">            return 0;</span>
+        }
+
+<span class="fc" id="L57">        return createConsentRecords(patient, creationTeams, context);</span>
+    }
+
+    public &lt;ID&gt; Stream&lt;RecordWithId&lt;ID, Long&gt;&gt; addToTeams(PKBPerson patient, List&lt;RecordWithId&lt;ID, Tuple2&lt;EHRRequestContext, Set&lt;Team&gt;&gt;&gt;&gt; teamsList) {
+<span class="pc bpc" id="L61" title="1 of 4 branches missed.">        if (patient == null || !patient.isSharingEnabled()) {</span>
+<span class="fc" id="L62">            return Stream.empty();</span>
+        }
+
+<span class="fc" id="L65">        Map&lt;Long, Team&gt; teamMap = teamsList.stream()</span>
+<span class="fc" id="L66">                .flatMap(r -&gt; r.record()._2.stream())</span>
+<span class="fc" id="L67">                .collect(toMap(Team::getId, identity(), (t1, t2) -&gt; t1));</span>
+
+<span class="fc" id="L69">        var teamConsents = patientConsentManager.hasActiveTeamConsent(Collections.singleton(patient.getId()), teamMap.keySet());</span>
+
+<span class="fc" id="L71">        Set&lt;Long&gt; teamsWithoutConsent = teamMap.values().stream()</span>
+<span class="fc" id="L72">                .map(Team::getId)</span>
+<span class="fc" id="L73">                .filter(teamId -&gt; {</span>
+<span class="fc" id="L74">                    Boolean activeTeamConsent = teamConsents.get(patient.getId(), teamId);</span>
+<span class="pc bpc" id="L75" title="1 of 4 branches missed.">                    return activeTeamConsent == null || Boolean.FALSE.equals(activeTeamConsent);</span>
+                })
+<span class="fc" id="L77">                .collect(toSet());</span>
+
+
+        //This makes sure we only add each team once, and in the order they would be added wihtout batching
+<span class="fc" id="L81">        Set&lt;Long&gt; mutableTeamWithoutConsent = new HashSet&lt;&gt;(teamsWithoutConsent);</span>
+<span class="fc bfc" id="L82" title="All 2 branches covered.">        Function&lt;Team, Boolean&gt; consentProvider = team -&gt; !mutableTeamWithoutConsent.remove(team.getId());</span>
+
+<span class="fc" id="L84">        return teamsList.stream().map(r -&gt; {</span>
+<span class="fc" id="L85">            var contextAndCreationTeams = r.record();</span>
+<span class="fc" id="L86">            long countCreated = createConsentRecords(patient, contextAndCreationTeams._2, contextAndCreationTeams._1, consentProvider);</span>
+<span class="fc" id="L87">            return r.switchRecord(countCreated);</span>
+        });
+    }
+
+    public boolean hasActiveConsentRecord(PKBPerson person, Org org) {
+<span class="fc" id="L92">        return patientConsentManager.hasActiveConsentRecord(person, org);</span>
+    }
+
+
+    private long createConsentRecords(PKBPerson patient, Collection&lt;Team&gt; creationTeams, EHRRequestContext context) {
+<span class="fc" id="L97">        return createConsentRecords(patient, creationTeams, context, team -&gt; patientConsentManager.hasActiveConsentRecord(patient, team));</span>
+    }
+
+    private long createConsentRecords(PKBPerson patient, Collection&lt;Team&gt; creationTeams, EHRRequestContext context, Function&lt;Team, Boolean&gt; consentProvider) {
+<span class="fc" id="L101">        counter(ADDED_TO_TEAM_COUNTER_NAME, ADDED_TO_TEAM_TAG_KEY, &quot;true&quot;, ADDED_TO_TEAM_ROUTE_KEY, context.getAccessRoute().toString()).increment();</span>
+<span class="fc bfc" id="L102" title="All 2 branches covered.">        if (!patient.isSharingEnabled()) {</span>
+<span class="fc" id="L103">            return 0;</span>
+        }
+
+<span class="fc" id="L106">        return creationTeams.stream()</span>
+<span class="fc" id="L107">                .filter(team -&gt; noConsentForTeam(team, consentProvider))</span>
+<span class="fc" id="L108">                .map(team -&gt; createConsentRecordsAndNotify(patient, team, context))</span>
+<span class="fc" id="L109">                .count();</span>
+    }
+
+    private boolean noConsentForTeam(Team team, Function&lt;Team, Boolean&gt; consentProvider) {
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        return !consentProvider.apply(team);</span>
+    }
+
+    private PatientConsentUpdateDTO createConsentRecordsAndNotify(PKBPerson patient, Team team, EHRRequestContext context) {
+<span class="fc" id="L117">        var consent = patientConsentManager.grantDefaultConsentToTeam(context, patient, team);</span>
+<span class="fc" id="L118">        emailMessageManager.sendTeamAccessNotificationToPatient(ACCESS_GRANT,</span>
+<span class="fc" id="L119">                ImmutableEmailInfo.builder()</span>
+<span class="fc" id="L120">                        .recipient(patient)</span>
+<span class="fc" id="L121">                        .team(team)</span>
+<span class="fc" id="L122">                        .includeSender(false)</span>
+<span class="fc" id="L123">                        .build(),</span>
+                consent);
+<span class="fc" id="L125">        return consent;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,325 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DataCollectionService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.support</a> &gt; <span class="el_source">DataCollectionService.java</span></div><h1>DataCollectionService.java</h1><pre class="source lang-java linenums">package com.pkb.service.support;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.pkb.datamodel.Org;
+import com.pkb.datamodel.RegistrationEventExisting;
+import com.pkb.datamodel.contact.EmailContact;
+import com.pkb.datamodel.team.TeamUser;
+import com.pkb.datamodel.team.TeamWithOrg;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.AccountUserService;
+import com.pkb.domain.RegistrationEventService;
+import com.pkb.domain.duplicate.person.PersonService;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.RegistrationMethod;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.phoenix.shared.structures.request.PatientInfoTaskInput;
+import com.pkb.phoenix.shared.structures.request.PatientInfoTaskRequest;
+import com.pkb.phoenix.shared.structures.request.SupportToolNationalIdType;
+import com.pkb.phoenix.shared.structures.response.ImmutableNationalIdSearchResult;
+import com.pkb.phoenix.shared.structures.response.ImmutableOrgAndTeamSearchResult;
+import com.pkb.phoenix.shared.structures.response.ImmutablePatientInfoResult;
+import com.pkb.phoenix.shared.structures.response.ImmutablePatientInfoTaskResponse;
+import com.pkb.phoenix.shared.structures.response.ImmutableRegistrationResult;
+import com.pkb.phoenix.shared.structures.response.ImmutableUserEmailResult;
+import com.pkb.phoenix.shared.structures.response.PatientInfoTaskResponse;
+import com.pkb.phoenix.shared.structures.response.TaskResponseStatus;
+import com.pkb.phoenix.shared.structures.response.TaskResultStatus;
+import com.pkb.phoenix.shared.structures.response.UserType;
+import io.vavr.control.Either;
+import org.apache.camel.Consume;
+import org.apache.camel.ProducerTemplate;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.RegistrationMethod.EMAIL_LINK;
+import static com.pkb.entities.enums.RegistrationMethod.NHS_LOGIN;
+import static com.pkb.entities.enums.RegistrationMethod.SELF_REGISTRATION;
+import static com.pkb.entities.enums.RegistrationMethod.TOKEN_INVITATION;
+import static com.pkb.entities.enums.RegistrationMethod.UNKNOWN;
+import static com.pkb.entities.enums.UserStatus.ACTIVE;
+import static com.pkb.entities.enums.UserStatus.CREATED;
+import static com.pkb.entities.enums.UserStatus.DEAD;
+import static com.pkb.entities.enums.UserStatus.EMAIL_CONFIRMED;
+import static com.pkb.entities.enums.UserStatus.INACTIVE;
+import static com.pkb.entities.enums.UserStatus.INVITED;
+import static com.pkb.entities.enums.UserStatus.NEW;
+import static com.pkb.entities.enums.UserStatus.NOCONTACT;
+import static com.pkb.entities.enums.UserType.EMPLOYEE;
+import static com.pkb.entities.enums.UserType.INSTITUTE_ADMIN;
+import static com.pkb.entities.enums.UserType.ORG_COORD;
+import static com.pkb.entities.enums.UserType.PATIENT;
+import static com.pkb.entities.enums.UserType.PRIVACY_OFFICER;
+import static com.pkb.entities.enums.UserType.REG_CLINICIAN;
+import static com.pkb.entities.enums.UserType.SUPER_ADMIN;
+import static com.pkb.entities.enums.UserType.TECH_SUPPORT;
+import static com.pkb.phoenix.shared.structures.response.PatientInfoTaskResponse.OrgAndTeamSearchResult;
+import static com.pkb.phoenix.shared.structures.response.PatientInfoTaskResponse.RegistrationResult;
+import static com.pkb.phoenix.shared.structures.response.TaskResultStatus.NOT_FOUND;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.util.stream.Collectors.toList;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * This class processes the inbound data collection request message that comes from Phoenix
+ * by calling stored procedures in SupportRepository.class.
+ * There are two types of Datacollection requests.
+ * 1. Query the patient's private ID based on the given email.
+ * 2. Query the patient's email address based on the given private ID.
+ * When the request is processed the result is sent back to Phoenix via Pubsub.
+ */
+public class DataCollectionService {
+<span class="fc" id="L87">    private static final Logger LOG = getLogger(lookup().lookupClass());</span>
+<span class="fc" id="L88">    private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern(&quot;dd-MM-yyyy' 'HH:mm:ss&quot;).withZone(ZoneId.of(&quot;UTC&quot;));</span>
+
+<span class="fc" id="L90">    private static final Map&lt;SupportToolNationalIdType, NationalIdType&gt; NID_TYPE_SELECTOR = Maps.immutableEnumMap(ImmutableMap.of(</span>
+            SupportToolNationalIdType.NHS_NUMBER, NationalIdType.NHS_NUMBER,
+            SupportToolNationalIdType.CHI_NUMBER, NationalIdType.CHI_NUMBER,
+            SupportToolNationalIdType.H_AND_C_NUMBER, NationalIdType.H_AND_C_NUMBER,
+            SupportToolNationalIdType.IHI_NUMBER, NationalIdType.IHI_NUMBER,
+            SupportToolNationalIdType.SSN_USA, NationalIdType.SSN_USA,
+            SupportToolNationalIdType.SIN_CA, NationalIdType.SIN_CA,
+            SupportToolNationalIdType.HKID_HK, NationalIdType.HKID_HK,
+            SupportToolNationalIdType.BSN_NL, NationalIdType.BSN_NL,
+            SupportToolNationalIdType.KVN_DE, NationalIdType.KVN_DE,
+            SupportToolNationalIdType.CIVIL_ID_KW, NationalIdType.CIVIL_ID_KW));
+
+    public static final String INBOUND_REQUEST_PATIENT_INFO = &quot;direct:inboundRequestPatientInfo&quot;;
+    public static final String OUTBOUND_PATIENT_INFO_COMPLETE = &quot;direct:outboundPatientInfoComplete&quot;;
+
+    private final ProducerTemplate producer;
+    private final PersonService personService;
+    private final AccountUserService accountUserService;
+    private final RegistrationEventService registrationEventService;
+
+    public DataCollectionService(ProducerTemplate producer,
+            PersonService personService,
+            AccountUserService accountUserService,
+<span class="fc" id="L113">            RegistrationEventService registrationEventService) {</span>
+<span class="fc" id="L114">        this.producer = producer;</span>
+<span class="fc" id="L115">        this.personService = personService;</span>
+<span class="fc" id="L116">        this.accountUserService = accountUserService;</span>
+<span class="fc" id="L117">        this.registrationEventService = registrationEventService;</span>
+<span class="fc" id="L118">    }</span>
+
+    @Consume(INBOUND_REQUEST_PATIENT_INFO)
+    public void collectData(PatientInfoTaskRequest request) {
+<span class="fc" id="L122">        producer.sendBody(OUTBOUND_PATIENT_INFO_COMPLETE, process(request));</span>
+<span class="fc" id="L123">    }</span>
+
+    private class FindPatientError {
+        TaskResultStatus errorStatus;
+        String errorMessage;
+
+<span class="fc" id="L129">        FindPatientError(TaskResultStatus status, String errorMessage) {</span>
+<span class="fc" id="L130">            this.errorStatus = status;</span>
+<span class="fc" id="L131">            this.errorMessage = errorMessage;</span>
+<span class="fc" id="L132">        }</span>
+
+    }
+
+    @VisibleForTesting
+    PatientInfoTaskResponse process(PatientInfoTaskRequest request) {
+<span class="fc" id="L138">        var builder = new ImmutablePatientInfoTaskResponse.Builder()</span>
+<span class="fc" id="L139">                .taskId(request.taskId())</span>
+<span class="fc" id="L140">                .requestId(request.requestId());</span>
+        try {
+<span class="fc" id="L142">            return builder</span>
+<span class="fc" id="L143">                    .results(findPerson(request.input())</span>
+<span class="fc" id="L144">                            .stream()</span>
+<span class="fc" id="L145">                            .map(errorOrPerson -&gt; errorOrPerson.fold(</span>
+<span class="fc" id="L146">                                    error -&gt; mapToErrorResult(error.errorStatus, error.errorMessage),</span>
+<span class="fc" id="L147">                                    person -&gt; mapToTaskResult(request, person)))</span>
+<span class="fc" id="L148">                            .collect(toList()))</span>
+<span class="fc" id="L149">                    .status(TaskResponseStatus.SUCCESS)</span>
+<span class="fc" id="L150">                    .errorMessage(&quot;&quot;)</span>
+<span class="fc" id="L151">                    .build();</span>
+
+<span class="fc" id="L153">        } catch (RuntimeException cause) {</span>
+<span class="fc" id="L154">            LOG.error(&quot;Failed to collect data, &quot;, cause);</span>
+<span class="fc" id="L155">            return mapToErrorResponse(builder, TaskResponseStatus.ERROR, cause.getMessage());</span>
+
+        }
+    }
+
+    private PatientInfoTaskResponse mapToErrorResponse(ImmutablePatientInfoTaskResponse.Builder builder, TaskResponseStatus errorStatus, String errorMessage) {
+<span class="fc" id="L161">        return builder</span>
+<span class="fc" id="L162">                .status(errorStatus)</span>
+<span class="fc" id="L163">                .errorMessage(errorMessage)</span>
+<span class="fc" id="L164">                .build();</span>
+    }
+
+    @NotNull
+    private ImmutablePatientInfoResult mapToTaskResult(PatientInfoTaskRequest request, Person person) {
+<span class="fc" id="L169">        var resultBuilder = new ImmutablePatientInfoResult.Builder();</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        if (request.output().privateId()) {</span>
+<span class="fc" id="L171">            resultBuilder.patientId(person.getId());</span>
+        }
+<span class="fc bfc" id="L173" title="All 2 branches covered.">        if (request.output().email()) {</span>
+<span class="fc" id="L174">            resultBuilder.email(buildAndCompareUserEmailResult(person.demographics().getEmail()));</span>
+        }
+<span class="fc bfc" id="L176" title="All 2 branches covered.">        if (request.output().orgAndTeamNames()) {</span>
+<span class="fc" id="L177">            resultBuilder.addAllOrgAndTeamNames(constructOrgsAndTeams(person));</span>
+        }
+<span class="fc bfc" id="L179" title="All 2 branches covered.">        if (request.output().nationalIds()) {</span>
+<span class="fc" id="L180">            resultBuilder.nationalIds(</span>
+<span class="fc" id="L181">                    person.demographics().getNationalId().map(nationalId -&gt; new ImmutableNationalIdSearchResult.Builder()</span>
+                            //TODO PNX-189: Represent national ID type with enum.
+<span class="fc" id="L183">                            .type(nationalId.getType().getName())</span>
+<span class="fc" id="L184">                            .value(nationalId.getValueFormatted().getOrElse(&quot;&quot;)).build()));</span>
+        }
+<span class="fc bfc" id="L186" title="All 2 branches covered.">        if (request.output().userType()) {</span>
+            //we need to be able to look up whether a patient is also a carer. ie are there any non default account users linked to their person id
+<span class="fc" id="L188">            boolean hasAccessToOtherUsers = accountUserService.hasNonDefaultAccountUser(person.getId());</span>
+<span class="fc" id="L189">            resultBuilder.userType(mapPhrToPhoenixUserType(person.getUserType(), hasAccessToOtherUsers));</span>
+        }
+
+<span class="fc bfc" id="L192" title="All 2 branches covered.">        if (request.output().userStatus()) {</span>
+<span class="fc" id="L193">            resultBuilder.userStatus(mapPhrToPhoenixPatientStatus(person.getUserStatus()));</span>
+        }
+
+<span class="fc bfc" id="L196" title="All 2 branches covered.">        if (request.output().userRegistration()) {</span>
+<span class="fc" id="L197">            var maybeRegistrationEvents = registrationEventService.findAllByPersonId(person.getId());</span>
+
+<span class="fc bfc" id="L199" title="All 2 branches covered.">            if (maybeRegistrationEvents.isEmpty()) {</span>
+<span class="fc" id="L200">                resultBuilder.registrationDetails(Collections.emptyList());</span>
+            } else {
+<span class="fc" id="L202">                resultBuilder.registrationDetails(formatAndSortRegistrationEvents(maybeRegistrationEvents));</span>
+            }
+        }
+
+<span class="fc" id="L206">        return resultBuilder.build();</span>
+    }
+
+    private List&lt;ImmutableUserEmailResult&gt; buildAndCompareUserEmailResult(io.vavr.collection.List&lt;EmailContact&gt; emails) {
+<span class="fc" id="L210">        return emails.toJavaList().stream().map(email -&gt; new ImmutableUserEmailResult.Builder()</span>
+<span class="fc" id="L211">                .value(email.getValue())</span>
+<span class="fc" id="L212">                .isPrimary(email.isPrimary())</span>
+<span class="fc" id="L213">                .isConfirmed(email.isConfirmed())</span>
+<span class="fc" id="L214">                .build())</span>
+<span class="fc" id="L215">                .sorted(Comparator.comparing(ImmutableUserEmailResult::value))</span>
+<span class="fc" id="L216">                .sorted((email1, email2) -&gt; Boolean.compare(email2.isConfirmed(), email1.isConfirmed()))</span>
+<span class="fc" id="L217">                .sorted((email1, email2) -&gt; Boolean.compare(email2.isPrimary(), email1.isPrimary()))</span>
+<span class="fc" id="L218">                .collect(toList());</span>
+    }
+
+    private List&lt;RegistrationResult&gt; formatAndSortRegistrationEvents(List&lt;RegistrationEventExisting&gt; registrationEvents) {
+<span class="fc" id="L222">        Comparator&lt;RegistrationResult&gt; byRegistrationDate = Comparator.comparing(RegistrationResult::registeredOn);</span>
+
+<span class="fc" id="L224">        return registrationEvents.stream().map(registrationEvent -&gt; new ImmutableRegistrationResult.Builder()</span>
+<span class="fc" id="L225">                .registrationMethod(mapPhrRegistrationMethodToPhoenixRegistrationMethod(registrationEvent.getRegistrationMethod()))</span>
+<span class="fc" id="L226">                .registeredOn(formatter.format(registrationEvent.getRegisteredOn()))</span>
+<span class="fc" id="L227">                .build()).sorted(byRegistrationDate).collect(toList());</span>
+    }
+
+    private ImmutablePatientInfoResult mapToErrorResult(TaskResultStatus status, String responseMessage) {
+<span class="fc" id="L231">        return new ImmutablePatientInfoResult.Builder()</span>
+<span class="fc" id="L232">                .status(status)</span>
+<span class="fc" id="L233">                .maybeMessageAboutStatus(responseMessage)</span>
+<span class="fc" id="L234">                .build();</span>
+    }
+
+    private List&lt;OrgAndTeamSearchResult&gt; constructOrgsAndTeams(Person person) {
+<span class="fc" id="L238">        return person.getTeams().map(</span>
+                teamUsers -&gt; {
+<span class="fc" id="L240">                    var teamsAndOrgs = teamUsers.map(TeamUser::getTeamWithOrg);</span>
+<span class="fc" id="L241">                    var orgIdsToNames = teamsAndOrgs.distinctBy(t -&gt; t.getOrg().getId()).map(TeamWithOrg::getOrg).collect(Collectors.toMap(Org::getId, Org::getName));</span>
+<span class="fc" id="L242">                    return teamsAndOrgs.groupBy(teamWithOrg -&gt; teamWithOrg.getOrg().getId())</span>
+<span class="fc" id="L243">                            .map(tuple -&gt; {</span>
+<span class="fc" id="L244">                                var builder = new ImmutableOrgAndTeamSearchResult.Builder();</span>
+<span class="fc" id="L245">                                builder.orgName(orgIdsToNames.get(tuple._1));</span>
+<span class="fc" id="L246">                                builder.addAllTeams(tuple._2.map(TeamWithOrg::getName));</span>
+<span class="fc bfc" id="L247" title="All 2 branches covered.">                                builder.isRegisteringOrg(person.getSourceOrg().map(o -&gt; o.getId() == tuple._1).getOrElse(false));</span>
+<span class="fc" id="L248">                                return (OrgAndTeamSearchResult) builder.build();</span>
+                            })
+<span class="fc" id="L250">                            .collect(toList());</span>
+<span class="fc" id="L251">                }).getOrElse(Collections.emptyList());</span>
+    }
+
+    private List&lt;Either&lt;FindPatientError, Person&gt;&gt; findPerson(PatientInfoTaskInput input) {
+
+<span class="fc" id="L256">        var maybePersonIds = Match(input.type()).of(</span>
+<span class="fc" id="L257">                Case($(PatientInfoTaskInput.InputType.PRIVATE_ID), () -&gt; List.of(Long.parseLong(input.value()))),</span>
+<span class="fc" id="L258">                Case($(PatientInfoTaskInput.InputType.EMAIL), () -&gt; personService.findPersonIdByEmail(input.value())),</span>
+<span class="fc" id="L259">                Case($(PatientInfoTaskInput.InputType.NATIONAL_ID), () -&gt; personService.findPersonIdsByNationalId(getValidNationalId(input))));</span>
+
+<span class="fc bfc" id="L261" title="All 2 branches covered.">        if (maybePersonIds.isEmpty()) {</span>
+<span class="fc" id="L262">            return List.of(Either.left(new FindPatientError(NOT_FOUND, String.format(&quot;No patient ID was found for %s: [%s]&quot;, input.type(), input.value()))));</span>
+        }
+<span class="fc" id="L264">        return maybePersonIds</span>
+<span class="fc" id="L265">                .stream()</span>
+<span class="fc" id="L266">                .map(id -&gt; {</span>
+<span class="fc" id="L267">                    Optional&lt;Person&gt; maybePerson = personService.findOptionalPersonByIdWithTeamsAndAllLazies(id);</span>
+<span class="fc" id="L268">                    return maybePerson.map(Either::&lt;FindPatientError, Person&gt; right)</span>
+<span class="fc" id="L269">                            .orElseGet(() -&gt; Either.left(new FindPatientError(NOT_FOUND, &quot;No person found for id: &quot; + id)));</span>
+                })
+<span class="fc" id="L271">                .collect(toList());</span>
+
+    }
+
+    private ValidNationalId getValidNationalId(PatientInfoTaskInput input) {
+<span class="fc" id="L276">        return mapPhoenixNationalIdTypeToPhrNationalIdType(input.nationalIdType())</span>
+<span class="fc" id="L277">                .getValidNationalIdAndType(input.value())</span>
+<span class="fc" id="L278">                .orElseThrow(() -&gt; new RuntimeException(&quot;National ID is not valid!&quot;));</span>
+    }
+
+    private UserType mapPhrToPhoenixUserType(com.pkb.entities.enums.UserType phr, boolean hasAccessToOtherUsers) {
+
+<span class="fc" id="L283">        return Match(phr).of(</span>
+<span class="fc bfc" id="L284" title="All 2 branches covered.">                Case($(PATIENT), () -&gt; hasAccessToOtherUsers ? UserType.PATIENT_AND_CARER : UserType.PATIENT),</span>
+<span class="fc" id="L285">                Case($(REG_CLINICIAN), () -&gt; UserType.REG_CLINICIAN),</span>
+<span class="fc" id="L286">                Case($(INSTITUTE_ADMIN), () -&gt; UserType.INSTITUTE_ADMIN),</span>
+<span class="pc" id="L287">                Case($(ORG_COORD), () -&gt; UserType.ORG_COORD),</span>
+<span class="pc" id="L288">                Case($(PRIVACY_OFFICER), () -&gt; UserType.PRIVACY_OFFICER),</span>
+<span class="pc" id="L289">                Case($(TECH_SUPPORT), () -&gt; UserType.TECH_SUPPORT),</span>
+<span class="pc" id="L290">                Case($(EMPLOYEE), () -&gt; UserType.EMPLOYEE),</span>
+<span class="pc" id="L291">                Case($(SUPER_ADMIN), () -&gt; UserType.SUPER_ADMIN));</span>
+    }
+
+    private com.pkb.phoenix.shared.structures.response.UserStatus mapPhrToPhoenixPatientStatus(UserStatus phr) {
+<span class="fc" id="L295">        return Match(phr).of(</span>
+<span class="pc" id="L296">                Case($(NEW), () -&gt; com.pkb.phoenix.shared.structures.response.UserStatus.NEW),</span>
+<span class="pc" id="L297">                Case($(CREATED), () -&gt; com.pkb.phoenix.shared.structures.response.UserStatus.CREATED),</span>
+<span class="pc" id="L298">                Case($(INVITED), () -&gt; com.pkb.phoenix.shared.structures.response.UserStatus.INVITED),</span>
+<span class="fc" id="L299">                Case($(EMAIL_CONFIRMED), () -&gt; com.pkb.phoenix.shared.structures.response.UserStatus.EMAIL_CONFIRMED),</span>
+<span class="pc" id="L300">                Case($(ACTIVE), () -&gt; com.pkb.phoenix.shared.structures.response.UserStatus.ACTIVE),</span>
+<span class="pc" id="L301">                Case($(INACTIVE), () -&gt; com.pkb.phoenix.shared.structures.response.UserStatus.INACTIVE),</span>
+<span class="pc" id="L302">                Case($(NOCONTACT), () -&gt; com.pkb.phoenix.shared.structures.response.UserStatus.NOCONTACT),</span>
+<span class="pc" id="L303">                Case($(DEAD), () -&gt; com.pkb.phoenix.shared.structures.response.UserStatus.DEAD));</span>
+    }
+
+    private com.pkb.phoenix.shared.structures.response.RegistrationMethod mapPhrRegistrationMethodToPhoenixRegistrationMethod(RegistrationMethod phrRegistrationMethod) {
+<span class="fc" id="L307">        return Match(phrRegistrationMethod).of(</span>
+<span class="fc" id="L308">                Case($(SELF_REGISTRATION), () -&gt; com.pkb.phoenix.shared.structures.response.RegistrationMethod.SELF_REGISTRATION),</span>
+<span class="pc" id="L309">                Case($(EMAIL_LINK), () -&gt; com.pkb.phoenix.shared.structures.response.RegistrationMethod.EMAIL_LINK),</span>
+<span class="pc" id="L310">                Case($(TOKEN_INVITATION), () -&gt; com.pkb.phoenix.shared.structures.response.RegistrationMethod.TOKEN_INVITATION),</span>
+<span class="fc" id="L311">                Case($(NHS_LOGIN), () -&gt; com.pkb.phoenix.shared.structures.response.RegistrationMethod.NHS_LOGIN),</span>
+<span class="pc" id="L312">                Case($(UNKNOWN), () -&gt; com.pkb.phoenix.shared.structures.response.RegistrationMethod.UNKNOWN));</span>
+    }
+
+    @VisibleForTesting
+    NationalIdType mapPhoenixNationalIdTypeToPhrNationalIdType(SupportToolNationalIdType supportToolNationalIdType) {
+<span class="fc" id="L317">        var mappedNationalIdType = NID_TYPE_SELECTOR.get(supportToolNationalIdType);</span>
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">        if (mappedNationalIdType == null) {</span>
+<span class="nc" id="L319">            throw new RuntimeException(String.format(&quot;Supplied National ID type [%s] was not found!&quot;, supportToolNationalIdType.name()));</span>
+        }
+<span class="fc" id="L321">        return mappedNationalIdType;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

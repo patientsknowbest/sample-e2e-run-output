@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InboundForeignKeyReference.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.deletion.model</a> &gt; <span class="el_source">InboundForeignKeyReference.java</span></div><h1>InboundForeignKeyReference.java</h1><pre class="source lang-java linenums">package com.pkb.deletion.model;
+
+import com.pkb.deletion.model.errors.DeletionServiceError;
+import com.pkb.deletion.repository.DeleteOperationRepository;
+import io.vavr.control.Either;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+
+/**
+ * Represents an inbound foreign key reference to a parent table. So, for example,
+ * core.account has (among others) an inbound FK from menu_data.account_id. If we delete
+ * an account, we must find all the rows in menu_data which point to it and delete them
+ * as well.
+ * @param &lt;PK_TYPE&gt; The type of the primary key of the referring/dependent table
+ * @param &lt;FK_TYPE&gt; The type of the foreign key reference - which will be the same as
+ *                 the type of the primary key on the parent table that it points to. Note
+ *                 that in some special cases the type of the referring column may actually
+ *                 be different - such as when we store bigints in text columns. This is handled
+ *                 by getNonStandardDataType() below. The FK_TYPE will always match up to the PK_TYPE
+ *                 of the parent table to ensure type-safety in the model graph.
+ */
+public interface InboundForeignKeyReference&lt;PK_TYPE, FK_TYPE&gt; {
+
+    /**
+     * This is the table on which the foreign key column lives that points to the parent table.
+     */
+    DatabaseTable&lt;PK_TYPE&gt; getReferencingTable();
+
+    /**
+     * The names of the columns. For query efficiency, where there's more than one reference from one table to another
+     * (e.g. person_id and ref_person_id on personcontact) we list them together so dependent rows can all be selected
+     * together in one query.
+     */
+    List&lt;String&gt; getFkColumnNames();
+
+    /**
+     * We draw a distinction between a foreign key reference that implies ownership on the part of the parent,
+     * and one that is simply a reference. We have to track both because we can't violate the integrity of any
+     * FKs, but if we find that we're scheduled to delete a reference that isn't &quot;owned&quot; by any path through the
+     * graph, this is an error that blocks deletion. For example, there's a reference to account.id from
+     * person.defaultaccountid, and this is an &quot;ownership&quot; relation. If we delete the account, we should also be deleting
+     * the person it relates to. On the other hand, nationalid has a sourcepersonid column, which doesn't imply
+     * that the referenced person owns the relevant nationalid, just that, as a matter of audit history, they were
+     * responsible for creating it. If we try to delete the referenced person without deleting the national id record,
+     * we will break referential integrity in the database, but it's also not safe just to naively delete the national id
+     * record that might belong to another user who is not being deleted. Unless the nationalid is being deleted _anyway_
+     * as a result of following some other, owning FK reference in the same deletion batch, this is an error that should
+     * block deletion until we can decide how to fix this up.
+     */
+    boolean isOwning();
+
+    /**
+     * In some cases in our database we have &quot;foreign keys&quot; that reference columns with a different data type - most
+     * commonly because we're using a string column to store a bigint. It's infuriating but we have to deal with it.
+     * This is the type of the column on the referring table.
+     */
+    Optional&lt;Class&lt;?&gt;&gt; getNonStandardDataType();
+
+
+    default Either&lt;DeletionServiceError, Integer&gt; writeDependentDeletionOperations(DeleteOperation parentDelete, IdColumn&lt;FK_TYPE, ?&gt; referencedId, DeleteOperationRepository queryExecutor) {
+<span class="fc" id="L65">        DeleteOperation dependentDeleteOperation = parentDelete.spawnChild(getReferencingTable().getTableName(), isOwning());</span>
+<span class="fc" id="L66">        queryExecutor.persist(dependentDeleteOperation);</span>
+<span class="fc" id="L67">        return queryExecutor.runUpdateDeleteQuery(getIdWritingSql(parentDelete.getId(), parentDelete.getTableName(), referencedId, queryExecutor.getDeletionServiceSchema()), Map.of(&quot;operationId&quot;, dependentDeleteOperation.getId()))</span>
+<span class="fc" id="L68">                .flatMap(localCount -&gt; getReferencingTable().buildDependentDeletionGraph(dependentDeleteOperation, queryExecutor).map(descendantCount -&gt; localCount + descendantCount));</span>
+    }
+
+    default String getIdWritingSql(UUID parentOperationId, String parentTableName, IdColumn&lt;FK_TYPE, ?&gt; referencedId, String deletionServiceSchema) {
+<span class="fc" id="L72">        return  &quot;INSERT INTO &quot; + deletionServiceSchema + &quot;.delete_operation_id SELECT DISTINCT :operationId, primary_table.&quot; + getReferencingTable().getPkColumn().getName() +</span>
+<span class="fc" id="L73">                &quot; FROM &quot; + getReferencingTable().getTableName() + &quot; primary_table, &quot; + deletionServiceSchema + &quot;.delete_operation_id doi &quot;</span>
+<span class="fc" id="L74">                + referencedId.getIdJoinTableClause(parentTableName) +</span>
+                &quot; WHERE doi.operation_id = '&quot; + parentOperationId + &quot;' AND &quot; +
+<span class="fc" id="L76">                referencedId.buildFkReferenceWhereConditions(getFkColumnNames(), getNonStandardDataType()) +</span>
+<span class="fc" id="L77">                getAdditionalWhereConditions() + &quot;;&quot;;</span>
+    }
+
+<span class="fc" id="L80">    default String getAdditionalWhereConditions() { return &quot;&quot;; }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

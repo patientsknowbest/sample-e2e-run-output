@@ -1,0 +1,389 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QuestionnaireResourceService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir.questionnaire</a> &gt; <span class="el_source">QuestionnaireResourceService.java</span></div><h1>QuestionnaireResourceService.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir.questionnaire;
+
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import com.google.rpc.Code;
+import com.pkb.api.fhir.AbstractResourceService;
+import com.pkb.api.fhir.config.FhirApiProperties;
+import com.pkb.api.fhir.exception.ServerResponseExceptionMapper;
+import com.pkb.api.fhir.foundation.ReferenceMapper;
+import com.pkb.api.fhir.util.Issues;
+import com.pkb.authentication.AuthenticatedIdentity;
+import com.pkb.authentication.principal.user.AuthenticatedSystemUser;
+import com.pkb.authz.AuthorizationDataService;
+import com.pkb.authz.action.Action;
+import com.pkb.authz.context.Path;
+import com.pkb.authz.data.AuthorizationData;
+import com.pkb.authz.data.AuthorizationInputs;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.PubliclyIdentifiable;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.PractitionerDemographicsService;
+import com.pkb.domain.criteria.CriteriaResult;
+import com.pkb.domain.criteria.ImmutableCriteriaResult;
+import com.pkb.domain.person.PersonService;
+import com.pkb.domain.questionnaire.ImmutableQuestionnaireSearchCriteria;
+import com.pkb.domain.questionnaire.QuestionnaireRequestCriteria;
+import com.pkb.domain.questionnaire.QuestionnaireSearchCriteria;
+import com.pkb.domain.questionnaire.QuestionnaireService;
+import com.pkb.domain.repository.OrgRepository;
+import com.pkb.entities.enums.Route;
+import com.pkb.fhir.orchestration.QuestionnaireOrchestrationService;
+import com.pkb.fhir.orchestration.model.ImmutablePersonDetails;
+import com.pkb.fhir.orchestration.model.ModifiableQuestionnaireRequestUnit;
+import com.pkb.fhir.orchestration.model.PersonDetails;
+import com.pkb.fhir.orchestration.model.QuestionnaireRequestUnit;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireRequest;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireTeam;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.Map;
+import io.vavr.collection.Set;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.tuple.Pair;
+import org.hl7.fhir.dstu3.model.Identifier;
+import org.hl7.fhir.dstu3.model.OperationOutcome;
+import org.hl7.fhir.dstu3.model.Parameters;
+import org.hl7.fhir.dstu3.model.Questionnaire;
+import org.hl7.fhir.dstu3.model.ResourceType;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.VisibleForTesting;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.api.fhir.parameters.ParametersMapper.createComponent;
+import static com.pkb.api.fhir.parameters.ParametersMapper.createResource;
+import static com.pkb.api.fhir.util.Fhirs.internalErrorException;
+import static com.pkb.api.fhir.util.Fhirs.invalidRequestException;
+import static com.pkb.authz.ImmutableTargetMeta.targetMeta;
+import static com.pkb.authz.action.Action.READ;
+import static com.pkb.authz.context.Path.FHIR;
+import static com.pkb.authz.data.ImmutableAuthorizationInputs.inputs;
+import static com.pkb.domain.criteria.OperationOutcomeFactory.operationOutcome;
+import static com.pkb.fhir.orchestration.model.QuestionnaireRequestUnit.QuestionnaireRequestUnitFailure.PATIENT_INACCESSIBLE;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.API.None;
+import static io.vavr.API.Set;
+import static io.vavr.API.Some;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptySet;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.mapping;
+import static java.util.stream.Collectors.toSet;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueSeverity.ERROR;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueSeverity.WARNING;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueType.FORBIDDEN;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueType.INCOMPLETE;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueType.INVALID;
+
+public class QuestionnaireResourceService extends AbstractResourceService&lt;Questionnaire&gt; {
+
+    private final AuthorizationDataService authorizationDataService;
+    private final QuestionnaireMapper questionnaireMapper;
+    private final ReferenceMapper referenceMapper;
+    private final QuestionnaireService questionnaireService;
+    private final PractitionerDemographicsService practitionerDemographicsService;
+    private final PersonService personService;
+    private final FhirApiProperties fhirConfig;
+    private final DateTimeService dateTimeService;
+    private final OrgRepository orgRepository;
+
+    private final QuestionnaireOrchestrationService questionnaireOrchestrationService;
+
+    public QuestionnaireResourceService(@NotNull AuthorizationDataService authorizationDataService,
+                                        @NotNull QuestionnaireMapper questionnaireMapper,
+                                        @NotNull ReferenceMapper referenceMapper,
+                                        QuestionnaireService questionnaireService,
+                                        PractitionerDemographicsService practitionerDemographicsService,
+                                        PersonService personService,
+                                        @NotNull ServerResponseExceptionMapper exceptionMapper,
+                                        FhirApiProperties fhirConfig,
+                                        DateTimeService dateTimeService,
+                                        OrgRepository orgRepository,
+                                        QuestionnaireOrchestrationService questionnaireOrchestrationService) {
+<span class="fc" id="L113">        super(exceptionMapper);</span>
+<span class="fc" id="L114">        this.authorizationDataService = authorizationDataService;</span>
+<span class="fc" id="L115">        this.questionnaireMapper = questionnaireMapper;</span>
+<span class="fc" id="L116">        this.referenceMapper = referenceMapper;</span>
+<span class="fc" id="L117">        this.questionnaireService = questionnaireService;</span>
+<span class="fc" id="L118">        this.practitionerDemographicsService = practitionerDemographicsService;</span>
+<span class="fc" id="L119">        this.personService = personService;</span>
+<span class="fc" id="L120">        this.fhirConfig = fhirConfig;</span>
+<span class="fc" id="L121">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L122">        this.orgRepository = orgRepository;</span>
+<span class="fc" id="L123">        this.questionnaireOrchestrationService = questionnaireOrchestrationService;</span>
+<span class="fc" id="L124">    }</span>
+
+    public @NotNull Either&lt;BaseServerResponseException, CriteriaResult&lt;Questionnaire&gt;&gt; findQuestionnaires(AuthenticatedIdentity authenticatedIdentity) {
+<span class="fc" id="L127">        AuthorizationInputs authorizationInputs = inputs()</span>
+<span class="fc" id="L128">                .authenticatedIdentity(authenticatedIdentity)</span>
+<span class="fc" id="L129">                .action(Action.SEARCH)</span>
+<span class="fc" id="L130">                .addTargets(targetMeta(com.pkb.questionnaireservice.modelv2.Questionnaire.class, Set(), None(), false))</span>
+<span class="fc" id="L131">                .path(FHIR)</span>
+<span class="fc" id="L132">                .build();</span>
+<span class="fc" id="L133">        AuthorizationData authData = authorizationDataService.fetch(authorizationInputs);</span>
+<span class="fc" id="L134">        return questionnaireService.getQuestionnaires(authData, buildQuestionnaireCriteria())</span>
+<span class="pc" id="L135">                .bimap(e -&gt; exceptionToFhir(e, Questionnaire.class),</span>
+                        this::mapToCriteriaResult);
+    }
+
+    @NotNull
+    private ImmutableCriteriaResult&lt;Questionnaire&gt; mapToCriteriaResult(
+            CriteriaResult&lt;com.pkb.questionnaireservice.modelv2.Questionnaire&gt; qs) {
+<span class="fc" id="L142">        return ImmutableCriteriaResult.&lt;Questionnaire&gt; builder().page(qs.getPage().map(questionnaireMapper::toQuestionnaire))</span>
+<span class="fc" id="L143">                .total(qs.getTotal()).build();</span>
+    }
+
+    private QuestionnaireSearchCriteria buildQuestionnaireCriteria() {
+<span class="fc" id="L147">        return ImmutableQuestionnaireSearchCriteria.builder().pageSize(fhirConfig.getQuestionnaireMaxNumberOfResources()).build();</span>
+    }
+
+    public @NotNull Either&lt;BaseServerResponseException, Questionnaire&gt; getQuestionnaire(AuthenticatedIdentity authenticatedIdentity, @NotNull UUID publicId) {
+<span class="fc" id="L151">        return getAuthorizedQuestionnaireTeam(authenticatedIdentity, publicId)</span>
+<span class="fc" id="L152">                .map(QuestionnaireTeam::getQuestionnaire)</span>
+<span class="fc" id="L153">                .map(questionnaireMapper::toQuestionnaire);</span>
+    }
+    
+    private @NotNull Either&lt;BaseServerResponseException, QuestionnaireTeam&gt; getAuthorizedQuestionnaireTeam(AuthenticatedIdentity authenticatedIdentity, @NotNull UUID publicId) {
+<span class="fc" id="L157">        AuthorizationInputs authorizationInputs = inputs()</span>
+<span class="fc" id="L158">                .authenticatedIdentity(authenticatedIdentity)</span>
+<span class="fc" id="L159">                .action(Action.READ)</span>
+<span class="fc" id="L160">                .addTargets(targetMeta(com.pkb.questionnaireservice.modelv2.Questionnaire.class, Set(publicId), None(), false))</span>
+<span class="fc" id="L161">                .path(FHIR)</span>
+<span class="fc" id="L162">                .build();</span>
+<span class="fc" id="L163">        AuthorizationData authData = authorizationDataService.fetch(authorizationInputs);</span>
+<span class="fc" id="L164">        return questionnaireService.getQuestionnaireTeam(authData, publicId)</span>
+<span class="fc" id="L165">                .mapLeft(ex -&gt; exceptionToFhir(ex, Questionnaire.class));</span>
+    }
+
+    public Either&lt;BaseServerResponseException, Parameters&gt; sendQuestionnaireRequests(@NotNull QuestionnaireRequestCriteria requestCriteria) {
+<span class="fc" id="L169">        return buildQuestionnaireRequestUnits(requestCriteria)</span>
+<span class="fc" id="L170">                .map(questionnaireOrchestrationService::sendQuestionnaireRequests)</span>
+<span class="fc" id="L171">                .flatMap(this::buildResultParameters);</span>
+    }
+
+    Either&lt;BaseServerResponseException, Stream&lt;List&lt;ModifiableQuestionnaireRequestUnit&gt;&gt;&gt; buildQuestionnaireRequestUnits(@NotNull QuestionnaireRequestCriteria requestCriteria) {
+<span class="fc" id="L175">        return getAuthorizedQuestionnaireTeam(requestCriteria.authenticatedIdentity(), requestCriteria.questionnaireId())</span>
+<span class="fc" id="L176">                .flatMap(questionnaireTeam -&gt; {</span>
+<span class="fc" id="L177">                    AuthenticatedSystemUser systemUser = requestCriteria.requireAuthenticatedSystemUser();                    </span>
+<span class="fc" id="L178">                    var mapIdsByResourceType = requestCriteria.targets().stream()</span>
+<span class="fc" id="L179">                            .collect(groupingBy(Pair::getLeft, mapping(Pair::getRight, toSet())));</span>
+<span class="fc" id="L180">                    Set&lt;UUID&gt; targetPatientPublicIds = HashSet.ofAll(mapIdsByResourceType.getOrDefault(ResourceType.Patient, emptySet()));</span>
+<span class="fc" id="L181">                    Set&lt;UUID&gt; targetTeamPublicIds = HashSet.ofAll(mapIdsByResourceType.getOrDefault(ResourceType.Organization, emptySet()));</span>
+
+<span class="fc bfc" id="L183" title="All 2 branches covered.">                    if (targetTeamPublicIds.size() &gt; 1) {</span>
+<span class="fc" id="L184">                        return left(invalidRequestException(Issues.errorFrom(&quot;Several organizations were sent as target parameters, while only one can be accepted&quot;, INVALID)));</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">                    } else if (targetTeamPublicIds.size() == 1) {</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">                        if (!targetPatientPublicIds.isEmpty()) {</span>
+<span class="fc" id="L187">                            return left(invalidRequestException(Issues.errorFrom(&quot;Several target parameters were sent, they all should be references to patients&quot;, INVALID)));</span>
+                        }
+
+<span class="fc bfc" id="L190" title="All 2 branches covered.">                        if (!targetTeamPublicIds.get().equals(questionnaireTeam.getTeamId())) {</span>
+<span class="fc" id="L191">                            return left(invalidRequestException(Issues.errorFrom(&quot;Questionnaire &quot; + questionnaireTeam.getQuestionnaire().getId().toString()</span>
+<span class="fc" id="L192">                                    + &quot; does not belong to team &quot; + targetTeamPublicIds.get(), INVALID)));</span>
+                        }
+                        
+<span class="fc bfc" id="L195" title="All 2 branches covered.">                        if (requestCriteria.additionalIdentifier().isPresent()) {</span>
+<span class="fc" id="L196">                            return left(invalidRequestException(Issues.errorFrom(&quot;Cannot accept additional identifier for a request targeting a whole team&quot;, INVALID)));</span>
+                        }
+                        
+<span class="fc" id="L199">                        return buildQuestionnaireRequestUnitsForTeam(requestCriteria, systemUser, questionnaireTeam, targetTeamPublicIds.get());</span>
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">                    } else if (targetPatientPublicIds.isEmpty()) {</span>
+<span class="nc" id="L201">                        return left(invalidRequestException(Issues.errorFrom(&quot;Missing parameter target&quot;, INVALID)));</span>
+                    }
+
+<span class="fc bfc" id="L204" title="All 4 branches covered.">                    if (targetPatientPublicIds.size() &gt; 1 &amp;&amp; requestCriteria.additionalIdentifier().isPresent()) {</span>
+<span class="fc" id="L205">                        return left(invalidRequestException(Issues.errorFrom(&quot;Cannot accept additional identifier for more than one Procedure Request creation&quot;, INVALID)));</span>
+                    }
+<span class="fc" id="L207">                    return buildQuestionnaireRequestUnitsForPatients(requestCriteria, systemUser, questionnaireTeam, targetPatientPublicIds);</span>
+                });
+    }
+
+    private Either&lt;BaseServerResponseException, Stream&lt;List&lt;ModifiableQuestionnaireRequestUnit&gt;&gt;&gt; buildQuestionnaireRequestUnitsForTeam(QuestionnaireRequestCriteria requestCriteria,
+                                                                                                                                        AuthenticatedSystemUser systemUser,
+                                                                                                                                        QuestionnaireTeam questionnaireTeam,
+                                                                                                                                        UUID teamId) {
+<span class="fc" id="L215">        return buildQuestionnaireRequestUnitsForPatients(requestCriteria, systemUser, questionnaireTeam,</span>
+<span class="fc" id="L216">                personService.findAllRegisteredPatientsPublicIdsFromTeamPublicId(teamId));</span>
+    }
+
+    private Either&lt;BaseServerResponseException, Stream&lt;List&lt;ModifiableQuestionnaireRequestUnit&gt;&gt;&gt; buildQuestionnaireRequestUnitsForPatients(QuestionnaireRequestCriteria requestCriteria,
+                                                                                                                                            AuthenticatedSystemUser systemUser,
+                                                                                                                                            QuestionnaireTeam questionnaireTeam,
+                                                                                                                                            Set&lt;UUID&gt; targetPatientPublicIds) {
+<span class="fc bfc" id="L223" title="All 2 branches covered.">        if (questionnaireTeam.getHidden()) {</span>
+<span class="fc" id="L224">            return left(invalidRequestException(Issues.errorFrom(String.format(&quot;Questionnaire with id [%s] is hidden&quot;, questionnaireTeam.getQuestionnaire().getId()), INVALID)));</span>
+        }
+
+<span class="fc" id="L227">        AuthorizationInputs clinicianAuthorizationInputs = inputs()</span>
+<span class="fc" id="L228">                .authenticatedIdentity(requestCriteria.authenticatedIdentity())</span>
+<span class="fc" id="L229">                .action(READ)</span>
+<span class="fc" id="L230">                .addTargets(targetMeta(Person.class, Set(requestCriteria.requestorId()), None(), true))</span>
+<span class="fc" id="L231">                .path(FHIR)</span>
+<span class="fc" id="L232">                .build();</span>
+<span class="fc" id="L233">        AuthorizationData clinicianAuthData = authorizationDataService.fetch(clinicianAuthorizationInputs);</span>
+<span class="fc" id="L234">        BaseServerResponseException invalidRequest = invalidRequestException(Issues.errorFrom(&quot;Questionnaire &quot; + requestCriteria.questionnaireId() + </span>
+<span class="fc" id="L235">                &quot; does not belong to practitioner &quot; + requestCriteria.requestorId() + &quot; team&quot;, INVALID));</span>
+<span class="fc" id="L236">        return practitionerDemographicsService.findActivePractitionerDemographicsForSystemUser(clinicianAuthData, requestCriteria.requestorId())</span>
+<span class="fc" id="L237">                .mapLeft($ -&gt; invalidRequestException(Issues.errorFrom(&quot;Could not find practitioner &quot; + requestCriteria.requestorId())))</span>
+<span class="fc" id="L238">                .flatMap(clinicianDemographics -&gt; personService.findClinicianTeamId(clinicianDemographics.getId())</span>
+<span class="fc" id="L239">                        .toEither(invalidRequest)</span>
+<span class="fc" id="L240">                        .flatMap(clinicianTeamId -&gt; {</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">                            if (!clinicianTeamId.equals(questionnaireTeam.getTeamId())) {</span>
+<span class="fc" id="L242">                                return left(invalidRequest);</span>
+                            }
+
+<span class="fc" id="L245">                            PersonDetails clinicianDetails = ImmutablePersonDetails.builder()</span>
+<span class="fc" id="L246">                                    .id(requestCriteria.requestorId())</span>
+<span class="fc" id="L247">                                    .privateId(clinicianDemographics.getId())</span>
+<span class="fc" id="L248">                                    .title(clinicianDemographics.getTitle())</span>
+<span class="fc" id="L249">                                    .firstname(clinicianDemographics.getFirstName())</span>
+<span class="fc" id="L250">                                    .lastname(clinicianDemographics.getLastName())</span>
+<span class="fc" id="L251">                                    .languageCode(Option.none()).build();</span>
+
+<span class="fc" id="L253">                            String orgName = orgRepository.findOptionalNameByPublicId(systemUser.getOrgPublicId()).get();</span>
+
+<span class="fc" id="L255">                            return right(targetPatientPublicIds.toStream()</span>
+<span class="fc" id="L256">                                    .map(patientId -&gt; ModifiableQuestionnaireRequestUnit.create()</span>
+<span class="fc" id="L257">                                            .setPatientId(patientId)</span>
+<span class="fc" id="L258">                                            .setSourceOrgName(orgName)</span>
+<span class="fc" id="L259">                                            .setSourceOrgId(systemUser.getOrgPublicId())</span>
+<span class="fc" id="L260">                                            .setSourceTeamId(clinicianTeamId)</span>
+<span class="fc" id="L261">                                            .setClinicianDetails(clinicianDetails))</span>
+<span class="fc" id="L262">                                    .grouped(fhirConfig.getQuestionnaireRequestCreationBatchSize())</span>
+<span class="fc" id="L263">                                    .map(questionnaireRequestUnitList -&gt; addPatientDetailsAndCreateQuestionnaireRequest(requestCriteria.authenticatedIdentity(),</span>
+                                            clinicianTeamId,
+                                            questionnaireTeam,
+<span class="fc" id="L266">                                            questionnaireRequestUnitList.toJavaList(),</span>
+<span class="fc" id="L267">                                            requestCriteria.additionalIdentifier()))</span>
+<span class="fc" id="L268">                                    .toJavaStream());</span>
+                        }));
+    }
+    
+    private List&lt;ModifiableQuestionnaireRequestUnit&gt; addPatientDetailsAndCreateQuestionnaireRequest(AuthenticatedIdentity authenticatedIdentity,
+                                                                                                    UUID teamId,
+                                                                                                    QuestionnaireTeam questionnaireTeam,
+                                                                                                    List&lt;ModifiableQuestionnaireRequestUnit&gt; questionnaireRequestUnits,
+                                                                                                    Optional&lt;Identifier&gt; additionalIdentifier){
+<span class="fc" id="L277">        io.vavr.collection.List&lt;UUID&gt; targetPatientPublicIds = io.vavr.collection.List.ofAll(questionnaireRequestUnits.stream().map(QuestionnaireRequestUnit::patientId));</span>
+        
+<span class="fc" id="L279">        AuthorizationInputs patientsIdAuthInputs = inputs()</span>
+<span class="fc" id="L280">                .authenticatedIdentity(authenticatedIdentity)</span>
+<span class="fc" id="L281">                .action(Action.SEARCH)</span>
+<span class="fc" id="L282">                .targets(targetPatientPublicIds.map(id -&gt; targetMeta(Patient.class, Set(id), Some(id), true)))</span>
+<span class="fc" id="L283">                .path(Path.FHIR)</span>
+<span class="fc" id="L284">                .build();</span>
+
+<span class="fc" id="L286">        AuthorizationData patientAuthData = authorizationDataService.fetch(patientsIdAuthInputs);</span>
+
+<span class="fc" id="L288">        Map&lt;UUID, Person&gt; patientMap = personService.getRegisteredPatientsByPublicIdAndTeamId(patientAuthData, targetPatientPublicIds.toSet(), teamId)</span>
+<span class="fc" id="L289">                .filter(Either::isRight).map(Either::get)</span>
+<span class="fc" id="L290">                .toMap(PubliclyIdentifiable::getPublicId, identity());</span>
+        
+<span class="fc" id="L292">        return questionnaireRequestUnits.stream().map(</span>
+                questionnaireRequestUnit -&gt; {
+<span class="fc" id="L294">                    UUID patientId = questionnaireRequestUnit.patientId();</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">                    if (patientMap.containsKey(patientId)) {</span>
+<span class="fc" id="L296">                        Person patient = patientMap.get(patientId).get();</span>
+<span class="fc" id="L297">                        PersonDetails patientDetails = ImmutablePersonDetails.builder()</span>
+<span class="fc" id="L298">                                .id(patient.getPublicId())</span>
+<span class="fc" id="L299">                                .privateId(patient.getId())</span>
+<span class="fc" id="L300">                                .title(patient.demographics().getTitle())</span>
+<span class="fc" id="L301">                                .firstname(patient.demographics().getFirstName())</span>
+<span class="fc" id="L302">                                .lastname(patient.demographics().getLastName())</span>
+<span class="fc" id="L303">                                .languageCode(patient.getLanguageCode()).build();</span>
+                        
+<span class="fc" id="L305">                        QuestionnaireRequest request = questionnaireTeam.getQuestionnaire().createRequest(dateTimeService.now(),</span>
+<span class="fc" id="L306">                                questionnaireRequestUnit.clinicianDetails().id(),</span>
+                                teamId,
+                                patientId,
+                                Route.FHIR_API,
+<span class="fc" id="L310">                                additionalIdentifier.map(id -&gt; List.of(new kotlin.Pair&lt;&gt;(id.getSystem(), id.getValue()))).orElse(emptyList()));</span>
+                        
+<span class="fc" id="L312">                        return questionnaireRequestUnit.setPatientDetails(patientDetails)</span>
+<span class="fc" id="L313">                                        .setRequest(request);</span>
+                    }
+<span class="fc" id="L315">                    return questionnaireRequestUnit.setFailure(PATIENT_INACCESSIBLE);</span>
+<span class="fc" id="L316">                }).collect(Collectors.toList());</span>
+    }
+
+    @VisibleForTesting
+    Either&lt;BaseServerResponseException, Parameters&gt; buildResultParameters(List&lt;ModifiableQuestionnaireRequestUnit&gt; requestUnits) {
+        
+<span class="fc" id="L322">        Parameters parameters = new Parameters();</span>
+<span class="fc" id="L323">        OperationOutcome outcome = operationOutcome();</span>
+        // this condition is true if any questionnaire request is actually posted
+        // or if there was one valid procedure request (the request is set) but there was an error posting it to 
+        // the database (hasFailure)
+<span class="fc" id="L327">        requestUnits.forEach(requestResult -&gt; {</span>
+<span class="fc bfc" id="L328" title="All 2 branches covered.">            if (requestResult.failureIsSet()) {</span>
+                // something went wrong: the questionnaire request did not get posted
+                // either there was an error posting the request within the questionnaireService (unlikely to happen)
+                // or we can't access the patient and didn't even create the request
+<span class="pc bpc" id="L332" title="3 of 4 branches missed.">                if (requestResult.requestIsSet() &amp;&amp; requestResult.questionnaireExceptionIsSet()) {</span>
+<span class="nc" id="L333">                    outcome.addIssue(new OperationOutcome.OperationOutcomeIssueComponent().setSeverity(ERROR)</span>
+<span class="nc" id="L334">                            .setCode(INCOMPLETE)</span>
+<span class="nc" id="L335">                            .setDiagnostics(&quot;Unable to create request for patient &quot; + requestResult.patientId().toString() +</span>
+<span class="nc" id="L336">                                    &quot;; cause: &quot; + requestResult.questionnaireException().getMessage()));</span>
+                } else {
+                    // we didn't even create the request
+                    // the patient is ignored either because it is not part of the questionnaire team (so no access to the questionnaire)
+                    // or because the org does not have access to the patient, so necessarily they can't access the questionnaire either
+<span class="fc" id="L341">                    outcome.addIssue(</span>
+<span class="fc" id="L342">                            new OperationOutcome.OperationOutcomeIssueComponent().setSeverity(WARNING)</span>
+<span class="fc" id="L343">                                    .setCode(FORBIDDEN)</span>
+<span class="fc" id="L344">                                    .setDiagnostics(&quot;Request to patient &quot; + requestResult.patientId() + &quot; was not created; &quot; +</span>
+                                            &quot;patient cannot access the requested Questionnaire&quot;));
+                }
+            } else {
+                // the request was posted succesfully
+<span class="fc" id="L349">                var requestId = requestResult.request().getId();</span>
+<span class="fc" id="L350">                parameters.addParameter(</span>
+<span class="fc" id="L351">                        createComponent(&quot;request&quot;,</span>
+<span class="fc" id="L352">                                referenceMapper.toReference(ResourceType.ProcedureRequest, requestId)));</span>
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">                if (requestResult.messageExceptionIsSet()) {</span>
+<span class="nc" id="L354">                    outcome.addIssue(new OperationOutcome.OperationOutcomeIssueComponent().setSeverity(ERROR)</span>
+<span class="nc" id="L355">                            .setCode(matchGrpcCodeToFHIRCode(Code.forNumber(requestResult.messageException().getCode())))</span>
+<span class="nc" id="L356">                            .setDiagnostics(&quot;Messages for ProcedureRequest &quot; + requestId</span>
+<span class="nc" id="L357">                                    + &quot; failed to get sent; cause: &quot; + requestResult.messageException().getMessage()));</span>
+                }
+
+<span class="fc bfc" id="L360" title="All 2 branches covered.">                if (requestResult.emailExceptionIsSet()) {</span>
+<span class="fc" id="L361">                    outcome.addIssue(new OperationOutcome.OperationOutcomeIssueComponent().setSeverity(ERROR)</span>
+<span class="fc" id="L362">                            .setCode(matchGrpcCodeToFHIRCode(Code.forNumber(requestResult.emailException().getCode())))</span>
+<span class="fc" id="L363">                            .setDiagnostics(&quot;Email for ProcedureRequest &quot; + requestId</span>
+<span class="fc" id="L364">                                    + &quot; failed to get sent; cause: &quot; + requestResult.emailException().getMessage()));</span>
+                }
+            }
+<span class="fc" id="L367">        });</span>
+
+<span class="fc bfc" id="L369" title="All 2 branches covered.">        if (!parameters.hasParameter()) {</span>
+<span class="pc bpc" id="L370" title="2 of 4 branches missed.">            return outcome.getIssue().stream().anyMatch(issue -&gt; issue.getCode() == INCOMPLETE) ?</span>
+<span class="nc" id="L371">                    left(internalErrorException(Issues.of(outcome.getIssue()))) :</span>
+<span class="fc" id="L372">                    left(invalidRequestException(Issues.errorFrom(&quot;No target patient can access the requested Questionnaire&quot;, INVALID)));</span>
+        }
+
+<span class="fc bfc" id="L375" title="All 2 branches covered.">        if (!outcome.getIssue().isEmpty()) {</span>
+<span class="fc" id="L376">            parameters.addParameter(createResource(&quot;outcome&quot;, outcome));</span>
+        }
+<span class="fc" id="L378">        return right(parameters);</span>
+    }
+    
+    private OperationOutcome.IssueType matchGrpcCodeToFHIRCode(Code code){
+<span class="fc" id="L382">        return Match(code).of(</span>
+<span class="fc" id="L383">                Case($(Code.NOT_FOUND), OperationOutcome.IssueType.NOTFOUND),</span>
+<span class="fc" id="L384">                Case($(Code.INVALID_ARGUMENT), OperationOutcome.IssueType.INVALID),</span>
+<span class="fc" id="L385">                Case($(Code.UNKNOWN), OperationOutcome.IssueType.UNKNOWN),</span>
+<span class="fc" id="L386">                Case($(), OperationOutcome.IssueType.EXCEPTION));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

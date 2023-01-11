@@ -1,0 +1,407 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LoginCheckAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action</a> &gt; <span class="el_source">LoginCheckAction.java</span></div><h1>LoginCheckAction.java</h1><pre class="source lang-java linenums">package com.pkb.action;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
+import com.opensymphony.xwork2.Action;
+import com.opensymphony.xwork2.ActionSupport;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.servlets.filter.SessionCheckFilter;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.CookieUtil;
+import com.pkb.util.CustomLoginSkinTypes;
+import com.pkb.util.LoggedInUserUtil;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.struts2.interceptor.ServletRequestAware;
+import org.apache.struts2.interceptor.ServletResponseAware;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpHeaders;
+import org.springframework.security.web.savedrequest.DefaultSavedRequest;
+import org.springframework.security.web.savedrequest.SavedRequest;
+
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.lang.invoke.MethodHandles;
+import java.net.URLEncoder;
+import java.time.Duration;
+import java.util.List;
+
+import static com.pkb.datamodel.ImmutableDisclosingEmail.disclosingEmail;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.struts2.ServletActionContext.getRequest;
+
+/**
+ * User visits bare URL or login page -- redirect to dashboard if they are already signed in
+ *
+ * @author rwhelan
+ */
+<span class="fc" id="L49">public class LoginCheckAction</span>
+        extends ActionSupport
+        implements ServletRequestAware, ServletResponseAware, NhsLoginResource {
+
+<span class="fc" id="L53">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final long serialVersionUID = -1036024928708542380L;
+
+    private static final String MSG_AUTH = &quot;auth&quot;;
+    private static final String MSG_INACTIVE_ACCOUNT = &quot;inactive&quot;;
+    private static final String MSG_TOO_MANY_LOGIN_ATTEMPTS = &quot;tooManyLoginAttempts&quot;;
+    private static final String MSG_INVALID_TOKEN = &quot;invalidToken&quot;;
+    private static final String MSG_REG_INCOMPLETE = &quot;regIncomplete&quot;;
+    private static final String MSG_REG_COMPLETE = &quot;regComplete&quot;;
+    private static final String MSG_LOGGED_OUT = &quot;loggedOut&quot;;
+    private static final String MSG_RESET_IN_PROGRESS = &quot;resetInProgress&quot;;
+    private static final String MSG_FROZEN_BY_TEAM = &quot;frozenByTeam&quot;;
+    private static final String MSG_CONTACT_TEAM_FOR_ACCESS = &quot;contactTeamForAccess&quot;;
+
+    private static final String MSG_SESSION_TIMEOUT = &quot;timeout&quot;;
+
+    public static final String PKB = &quot;pkb&quot;;
+    public static final String PKB_SSO = &quot;pkbSSO&quot;;
+
+    /**
+     * for pre-populating the email address from email links
+     */
+    private String e;
+
+    private String j_username;
+
+    private String msg;
+
+    // For specifying where an unregistered user will register (usu null)
+    private String teamCode;
+
+    //for specifying a team's login page to use (ie specific logo, name)
+    private String team;
+
+    //for login.jsp:
+    private String teamLogo;
+    private String teamName;
+
+    // false if the browser has recently been used for an SSO-login (e.g. EMIS). SSO users
+    // may only authenticate via their SSO integration
+<span class="fc" id="L94">    private boolean restrictNormalLogin = false;</span>
+<span class="fc" id="L95">    private boolean displayCookiesBlockedWarning = false;</span>
+
+    private UserManager userManager;
+    private TeamManager teamManager;
+    private LoggedInUserUtil loggedInUserUtil;
+    private HttpServletRequest servletRequest;
+    private HttpServletResponse servletResponse;
+
+    @Autowired
+    protected PhrConfig config;
+
+    @Override
+    public String execute() {
+<span class="fc" id="L108">        LOGGER.trace(&quot;Entering login check action&quot;);</span>
+
+        // default: show login page
+<span class="fc" id="L111">        String result = getLoginResult();</span>
+
+        try {
+            // if user is signed in, redirect to home page (no message needed)
+<span class="fc" id="L115">            String loggedInResult = loggedInUserUtil.getLoggedInUserHomeResult().orElse(null);</span>
+
+<span class="fc" id="L117">            restrictNormalLogin = detectRestrictionOnNormalLogin();</span>
+
+<span class="pc bpc" id="L119" title="1 of 4 branches missed.">            if ((team != null) &amp;&amp; !team.isEmpty()) {</span>
+<span class="fc" id="L120">                Team welcomeTeam = teamManager.getTeamByCode(team);</span>
+<span class="fc bfc" id="L121" title="All 2 branches covered.">                if (welcomeTeam != null) {</span>
+<span class="fc" id="L122">                    teamLogo = welcomeTeam.getLogoFileName();</span>
+<span class="fc" id="L123">                    teamName = welcomeTeam.getName();</span>
+                }
+            }
+
+<span class="fc bfc" id="L127" title="All 2 branches covered.">            if (loggedInResult != null) {</span>
+<span class="fc" id="L128">                result = loggedInResult;</span>
+            } else {
+                // showing the login page
+
+                // See if there is a consultTeamId in the parameters -
+                // if present, login.jsp will direct people without accounts
+                // to sign-up page for the specified institute
+<span class="fc" id="L135">                String consultTeamId = getSavedConsultTeamIdRequestParam();</span>
+<span class="pc bpc" id="L136" title="3 of 4 branches missed.">                if (!StringUtils.isEmpty(consultTeamId) &amp;&amp; StringUtils.isNumeric(consultTeamId)) {</span>
+<span class="nc" id="L137">                    Long teamId = Long.parseLong(consultTeamId);</span>
+<span class="nc" id="L138">                    Team team = teamManager.getTeam(teamId);</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                    if (team != null) {</span>
+<span class="nc" id="L140">                        teamCode = team.getCode();</span>
+                    }
+                }
+
+                // pre-populate the email address, if that was passed in
+                // ...if not found directly, check the wrapped request
+                // (Spring hides the original, to redirect after auth)
+<span class="fc bfc" id="L147" title="All 2 branches covered.">                if (StringUtils.isBlank(e)) {</span>
+<span class="fc" id="L148">                    e = getSavedEmailRequestParam();</span>
+                }
+<span class="fc bfc" id="L150" title="All 2 branches covered.">                if (StringUtils.isNotBlank(e)) {</span>
+<span class="fc" id="L151">                    j_username = e;</span>
+
+                    // If the person has not yet completed registration, tell them to look
+                    // for their original invite. We cannot redirect them to the registration
+                    // page because we do not have the temp password
+<span class="fc" id="L156">                    List&lt;PKBPerson&gt; persons = userManager.getPKBPersonByConfirmedOrPrimaryEmail(disclosingEmail(j_username));</span>
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">                    if (!persons.isEmpty()) {</span>
+<span class="fc" id="L158">                        boolean atLeastOneAccountConfirmed = false;</span>
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">                        for (PKBPerson person : persons) {</span>
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">                            if (person.getStatus() != UserStatus.CREATED) {</span>
+<span class="fc" id="L161">                                atLeastOneAccountConfirmed = true;</span>
+<span class="fc" id="L162">                                break;</span>
+                            }
+<span class="nc" id="L164">                        }</span>
+
+<span class="pc bpc" id="L166" title="1 of 2 branches missed.">                        if (!atLeastOneAccountConfirmed) {</span>
+<span class="nc" id="L167">                            addActionError(getText(&quot;loginCheckAction.err.not_registered&quot;));</span>
+                        }
+                    }
+
+                    // if the person is null... just populate the username anyway.
+                    // we don't want to reveal what usernames are valid and which are not, here.
+                }
+
+                // show any errors (put into request by spring;
+                // see SpringSecurityBeansConfig.RefererAwareExceptionMappingAuthenticationFailureHandler
+<span class="fc bfc" id="L177" title="All 2 branches covered.">                if (MSG_AUTH.equals(msg)) {</span>
+<span class="fc" id="L178">                    addActionError(getText(&quot;loginCheckAction.err.invalid_username_or_password&quot;));</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">                } else if (MSG_TOO_MANY_LOGIN_ATTEMPTS.equals(msg)) {</span>
+<span class="fc" id="L180">                    addActionError(getText(&quot;loginCheckAction.err.too_many_login_attempts&quot;));</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">                } else if (MSG_INVALID_TOKEN.equals(msg)) {</span>
+<span class="fc" id="L182">                    addActionError(getText(&quot;loginCheckAction.err.invalid_token&quot;));</span>
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">                } else if (MSG_INACTIVE_ACCOUNT.equals(msg)) {</span>
+<span class="nc" id="L184">                    addActionError(getText(&quot;loginCheckAction.err.account_inactive&quot;));</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">                } else if (MSG_REG_INCOMPLETE.equals(msg)) {</span>
+<span class="nc" id="L186">                    addActionError(getText(&quot;loginCheckAction.err.not_completed_registration&quot;));</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">                } else if (MSG_LOGGED_OUT.equals(msg)) {</span>
+<span class="fc" id="L188">                    addActionMessage(getText(&quot;loginCheckAction.txt.logged_out_successfully&quot;));</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">                } else if (MSG_RESET_IN_PROGRESS.equals(msg)) {</span>
+<span class="nc" id="L190">                    addActionMessage(getText(&quot;loginCheckAction.txt.please_check_email&quot;)); // TODO</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">                } else if (MSG_CONTACT_TEAM_FOR_ACCESS.equals(msg)) {</span>
+<span class="fc" id="L192">                    addActionError(getText(&quot;loginCheckAction.err.contact_team_for_access&quot;));</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">                } else if (MSG_FROZEN_BY_TEAM.equals(msg)) {</span>
+                    // can we figure out what team froze them?
+<span class="nc" id="L195">                    Team freezingTeam = null;</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">                    if (StringUtils.isNotBlank(j_username)) {</span>
+<span class="nc" id="L197">                        List&lt;PKBPerson&gt; persons = userManager.getPKBPersonByConfirmedOrPrimaryEmail(disclosingEmail(j_username));</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                        if (!persons.isEmpty()) {</span>
+<span class="nc" id="L199">                            Long teamId = persons.get(0).getFrozenByTeamId();</span>
+<span class="nc" id="L200">                            freezingTeam = teamManager.getTeam(teamId);</span>
+                        }
+                    }
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                    if (freezingTeam != null) {</span>
+<span class="nc" id="L204">                        addActionMessage(getText(&quot;global.msg.frozen_by_team&quot;,</span>
+<span class="nc" id="L205">                                new String[]{freezingTeam.getOrg().getName(), freezingTeam.getName()}));</span>
+                    } else {
+<span class="nc" id="L207">                        addActionMessage(getText(&quot;global.msg.frozen_by_team_generic&quot;));</span>
+                    }
+<span class="pc bfc" id="L209" title="All 2 branches covered.">                } else if (MSG_REG_COMPLETE.equals(msg)) {</span>
+<span class="fc" id="L210">                    addActionMessage(getText(&quot;loginCheckAction.txt.registration_success&quot;));</span>
+<span class="fc bfc" id="L211" title="All 2 branches covered.">                } else if (MSG_SESSION_TIMEOUT.equals(msg)) {</span>
+<span class="fc" id="L212">                    addActionError(getText(&quot;loginCheckAction.err.session_timed_out&quot;,</span>
+<span class="fc" id="L213">                            Lists.newArrayList(Duration.ofSeconds(servletRequest.getSession().getMaxInactiveInterval()).toMinutes())));</span>
+<span class="fc bfc" id="L214" title="All 2 branches covered.">                } else if (cookiesBlocked()) {</span>
+<span class="fc" id="L215">                    displayCookiesBlockedWarning = true;</span>
+                }
+
+                // make sure we clear any old PKB browser cookie
+<span class="fc" id="L219">                String oldPkbCookie = removeSessionCookie();</span>
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">                if (oldPkbCookie != null) {</span>
+                    // TODO: Check more slowly - should we be logging this?
+<span class="nc" id="L222">                    LOGGER.debug(&quot;Login: found pkb browser cookie to remove: {}&quot;, oldPkbCookie);</span>
+                }
+            }
+<span class="nc" id="L225">        } catch (Exception e) {</span>
+<span class="nc" id="L226">            LOGGER.error(&quot;unexpected error in login processing; rethrowing&quot;, e);</span>
+<span class="nc" id="L227">            throw new PKBException(e);</span>
+<span class="fc" id="L228">        }</span>
+
+<span class="fc" id="L230">        LOGGER.trace(&quot;Exiting login check action: {}&quot;, result);</span>
+<span class="fc" id="L231">        return result;</span>
+    }
+
+    @NotNull
+    private String getLoginResult() {
+<span class="fc" id="L236">        return CustomLoginSkinTypes</span>
+<span class="fc" id="L237">                .findActionFor(team)</span>
+<span class="fc" id="L238">                .orElse(Action.SUCCESS);</span>
+    }
+
+    @VisibleForTesting
+    String removeSessionCookie() {
+<span class="fc" id="L243">        return CookieUtil.removeCookie(servletRequest, servletResponse, PKB);</span>
+    }
+
+    @VisibleForTesting
+    String getSavedEmailRequestParam() {
+<span class="fc" id="L248">        return SessionCheckFilter.getSavedRequestParam(servletRequest, &quot;e&quot;);</span>
+    }
+
+    @VisibleForTesting
+    SavedRequest getSavedRequest() {
+<span class="fc" id="L253">        return SessionCheckFilter.getSavedRequest(servletRequest);</span>
+    }
+
+    @VisibleForTesting
+    String getSavedConsultTeamIdRequestParam() {
+<span class="fc" id="L258">        return SessionCheckFilter.getSavedRequestParam(servletRequest, &quot;consultTeamId&quot;);</span>
+    }
+
+    @VisibleForTesting
+    boolean detectRestrictionOnNormalLogin() {
+<span class="fc bfc" id="L263" title="All 2 branches covered.">        return CookieUtil.readCookie(servletRequest, PKB_SSO) != null;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L267">        this.userManager = userManager;</span>
+<span class="fc" id="L268">    }</span>
+
+    public void setTeamManager(TeamManager teamManager) {
+<span class="fc" id="L271">        this.teamManager = teamManager;</span>
+<span class="fc" id="L272">    }</span>
+
+    public void setLoggedInUserUtil(LoggedInUserUtil loggedInUserUtil) {
+<span class="fc" id="L275">        this.loggedInUserUtil = loggedInUserUtil;</span>
+<span class="fc" id="L276">    }</span>
+
+    @Override
+    public void setServletRequest(HttpServletRequest servletRequest) {
+<span class="fc" id="L280">        this.servletRequest = servletRequest;</span>
+<span class="fc" id="L281">    }</span>
+
+    @Override
+    public void setServletResponse(HttpServletResponse servletResponse) {
+<span class="fc" id="L285">        this.servletResponse = servletResponse;</span>
+<span class="fc" id="L286">    }</span>
+
+    public String getMsg() {
+<span class="nc" id="L289">        return msg;</span>
+    }
+
+    public void setMsg(String msg) {
+<span class="fc" id="L293">        this.msg = msg;</span>
+<span class="fc" id="L294">    }</span>
+
+    public String getE() {
+<span class="nc" id="L297">        return e;</span>
+    }
+
+    public void setE(String e) {
+<span class="fc" id="L301">        this.e = e;</span>
+<span class="fc" id="L302">    }</span>
+
+    public String getJ_username() {
+<span class="fc" id="L305">        return j_username;</span>
+    }
+
+    public void setJ_username(String j_username) {
+<span class="fc" id="L309">        this.j_username = j_username;</span>
+<span class="fc" id="L310">    }</span>
+
+    public String getTeamCode() {
+<span class="nc" id="L313">        return teamCode;</span>
+    }
+
+    public void setTeamCode(String teamCode) {
+<span class="nc" id="L317">        this.teamCode = teamCode;</span>
+<span class="nc" id="L318">    }</span>
+
+    public String getTeam() {
+<span class="fc" id="L321">        return team;</span>
+    }
+
+    public void setTeam(String team) {
+<span class="fc" id="L325">        this.team = team;</span>
+<span class="fc" id="L326">    }</span>
+
+    public String getTeamLogo() {
+<span class="fc" id="L329">        return teamLogo;</span>
+    }
+
+    public void setTeamLogo(String teamLogo) {
+<span class="nc" id="L333">        this.teamLogo = teamLogo;</span>
+<span class="nc" id="L334">    }</span>
+
+    public String getTeamName() {
+<span class="fc" id="L337">        return teamName;</span>
+    }
+
+    public void setTeamName(String teamName) {
+<span class="nc" id="L341">        this.teamName = teamName;</span>
+<span class="nc" id="L342">    }</span>
+
+    public boolean isRestrictNormalLogin() {
+<span class="fc" id="L345">        return restrictNormalLogin;</span>
+    }
+
+<span class="fc" id="L348">    public boolean isDisplayCookiesBlockedWarning() { return displayCookiesBlockedWarning; }</span>
+
+    public boolean isNhsLoginFeatureAndWebUiButtonEnabled() {
+<span class="fc bfc" id="L351" title="All 6 branches covered.">        return config.isNhsLoginEnabled() &amp;&amp; (config.isNhsLoginWebUiButtonEnabled() || isTeamSpecificNhsLoginEnabled());</span>
+    }
+
+    private boolean isTeamSpecificNhsLoginEnabled() {
+<span class="fc" id="L355">        return CustomLoginSkinTypes.findCustomSkinTypeFor(team)</span>
+<span class="fc" id="L356">                .map(type -&gt; Match(type).of(</span>
+<span class="fc" id="L357">                        Case($(CustomLoginSkinTypes.TEAM_CIE), config.isNhsLoginWebUiButtonEnabledForCIE()),</span>
+<span class="fc" id="L358">                        Case($(CustomLoginSkinTypes.SUSSEX), config.isNhsLoginWebUiButtonEnabledForSussex()),</span>
+<span class="fc" id="L359">                        Case($(CustomLoginSkinTypes.SHERWOOD_FOREST_HOSPITAL), config.isNhsLoginWebUiButtonEnabledForSherwoodForestHospital()),</span>
+<span class="fc" id="L360">                        Case($(CustomLoginSkinTypes.CHESHIRE_MCHFT_PR), config.isNhsLoginWebUiButtonEnabledForCheshireMchftPr()),</span>
+<span class="fc" id="L361">                        Case($(CustomLoginSkinTypes.CONNECTED_NOTTS), config.isNhsLoginWebUiButtonEnabledForConnectedNotts()),</span>
+<span class="fc" id="L362">                        Case($(CustomLoginSkinTypes.HULL), config.isNhsLoginWebUiButtonEnabledForHull()),</span>
+<span class="fc" id="L363">                        Case($(CustomLoginSkinTypes.MID_YORKSHIRE_HOSPITALS), config.isNhsLoginWebUiButtonEnabledForMidYorkshireHospitals()),</span>
+<span class="fc" id="L364">                        Case($(CustomLoginSkinTypes.YORK_TEACHING_HOSP), config.isNhsLoginWebUiButtonEnabledForYorkTeachingHospital()),</span>
+<span class="fc" id="L365">                        Case($(), false)))</span>
+<span class="fc" id="L366">                .orElse(false);</span>
+    }
+
+    @Override
+    public String getNhsLoginLink() {
+<span class="fc" id="L371">        DefaultSavedRequest request = (DefaultSavedRequest) getSavedRequest();</span>
+<span class="fc bfc" id="L372" title="All 2 branches covered.">        if (request == null) {</span>
+<span class="fc" id="L373">            String nhsIntegrationUrl = config.getNhsIntegrationUrl();</span>
+<span class="fc bfc" id="L374" title="All 2 branches covered.">            if (team != null) {</span>
+<span class="fc" id="L375">                return nhsIntegrationUrl + &quot;?teamCode=&quot; + team;</span>
+            }
+<span class="fc" id="L377">            return nhsIntegrationUrl;</span>
+        }
+
+<span class="fc" id="L380">        String fullRequestUrl = request.getRequestURI();</span>
+<span class="fc" id="L381">        String queryParameters = request.getQueryString();</span>
+
+<span class="fc bfc" id="L383" title="All 2 branches covered.">        if (queryParameters != null) {</span>
+<span class="fc" id="L384">            fullRequestUrl += &quot;?&quot; + queryParameters;</span>
+        }
+
+<span class="fc" id="L387">        return config.getNhsIntegrationUrl() + &quot;?phrPath=&quot; + URLEncoder.encode(fullRequestUrl, UTF_8);</span>
+    }
+
+    @VisibleForTesting
+    boolean cookiesBlocked() throws Exception {
+<span class="fc" id="L392">        HttpServletRequest servletRequest = getRequest();</span>
+<span class="fc" id="L393">        Cookie pkbLocale = CookieUtil.readCookie(servletRequest,&quot;pkbLocale&quot;);</span>
+<span class="fc bfc" id="L394" title="All 2 branches covered.">        if (pkbLocale != null) {</span>
+<span class="fc" id="L395">            return false;</span>
+        }
+        // If the cookie is missing it might be blocked, or this might be the first visit.
+        // But if we were referred here from any logged in page inside pkb something is definitely wrong
+<span class="fc" id="L399">        String referrer = servletRequest.getHeader(HttpHeaders.REFERER);</span>
+<span class="fc bfc" id="L400" title="All 6 branches covered.">        if (referrer == null || referrer.endsWith(&quot;verifyPersonalInfo.action&quot;) || referrer.endsWith(&quot;openPkbInIframe.action&quot;)) {</span>
+<span class="fc" id="L401">            return false;</span>
+        }
+<span class="fc" id="L403">        String baseUrl = config.getBaseURL()+'/';</span>
+<span class="fc bfc" id="L404" title="All 2 branches covered.">        return referrer.compareTo(baseUrl) &gt; 0;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

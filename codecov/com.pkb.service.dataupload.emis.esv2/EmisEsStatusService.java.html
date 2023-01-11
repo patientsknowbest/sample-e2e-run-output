@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisEsStatusService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisEsStatusService.java</span></div><h1>EmisEsStatusService.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.pkb.common.ClearableInternalState;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.mappers.EmisEsJobStateToEmisInformationDtoMapper;
+import com.pkb.service.dataupload.emis.esv2.batch.FileProcessor;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFile;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFileSet;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.collection.HashMap;
+
+import java.math.BigInteger;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+public class EmisEsStatusService implements ClearableInternalState {
+
+    private final DateTimeService dateTimeService;
+    private final EmisEsBatchStateService emisEsBatchStateService;
+    private final EmisEsMissingCodeHelper emisEsMissingCodeHelper;
+    private final EmisEsJobStateToEmisInformationDtoMapper emisEsJobStateToEmisInformationDtoMapper;
+
+<span class="fc" id="L35">    private volatile boolean isRunning = false;</span>
+<span class="fc" id="L36">    private volatile int totalUniqueTags = 0;</span>
+<span class="fc" id="L37">    private volatile int reportedUniqueTags = 0;</span>
+    private volatile Instant serverStart;
+<span class="fc" id="L39">    private volatile String currentUniqueTag = null;</span>
+<span class="fc" id="L40">    private final ConcurrentHashMap&lt;String, Boolean&gt; isAfterError = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L41">    private final ConcurrentHashMap&lt;String, Tuple2&lt;EmisStepResult, Duration&gt;&gt; serverResult = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L42">    private final ConcurrentHashMap&lt;String, List&lt;LocalDate&gt;&gt; processedBatches = new ConcurrentHashMap&lt;&gt;();</span>
+
+    private volatile LocalDate currentLastBatch;
+<span class="fc" id="L45">    private volatile int currentBatch = -1;</span>
+<span class="fc" id="L46">    private volatile int errorIndex = -1;</span>
+    private volatile LocalDate currentBatchDatestamp;
+    private volatile io.vavr.collection.List&lt;VerifiedEmisFileSet&gt; currentBatches;
+<span class="fc" id="L49">    private volatile BigInteger currentBatchesTotalSize = BigInteger.ZERO;</span>
+    private volatile Instant batchStart;
+    private volatile List&lt;Duration&gt; batchResults;
+
+
+    private volatile VerifiedEmisFile currentFile;
+    private volatile FileProcessor.ProcessorType currentProcessorType;
+<span class="fc" id="L56">    private volatile long currentRow = 0;</span>
+<span class="fc" id="L57">    private volatile long totalRows = 0;</span>
+
+<span class="fc" id="L59">    public EmisEsStatusService(DateTimeService dateTimeService, EmisEsBatchStateService emisEsBatchStateService, EmisEsMissingCodeHelper emisEsMissingCodeHelper, EmisEsJobStateToEmisInformationDtoMapper emisEsJobStateToEmisInformationDtoMapper) {</span>
+<span class="fc" id="L60">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L61">        this.emisEsBatchStateService = emisEsBatchStateService;</span>
+<span class="fc" id="L62">        this.emisEsMissingCodeHelper = emisEsMissingCodeHelper;</span>
+<span class="fc" id="L63">        this.emisEsJobStateToEmisInformationDtoMapper = emisEsJobStateToEmisInformationDtoMapper;</span>
+<span class="fc" id="L64">        reset();</span>
+<span class="fc" id="L65">    }</span>
+
+    @Override
+    public void clearState() {
+<span class="fc" id="L69">        reset();</span>
+<span class="fc" id="L70">    }</span>
+
+    private void reset() {
+<span class="fc" id="L73">        reportStop();</span>
+<span class="fc" id="L74">        isAfterError.clear();</span>
+<span class="fc" id="L75">        serverResult.clear();</span>
+<span class="fc" id="L76">        processedBatches.clear();</span>
+<span class="fc" id="L77">        currentUniqueTag = null;</span>
+<span class="fc" id="L78">        totalUniqueTags = 0;</span>
+<span class="fc" id="L79">        reportedUniqueTags = 0;</span>
+<span class="fc" id="L80">        currentBatch = -1;</span>
+<span class="fc" id="L81">        currentLastBatch = null;</span>
+<span class="fc" id="L82">        currentBatches = io.vavr.collection.List.empty();</span>
+<span class="fc" id="L83">        batchResults = Collections.emptyList();</span>
+<span class="fc" id="L84">        batchStart = null;</span>
+<span class="fc" id="L85">        serverStart = null;</span>
+<span class="fc" id="L86">        currentFile = null;</span>
+<span class="fc" id="L87">        currentProcessorType = null;</span>
+<span class="fc" id="L88">        currentRow = 0;</span>
+<span class="fc" id="L89">        totalRows = 0;</span>
+<span class="fc" id="L90">        currentBatchesTotalSize = BigInteger.ZERO;</span>
+<span class="fc" id="L91">    }</span>
+
+    public EmisEsStatus getStatus() {
+<span class="fc" id="L94">        var cf = Optional.ofNullable(currentFile);</span>
+<span class="fc" id="L95">        var cpt = Optional.ofNullable(currentProcessorType);</span>
+<span class="fc" id="L96">        long cr = currentRow;</span>
+<span class="fc" id="L97">        long tr = totalRows;</span>
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">        io.vavr.collection.List&lt;VerifiedEmisFileSet&gt; cb = currentBatches == null ? io.vavr.collection.List.empty() : io.vavr.collection.List.ofAll(currentBatches);</span>
+<span class="fc" id="L99">        var cbts = BigInteger.ZERO.add(currentBatchesTotalSize);</span>
+<span class="fc" id="L100">        var currentBatchResults = io.vavr.collection.List.ofAll(batchResults);</span>
+<span class="fc" id="L101">        var currentServerResults = HashMap.ofAll(serverResult);</span>
+<span class="fc" id="L102">        var iae = HashMap.ofAll(isAfterError);</span>
+<span class="fc" id="L103">        var lbtsocs = Optional.ofNullable(currentLastBatch);</span>
+<span class="fc" id="L104">        var currentProcessedBatches = HashMap.ofAll(processedBatches);</span>
+
+<span class="fc" id="L106">        Optional&lt;LocalDateTime&gt; estimatedTimeToFinishServer = Optional.empty();</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">        if (!currentBatchResults.isEmpty()) {</span>
+<span class="fc" id="L108">            BigInteger processedSize = BigInteger.ZERO;</span>
+<span class="fc" id="L109">            Duration processingTime = Duration.ZERO;</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">            for (int i = 0; i &lt; currentBatchResults.size(); ++i) {</span>
+<span class="fc" id="L111">                processedSize = processedSize.add(cb.get(i).filesSize());</span>
+<span class="fc" id="L112">                processingTime = processingTime.plus(currentBatchResults.get(i));</span>
+            }
+<span class="fc" id="L114">            BigInteger remainderMultiplier = cbts.subtract(processedSize).divide(processedSize);</span>
+<span class="fc" id="L115">            estimatedTimeToFinishServer = Optional.of(dateTimeService.nowLocalDateTime().plus(processingTime.multipliedBy(remainderMultiplier.longValue())));</span>
+        }
+
+
+<span class="fc" id="L119">        Optional&lt;LocalDateTime&gt; estimatedTimeToFinishEveryServer = Optional.empty();</span>
+
+<span class="pc bpc" id="L121" title="1 of 2 branches missed.">        if (!currentServerResults.isEmpty()) {</span>
+
+<span class="nc" id="L123">            Duration totalDuration = currentServerResults.map(e -&gt; e._2._2).reduce((d1, d2) -&gt; d1.plus(d2));</span>
+<span class="nc" id="L124">            Duration averageDuration = totalDuration.dividedBy(currentServerResults.size());</span>
+<span class="nc" id="L125">            estimatedTimeToFinishEveryServer = Optional.of(dateTimeService.nowLocalDateTime().plus(averageDuration));</span>
+        }
+
+<span class="fc" id="L128">        Optional&lt;Long&gt; rowPercent = Optional.empty();</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        if (cr != 0) {</span>
+<span class="fc" id="L130">            long percent = (cr / tr) * 100L;</span>
+<span class="fc" id="L131">            rowPercent = Optional.of(percent);</span>
+        }
+
+<span class="fc" id="L134">        var batchStates = emisEsBatchStateService.findAll().stream()</span>
+<span class="fc" id="L135">                .map(emisEsJobStateToEmisInformationDtoMapper::toDto)</span>
+<span class="fc" id="L136">                .collect(Collectors.toList());</span>
+
+<span class="fc" id="L138">        var codingProblems = emisEsMissingCodeHelper.getCodingProblemReport();</span>
+
+<span class="fc" id="L140">        return ImmutableEmisEsStatus.builder()</span>
+<span class="fc" id="L141">                .isRunning(isRunning)</span>
+<span class="fc" id="L142">                .estimatedTimeToFinishEveryServer(estimatedTimeToFinishEveryServer)</span>
+<span class="fc" id="L143">                .estimatedTimeToFinishServer(estimatedTimeToFinishServer)</span>
+<span class="fc" id="L144">                .isAfterError(iae.toJavaMap())</span>
+<span class="fc" id="L145">                .serverResults(currentServerResults.toJavaMap())</span>
+<span class="fc" id="L146">                .currentSourceUniqueTag(Optional.ofNullable(currentUniqueTag))</span>
+<span class="fc" id="L147">                .lastBatchTimestampOnCurrentSource(lbtsocs)</span>
+<span class="fc" id="L148">                .currentFilename(cf.map(emisFile -&gt; emisFile.relativePath().toString()))</span>
+<span class="fc bfc" id="L149" title="All 2 branches covered.">                .rowsInCurrentFile(tr == 0 ? Optional.empty() : Optional.of(tr))</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">                .rowInCurrentFile(cr == 0 ? Optional.empty() : Optional.of(cr))</span>
+<span class="fc" id="L151">                .percentOfRowsDone(rowPercent)</span>
+<span class="fc" id="L152">                .currentProcessorType(cpt)</span>
+<span class="fc" id="L153">                .batchState(batchStates)</span>
+<span class="fc" id="L154">                .processedBatches(currentProcessedBatches.toJavaMap())</span>
+<span class="fc" id="L155">                .codingProblems(codingProblems)</span>
+<span class="fc" id="L156">                .build();</span>
+    }
+
+    public void reportStart() {
+<span class="fc" id="L160">        isRunning = true;</span>
+<span class="fc" id="L161">    }</span>
+
+    public void reportStop() {
+<span class="fc" id="L164">        isRunning = false;</span>
+<span class="fc" id="L165">    }</span>
+
+    public void reportCurrentUniqueTag(String tag) {
+<span class="fc" id="L168">        serverStart = dateTimeService.now();</span>
+<span class="fc" id="L169">        ++reportedUniqueTags;</span>
+<span class="fc" id="L170">        currentUniqueTag = tag;</span>
+<span class="fc" id="L171">        isAfterError.put(currentUniqueTag, false);</span>
+<span class="fc" id="L172">        currentLastBatch = null;</span>
+<span class="fc" id="L173">        currentBatchDatestamp = null;</span>
+<span class="fc" id="L174">    }</span>
+
+    public void reportBatchError() {
+<span class="fc" id="L177">        isAfterError.put(currentUniqueTag, true);</span>
+<span class="fc" id="L178">        errorIndex = currentBatch;</span>
+<span class="fc" id="L179">        --currentBatch;</span>
+<span class="fc" id="L180">    }</span>
+
+    public void reportUniqueTags(int count) {
+<span class="fc" id="L183">        totalUniqueTags = count;</span>
+<span class="fc" id="L184">    }</span>
+
+    public void reportServerResult(EmisStepResult result) {
+<span class="fc" id="L187">        serverResult.put(currentUniqueTag, Tuple.of(result, Duration.between(serverStart, dateTimeService.now())));</span>
+<span class="fc" id="L188">    }</span>
+
+    public void reportCurrentBatchBeingReprocessed() {
+<span class="fc bfc" id="L191" title="All 2 branches covered.">        if (isNotEmpty(batchResults)) {</span>
+<span class="fc" id="L192">            batchResults.remove(batchResults.size() - 1);</span>
+        }
+<span class="fc" id="L194">    }</span>
+
+    public void reportBatchStart(LocalDate currentDatestamp) {
+<span class="fc" id="L197">        ++currentBatch;</span>
+<span class="fc" id="L198">        currentBatchDatestamp = currentDatestamp;</span>
+<span class="fc" id="L199">        batchStart = dateTimeService.now();</span>
+<span class="fc" id="L200">    }</span>
+
+    public void reportBatchEnd() {
+<span class="fc" id="L203">        processedBatches.computeIfAbsent(currentUniqueTag, s -&gt; Collections.synchronizedList(new LinkedList&lt;&gt;())).add(currentBatchDatestamp);</span>
+<span class="fc" id="L204">        batchResults.add(Duration.between(batchStart, dateTimeService.now()));</span>
+<span class="fc" id="L205">    }</span>
+
+    public void reportCurrentBatches(List&lt;VerifiedEmisFileSet&gt; emisBatches) {
+<span class="fc" id="L208">        currentBatches = io.vavr.collection.List.ofAll(emisBatches);</span>
+<span class="fc" id="L209">        currentBatch = -1;</span>
+<span class="fc" id="L210">        currentLastBatch = emisBatches.get(emisBatches.size() - 1).dateStamp();</span>
+<span class="fc" id="L211">        batchResults = new ArrayList&lt;&gt;(emisBatches.size());</span>
+<span class="fc" id="L212">        currentBatchesTotalSize = emisBatches.stream().map(VerifiedEmisFileSet::filesSize).reduce(BigInteger.ZERO, BigInteger::add);</span>
+<span class="fc" id="L213">    }</span>
+
+    public void reportCurrentFile(FileProcessor.ProcessorType type, VerifiedEmisFile currentFile) {
+<span class="fc" id="L216">        currentRow = 0;</span>
+<span class="fc" id="L217">        this.currentFile = currentFile;</span>
+<span class="fc" id="L218">        this.currentProcessorType = type;</span>
+<span class="fc" id="L219">    }</span>
+
+    public void reportTotalRows(long totalRows) {
+<span class="fc" id="L222">        this.totalRows = totalRows;</span>
+<span class="fc" id="L223">    }</span>
+
+    public void reportCurrentRows(long rows) {
+<span class="fc" id="L226">        currentRow = rows;</span>
+<span class="fc" id="L227">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

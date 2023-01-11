@@ -1,0 +1,567 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InviteCaregiverAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.invitation</a> &gt; <span class="el_source">InviteCaregiverAction.java</span></div><h1>InviteCaregiverAction.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: InviteCaregiverAction.java Jan 21, 2012 3:58:45 AM pravinam$
+//
+//---------------------------------------------------------------------------
+package com.pkb.action.invitation;
+
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.bean.IUserWebBean;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.consent.PatientConsentDTO;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.InstituteUser;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.invitation.impl.InvitationManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Objects;
+
+/**
+ * Patient invites another patient in a specific role (e.g as caregiver)
+ *
+ * @author pravinam
+ */
+<span class="fc" id="L46">public class InviteCaregiverAction extends BaseAction {</span>
+<span class="fc" id="L47">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    // Managers, injected
+    private IUserWebBean userWebBean;
+    private TeamUserManager teamUserManager;
+    private PersonContactManager personContactManager;
+    private InvitationManager invitationManager;
+    private UserAccessManager userAccessManager;
+    private PKBEmailMessageManager pkbEmailMessageManager;
+
+
+    // Form fields
+    private String title;
+    private String firstName;
+    private String lastName;
+    private Email emailId;
+    private String message;
+    private boolean generalHealthConsentGranted;
+    private boolean sexualHealthConsentGranted;
+    private boolean mentalHealthConsentGranted;
+    private boolean socialCareConsentGranted;
+
+    // Hidden form fields
+    private String patientId;
+    private String returnTo;
+    private String searchString; // For activatedPatients.jsp on error
+    private String searchIdType; // national/org/team
+    private String searchId;
+    private String searchName;
+    private String searchDobYear;
+    private String searchDobMonth;
+    private String searchDobDay;
+    private String searchLevel;
+    private String userId; // Hack for userId coming from activatedPatients.jsp
+
+    // Variables for display only
+    private String patientFullName;
+    // Carer's can't bootstrap more consents, disable the form fields so they don't think they can.
+    private boolean canGrantGeneralHealthConsent;
+    private boolean canGrantSexualHealthConsent;
+    private boolean canGrantMentalHealthConsent;
+    private boolean canGrantSocialCareConsent;
+
+    /**
+     * An invitation will be sent to the patient if the given email id is valid with respect to the following
+     * conditions. Check if the patient is already invited. If yes, show an message informing the same and exit.
+     * Check if the entered email id matches currently logged in user. If yes, show an error message and exit.
+     * If any exception comes while sending the invitation show a generalized error
+     * message.
+     */
+    @Override
+    public String execute() {
+<span class="fc" id="L99">        PKBPerson contextPatient = contextUserUtil.getContextUser();</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">        if (contextPatient == null) {</span>
+<span class="fc" id="L101">            contextPatient = userManager.getPKBPerson(loggedInUserUtil.getLoggedInUserId(),</span>
+                    PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.PROPERTIES);
+        }
+
+<span class="fc bfc" id="L105" title="All 2 branches covered.">        if (!IsValidInvitation(contextPatient)) {</span>
+<span class="fc" id="L106">            return Action.INPUT;</span>
+        }
+
+<span class="fc" id="L109">        return inviteCarer(contextPatient);</span>
+    }
+
+    public String inviteCarerForPatient() {
+<span class="fc" id="L113">        PKBPerson contextPatient = userManager.getPKBPerson(Long.parseLong(patientId),</span>
+                PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.PROPERTIES);
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">        if (!IsValidInvitation(contextPatient)) {</span>
+            // Reinitialise form before we show the jsp
+<span class="nc" id="L117">            inviteCarerForPatientForm();</span>
+
+<span class="nc" id="L119">            return Action.INPUT;</span>
+        }
+<span class="fc" id="L121">        return inviteCarer(contextPatient);</span>
+    }
+
+    private void sendNotification(PKBPerson invitee, PKBPerson patient, PKBPerson author) {
+<span class="pc bpc" id="L125" title="1 of 4 branches missed.">        if (!author.getId().equals(patient.getId()) &amp;&amp; UserType.PATIENT == invitee.getUserType()) {</span>
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">            if (invitee.isPatient()) {</span>
+<span class="fc" id="L127">                pkbEmailMessageManager.otherUserInvitesCarerNotifyPatient(patient, author, invitee);</span>
+            }
+        }
+<span class="fc" id="L130">    }</span>
+
+    private String inviteCarer(PKBPerson contextPatient) {
+        // Carer cannot invite another carer - PHR-11018
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">        if (getEHRRequestContext().isCarer()) {</span>
+<span class="nc" id="L135">            return Action.INPUT;</span>
+        }
+<span class="fc" id="L137">        populateData();</span>
+<span class="fc" id="L138">        Email validEmailId = emailId;</span>
+
+<span class="fc" id="L140">        PKBPerson loggedInUser = loggedInUserUtil.getLoggedInUser();</span>
+        PersonContact inviteeContact;
+<span class="fc" id="L142">        PKBPerson inviteePatient = personContactManager.getPersonForConfirmedOrPrimaryPatientContact(validEmailId).getOrNull();</span>
+
+<span class="fc bfc" id="L144" title="All 2 branches covered.">        if (inviteePatient != null) {</span>
+            //Validate the user type of invitee ; should be a patient
+<span class="fc bfc" id="L146" title="All 2 branches covered.">            if (!validateInvitee(contextPatient, inviteePatient)) {</span>
+<span class="fc" id="L147">                return Action.INPUT;</span>
+            }
+        } else {
+
+            // inviteePatient doesn't exist; populate fields into a new PKBPerson
+<span class="fc" id="L152">            inviteePatient = userWebBean.populateInvitee(</span>
+<span class="fc" id="L153">                    getEHRRequestContext(), firstName, lastName, validEmailId, title, contextPatient.getLanguageCode());</span>
+<span class="fc" id="L154">            inviteeContact = userWebBean.populateContact(validEmailId, true);</span>
+<span class="fc" id="L155">            inviteeContact.setPerson(inviteePatient);</span>
+<span class="fc" id="L156">            inviteePatient.setContacts(null);</span>
+<span class="fc" id="L157">            inviteePatient.getContacts().add(inviteeContact);</span>
+        }
+
+<span class="fc" id="L160">        EnumSet&lt;PrivacyFlag&gt; carerConsentSettings = EnumSet.noneOf(PrivacyFlag.class);</span>
+<span class="pc bpc" id="L161" title="1 of 4 branches missed.">        if (canGrantGeneralHealthConsent &amp;&amp; generalHealthConsentGranted) {</span>
+<span class="fc" id="L162">            carerConsentSettings.add(PrivacyFlag.GENERAL);</span>
+        }
+<span class="pc bpc" id="L164" title="1 of 4 branches missed.">        if (canGrantSexualHealthConsent &amp;&amp; sexualHealthConsentGranted) {</span>
+<span class="fc" id="L165">            carerConsentSettings.add(PrivacyFlag.SEXUAL_HEALTH);</span>
+        }
+<span class="pc bpc" id="L167" title="1 of 4 branches missed.">        if (canGrantMentalHealthConsent &amp;&amp; mentalHealthConsentGranted) {</span>
+<span class="fc" id="L168">            carerConsentSettings.add(PrivacyFlag.MENTAL_HEALTH);</span>
+        }
+<span class="pc bpc" id="L170" title="1 of 4 branches missed.">        if(canGrantSocialCareConsent &amp;&amp; socialCareConsentGranted) {</span>
+<span class="fc" id="L171">            carerConsentSettings.add(PrivacyFlag.SOCIAL_CARE);</span>
+        }
+
+<span class="fc" id="L174">        userWebBean.inviteCarerForPatient(</span>
+<span class="fc" id="L175">                getLoggedInEHRRequestContext(),</span>
+                contextPatient,
+                loggedInUser,
+                inviteePatient,
+                carerConsentSettings,
+                message
+                // Don't bother with permissions, the patient is supposed to be consent-migrated
+        );
+
+        //Log the activity
+<span class="pc bpc" id="L185" title="1 of 4 branches missed.">        if (inviteePatient.getId() != null &amp;&amp; userManager.getDefaultAccountId(inviteePatient.getId()) != null) {</span>
+<span class="fc" id="L186">            logActivity(com.pkb.notification.entity.Activity.Action.SENT_INVITATION, dateTimeService.now(), inviteePatient.getId(), false,</span>
+                    new NoConsentsRequired());
+        }
+
+<span class="fc" id="L190">        sendNotification(inviteePatient, contextPatient, loggedInUser);</span>
+
+<span class="fc" id="L192">        addActionMessage(getText(&quot;inviteCaregiverAction.msg.sent_invitation&quot;, new String[]{inviteePatient.findEmail().map(Email::address).getOrNull(),</span>
+<span class="fc" id="L193">                inviteePatient.getFirstName(), inviteePatient.getLastName()}));</span>
+
+<span class="fc" id="L195">        return StringUtils.defaultIfEmpty(returnTo, &quot;listPatientTeam&quot;);</span>
+    }
+
+    public String inviteCarerForPatientForm() {
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        if (patientId == null) {</span>
+<span class="fc" id="L200">            patientId = userId; // Hack for userId coming from activatedPatients.jsp</span>
+        }
+
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">        if (patientId == null) {</span>
+<span class="nc" id="L204">            addActionError(getText(&quot;inviteCaregiverAction.err.select_patient&quot;));</span>
+<span class="nc" id="L205">            return returnTo;</span>
+        }
+
+<span class="fc" id="L208">        populateData();</span>
+<span class="fc" id="L209">        return Action.SUCCESS;</span>
+    }
+
+    private boolean validateInvitee(PKBPerson contextPatient, PKBPerson inviteePatient) {
+
+<span class="fc bfc" id="L214" title="All 2 branches covered.">        if (userWebBean.hasIndivAccountAccess(inviteePatient, contextPatient)) {</span>
+<span class="fc" id="L215">            addActionError(getText(&quot;inviteCaregiverAction.err.already_has_access&quot;,</span>
+<span class="fc" id="L216">                    new String[]{inviteePatient.getTitle(), inviteePatient.getLastName()}));</span>
+<span class="fc" id="L217">            return false;</span>
+        }
+
+<span class="fc" id="L220">        UserType inviteeUserType = inviteePatient.getUserType();</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">        if (UserType.PATIENT != inviteeUserType) {</span>
+<span class="fc" id="L222">            addActionError(getText(&quot;inviteCaregiverAction.err.invitee_not_patient&quot;, new String[]{Option.of(emailId).map(Email::address).getOrNull()}));</span>
+<span class="fc" id="L223">            return false;</span>
+        }
+
+<span class="fc" id="L226">        Team team = teamUserManager.getPrimaryTeam(getEHRRequestContext(), inviteePatient.getId(), true/*activeOnly*/);</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">        if (team == null) {</span>
+<span class="fc" id="L228">            List&lt;InstituteUser&gt; instituteUsers = teamUserManager.getInstituteUsersForPerson(getEHRRequestContext(),</span>
+<span class="fc" id="L229">                    inviteePatient.getId());</span>
+            // user is not active in any team currently
+<span class="pc bpc" id="L231" title="1 of 2 branches missed.">            if (instituteUsers.size() &gt; 1) {</span>
+<span class="nc" id="L232">                addActionError(getText(&quot;inviteCaregiverAction.err.invitee_not_active_in_any_team&quot;));</span>
+<span class="nc" id="L233">                return false;</span>
+            }
+        }
+
+<span class="fc" id="L237">        return true;</span>
+    }
+
+    private boolean IsValidInvitation(PKBPerson contextPatient) {
+<span class="fc" id="L241">        Long patientAccountId = userManager.getDefaultAccountId(contextPatient.getId());</span>
+
+<span class="fc bfc" id="L243" title="All 2 branches covered.">        if (contextPatient.getStatus() != UserStatus.NOCONTACT) {</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">            if (Objects.equals(contextPatient.getEmail(), emailId)) {</span>
+<span class="fc" id="L245">                addActionError(getText(&quot;inviteCaregiverAction.err.cannot_invite_yourself&quot;, new String[]{Option.of(emailId).map(Email::address).getOrNull()}));</span>
+<span class="fc" id="L246">                return false;</span>
+            }
+        }
+
+<span class="fc" id="L250">        var emailId = Option.of(this.emailId);</span>
+<span class="fc bfc" id="L251" title="All 2 branches covered.">        if (invitationManager.invitedAlready(emailId, patientAccountId)) {</span>
+<span class="fc" id="L252">            addActionError(getText(&quot;inviteCaregiverAction.err.already_invited_carer&quot;,</span>
+<span class="fc" id="L253">                    new String[]{emailId.map(Email::address).get()}));</span>
+<span class="fc" id="L254">            return false;</span>
+        }
+<span class="fc" id="L256">        return true;</span>
+    }
+
+    @Override
+    public void validate() {
+        // reminder: validation could also live in a file called InviteCaregiverAction-validation.xml
+<span class="pc bpc" id="L262" title="2 of 4 branches missed.">        if ((title == null) || &quot;-1&quot;.equals(title)) {</span>
+<span class="nc" id="L263">            addFieldError(&quot;title&quot;, getText(&quot;inviteCaregiverAction.err.enter_title&quot;));</span>
+        }
+<span class="fc" id="L265">    }</span>
+
+    @Override
+    public String input() {
+<span class="fc" id="L269">        PKBPerson loggedInUser = loggedInUserUtil.getLoggedInPerson();</span>
+<span class="fc" id="L270">        PKBPerson contextUser = contextUserUtil.getContextUser();</span>
+
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">        if (patientId != null) {</span>
+            try {
+<span class="nc" id="L274">                PKBPerson person = userManager.getPKBPerson(Long.parseLong(patientId), PKBPerson.Lazy.CONTACTS);</span>
+<span class="nc" id="L275">                firstName = person.getFirstName();</span>
+<span class="nc" id="L276">                lastName = person.getLastName();</span>
+<span class="nc" id="L277">                emailId = person.getEmail();</span>
+<span class="nc" id="L278">                title = person.getTitle();</span>
+
+<span class="nc" id="L280">            } catch (NumberFormatException | PKBException e) {</span>
+                // Ignoring the exception
+<span class="nc" id="L282">                LOGGER.error(&quot;&quot;, e);</span>
+<span class="nc" id="L283">            }</span>
+        }
+
+<span class="fc" id="L286">        populateData();</span>
+
+<span class="fc" id="L288">        return SUCCESS;</span>
+    }
+
+    public String cancel() {
+<span class="fc" id="L292">        return StringUtils.defaultIfEmpty(returnTo, &quot;listPatientTeam&quot;);</span>
+    }
+
+    /**
+     * Set read-only variables, these may be used for display in the JSP,
+     * or for
+     */
+    private void populateData() {
+<span class="fc" id="L300">        PKBPerson loggedInUser = loggedInUserUtil.getLoggedInPerson();</span>
+<span class="fc" id="L301">        PKBPerson contextUser = contextUserUtil.getContextUser();</span>
+
+<span class="fc bfc" id="L303" title="All 2 branches covered.">        if (patientId != null) {</span>
+<span class="fc" id="L304">            patientFullName = userManager</span>
+<span class="fc" id="L305">                    .getPKBPerson(Long.parseLong(patientId))</span>
+<span class="fc" id="L306">                    .getFullName();</span>
+        }
+
+
+        // Normally we can grant any consents (patient granting consent)
+<span class="fc" id="L311">        canGrantGeneralHealthConsent = true;</span>
+<span class="fc" id="L312">        canGrantSexualHealthConsent = true;</span>
+<span class="fc" id="L313">        canGrantMentalHealthConsent = true;</span>
+<span class="fc" id="L314">        canGrantSocialCareConsent = true;</span>
+        // If we're a _carer_ viewing this page, we shouldn't be able to bootstrap more consent than we have
+<span class="fc bfc" id="L316" title="All 2 branches covered.">        if (contextUser != null</span>
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">                &amp;&amp; loggedInUser.isPatient()</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">                &amp;&amp; !loggedInUser.getId().equals(contextUser.getId())) {</span>
+            // Carers can only grant consents they already have. No bootstrapping.
+<span class="nc" id="L320">            PatientConsentDTO carerConsent = getEHRRequestContext()</span>
+<span class="nc" id="L321">                    .getConsentStatus()</span>
+<span class="nc" id="L322">                    .getConsent()</span>
+<span class="nc" id="L323">                    .orElseThrow(() -&gt; new IllegalStateException(&quot;Carer has no consent, but is trying to grant access to another carer&quot;));</span>
+<span class="nc" id="L324">            canGrantGeneralHealthConsent = carerConsent.generalHealthConsentGranted();</span>
+<span class="nc" id="L325">            canGrantSexualHealthConsent = carerConsent.sexualHealthConsentGranted();</span>
+<span class="nc" id="L326">            canGrantMentalHealthConsent = carerConsent.mentalHealthConsentGranted();</span>
+<span class="nc" id="L327">            canGrantSocialCareConsent = carerConsent.socialCareConsentGranted();</span>
+        }
+<span class="fc" id="L329">    }</span>
+
+    public IUserWebBean getUserWebBean() {
+<span class="nc" id="L332">        return userWebBean;</span>
+    }
+
+    public void setUserWebBean(IUserWebBean userWebBean) {
+<span class="fc" id="L336">        this.userWebBean = userWebBean;</span>
+<span class="fc" id="L337">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L340">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L344">        this.userManager = userManager;</span>
+<span class="fc" id="L345">    }</span>
+
+    public TeamUserManager getTeamUserManager() {
+<span class="nc" id="L348">        return teamUserManager;</span>
+    }
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L352">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L353">    }</span>
+
+    public PersonContactManager getPersonContactManager() {
+<span class="nc" id="L356">        return personContactManager;</span>
+    }
+
+    public void setPersonContactManager(PersonContactManager personContactManager) {
+<span class="fc" id="L360">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L361">    }</span>
+
+    public InvitationManager getInvitationManager() {
+<span class="nc" id="L364">        return invitationManager;</span>
+    }
+
+    public void setInvitationManager(InvitationManager invitationManager) {
+<span class="fc" id="L368">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L369">    }</span>
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L372">        return userAccessManager;</span>
+    }
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L376">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L377">    }</span>
+
+    public PKBEmailMessageManager getPkbEmailMessageManager() {
+<span class="nc" id="L380">        return pkbEmailMessageManager;</span>
+    }
+
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L384">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L385">    }</span>
+
+    public String getTitle() {
+<span class="fc" id="L388">        return title;</span>
+    }
+
+    public void setTitle(String title) {
+<span class="fc" id="L392">        this.title = title;</span>
+<span class="fc" id="L393">    }</span>
+
+    public String getFirstName() {
+<span class="fc" id="L396">        return firstName;</span>
+    }
+
+    public void setFirstName(String firstName) {
+<span class="fc" id="L400">        this.firstName = firstName;</span>
+<span class="fc" id="L401">    }</span>
+
+    public String getLastName() {
+<span class="fc" id="L404">        return lastName;</span>
+    }
+
+    public void setLastName(String lastName) {
+<span class="fc" id="L408">        this.lastName = lastName;</span>
+<span class="fc" id="L409">    }</span>
+
+    public Email getEmailId() {
+<span class="fc" id="L412">        return emailId;</span>
+    }
+
+    public void setEmailId(Email emailId) {
+<span class="fc" id="L416">        this.emailId = emailId;</span>
+<span class="fc" id="L417">    }</span>
+
+    public String getMessage() {
+<span class="fc" id="L420">        return message;</span>
+    }
+
+    public void setMessage(String message) {
+<span class="fc" id="L424">        this.message = message;</span>
+<span class="fc" id="L425">    }</span>
+
+    public boolean isGeneralHealthConsentGranted() {
+<span class="nc" id="L428">        return generalHealthConsentGranted;</span>
+    }
+
+    public void setGeneralHealthConsentGranted(boolean generalHealthConsentGranted) {
+<span class="fc" id="L432">        this.generalHealthConsentGranted = generalHealthConsentGranted;</span>
+<span class="fc" id="L433">    }</span>
+
+    public boolean isSexualHealthConsentGranted() {
+<span class="fc" id="L436">        return sexualHealthConsentGranted;</span>
+    }
+
+    public void setSexualHealthConsentGranted(boolean sexualHealthConsentGranted) {
+<span class="fc" id="L440">        this.sexualHealthConsentGranted = sexualHealthConsentGranted;</span>
+<span class="fc" id="L441">    }</span>
+
+    public boolean isMentalHealthConsentGranted() {
+<span class="fc" id="L444">        return mentalHealthConsentGranted;</span>
+    }
+
+    public void setMentalHealthConsentGranted(boolean mentalHealthConsentGranted) {
+<span class="fc" id="L448">        this.mentalHealthConsentGranted = mentalHealthConsentGranted;</span>
+<span class="fc" id="L449">    }</span>
+
+    public boolean isSocialCareConsentGranted() {
+<span class="fc" id="L452">        return socialCareConsentGranted;</span>
+    }
+
+    public void setSocialCareConsentGranted(boolean socialCareConsentGranted) {
+<span class="fc" id="L456">        this.socialCareConsentGranted = socialCareConsentGranted;</span>
+<span class="fc" id="L457">    }</span>
+
+    public String getPatientId() {
+<span class="fc" id="L460">        return patientId;</span>
+    }
+
+    public void setPatientId(String patientId) {
+<span class="fc" id="L464">        this.patientId = patientId;</span>
+<span class="fc" id="L465">    }</span>
+
+    public String getReturnTo() {
+<span class="fc" id="L468">        return returnTo;</span>
+    }
+
+    public void setReturnTo(String returnTo) {
+<span class="fc" id="L472">        this.returnTo = returnTo;</span>
+<span class="fc" id="L473">    }</span>
+
+    public String getSearchString() {
+<span class="fc" id="L476">        return searchString;</span>
+    }
+
+    public void setSearchString(String searchString) {
+<span class="fc" id="L480">        this.searchString = searchString;</span>
+<span class="fc" id="L481">    }</span>
+
+    public String getSearchIdType() {
+<span class="fc" id="L484">        return searchIdType;</span>
+    }
+
+    public void setSearchIdType(String searchIdType) {
+<span class="fc" id="L488">        this.searchIdType = searchIdType;</span>
+<span class="fc" id="L489">    }</span>
+
+    public String getSearchId() {
+<span class="fc" id="L492">        return searchId;</span>
+    }
+
+    public void setSearchId(String searchId) {
+<span class="fc" id="L496">        this.searchId = searchId;</span>
+<span class="fc" id="L497">    }</span>
+
+    public String getSearchName() {
+<span class="fc" id="L500">        return searchName;</span>
+    }
+
+    public void setSearchName(String searchName) {
+<span class="fc" id="L504">        this.searchName = searchName;</span>
+<span class="fc" id="L505">    }</span>
+
+    public String getSearchDobYear() {
+<span class="fc" id="L508">        return searchDobYear;</span>
+    }
+
+    public void setSearchDobYear(String searchDobYear) {
+<span class="fc" id="L512">        this.searchDobYear = searchDobYear;</span>
+<span class="fc" id="L513">    }</span>
+
+    public String getSearchDobMonth() {
+<span class="fc" id="L516">        return searchDobMonth;</span>
+    }
+
+    public void setSearchDobMonth(String searchDobMonth) {
+<span class="fc" id="L520">        this.searchDobMonth = searchDobMonth;</span>
+<span class="fc" id="L521">    }</span>
+
+    public String getSearchDobDay() {
+<span class="fc" id="L524">        return searchDobDay;</span>
+    }
+
+    public void setSearchDobDay(String searchDobDay) {
+<span class="fc" id="L528">        this.searchDobDay = searchDobDay;</span>
+<span class="fc" id="L529">    }</span>
+
+    public String getSearchLevel() {
+<span class="fc" id="L532">        return searchLevel;</span>
+    }
+
+    public void setSearchLevel(String searchLevel) {
+<span class="fc" id="L536">        this.searchLevel = searchLevel;</span>
+<span class="fc" id="L537">    }</span>
+
+    public String getPatientFullName() {
+<span class="fc" id="L540">        return patientFullName;</span>
+    }
+
+    public boolean isCanGrantGeneralHealthConsent() {
+<span class="fc" id="L544">        return canGrantGeneralHealthConsent;</span>
+    }
+
+    public boolean isCanGrantSexualHealthConsent() {
+<span class="fc" id="L548">        return canGrantSexualHealthConsent;</span>
+    }
+
+    public boolean isCanGrantMentalHealthConsent() {
+<span class="fc" id="L552">        return canGrantMentalHealthConsent;</span>
+    }
+
+    public boolean isCanGrantSocialCareConsent() {
+<span class="fc" id="L556">        return canGrantSocialCareConsent;</span>
+    }
+
+    public String getUserId() {
+<span class="nc" id="L560">        return userId;</span>
+    }
+
+    public void setUserId(String userId) {
+<span class="fc" id="L564">        this.userId = userId;</span>
+<span class="fc" id="L565">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

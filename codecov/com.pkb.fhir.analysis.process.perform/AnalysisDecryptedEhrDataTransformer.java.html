@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AnalysisDecryptedEhrDataTransformer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.analysis.process.perform</a> &gt; <span class="el_source">AnalysisDecryptedEhrDataTransformer.java</span></div><h1>AnalysisDecryptedEhrDataTransformer.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.analysis.process.perform;
+
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.fhir.analysis.core.threading.EhrDataProcessorWorker;
+import com.pkb.fhir.analysis.persistence.targetdb.TransformedEhrDataEntity;
+import com.pkb.fhir.analysis.persistence.targetdb.TransformedEhrDataRepository;
+import com.pkb.fhir.analysis.persistence.targetdb.repository.DecryptedEhrDataRepository;
+import com.pkb.fhir.common.decrypt.DecryptedEhrData;
+import com.pkb.fhir.common.enums.DecryptedEhrDataStatus;
+import com.pkb.fhir.common.enums.TransformedEhrDataStatus;
+import com.pkb.fhir.common.retrieve.AllergyEhrDataRetriever;
+import com.pkb.fhir.common.retrieve.DataTypeBasedEhrDataRetriever;
+import com.pkb.fhir.common.transform.BaseEhrDataTransformer;
+import com.pkb.fhir.common.transform.TransformableDto;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+/**
+ * This is the implementation for the transformation processor. {@link EhrDataProcessorWorker}
+ * We read the successfully decrypted data from the target database,
+ * collect extra data (not encrypted fields from menu_data) from the source database {@link AllergyEhrDataRetriever},
+ * then transform the XML + extra data to a json FHIR stucture and write it to the target database.
+ */
+public class AnalysisDecryptedEhrDataTransformer implements EhrDataProcessor {
+    private final TransformedEhrDataRepository transformedEhrDataRepository;
+    private final DataTypeBasedEhrDataRetriever ehrDataRetriever;
+    private final DecryptedEhrDataRepository ehrDataRepository;
+    private final Map&lt;MenuDataType, BaseEhrDataTransformer&gt; transformerMap;
+
+    public AnalysisDecryptedEhrDataTransformer(TransformedEhrDataRepository transformedEhrDataRepository,
+                                               DataTypeBasedEhrDataRetriever ehrDataRetriever,
+                                               DecryptedEhrDataRepository ehrDataRepository,
+<span class="fc" id="L40">                                               Map&lt;MenuDataType, BaseEhrDataTransformer&gt; transformerMap) {</span>
+<span class="fc" id="L41">        this.transformedEhrDataRepository = transformedEhrDataRepository;</span>
+<span class="fc" id="L42">        this.ehrDataRetriever = ehrDataRetriever;</span>
+<span class="fc" id="L43">        this.ehrDataRepository = ehrDataRepository;</span>
+<span class="fc" id="L44">        this.transformerMap = transformerMap;</span>
+<span class="fc" id="L45">    }</span>
+
+    @Override
+    public List&lt;TransformedEhrDataEntity&gt; process(List&lt;Long&gt; idsToProcess) {
+<span class="fc" id="L49">        List&lt;TransformedEhrDataEntity&gt; result = Collections.emptyList();</span>
+
+<span class="fc" id="L51">        Map&lt;Long, DecryptedEhrData&gt; successfullyDecryptedEhrData = ehrDataRepository.findAllById(idsToProcess, Collections.singletonList(DecryptedEhrDataStatus.SUCCESS))</span>
+<span class="fc" id="L52">                .stream().map(decryptedDataEntity -&gt;</span>
+<span class="fc" id="L53">                        new DecryptedEhrData(decryptedDataEntity.getId(), decryptedDataEntity.getContent(), decryptedDataEntity.getStatus(), decryptedDataEntity.getDataType()))</span>
+<span class="fc" id="L54">                .collect(Collectors.toMap(DecryptedEhrData::getId, Function.identity()));</span>
+
+<span class="fc" id="L56">        Map&lt;Long, ? extends TransformableDto&gt; foundEhrData =</span>
+<span class="fc" id="L57">                ehrDataRetriever.retrieveEhrDataDto(successfullyDecryptedEhrData)</span>
+<span class="fc" id="L58">                        .stream()</span>
+<span class="fc" id="L59">                        .collect(Collectors.toMap(TransformableDto::getId, Function.identity()));</span>
+
+<span class="pc bpc" id="L61" title="1 of 2 branches missed.">        if (!foundEhrData.isEmpty()) {</span>
+<span class="fc" id="L62">            MenuDataType menuDataType = foundEhrData.values().stream().findAny().get().getMenuDataType();</span>
+
+<span class="fc" id="L64">            result = transformData(foundEhrData.values());</span>
+
+<span class="fc" id="L66">            List&lt;Long&gt; failedToDecryptIds = collectMissingFromSubset(idsToProcess, successfullyDecryptedEhrData.keySet());</span>
+<span class="fc" id="L67">            result.addAll(createFailedTransformations(menuDataType, failedToDecryptIds, &quot;Failed to decrypt&quot;));</span>
+
+<span class="fc" id="L69">            List&lt;Long&gt; decryptedEhrDataDeletedFromOriginalSource = collectMissingFromSubset(successfullyDecryptedEhrData.keySet(), foundEhrData.keySet());</span>
+<span class="fc" id="L70">            result.addAll(createFailedTransformations(menuDataType, decryptedEhrDataDeletedFromOriginalSource, &quot;Could not find in original source (menu_data)&quot;));</span>
+
+<span class="fc" id="L72">            transformedEhrDataRepository.saveAll(result);</span>
+        }
+<span class="fc" id="L74">        return result;</span>
+    }
+
+    @NotNull
+    private List&lt;TransformedEhrDataEntity&gt; createFailedTransformations(MenuDataType menuDataType, List&lt;Long&gt; failedToDecryptIds, String s) {
+<span class="fc" id="L79">        return failedToDecryptIds.stream().map(</span>
+<span class="nc" id="L80">                id -&gt; createFailedToTransformEhrDataEntity(menuDataType, id, s)</span>
+<span class="fc" id="L81">        ).collect(Collectors.toList());</span>
+    }
+
+    @NotNull
+    private TransformedEhrDataEntity createFailedToTransformEhrDataEntity(MenuDataType menuDataType, Long id, String errorMsg) {
+<span class="nc" id="L86">        TransformedEhrDataEntity missingEntity = new TransformedEhrDataEntity();</span>
+<span class="nc" id="L87">        missingEntity.setError(errorMsg);</span>
+<span class="nc" id="L88">        missingEntity.setStatus(TransformedEhrDataStatus.TRANSFORM_FAILED);</span>
+<span class="nc" id="L89">        missingEntity.setDataType(menuDataType);</span>
+<span class="nc" id="L90">        missingEntity.setId(id);</span>
+<span class="nc" id="L91">        return missingEntity;</span>
+    }
+
+    @NotNull
+    private List&lt;Long&gt; collectMissingFromSubset(Collection&lt;Long&gt; originalDataset, Collection&lt;Long&gt; subset) {
+<span class="fc" id="L96">        List&lt;Long&gt; toRemoveFrom = new ArrayList&lt;&gt;(originalDataset);</span>
+<span class="fc" id="L97">        toRemoveFrom.removeAll(subset);</span>
+<span class="fc" id="L98">        return toRemoveFrom;</span>
+    }
+
+    private List&lt;TransformedEhrDataEntity&gt; transformData(Collection&lt;? extends TransformableDto&gt; data) {
+<span class="fc" id="L102">        return data.stream().map(this::transform).collect(Collectors.toList());</span>
+    }
+
+    public TransformedEhrDataEntity transform(TransformableDto item) {
+<span class="fc" id="L106">        TransformedEhrDataEntity result = new TransformedEhrDataEntity();</span>
+<span class="fc" id="L107">        result.setId(item.getId());</span>
+<span class="fc" id="L108">        result.setDataType(item.getMenuDataType());</span>
+        try {
+<span class="fc" id="L110">            String transformedContent = transformerMap.get(item.getMenuDataType()).transformToFhirJson(item);</span>
+<span class="fc" id="L111">            result.setContent(transformedContent);</span>
+<span class="fc" id="L112">            result.setStatus(TransformedEhrDataStatus.TRANSFORMED);</span>
+<span class="nc" id="L113">        } catch (Exception e) {</span>
+<span class="nc" id="L114">            result.setStatus(TransformedEhrDataStatus.TRANSFORM_FAILED);</span>
+<span class="nc" id="L115">            result.setError(e.getMessage());</span>
+<span class="fc" id="L116">        }</span>
+<span class="fc" id="L117">        return result;</span>
+    }
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

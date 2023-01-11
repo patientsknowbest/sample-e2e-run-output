@@ -1,0 +1,535 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EHRMeasurementManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.measurement</a> &gt; <span class="el_source">EHRMeasurementManager.java</span></div><h1>EHRMeasurementManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.measurement;
+
+import com.pkb.app.EhrDataVersionResult;
+import com.pkb.app.dto.DateFilterDTO;
+import com.pkb.app.dto.PageFilterDTO;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PKBFilter;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.coding.entity.CodingReceived;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.common.testlogging.DetailLoggingProvider;
+import com.pkb.data.EHRRemote;
+import com.pkb.dto.I18nTextDTO;
+import com.pkb.entities.enums.CodingDataType;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.exception.PKBPluginException;
+import com.pkb.service.coding.CodingManager;
+import com.pkb.service.ehr.DeduplicatorManager;
+import com.pkb.service.ehr.EhrDataPointManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.test.UploadedDataDeletionMetadata;
+import com.pkb.test.entity.MeasurementCategory;
+import com.pkb.test.entity.MeasurementDTO;
+import com.pkb.test.entity.MeasurementHistoryDTO;
+import com.pkb.test.entity.MeasurementTypeId;
+import com.pkb.test.entity.PredefinedMeasurementType;
+import com.pkb.user.PKBPersonRemote;
+import com.pkb.util.Constants;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import io.vavr.Function2;
+import io.vavr.Tuple2;
+import io.vavr.Tuple3;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.UUID;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singletonList;
+import static java.util.Objects.nonNull;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+public class EHRMeasurementManager extends EhrDataPointManager&lt;MeasurementDTO&gt; {
+
+<span class="fc" id="L73">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L74">    private static final DateTimeFormatter WARNING_DATE_FORMATTER = DateTimeFormatter.ofPattern(&quot;dd-MM-yyyy&quot;);</span>
+
+    private DetailLoggingProvider testLoggingService;
+
+<span class="fc" id="L78">    private static final Function2&lt;MeasurementDTO, PrivacyFlag, Void&gt; PRIVACY_FLAG_HANDLER = (measurementDTO, privacyFlag) -&gt; {</span>
+<span class="fc" id="L79">        measurementDTO.getBaseFields().setPrivacyFlag(privacyFlag);</span>
+<span class="fc" id="L80">        return null;</span>
+    };
+
+<span class="fc" id="L83">    private static final Function2&lt;MeasurementDTO, Long, Void&gt; CODING_RECEIVED_ID_SETTER = (measurement, privateId) -&gt; {</span>
+<span class="fc" id="L84">        measurement.setCodingReceivedId(privateId);</span>
+<span class="fc" id="L85">        return null;</span>
+    };
+
+    public EHRMeasurementManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider,
+                                 CodingManager codingManager, DeduplicatorManager deduplicator, DetailLoggingProvider testLoggingService, Class&lt;MeasurementDTO&gt; dtoClass, MenuDataType dataType) {
+<span class="fc" id="L90">        super(config, beanFactory, dateTimeService, uuidProvider, codingManager, deduplicator, dtoClass, dataType);</span>
+<span class="fc" id="L91">        this.testLoggingService = testLoggingService;</span>
+<span class="fc" id="L92">    }</span>
+
+    @Override
+    protected List&lt;Tuple2&lt;MeasurementDTO, EHRRequestContext&gt;&gt; adjustCodings(List&lt;Tuple2&lt;MeasurementDTO, EHRRequestContext&gt;&gt; data) {
+<span class="nc" id="L96">        return doAdjustCodings(data, CodingDataType.MEASUREMENT, MeasurementDTO::getCodeableConcept,</span>
+                CODING_RECEIVED_ID_SETTER,
+                PRIVACY_FLAG_HANDLER);
+    }
+
+    @Override
+    protected List&lt;Tuple2&lt;MeasurementDTO, EHRRequestContext&gt;&gt; adjustCodingsNoCodingLookup(List&lt;Tuple3&lt;MeasurementDTO, CodingReceived, EHRRequestContext&gt;&gt; data) {
+<span class="fc" id="L103">        return doAdjustCodingsNoCodingLookup(data, CODING_RECEIVED_ID_SETTER, PRIVACY_FLAG_HANDLER);</span>
+    }
+
+    public void saveMeasurements(EHRRequestContext requestContext, List&lt;MeasurementDTO&gt; dtoList, long patientUserId) {
+<span class="fc" id="L107">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L108">        PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L109">        Long patientAccountId = checkNotNull(personBean.getDefaultAccountId(patientUserId),</span>
+                &quot;Could not find default account for user %s&quot;, patientUserId);
+
+<span class="fc bfc" id="L112" title="All 2 branches covered.">        for (MeasurementDTO dto : dtoList) {</span>
+            // first do any conversion needed
+<span class="fc" id="L114">            var predefinedTypeId = dto.getMeasurementType().id().asInternalId();</span>
+<span class="fc" id="L115">            var predefinedType = predefinedTypeId.flatMap(id -&gt; Option.of(PredefinedMeasurementType.getById(id)));</span>
+<span class="pc bpc" id="L116" title="3 of 4 branches missed.">            if (predefinedType.isEmpty() &amp;&amp; predefinedTypeId.isDefined()) {</span>
+<span class="nc" id="L117">                throw new NullPointerException(&quot;Attempting to save measurement with invalid type ID [&quot; + dto.getMeasurementType().id() + &quot;]&quot;);</span>
+            }
+            // This may change the measurement type in the DTO
+<span class="fc" id="L120">            dto.getMeasurementType().convertFromInput(dto);</span>
+<span class="fc" id="L121">            dto.getBaseFields().generateNewRandomUniqueId();</span>
+<span class="fc" id="L122">        }</span>
+
+<span class="fc" id="L124">        List&lt;EHRData&gt; ehrDatas = ehrBean.populateEHRDataList(dtoList, patientAccountId, MeasurementDTO.MS_PATH, requestContext);</span>
+<span class="fc" id="L125">        ehrDatas = ehrBean.saveEHRDataList(requestContext, ehrDatas);</span>
+
+<span class="fc" id="L127">        testLoggingService.obtainLogger(LOGGER).info(&quot;just saved ehrDatas {}&quot;, ehrDatas);</span>
+<span class="fc" id="L128">    }</span>
+
+    public List&lt;MeasurementDTO&gt; getMeasurements(@NotNull LoggedInEHRRequestContext requestContext, List&lt;MeasurementTypeId&gt; typesOrNull,
+                                                DateFilterDTO dateFilterOrNull,
+                                                long patientId, PageFilterDTO pageFilterOrNull) {
+<span class="fc" id="L133">        PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+
+        try {
+<span class="fc" id="L136">            Long patientAccountId = checkNotNull(personBean.getDefaultAccountId(patientId),</span>
+                    &quot;Could not find default account for user %s&quot;, patientId);
+
+<span class="fc" id="L139">            int pageSize = 0;</span>
+<span class="fc" id="L140">            int offset = 0;</span>
+
+<span class="fc bfc" id="L142" title="All 2 branches covered.">            if (pageFilterOrNull != null) {</span>
+<span class="fc" id="L143">                pageSize = pageFilterOrNull.getPageSize();</span>
+<span class="fc" id="L144">                offset = pageFilterOrNull.getOffset();</span>
+            }
+
+<span class="fc" id="L147">            int finalPageSize = pageSize;</span>
+<span class="fc" id="L148">            int finalOffset = offset;</span>
+<span class="fc" id="L149">            Supplier&lt;EHRSearch&lt;?&gt;&gt; baseSearch = () -&gt; {</span>
+<span class="fc" id="L150">                EHRSearch&lt;MeasurementDTO&gt; ehrSearch = new EHRSearch&lt;&gt;(patientAccountId, MeasurementDTO.class,</span>
+                        MeasurementDTO.MS_PATH);
+
+<span class="fc" id="L153">                ehrSearch.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L154">                addDateFilter(dateFilterOrNull, ehrSearch);</span>
+<span class="fc" id="L155">                ehrSearch.setOrderBy(&quot;date01&quot;, EHRSearch.OrderByDirection.Desc);</span>
+<span class="fc" id="L156">                return ehrSearch;</span>
+            };
+
+<span class="fc" id="L159">            var searches = new ArrayList&lt;EHRSearch&lt;?&gt;&gt;();</span>
+
+<span class="pc bpc" id="L161" title="1 of 4 branches missed.">            if ((typesOrNull != null) &amp;&amp; !typesOrNull.isEmpty()) {</span>
+<span class="fc" id="L162">                searches.addAll(searches(typesOrNull, baseSearch).collect(toList()));</span>
+            } else {
+<span class="fc" id="L164">                searches.add(baseSearch.get());</span>
+            }
+
+<span class="fc" id="L167">            EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L168">            List&lt;EHRData&gt; ehrList = ehrBean.queryAndDecryptEHRData(searches, requestContext, finalPageSize, finalOffset);</span>
+<span class="fc" id="L169">            var measurements = ehrBean.populateDTOList(ehrList, MeasurementDTO.class, requestContext);</span>
+<span class="fc" id="L170">            addWarnings(measurements);</span>
+
+<span class="fc" id="L172">            testLoggingService.obtainLogger(LOGGER).info(&quot;Returning measurements {}&quot;, measurements);</span>
+
+<span class="fc" id="L174">            return measurements;</span>
+
+<span class="nc" id="L176">        } catch (Exception e) {</span>
+<span class="nc" id="L177">            throw new PKBPluginException(&quot;Exception whilst fetching measurement about patientId -&quot; + patientId, e);</span>
+        }
+    }
+
+    /**
+     * Add date filter to search object
+     */
+    private void addDateFilter(DateFilterDTO dateFilterOrNull, EHRSearch ehrSearch) {
+<span class="fc" id="L185">        Instant fromDateOrNull = null;</span>
+<span class="fc" id="L186">        Instant toDateOrNull = null;</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">        if (dateFilterOrNull != null) {</span>
+<span class="fc" id="L188">            fromDateOrNull = dateFilterOrNull.getFromDate();</span>
+<span class="fc" id="L189">            toDateOrNull = dateFilterOrNull.getToDate();</span>
+        }
+<span class="fc bfc" id="L191" title="All 2 branches covered.">        if (fromDateOrNull != null) {</span>
+<span class="fc" id="L192">            ehrSearch.addFilter(new PKBFilter(MeasurementDTO.MEASURE_DATE, PKBFilter.Operator.GREATER_OR_EQUAL, fromDateOrNull));</span>
+        }
+
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">        if (toDateOrNull != null) {</span>
+<span class="nc" id="L196">            ehrSearch.addFilter(new PKBFilter(MeasurementDTO.MEASURE_DATE, PKBFilter.Operator.LESS_OR_EQUAL, toDateOrNull));</span>
+        }
+<span class="fc" id="L198">    }</span>
+
+    public Map&lt;MeasurementTypeId, MeasurementDTO&gt; getSingleLatestMeasurementForTypes(@NotNull LoggedInEHRRequestContext requestContext, long patientId, @NotNull List&lt;PredefinedMeasurementType&gt; measurementTypes) {
+        try {
+<span class="fc" id="L202">            PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L203">            Long patientAccountId = checkNotNull(personBean.getDefaultAccountId(patientId), &quot;Could not find default account for user %s&quot;, patientId);</span>
+<span class="fc" id="L204">            List&lt;MeasurementHistoryDTO&gt; measurementHistories = doGetLatestMeasurements(requestContext.fillMissingContextUser(patientId),</span>
+<span class="fc" id="L205">                    patientAccountId, 1/*Fetch single most recent result*/, measurementTypes.stream().map(PredefinedMeasurementType::id).collect(toList()));</span>
+<span class="fc" id="L206">            Map&lt;MeasurementTypeId, MeasurementDTO&gt; latestReports = new TreeMap&lt;&gt;();</span>
+<span class="fc bfc" id="L207" title="All 2 branches covered.">            for (MeasurementHistoryDTO history : measurementHistories) {</span>
+<span class="fc" id="L208">                latestReports.put(history.getMeasurementType().id(), history.getLatestMeasurement());</span>
+<span class="fc" id="L209">            }</span>
+<span class="fc" id="L210">            return latestReports;</span>
+<span class="nc" id="L211">        } catch (Exception e) {</span>
+<span class="nc" id="L212">            LOGGER.error(&quot;Exception while getting latest measurements for userid-{}&quot;, patientId, e);</span>
+<span class="nc" id="L213">            throw new RuntimeException(&quot;Exception while getting latest measurements for userid-&quot; + patientId, e);</span>
+        }
+    }
+
+    private io.vavr.collection.List&lt;EHRSearch&lt;?&gt;&gt; searches(Collection&lt;MeasurementTypeId&gt; ids, Long patientAccountId) {
+<span class="fc" id="L218">        return searches(ids, () -&gt; new EHRSearch&lt;&gt;(patientAccountId, MeasurementDTO.class, MeasurementDTO.MS_PATH));</span>
+    }
+
+    private io.vavr.collection.List&lt;EHRSearch&lt;?&gt;&gt; searches(Collection&lt;MeasurementTypeId&gt; ids, Supplier&lt;EHRSearch&lt;?&gt;&gt; baseSearch) {
+<span class="fc bfc" id="L222" title="All 2 branches covered.">        if (ids.isEmpty()) {</span>
+<span class="fc" id="L223">            return io.vavr.collection.List.empty();</span>
+        }
+
+<span class="fc" id="L226">        List&lt;EHRSearch&lt;?&gt;&gt; searches = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L228">        io.vavr.collection.List.ofAll(ids)</span>
+<span class="fc" id="L229">                .flatMap(MeasurementTypeId::asInternalId)</span>
+<span class="fc" id="L230">                .forEach(internalId -&gt; {</span>
+<span class="fc" id="L231">                    var internalSearch = baseSearch.get();</span>
+<span class="fc" id="L232">                    internalSearch.addFilter(new PKBFilter(MeasurementDTO.MEASUREMENT_TYPE_ID, PKBFilter.Operator.EQUAL, internalId));</span>
+<span class="fc" id="L233">                    searches.add(internalSearch);</span>
+<span class="fc" id="L234">                });</span>
+
+<span class="fc" id="L236">        io.vavr.collection.HashSet.ofAll(ids)</span>
+<span class="fc" id="L237">                .flatMap(MeasurementTypeId::asCodingMatchIdAndUnit)</span>
+<span class="pc bpc" id="L238" title="1 of 4 branches missed.">                .filter(codingMatchIdWithUnit -&gt; codingMatchIdWithUnit._1() != null &amp;&amp; codingMatchIdWithUnit._2() != null)</span>
+<span class="fc" id="L239">                .forEach(codingMatchIdWithUnit -&gt; {</span>
+<span class="fc" id="L240">                    var externalSearch = baseSearch.get();</span>
+<span class="fc" id="L241">                    externalSearch.addFilter(new PKBFilter(MeasurementDTO.CODING_MATCH_ID, PKBFilter.Operator.EQUAL, codingMatchIdWithUnit._1()));</span>
+<span class="fc" id="L242">                    externalSearch.addFilter(new PKBFilter(MeasurementDTO.UNIT_FIELD, PKBFilter.Operator.EQUAL, codingMatchIdWithUnit._2()));</span>
+<span class="fc" id="L243">                    searches.add(externalSearch);</span>
+<span class="fc" id="L244">                });</span>
+
+<span class="fc" id="L246">        return io.vavr.collection.List.ofAll(searches);</span>
+    }
+
+    public List&lt;MeasurementHistoryDTO&gt; getLatestMeasurements(@NotNull LoggedInEHRRequestContext requestContext, long patientId, int maxNumberPerMeasurementType) {
+<span class="fc" id="L250">        PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L251">        Long patientAccountId = checkNotNull(personBean.getDefaultAccountId(patientId), &quot;Could not find default account for user %s&quot;, patientId);</span>
+<span class="fc" id="L252">        List&lt;MeasurementTypeId&gt; allMeasurementTypesInAccount = getMeasurementTypeStreamForAccount(requestContext, patientAccountId).collect(toList());</span>
+<span class="fc" id="L253">        return doGetLatestMeasurements(requestContext, patientAccountId, maxNumberPerMeasurementType, allMeasurementTypesInAccount);</span>
+    }
+
+    private List&lt;MeasurementHistoryDTO&gt; doGetLatestMeasurements(@NotNull LoggedInEHRRequestContext requestContext, long patientAccountId, int maxNumberPerMeasurementType, @NotNull List&lt;MeasurementTypeId&gt; measurementTypeIds) {
+<span class="fc" id="L257">        var searchesAll = searches(measurementTypeIds, patientAccountId);</span>
+<span class="fc" id="L258">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L259">        searchesAll.forEach(search -&gt; {</span>
+<span class="fc" id="L260">            search.setLatestPerTypeFilter(MeasurementDTO.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L261">            search.setOrderBy(MeasurementDTO.MEASURE_DATE, EHRSearch.OrderByDirection.Desc);</span>
+<span class="fc" id="L262">            search.setResultsMaxReturned(maxNumberPerMeasurementType);</span>
+<span class="fc" id="L263">        });</span>
+
+<span class="fc" id="L265">        List&lt;EHRData&gt; allResults = ehrBean.queryAndDecryptEHRData(searchesAll.toJavaList(), requestContext);</span>
+
+        // now convert to DTOs
+<span class="fc" id="L268">        List&lt;MeasurementDTO&gt; allDtos = ehrBean.populateDTOList(allResults, MeasurementDTO.class, requestContext);</span>
+<span class="fc" id="L269">        addWarnings(allDtos);</span>
+
+        // and split up into separate histories per-measurement
+<span class="fc" id="L272">        Map&lt;MeasurementTypeId, MeasurementHistoryDTO&gt; typeIdToHistoryMap = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L273" title="All 2 branches covered.">        for (MeasurementDTO dto : allDtos) {</span>
+<span class="fc" id="L274">            MeasurementTypeId dtoTypeId = dto.getMeasurementType().id();</span>
+
+<span class="fc" id="L276">            MeasurementHistoryDTO history = typeIdToHistoryMap.get(dtoTypeId);</span>
+<span class="fc bfc" id="L277" title="All 2 branches covered.">            if (history == null) {</span>
+<span class="fc" id="L278">                history = new MeasurementHistoryDTO();</span>
+<span class="fc" id="L279">                history.setMeasurementType(dto.getMeasurementType());</span>
+<span class="fc" id="L280">                history.setMeasurementList(new ArrayList&lt;&gt;());</span>
+
+<span class="fc" id="L282">                typeIdToHistoryMap.put(dtoTypeId, history);</span>
+            }
+<span class="fc" id="L284">            history.getMeasurementList().add(dto);</span>
+<span class="fc" id="L285">        }</span>
+
+<span class="fc" id="L287">        List&lt;MeasurementHistoryDTO&gt; historyList = new ArrayList&lt;&gt;(typeIdToHistoryMap.values());</span>
+
+        // loop through and do a day-sum where relevant
+<span class="fc bfc" id="L290" title="All 2 branches covered.">        for (MeasurementHistoryDTO history : historyList) {</span>
+<span class="fc" id="L291">            MeasurementCategory category = history.getMeasurementType().category();</span>
+<span class="fc bfc" id="L292" title="All 6 branches covered.">            if ((category == MeasurementCategory.NUTRITION) || (category == MeasurementCategory.FITNESS) || (category == MeasurementCategory.SLEEP)) {</span>
+<span class="fc" id="L293">                sumWithinDay(history.getMeasurementList());</span>
+            }
+<span class="fc" id="L295">        }</span>
+
+<span class="fc" id="L297">        testLoggingService.obtainLogger(LOGGER).info(&quot;Returning historyList {}&quot;, historyList);</span>
+
+<span class="fc" id="L299">        return historyList;</span>
+    }
+
+    @NotNull
+    private Stream&lt;MeasurementTypeId&gt; getMeasurementTypeStreamForAccount(@NotNull LoggedInEHRRequestContext requestContext, Long patientAccountId) {
+<span class="fc" id="L304">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L305">        EHRSearch&lt;MeasurementDTO&gt; latestByTypeSearch = new EHRSearch&lt;&gt;(patientAccountId, MeasurementDTO.class, MeasurementDTO.MS_PATH);</span>
+<span class="fc" id="L306">        latestByTypeSearch.setLatestPerTypeFilter(MeasurementDTO.MEASURE_DATE, MeasurementDTO.MEASUREMENT_TYPE_ID);</span>
+<span class="fc" id="L307">        latestByTypeSearch.getFieldsRequestedSet().add(MeasurementDTO.MEASUREMENT_TYPE_ID);</span>
+<span class="fc" id="L308">        latestByTypeSearch.addFilter(new PKBFilter(MeasurementDTO.MEASUREMENT_TYPE_ID, PKBFilter.Operator.IS_NOT_NULL, null));</span>
+<span class="fc" id="L309">        Stream&lt;Object&gt; measurementTypeStream = ehrBean.queryEHRDataFields(latestByTypeSearch, requestContext)</span>
+<span class="fc" id="L310">                .stream()</span>
+<span class="fc" id="L311">                .map(row -&gt; row.get(MeasurementDTO.MEASUREMENT_TYPE_ID));</span>
+
+<span class="fc" id="L313">        Stream&lt;MeasurementTypeId&gt; result = measurementTypeStream.map(it -&gt; MeasurementTypeId.ofPredefinedTypeId((Long) it));</span>
+
+<span class="fc" id="L315">        EHRSearch&lt;MeasurementDTO&gt; codingMatchBased = new EHRSearch&lt;&gt;(patientAccountId, MeasurementDTO.class, MeasurementDTO.MS_PATH);</span>
+<span class="fc" id="L316">        codingMatchBased.getFieldsRequestedSet().add(MeasurementDTO.CODING_MATCH_ID);</span>
+<span class="fc" id="L317">        codingMatchBased.getFieldsRequestedSet().add(MeasurementDTO.UNIT_FIELD);</span>
+<span class="fc" id="L318">        codingMatchBased.addFilter(new PKBFilter(MeasurementDTO.MEASUREMENT_TYPE_ID, PKBFilter.Operator.IS_NULL, null));</span>
+<span class="fc" id="L319">        Stream&lt;MeasurementTypeId&gt; codingMatchStream = ehrBean.queryEHRDataFields(codingMatchBased, requestContext)</span>
+<span class="fc" id="L320">                .stream()</span>
+<span class="fc" id="L321">                .map(row -&gt; MeasurementTypeId.ofCodingMatchAndUnit((Long) row.get(MeasurementDTO.CODING_MATCH_ID), (String) row.get(MeasurementDTO.UNIT_FIELD)));</span>
+
+<span class="fc" id="L323">        return Stream.concat(result, io.vavr.collection.HashSet.ofAll(codingMatchStream).toJavaStream());</span>
+
+    }
+
+    public Set&lt;Long&gt; getMeasurementIds(@NotNull LoggedInEHRRequestContext requestContext, Long patientAccountId, Long uploadedDataId, Set&lt;MeasurementTypeId&gt; measurementTypeIds) {
+        try {
+<span class="nc" id="L329">            EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="nc" id="L330">            Set&lt;Long&gt; predefinedIds = new HashSet&lt;&gt;(measurementTypeIds.size());</span>
+<span class="nc" id="L331">            Set&lt;Long&gt; codingMatchIds = new HashSet&lt;&gt;(measurementTypeIds.size());</span>
+<span class="nc" id="L332">            Set&lt;String&gt; units = new HashSet&lt;&gt;(measurementTypeIds.size());</span>
+<span class="nc" id="L333">            measurementTypeIds.forEach(measurementTypeId -&gt; measurementTypeId.peek(</span>
+<span class="nc" id="L334">                    predefinedIds::add,</span>
+                    codingMatchAndUnit -&gt; {
+<span class="nc" id="L336">                        codingMatchIds.add(codingMatchAndUnit._1());</span>
+<span class="nc" id="L337">                        units.add(codingMatchAndUnit._2());</span>
+<span class="nc" id="L338">                    }));</span>
+
+
+<span class="nc" id="L341">            List&lt;EHRData&gt; predefinedData = emptyList();</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">            if (isNotEmpty(predefinedIds)) {</span>
+<span class="nc" id="L343">                EHRSearch&lt;MeasurementDTO&gt; ehrSearchForPredefined = new EHRSearch&lt;&gt;(patientAccountId, MeasurementDTO.class, MeasurementDTO.MS_PATH);</span>
+<span class="nc" id="L344">                ehrSearchForPredefined.addFilter(new PKBFilter(MeasurementDTO.MEASUREMENT_TYPE_ID, PKBFilter.Operator.IN, predefinedIds));</span>
+<span class="nc" id="L345">                ehrSearchForPredefined.addFilter(new PKBFilter(MeasurementDTO.UPLOADED_DATA_ID, PKBFilter.Operator.EQUAL, uploadedDataId));</span>
+<span class="nc" id="L346">                predefinedData = ehrBean.queryAndDecryptEHRData(ehrSearchForPredefined, requestContext);</span>
+            }
+
+<span class="nc" id="L349">            List&lt;EHRData&gt; codingData = emptyList();</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">            if (isNotEmpty(codingMatchIds)) {</span>
+<span class="nc" id="L351">                EHRSearch&lt;MeasurementDTO&gt; ehrSearchForCodings = new EHRSearch&lt;&gt;(patientAccountId, MeasurementDTO.class, MeasurementDTO.MS_PATH);</span>
+<span class="nc" id="L352">                ehrSearchForCodings.addFilter(new PKBFilter(MeasurementDTO.CODING_MATCH_ID, PKBFilter.Operator.IN, codingMatchIds));</span>
+<span class="nc" id="L353">                ehrSearchForCodings.addFilter(new PKBFilter(MeasurementDTO.UNIT_FIELD, PKBFilter.Operator.IN, units));</span>
+<span class="nc" id="L354">                ehrSearchForCodings.addFilter(new PKBFilter(MeasurementDTO.UPLOADED_DATA_ID, PKBFilter.Operator.EQUAL, uploadedDataId));</span>
+<span class="nc" id="L355">                codingData = ehrBean.queryAndDecryptEHRData(ehrSearchForCodings, requestContext);</span>
+            }
+
+<span class="nc" id="L358">            List&lt;EHRData&gt; ehrList = new ArrayList&lt;&gt;(predefinedData.size() + codingData.size());</span>
+<span class="nc" id="L359">            ehrList.addAll(predefinedData);</span>
+<span class="nc" id="L360">            ehrList.addAll(codingData);</span>
+
+<span class="nc" id="L362">            return ehrBean.populateDTOList(ehrList, MeasurementDTO.class, requestContext)</span>
+<span class="nc" id="L363">                    .stream()</span>
+<span class="nc" id="L364">                    .filter(dto -&gt; dto.toMeasurementTypeId().map(measurementTypeIds::contains).getOrElse(false))</span>
+<span class="nc" id="L365">                    .map(MeasurementDTO::getId)</span>
+<span class="nc" id="L366">                    .collect(toSet());</span>
+<span class="nc" id="L367">        } catch (Exception e) {</span>
+<span class="nc" id="L368">            LOGGER.error(&quot;Exception while getting measurement ids for accountid-{}&quot;, patientAccountId, e);</span>
+<span class="nc" id="L369">            throw new RuntimeException(&quot;Exception while getting measurement ids for accountid-&quot; + patientAccountId, e);</span>
+        }
+    }
+
+    public List&lt;MeasurementDTO&gt; getMeasurements(@NotNull LoggedInEHRRequestContext requestContext, MeasurementTypeId typeIdOrNull,
+                                                DateFilterDTO dateFilterOrNull, long patientId, PageFilterDTO pageFilterOrNull,
+                                                boolean fetchReferrals) {
+<span class="fc" id="L376">        return getMeasurements(requestContext, Option.of(typeIdOrNull).collect(Collectors.toList()), dateFilterOrNull, patientId, pageFilterOrNull);</span>
+    }
+
+    private void sumWithinDay(List&lt;MeasurementDTO&gt; measurementList) {
+        // List is already ordered by date
+<span class="fc bfc" id="L381" title="All 2 branches covered.">        if (measurementList.size() &gt; 1) {</span>
+<span class="fc" id="L382">            Iterator&lt;MeasurementDTO&gt; dit = measurementList.iterator();</span>
+<span class="fc" id="L383">            MeasurementDTO thisDTO = dit.next();</span>
+
+<span class="fc bfc" id="L385" title="All 4 branches covered.">            if (thisDTO.getValue() != null &amp;&amp; !thisDTO.isDailyCumulativeDeviceData()) // Skip non-numeric and cumulative types</span>
+            {
+<span class="fc bfc" id="L387" title="All 2 branches covered.">                while (dit.hasNext()) {</span>
+<span class="fc" id="L388">                    MeasurementDTO nextDTO = dit.next();</span>
+<span class="pc bpc" id="L389" title="2 of 4 branches missed.">                    if (thisDTO.getMeasureDate() != null &amp;&amp; nextDTO.getMeasureDate() != null</span>
+<span class="fc bfc" id="L390" title="All 2 branches covered.">                            &amp;&amp; isSameDay(thisDTO.getMeasureDate(), nextDTO.getMeasureDate())) {</span>
+<span class="fc" id="L391">                        thisDTO.setMeasureDate(zeroTimeComponent(thisDTO.getMeasureDate()));</span>
+<span class="fc" id="L392">                        thisDTO.setValue(thisDTO.getValue() + nextDTO.getValue());</span>
+<span class="fc" id="L393">                        dit.remove();</span>
+                    } else {
+<span class="fc" id="L395">                        thisDTO = nextDTO;</span>
+                    }
+<span class="fc" id="L397">                }</span>
+            }
+        }
+<span class="fc" id="L400">    }</span>
+
+    // TODO bring DateUtils into plugin
+    // TODO this does not account for time zone!  It needs to...
+    private static boolean isSameDay(Instant d1, Instant d2) {
+<span class="fc" id="L405">        ZonedDateTime zdt1 = ZonedDateTime.ofInstant(d1, Constants.APPLICATION_TZ);</span>
+<span class="fc" id="L406">        ZonedDateTime zdt2 = ZonedDateTime.ofInstant(d2, Constants.APPLICATION_TZ);</span>
+<span class="fc" id="L407">        return zdt1.toLocalDate().isEqual(zdt2.toLocalDate());</span>
+    }
+
+    private static Instant zeroTimeComponent(Instant d) {
+<span class="fc" id="L411">        return ZonedDateTime.ofInstant(d, Constants.APPLICATION_TZ).truncatedTo(ChronoUnit.DAYS).toInstant();</span>
+    }
+
+    public UUID saveMeasurement(EHRRequestContext requestContext, MeasurementDTO measurementDTO, long patientId) {
+<span class="fc" id="L415">        saveMeasurements(requestContext, singletonList(measurementDTO), patientId);</span>
+<span class="fc" id="L416">        return measurementDTO.getBaseFields().getUniqueId();</span>
+    }
+
+    public UUID updateMeasurement(long patientId, MeasurementDTO measurementDTO, EHRRequestContext requestContext) {
+<span class="fc" id="L420">        measurementDTO.setId(null);</span>
+<span class="fc" id="L421">        PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L422">        UUID uniqueId = measurementDTO.getBaseFields().getUniqueId();</span>
+
+<span class="pc bpc" id="L424" title="1 of 2 branches missed.">        if (uniqueId == null) {</span>
+<span class="nc" id="L425">            throw new RuntimeException(&quot;Missing uniqueId for updating measurement&quot;);</span>
+        }
+        try {
+<span class="fc" id="L428">            EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L429">            Long patientAccountId = checkNotNull(personBean.getDefaultAccountId(patientId),</span>
+                    &quot;Could not find default account for user %s&quot;, patientId);
+<span class="fc" id="L431">            EHRData ehrData = new EHRData();</span>
+<span class="fc" id="L432">            ehrData = ehrBean.populateEHRData(ehrData, measurementDTO, patientAccountId, MeasurementDTO.MS_PATH, requestContext);</span>
+<span class="fc" id="L433">            ehrBean.saveEHRData(requestContext, ehrData);</span>
+<span class="nc" id="L434">        } catch (Exception e) {</span>
+<span class="nc" id="L435">            throw new RuntimeException(&quot;Error while updating measurement with uniqueId&quot; + uniqueId, e);</span>
+<span class="fc" id="L436">        }</span>
+<span class="fc" id="L437">        return uniqueId;</span>
+    }
+
+    @Nullable
+    public EHRData getMeasurementByUniqueId(@NotNull LoggedInEHRRequestContext requestContext, long patientId, UUID uniqueId, boolean includeDeleted) {
+        try {
+<span class="fc" id="L443">            EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L444">            PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L445">            Long patientAccountId = checkNotNull(personBean.getDefaultAccountId(patientId),</span>
+                    &quot;Could not find default account for user %s&quot;, patientId);
+<span class="fc" id="L447">            EHRSearch&lt;MeasurementDTO&gt; search = new EHRSearch&lt;&gt;(patientAccountId, MeasurementDTO.class,</span>
+                    MeasurementDTO.MS_PATH);
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">            if (includeDeleted) {</span>
+<span class="nc" id="L450">                search.setIncludeDeleted(true);</span>
+            }
+<span class="fc" id="L452">            search.addFilter(new PKBFilter(&quot;uniqueId&quot;, PKBFilter.Operator.EQUAL, uniqueId));</span>
+
+<span class="fc" id="L454">            List&lt;EHRData&gt; ehrDataList = ehrBean.queryAndDecryptEHRData(search, requestContext);</span>
+<span class="fc bfc" id="L455" title="All 2 branches covered.">            if (ehrDataList.isEmpty()) {</span>
+<span class="fc" id="L456">                return null;</span>
+            }
+<span class="fc" id="L458">            return ehrDataList.get(0);</span>
+<span class="nc" id="L459">        } catch (Exception e) {</span>
+<span class="nc" id="L460">            throw new RuntimeException(&quot;Exception while fetching measurement record by uniqueId -&quot; + uniqueId, e);</span>
+        }
+    }
+
+    private void addWarnings(@NotNull List&lt;MeasurementDTO&gt; measurements) {
+<span class="fc" id="L465">        measurements.forEach(this::addWarnings);</span>
+<span class="fc" id="L466">    }</span>
+
+    private void addWarnings(@NotNull MeasurementDTO measurementDTO) {
+<span class="fc" id="L469">        List&lt;I18nTextDTO&gt; warnings = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L471">        Instant iWarningDate = Instant.parse(config.getVcMaxWarningDate());</span>
+<span class="fc" id="L472">        Instant iEntered = measurementDTO.getBaseFields()</span>
+<span class="fc" id="L473">                .getEnteredDate()</span>
+<span class="fc" id="L474">                .toInstant();</span>
+<span class="fc bfc" id="L475" title="All 2 branches covered.">        if (measurementDTO.getMeasurementType().is(PredefinedMeasurementType.VC_MAX_L_PER_MIN)</span>
+<span class="pc bpc" id="L476" title="1 of 4 branches missed.">                &amp;&amp; (iEntered.isBefore(iWarningDate) || iEntered.equals(iWarningDate))) {</span>
+<span class="fc" id="L477">            I18nTextDTO warning = new I18nTextDTO();</span>
+<span class="fc" id="L478">            warning.setProperty(&quot;myMeasurements.txt.vc_max_warning&quot;);</span>
+<span class="fc" id="L479">            warning.setParams(new String[]{</span>
+                    WARNING_DATE_FORMATTER
+<span class="fc" id="L481">                            .withZone(ZoneId.of(&quot;UTC&quot;))</span>
+<span class="fc" id="L482">                            .format(iWarningDate)</span>
+            });
+<span class="fc" id="L484">            warnings.add(warning);</span>
+        }
+
+<span class="fc" id="L487">        measurementDTO.setWarnings(warnings);</span>
+<span class="fc" id="L488">    }</span>
+
+    public List&lt;EhrDataVersionResult&gt; deleteMeasurementsById(@NotNull LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; measurementIdsToDelete) {
+<span class="fc" id="L491">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L492">        List&lt;EHRData&gt; ehrDataList = ehrBean.findAndDecryptEHRData(measurementIdsToDelete, requestContext);</span>
+<span class="fc" id="L493">        return deleteMeasurements(requestContext, ehrDataList, null/*deletionMetadata*/);</span>
+    }
+
+    public List&lt;EhrDataVersionResult&gt; deleteMeasurementsById(@NotNull LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; measurementIdsToDelete, UploadedDataDeletionMetadata deletionMetadata) {
+<span class="nc" id="L497">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="nc" id="L498">        List&lt;EHRData&gt; ehrDataList = ehrBean.findAndDecryptEHRData(measurementIdsToDelete, requestContext);</span>
+<span class="nc" id="L499">        return deleteMeasurements(requestContext, ehrDataList, deletionMetadata);</span>
+    }
+
+    public List&lt;EhrDataVersionResult&gt; deleteMeasurements(@NotNull LoggedInEHRRequestContext requestContext, @NotNull List&lt;EHRData&gt; existingEds, UploadedDataDeletionMetadata deletionMetadata) {
+<span class="fc" id="L503">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L504">        return ehrBean.deleteIBaseDto(requestContext, existingEds, deletionMetadata, MeasurementDTO.class, MeasurementDTO.MS_PATH);</span>
+    }
+
+    public boolean deleteMeasurementByUniqueId(@NotNull LoggedInEHRRequestContext requestContext, long patientId, @NotNull UUID uniqueId) {
+<span class="fc" id="L508">        EHRData existingEd = getMeasurementByUniqueId(requestContext, patientId, uniqueId, false);</span>
+<span class="fc bfc" id="L509" title="All 2 branches covered.">        if (nonNull(existingEd)) {</span>
+<span class="fc" id="L510">            deleteMeasurements(requestContext, List.of(existingEd), null);</span>
+<span class="fc" id="L511">            return true;</span>
+        }
+<span class="fc" id="L513">        LOGGER.warn(&quot;Failed to find measurement {} for patient {} during deletion request&quot;, uniqueId, patientId);</span>
+<span class="fc" id="L514">        return false;</span>
+    }
+
+    public List&lt;EhrDataVersionResult&gt; deleteMeasurementsByFillerOrderNumber(@NotNull LoggedInEHRRequestContext requestContext,
+                                                                            @NotNull UploadedDataDeletionMetadata deletionInfo,
+                                                                            long orgId,
+                                                                            long patientId) {
+<span class="fc" id="L521">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L522">        PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L523">        String fonToDelete = deletionInfo.getMaybeFillerOrderNumber();</span>
+<span class="fc" id="L524">        Long accountId = personBean.getDefaultAccountId(patientId);</span>
+<span class="fc" id="L525">        EHRSearch&lt;MeasurementDTO&gt; ehrSearch = new EHRSearch&lt;&gt;(accountId, MeasurementDTO.class, MeasurementDTO.MS_PATH);</span>
+<span class="fc" id="L526">        ehrSearch.addFilter(new PKBFilter(MeasurementDTO.LAB_ORDER_ID, PKBFilter.Operator.EQUAL, fonToDelete));</span>
+<span class="fc" id="L527">        ehrSearch.addFilter(new PKBFilter(SourceDetails.EHRQUERY_ORG_ID, PKBFilter.Operator.EQUAL, orgId));</span>
+<span class="fc" id="L528">        ehrSearch.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L529">        ehrSearch.setIncludeDeleted(false);</span>
+<span class="fc" id="L530">        List&lt;EHRData&gt; ehrDataList = ehrBean.queryAndDecryptEHRData(ehrSearch, requestContext);</span>
+
+<span class="fc" id="L532">        return deleteMeasurements(requestContext, ehrDataList, deletionInfo);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

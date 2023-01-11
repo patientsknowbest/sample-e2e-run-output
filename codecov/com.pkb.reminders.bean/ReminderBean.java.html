@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReminderBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.reminders.bean</a> &gt; <span class="el_source">ReminderBean.java</span></div><h1>ReminderBean.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//---------------------------------------------------------------------------
+
+package com.pkb.reminders.bean;
+
+import com.pkb.app.entity.EHRData;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.encounter.entity.Message;
+import com.pkb.entities.enums.PropertyName;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.PKBPluginException;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.reminders.ReminderRemote;
+import com.pkb.reminders.dto.EHRMessageDTO;
+import com.pkb.reminders.dto.ImmutableEHRMessageDTO;
+import com.pkb.reminders.entity.ReminderOptOut;
+import com.pkb.user.PKBPersonLocal;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.DbUtil;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.ejb.EJB;
+import javax.ejb.Remote;
+import javax.ejb.Stateless;
+import javax.inject.Inject;
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.persistence.Query;
+import javax.persistence.TypedQuery;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import static com.google.common.collect.Lists.newArrayList;
+import static com.pkb.encounter.entity.EncounterEvent.MS_PATH_ENCOUNTER_EVENT;
+import static com.pkb.encounter.entity.Message.MS_PATH_MESSAGE;
+import static io.vavr.API.Some;
+import static java.time.ZoneOffset.UTC;
+
+/**
+ * @author russell
+ */
+@Stateless(mappedName = &quot;ReminderBean&quot;)
+@Remote(ReminderRemote.class)
+<span class="fc" id="L67">public class ReminderBean implements ReminderRemote {</span>
+
+    @PersistenceContext
+    private EntityManager em;
+
+    @EJB
+    private PKBPersonLocal personBean;
+
+    @Inject
+    private DateTimeService dateTimeService;
+
+<span class="fc" id="L78">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    @Override
+    public List&lt;PKBPerson&gt; getSymptomReminderEmailAddressBatch(int batchSize, long minPersonId) {
+        try {
+<span class="fc" id="L83">            String sql = &quot; SELECT DISTINCT iu.personId &quot; +</span>
+                    &quot; FROM InstituteUserEntity iu&quot; +
+                    &quot; LEFT JOIN ReminderOptOut ro ON iu.personId = ro.personId&quot; +
+                    &quot; LEFT JOIN iu.institute t&quot; +
+                    &quot; WHERE ro.id is null&quot; +
+                    &quot; AND iu.sponsorshipStatus = :sponsorshipStatus &quot; +
+                    &quot; AND t.sendSymptomReminders = true &quot; +
+                    &quot; AND iu.personId &gt; :minPersonId &quot; +
+                    &quot; ORDER BY iu.personId &quot;;
+
+<span class="fc" id="L93">            TypedQuery&lt;Long&gt; targetPersonIdsQuery = em.createQuery(sql, Long.class);</span>
+
+<span class="fc" id="L95">            em.flush();</span>
+
+<span class="fc" id="L97">            List&lt;Long&gt; targetPersonIds = targetPersonIdsQuery</span>
+<span class="fc" id="L98">                    .setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.ACTIVE)</span>
+<span class="fc" id="L99">                    .setParameter(&quot;minPersonId&quot;, minPersonId)</span>
+<span class="fc" id="L100">                    .getResultList();</span>
+
+<span class="fc" id="L102">            return personBean.findContactablePatients(targetPersonIds, batchSize);</span>
+<span class="nc" id="L103">        } catch (Exception e) {</span>
+<span class="nc" id="L104">            throw new PKBPluginException(</span>
+                    &quot;Error while getting the email addresses for symtom reminder emails. &quot;, e);
+
+        }
+    }
+
+    @Override
+    public List&lt;EHRMessageDTO&gt; getUnreadMessageReminderEmailAddressBatch(int batchSize, int offset, LocalDate dayToCheck) {
+<span class="fc" id="L112">        return getMessageDTOS(batchSize, offset, newArrayList(Route.WEBAPP, Route.REST_API), dayToCheck);</span>
+    }
+
+    @Override
+    public List&lt;EHRMessageDTO&gt; getUnreadDocumentReminderEmailAddressBatch(int batchSize, int offset, LocalDate dayToCheck) {
+<span class="fc" id="L117">        return getMessageDTOS(batchSize, offset, newArrayList(Route.HL7_API), dayToCheck);</span>
+    }
+
+    @NotNull
+    private List&lt;EHRMessageDTO&gt; getMessageDTOS(int batchSize, int offset, List&lt;Route&gt; routes, LocalDate dateToCheck) {
+<span class="fc" id="L122">        var ehrDatas = io.vavr.collection.List.ofAll(Some(em.createQuery(</span>
+                &quot;SELECT msg FROM EHRData msg&quot;
+                + &quot; WHERE msg.route IN :routes&quot;
+                + &quot;     AND msg.dataType IN :messageDateTypes&quot;
+                + &quot;     AND msg.string04 = 'UNREAD'&quot;
+                + &quot;     AND msg.deleted = false&quot;
+                + &quot;     AND msg.persistedDate &gt;= :received&quot;
+                + &quot;     AND msg.persistedDate &lt; :dayAfter&quot; +
+<span class="fc" id="L130">                Option.when(routes.contains(Route.HL7_API), () -&gt;</span>
+<span class="fc" id="L131">                          &quot; AND msg.string14 IN :documentTypes&quot;</span>
+<span class="fc" id="L132">                ).getOrElse(&quot;&quot;)</span>
+                + &quot;       ORDER BY msg.id&quot;, EHRData.class)
+<span class="fc" id="L134">                .setParameter(&quot;routes&quot;, routes)</span>
+<span class="fc" id="L135">                .setParameter(&quot;messageDateTypes&quot;, newArrayList(MS_PATH_MESSAGE, MS_PATH_ENCOUNTER_EVENT))</span>
+<span class="fc" id="L136">                .setParameter(&quot;received&quot;, Date.from(dateToCheck.atStartOfDay().atZone(ZoneId.systemDefault()).toInstant()))</span>
+<span class="fc" id="L137">                .setParameter(&quot;dayAfter&quot;, Date.from(dateToCheck.plusDays(1).atStartOfDay().atZone(ZoneId.systemDefault()).toInstant())))</span>
+<span class="fc" id="L138">                .map(q -&gt; Option.when(batchSize &gt; 0, () -&gt;</span>
+<span class="fc" id="L139">                            q.setMaxResults(batchSize)</span>
+<span class="fc" id="L140">                             .setFirstResult(offset))</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">                        .getOrElse(q))</span>
+<span class="fc" id="L142">                .map(q -&gt; Option.when(routes.contains(Route.HL7_API), () -&gt; </span>
+<span class="fc" id="L143">                            q.setParameter(&quot;documentTypes&quot;, Arrays.stream(Message.DocumentType.values()).map(Enum::name).collect(Collectors.toList())))</span>
+<span class="fc" id="L144">                         .getOrElse(q))</span>
+<span class="fc" id="L145">                .get()</span>
+<span class="fc" id="L146">                .getResultList());</span>
+
+        // Find the owners of the accounts for this data, and filter them
+<span class="fc" id="L149">        var accountOwnersFiltered = io.vavr.collection.HashMap.ofAll(personBean.getAccountOwners(ehrDatas.map(EHRData::getAccountId).toJavaList(),</span>
+                PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS_DEEP))
+<span class="fc" id="L151">                .filter((ignored, person) -&gt; </span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">                        person.isPatient()</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">                     &amp;&amp; person.getStatus() == UserStatus.EMAIL_CONFIRMED);</span>
+        
+        // Filter the EHRDatas same as the owners.
+<span class="fc" id="L156">        var ehrDatasFiltered = ehrDatas.filter(ed -&gt; accountOwnersFiltered.containsKey(ed.getAccountId()));</span>
+
+        // Find the source persons
+<span class="fc" id="L159">        var sourcePersonMap = io.vavr.collection.HashMap.ofAll(personBean.findPKBPersonMap(ehrDatasFiltered.map(EHRData::getSourcePersonId).asJava()));</span>
+        
+<span class="fc" id="L161">        return ehrDatasFiltered.map(ehrData -&gt; {</span>
+<span class="pc" id="L162">            var ownerPerson = accountOwnersFiltered.get(ehrData.getAccountId()).getOrElseThrow(() -&gt; new RuntimeException(String.format(&quot;Failed to find account owner for EHRData %d&quot;, ehrData.getId())));</span>
+<span class="fc" id="L163">            var sourcePerson = sourcePersonMap.get(ehrData.getSourcePersonId());</span>
+<span class="fc" id="L164">            Org sourceOrg = ehrData.getSourceOrg();</span>
+<span class="fc" id="L165">            Team sourceTeam = ehrData.getSourceTeam();</span>
+<span class="fc" id="L166">            return (EHRMessageDTO)Some(ImmutableEHRMessageDTO.builder()</span>
+<span class="fc" id="L167">                    .messageId(ehrData.getId())</span>
+<span class="fc" id="L168">                    .receiver(ownerPerson)</span>
+<span class="fc" id="L169">                    .conversationId(ehrData.getUuid01())</span>
+<span class="fc" id="L170">                    .route(ehrData.getRoute())</span>
+<span class="fc" id="L171">                    .org(Option.of(sourceOrg))</span>
+<span class="fc" id="L172">                    .team(sourceTeam)</span>
+<span class="fc" id="L173">                    .received(ehrData.getDate01().toInstant().atZone(UTC).toLocalDateTime()))</span>
+<span class="fc" id="L174">                    .map(b -&gt; sourcePerson.map(p -&gt; </span>
+<span class="fc" id="L175">                            b.sourceTitle(p.getTitle())</span>
+<span class="fc" id="L176">                             .sourceFirstName(p.getFirstName())</span>
+<span class="fc" id="L177">                             .sourceLastName(p.getLastName())</span>
+<span class="fc" id="L178">                        ).getOrElse(b))</span>
+<span class="fc" id="L179">                    .map(b -&gt; Optional.ofNullable(sourceOrg).map(o -&gt;</span>
+<span class="fc" id="L180">                            b.sourceOrg(o.getName()))</span>
+<span class="fc" id="L181">                             .orElse(b))</span>
+<span class="fc" id="L182">                    .get()</span>
+<span class="fc" id="L183">                    .build();</span>
+<span class="fc" id="L184">        }).asJava();</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; claimChildBirthdayEmailRecipients(Instant birthdayFrom, Instant birthdayTo, PropertyName reminderPropertyName) {
+        try {
+<span class="fc" id="L190">            Set&lt;Long&gt; patientIds = new HashSet&lt;&gt;(personBean.findPKBPersonIdListByUserTypeAndStatusDobIntervalWithoutBirthdayEmailSent(</span>
+<span class="fc" id="L191">                    Collections.singletonList(UserType.PATIENT),</span>
+<span class="fc" id="L192">                    Arrays.asList(UserStatus.CREATED, UserStatus.EMAIL_CONFIRMED, UserStatus.NOCONTACT),</span>
+                    birthdayFrom, birthdayTo, reminderPropertyName));
+
+<span class="fc" id="L195">            List&lt;Long&gt; activePatientIds = DbUtil.getInBatches(patientIds, batchOfIds -&gt; em.createQuery(</span>
+                    &quot;SELECT DISTINCT pc.patientPersonId&quot; +
+                            &quot; FROM PatientConsent pc&quot; +
+                            &quot; JOIN InstituteUserEntity iu ON pc.patientPersonId = iu.personId&quot; +
+                            &quot; WHERE iu.personId IN (:patientIds)&quot; +
+                            &quot;  AND iu.sponsorshipStatus = 'ACTIVE'&quot; +
+                            &quot;  AND pc.accessingEntityType = 'CARER'&quot;,
+                    Long.class)
+<span class="fc" id="L203">                    .setParameter(&quot;patientIds&quot;, batchOfIds)</span>
+<span class="fc" id="L204">                    .getResultList());</span>
+
+<span class="fc" id="L206">            Map&lt;Long, PKBPerson&gt; patientMap = personBean.findPKBPersonMap(activePatientIds, PKBPerson.Lazy.CONTACTS);</span>
+
+<span class="fc" id="L208">            List&lt;PKBPerson&gt; result = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L210">            activePatientIds.forEach(patientId -&gt; {</span>
+<span class="fc" id="L211">                PKBPerson patient = patientMap.get(patientId);</span>
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">                if (patient != null) {</span>
+<span class="fc" id="L213">                    personBean.setChildBirthdayEmailProperty(patient, reminderPropertyName);</span>
+<span class="fc" id="L214">                    result.add(patient);</span>
+                }
+<span class="fc" id="L216">            });</span>
+<span class="fc" id="L217">            return result;</span>
+<span class="nc" id="L218">        } catch (Exception e) {</span>
+<span class="nc" id="L219">            throw new RuntimeException(&quot;Error while getting the email addresses for child birthday reminder emails.&quot;, e);</span>
+        }
+    }
+
+    @Override
+    public boolean optOut(PKBPerson person) {
+
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">        if (isOptedIn(person.getId())) {</span>
+
+<span class="fc" id="L228">            LOGGER.debug(&quot;writing opt out record for {}&quot;, person.getId());</span>
+            //write an opt out record for the person
+<span class="fc" id="L230">            ReminderOptOut optOut = new ReminderOptOut();</span>
+<span class="fc" id="L231">            optOut.setDateOptedOut(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L232">            optOut.setPersonId(person.getId());</span>
+            try {
+<span class="fc" id="L234">                em.persist(optOut);</span>
+
+<span class="nc" id="L236">            } catch (Exception exception) {</span>
+
+<span class="nc" id="L238">                throw new PKBPluginException(&quot;Exception while creating opt out record&quot;, exception);</span>
+<span class="fc" id="L239">            }</span>
+<span class="fc" id="L240">            return true;</span>
+        }
+<span class="nc" id="L242">        LOGGER.debug(&quot;can't opt out person: {}. They have already opted out&quot;, person.getId());</span>
+<span class="nc" id="L243">        return false;</span>
+
+    }
+
+    @Override
+    public boolean optIn(PKBPerson person) {
+        try {
+
+<span class="nc bnc" id="L251" title="All 2 branches missed.">            if (!isOptedIn(person.getId())) {</span>
+<span class="nc" id="L252">                String select =</span>
+
+<span class="nc" id="L254">                        &quot;SELECT r FROM ReminderOptOut r &quot; + &quot;WHERE r.personId = '&quot; + person.getId() + &quot;'&quot;;</span>
+
+<span class="nc" id="L256">                LOGGER.debug(&quot;removing opt out record for {}&quot;, person.getId());</span>
+
+<span class="nc" id="L258">                Query query = em.createQuery(select);</span>
+<span class="nc" id="L259">                ReminderOptOut record = (ReminderOptOut) query.getSingleResult();</span>
+<span class="nc" id="L260">                em.remove(record);</span>
+<span class="nc" id="L261">                return true;</span>
+            }
+<span class="nc" id="L263">        } catch (Exception e) {</span>
+<span class="nc" id="L264">            throw new PKBPluginException(&quot;Error while looking up opt out records. &quot;, e);</span>
+
+<span class="nc" id="L266">        }</span>
+<span class="nc" id="L267">        LOGGER.debug(&quot;Can't opt in person: {}. They have no opt-out record to remove&quot;, person.getId());</span>
+<span class="nc" id="L268">        return false;</span>
+
+    }
+
+    @Override
+    public boolean isOptedIn(Long personId) {
+        // TODO Auto-generated method stub
+        try {
+<span class="fc" id="L276">            String select =</span>
+
+                    &quot;SELECT r FROM ReminderOptOut r &quot; + &quot;WHERE r.personId = '&quot; + personId + &quot;'&quot;;
+
+<span class="fc" id="L280">            Query query = em.createQuery(select);</span>
+<span class="fc" id="L281">            return query.getResultList().isEmpty();</span>
+<span class="nc" id="L282">        } catch (Exception e) {</span>
+<span class="nc" id="L283">            throw new PKBPluginException(&quot;Error while looking up opt out records. &quot;, e);</span>
+
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

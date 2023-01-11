@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DocumentMigrationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.file</a> &gt; <span class="el_source">DocumentMigrationManager.java</span></div><h1>DocumentMigrationManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.file;
+
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.document.Document;
+import com.pkb.entities.doc.DocDocumentMetadata;
+import com.pkb.entities.enums.DocStorageBackend;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import org.hibernate.query.NativeQuery;
+import org.hibernate.type.PostgresUUIDType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import java.lang.invoke.MethodHandles;
+import java.util.Collection;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.mapping;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+
+public class DocumentMigrationManager extends TransactionManager {
+
+<span class="fc" id="L45">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L46">    private static final AtomicBoolean MIGRATION_RUNNING = new AtomicBoolean(false);</span>
+    private static final String MIGRATION_SUCCESS_COUNTER_NAME = &quot;phr_gcs_migration_success_counter&quot;;
+    private static final String MIGRATION_ERROR_COUNTER_NAME = &quot;phr_gcs_migration_error_counter&quot;;
+
+<span class="fc" id="L50">    private static final Counter MIGRATION_SUCCESS_COUNTER = Counter.builder(MIGRATION_SUCCESS_COUNTER_NAME)</span>
+<span class="fc" id="L51">            .description(&quot;Successful migrations&quot;)</span>
+<span class="fc" id="L52">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L54">    private static final Counter MIGRATION_ERROR_COUNTER = Counter.builder(MIGRATION_ERROR_COUNTER_NAME)</span>
+<span class="fc" id="L55">            .description(&quot;Failed migrations&quot;)</span>
+<span class="fc" id="L56">            .register(Metrics.globalRegistry);</span>
+
+    @PersistenceContext
+    private EntityManager em;
+
+    private final ThreadPoolTaskExecutor taskExecutor;
+    private final DocumentManager documentManager;
+
+    public DocumentMigrationManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService,
+                                    UUIDProvider uuidProvider, ThreadPoolTaskExecutor taskExecutor, DocumentManager documentManager) {
+<span class="fc" id="L66">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L67">        this.taskExecutor = taskExecutor;</span>
+<span class="fc" id="L68">        this.documentManager = documentManager;</span>
+<span class="fc" id="L69">    }</span>
+
+    public void migrateDocument(Collection&lt;UUID&gt; ids) {
+<span class="pc bpc" id="L72" title="1 of 2 branches missed.">        if (ids.isEmpty()) {</span>
+<span class="nc" id="L73">            return;</span>
+        }
+
+<span class="pc bpc" id="L76" title="1 of 2 branches missed.">        if (MIGRATION_RUNNING.compareAndSet(false, true)) {</span>
+            try {
+<span class="fc" id="L78">                List&lt;UUID&gt; filteredIds = em.createNativeQuery(&quot;SELECT d.id FROM doc.document_metadata d&quot; +</span>
+                                &quot; WHERE d.storage &lt;&gt; 'GCS'\\:\\:doc_storage_backend_type&quot; +
+                                &quot; AND d.id IN (:ids)&quot;)
+<span class="fc" id="L81">                        .setParameter(&quot;ids&quot;, ids)</span>
+<span class="fc" id="L82">                        .unwrap(NativeQuery.class)</span>
+<span class="fc" id="L83">                        .addScalar(&quot;id&quot;, PostgresUUIDType.INSTANCE)</span>
+<span class="fc" id="L84">                        .getResultList();</span>
+
+<span class="fc" id="L86">                Map&lt;UUID, DocDocumentMetadata&gt; metadataMap = em.createQuery(&quot;SELECT dm FROM DocDocumentMetadata dm WHERE dm.id IN (:ids)&quot;, DocDocumentMetadata.class)</span>
+<span class="fc" id="L87">                        .setParameter(&quot;ids&quot;, ids).getResultList().stream().collect(Collectors.toMap(DocDocumentMetadata::getId, Function.identity()));</span>
+
+<span class="fc" id="L89">                Map&lt;UUID, String&gt; dmIdToNewGcsId = parallelUploadToGCS(filteredIds);</span>
+
+                try {
+<span class="fc" id="L92">                    batchMigrateDocuments(metadataMap, dmIdToNewGcsId);</span>
+<span class="fc" id="L93">                } catch (Exception e) {</span>
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">                    if (!config.isBatchGcsMigrationFallbackEnabled()) {</span>
+<span class="nc" id="L95">                        LOGGER.error(&quot;Error while batch migrating document to GCS, fallback is disabled&quot;, e);</span>
+<span class="nc" id="L96">                        throw e;</span>
+                    }
+<span class="fc" id="L98">                    LOGGER.error(&quot;Error while batch migrating document to GCS, switching to one-by-one migration for this batch&quot;, e);</span>
+<span class="fc" id="L99">                    migrateDocumentsOneByOne(metadataMap, dmIdToNewGcsId);</span>
+<span class="fc" id="L100">                }</span>
+            } finally {
+<span class="fc" id="L102">                MIGRATION_RUNNING.set(false);</span>
+<span class="fc" id="L103">            }</span>
+        } else {
+<span class="nc" id="L105">            LOGGER.info(&quot;Migrator already running, quit flow.&quot;);</span>
+        }
+<span class="fc" id="L107">    }</span>
+
+    private Map&lt;UUID, String&gt; parallelUploadToGCS(List&lt;UUID&gt; filteredIds) {
+<span class="fc" id="L110">        Map&lt;UUID, Document&gt; documentMap = documentManager.retrieve(filteredIds);</span>
+
+<span class="fc" id="L112">        List&lt;Tuple2&lt;UUID, CompletableFuture&lt;String&gt;&gt;&gt; futures = filteredIds.stream().map(id -&gt; {</span>
+<span class="fc" id="L113">            CompletableFuture&lt;String&gt; future = taskExecutor.submitListenable(() -&gt; {</span>
+<span class="fc" id="L114">                Document document = documentMap.get(id);</span>
+<span class="fc" id="L115">                return documentManager.createInGcs(document);</span>
+<span class="fc" id="L116">            }).completable();</span>
+<span class="fc" id="L117">            return Tuple.of(id, future);</span>
+<span class="fc" id="L118">        }).collect(toList());</span>
+
+<span class="fc" id="L120">        Map&lt;UUID, String&gt; dmIdToNewGcsId = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L121">        futures.forEach(f -&gt; {</span>
+            try {
+<span class="fc" id="L123">                dmIdToNewGcsId.put(f._1, f._2.get());</span>
+<span class="fc" id="L124">            } catch (Exception e) {</span>
+<span class="fc" id="L125">                LOGGER.error(&quot;Error while executing thread to upload document to GCS: {}&quot;, f._1, e);</span>
+<span class="fc" id="L126">            }</span>
+<span class="fc" id="L127">        });</span>
+
+<span class="fc" id="L129">        return dmIdToNewGcsId;</span>
+    }
+
+    private void batchMigrateDocuments(Map&lt;UUID, DocDocumentMetadata&gt; metadataMap, Map&lt;UUID, String&gt; dmIdToNewGcsId) {
+<span class="fc" id="L133">        transactional(() -&gt; {</span>
+<span class="fc" id="L134">            Map&lt;DocStorageBackend, List&lt;String&gt;&gt; idsToDelete = dmIdToNewGcsId.entrySet()</span>
+<span class="fc" id="L135">                    .stream()</span>
+<span class="fc" id="L136">                    .collect(groupingBy(k -&gt; metadataMap.get(k.getKey()).getStorage(), () -&gt; new EnumMap&lt;&gt;(DocStorageBackend.class), mapping(e -&gt; metadataMap.get(e.getKey()).getIdInStorage(), toList())));</span>
+
+<span class="fc" id="L138">            StringBuilder batchUpdateQueryBuilder = new StringBuilder(100 + dmIdToNewGcsId.size() * 85);</span>
+<span class="fc" id="L139">            batchUpdateQueryBuilder.append(&quot;update doc.document_metadata AS dm &quot;);</span>
+<span class="fc" id="L140">            batchUpdateQueryBuilder.append(&quot;SET storage = 'GCS'\\:\\:doc_storage_backend_type, &quot;);</span>
+<span class="fc" id="L141">            batchUpdateQueryBuilder.append(&quot;    id_in_storage = c.new_id &quot;);</span>
+<span class="fc" id="L142">            batchUpdateQueryBuilder.append(&quot;FROM ( VALUES&quot;);</span>
+<span class="fc" id="L143">            dmIdToNewGcsId.forEach((dmId, newId) -&gt; batchUpdateQueryBuilder.append(&quot;('&quot;).append(newId).append(&quot;',&quot;).append(&quot;'&quot;).append(dmId).append(&quot;'\\:\\:uuid),&quot;));</span>
+<span class="fc bfc" id="L144" title="All 2 branches covered.">            if (batchUpdateQueryBuilder.charAt(batchUpdateQueryBuilder.length() - 1) == ',') {</span>
+<span class="fc" id="L145">                batchUpdateQueryBuilder.deleteCharAt(batchUpdateQueryBuilder.length() - 1);</span>
+            }
+<span class="fc" id="L147">            batchUpdateQueryBuilder.append(&quot;) AS c(new_id,old_id) &quot;);</span>
+<span class="fc" id="L148">            batchUpdateQueryBuilder.append(&quot;WHERE c.old_id = dm.id&quot;);</span>
+
+<span class="fc" id="L150">            int updated = em.createNativeQuery(batchUpdateQueryBuilder.toString()).executeUpdate();</span>
+
+<span class="fc" id="L152">            idsToDelete.keySet().forEach(storage -&gt; {</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">                switch (storage) {</span>
+                    case GCS_FALLBACK:
+<span class="fc" id="L155">                        Set&lt;UUID&gt; fallbackStoreIds = idsToDelete.get(storage).stream().map(s -&gt; UUID.fromString(s)).collect(toSet());</span>
+<span class="fc" id="L156">                        em.createNativeQuery(&quot;DELETE FROM doc.gcs_fallback WHERE id IN (:ids)&quot;)</span>
+<span class="fc" id="L157">                                .setParameter(&quot;ids&quot;, fallbackStoreIds)</span>
+<span class="fc" id="L158">                                .executeUpdate();</span>
+<span class="fc" id="L159">                        break;</span>
+                    default:
+<span class="nc" id="L161">                        throw new IllegalStateException(String.format(&quot;Documents (%s) were sent for migration, but not in a supported store: %s&quot;, idsToDelete.get(storage).stream().map(l -&gt; l.toString()).collect(Collectors.joining(&quot;,&quot;)), storage));</span>
+                }
+<span class="fc" id="L163">            });</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">            if (config.isBatchGcsMigrationTestFailEnabled()) {</span>
+                // Run bogus query
+<span class="nc" id="L166">                em.createNativeQuery(&quot;DELETE FROM xy&quot;).executeUpdate();</span>
+            }
+<span class="fc" id="L168">            Metrics.counter(MIGRATION_SUCCESS_COUNTER_NAME).increment(updated);</span>
+<span class="fc" id="L169">        });</span>
+<span class="fc" id="L170">    }</span>
+
+    private void migrateDocumentsOneByOne(Map&lt;UUID, DocDocumentMetadata&gt; metadataMap, Map&lt;UUID, String&gt; dmIdToNewGcsId) {
+<span class="fc" id="L173">        dmIdToNewGcsId.forEach((id, newInternalId) -&gt; {</span>
+            try {
+<span class="fc" id="L175">                DocDocumentMetadata metadata = metadataMap.get(id);</span>
+
+<span class="fc" id="L177">                transactional(() -&gt; {</span>
+<span class="fc" id="L178">                    em.createNativeQuery(&quot;UPDATE doc.document_metadata SET storage = 'GCS'\\:\\:doc_storage_backend_type, id_in_storage = :newId WHERE id = :id&quot;)</span>
+<span class="fc" id="L179">                            .setParameter(&quot;newId&quot;, newInternalId)</span>
+<span class="fc" id="L180">                            .setParameter(&quot;id&quot;, id)</span>
+<span class="fc" id="L181">                            .unwrap(NativeQuery.class)</span>
+<span class="fc" id="L182">                            .addScalar(&quot;id&quot;, PostgresUUIDType.INSTANCE)</span>
+<span class="fc" id="L183">                            .executeUpdate();</span>
+
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">                    switch (metadata.getStorage()) {</span>
+                        case GCS_FALLBACK:
+<span class="fc" id="L187">                            UUID fallbackStoreId = UUID.fromString(metadata.getIdInStorage());</span>
+<span class="fc" id="L188">                            em.createNativeQuery(&quot;DELETE FROM doc.gcs_fallback WHERE id = :id&quot;)</span>
+<span class="fc" id="L189">                                    .setParameter(&quot;id&quot;, fallbackStoreId)</span>
+<span class="fc" id="L190">                                    .executeUpdate();</span>
+<span class="fc" id="L191">                            break;</span>
+                        default:
+<span class="nc" id="L193">                            throw new IllegalStateException(String.format(&quot;Document (%s) was sent for migration, but it's not in a supported store: %s&quot;, id.toString(), metadata.getStorage().toString()));</span>
+                    }
+
+<span class="fc bfc" id="L196" title="All 2 branches covered.">                    if (config.isGcsMigrationTestFailEnabled()) {</span>
+                        // Run bogus query
+<span class="nc" id="L198">                        em.createNativeQuery(&quot;DELETE FROM xy&quot;).executeUpdate();</span>
+                    }
+
+<span class="fc" id="L201">                    Metrics.counter(MIGRATION_SUCCESS_COUNTER_NAME).increment();</span>
+<span class="fc" id="L202">                });</span>
+<span class="fc" id="L203">            } catch (RuntimeException e) {</span>
+<span class="fc" id="L204">                LOGGER.error(&quot;Error while migrating document to GCS: {}&quot;, id, e);</span>
+<span class="fc" id="L205">                Metrics.counter(MIGRATION_ERROR_COUNTER_NAME).increment();</span>
+
+                try {
+<span class="fc" id="L208">                    documentManager.deleteFromGcs(newInternalId);</span>
+<span class="nc" id="L209">                } catch (RuntimeException e2) {</span>
+<span class="nc" id="L210">                    LOGGER.error(&quot;Error while cleaning up document from GCS: {}&quot;, newInternalId, e2);</span>
+<span class="fc" id="L211">                }</span>
+<span class="fc" id="L212">            }</span>
+<span class="fc" id="L213">        });</span>
+<span class="fc" id="L214">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

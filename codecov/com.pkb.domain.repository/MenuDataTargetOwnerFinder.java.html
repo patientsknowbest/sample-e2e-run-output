@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MenuDataTargetOwnerFinder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.repository</a> &gt; <span class="el_source">MenuDataTargetOwnerFinder.java</span></div><h1>MenuDataTargetOwnerFinder.java</h1><pre class="source lang-java linenums">package com.pkb.domain.repository;
+
+import com.google.common.collect.Sets;
+import com.google.common.collect.Sets.SetView;
+import com.pkb.authentication.principal.team.BaseTeam;
+import com.pkb.authz.AuthorizationDataService;
+import com.pkb.authz.AuthorizationService;
+import com.pkb.authz.TargetMeta;
+import com.pkb.authz.action.Action;
+import com.pkb.authz.data.AuthorizationData;
+import com.pkb.authz.data.AuthorizationInputs;
+import com.pkb.authz.data.ImmutableAuthorizationInputs;
+import com.pkb.datamodel.Identifiable;
+import com.pkb.datamodel.authorization.TargetOwnerData;
+import com.pkb.datamodel.entity.mapper.PersonMapper;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.internal.repository.AppMenuDataRepository;
+import com.pkb.ehrdata.AccessFilter;
+import com.pkb.ehrdata.ImmutableAccessFilter;
+import com.pkb.ehrdata.SearchSpec;
+import com.pkb.entities.app.AppMenuData;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.collection.Set;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.util.function.Function;
+import java.util.function.Predicate;
+
+import static com.pkb.authz.ImmutableTargetMeta.targetMeta;
+import static io.vavr.API.Map;
+import static io.vavr.API.Set;
+import static io.vavr.collection.List.ofAll;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.apache.commons.lang3.StringUtils.isNumeric;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class MenuDataTargetOwnerFinder {
+<span class="fc" id="L42">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+<span class="fc" id="L44">    private static final Function&lt;AppMenuData, String&gt; GET_STRING_03 = AppMenuData::getString03;</span>
+<span class="fc" id="L45">    private static final Function&lt;AppMenuData, Long&gt; GET_PARTICIPANT_ID = GET_STRING_03.andThen(Long::parseLong);</span>
+
+<span class="fc" id="L47">    private static final Function&lt;TargetMeta, String&gt; OBJECT_META_CANNONICAL_NAME = ((Function&lt;TargetMeta, Class&lt;?&gt;&gt;) TargetMeta::targetType).andThen(Class::getCanonicalName);</span>
+
+<span class="fc" id="L49">    private static final Predicate&lt;TargetMeta&gt; CONTAINS_ANY_IDENTIFIER = TargetMeta::containsAnyIdentifier;</span>
+<span class="fc" id="L50">    private static final Predicate&lt;TargetMeta&gt; HAS_NO_IDENTIFIER = CONTAINS_ANY_IDENTIFIER.negate();</span>
+
+    private final AuthorizationService authorizationService;
+    private final AuthorizationDataService authorizationDataService;
+    private final PersonRepository personRepository;
+    private final PersonMapper personMapper;
+    private final AppMenuDataRepository menuDataRepository;
+
+    public MenuDataTargetOwnerFinder(AuthorizationService authorizationService,
+                                     AuthorizationDataService authorizationDataService,
+                                     PersonRepository personRepository,
+                                     PersonMapper personMapper,
+<span class="fc" id="L62">                                     AppMenuDataRepository menuDataRepository) {</span>
+<span class="fc" id="L63">        this.authorizationService = authorizationService;</span>
+<span class="fc" id="L64">        this.authorizationDataService = authorizationDataService;</span>
+<span class="fc" id="L65">        this.personRepository = personRepository;</span>
+<span class="fc" id="L66">        this.personMapper = personMapper;</span>
+<span class="fc" id="L67">        this.menuDataRepository = menuDataRepository;</span>
+<span class="fc" id="L68">    }</span>
+
+    /**
+     * &lt;pre&gt;
+     * When we need to fetch menu data entries without knowing any target owner and target ids,
+     * then we need an intermediate step where we list permitted Patient details.
+     * E.g.: an open ended search, where a team user would like to get targets (like. Documents)
+     * &lt;/pre&gt;
+     * 
+     * @param searchSpec
+     *            All we know about seatch parameters.
+     * @param inputs
+     *            Authorization input used in earlier step of this call chain.
+     * @param action
+     *            Action needed.
+     * @return Lookup table, where the key is target, and value is target owner. Never {@code null}.
+     */
+    public Map&lt;TargetMeta&lt;?&gt;, TargetOwnerData&gt; findAllowedTargetOwnersByTargets(
+            @NotNull SearchSpec searchSpec,
+            @NotNull AuthorizationInputs inputs,
+            @NotNull Action action) {
+        // We have to figure out which Patients are involved.
+<span class="fc" id="L90">        AccessFilter accessFilter = searchAccessFilter(inputs);</span>
+
+<span class="fc" id="L92">        Class&lt;?&gt; targetType = getTargetType(inputs);</span>
+
+        // FIXME: GDE-725
+        //  this is potentially dangerous here...
+        //  Even FHIR searches allow to query bigger time span
+        //  so this intermediate step can fetch back way too many ids (and AppMenuData eventually).
+        //  We should be able to turn some of the conditions into filters
+        //  (which in turns should translate into AND parts in WHERE close)
+        //  so we limit further the results size.
+        //  Pre-fetching all patients ids of actor is not an option,
+        //  as due to umbrella teams some team users have access to &gt;16k Patients.
+        // DB round-trip #1
+<span class="fc" id="L104">        List&lt;Long&gt; targetIds = List.ofAll(menuDataRepository.find(searchSpec, accessFilter));</span>
+<span class="fc" id="L105">        LOGGER.debug(&quot;Found {} target(id)s matching search parameters. {} target owners lookup&quot;,</span>
+<span class="fc" id="L106">                targetIds.size(),</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">                targetIds.isEmpty() ? &quot;Skipping&quot; : &quot;Continuing&quot;);</span>
+
+<span class="fc bfc" id="L109" title="All 2 branches covered.">        if (!targetIds.isEmpty()) {</span>
+            // DB round-trip #2 - Given the IDs, we fetch the actual entries
+<span class="fc" id="L111">            List&lt;AppMenuData&gt; records = List.ofAll(menuDataRepository.findByIds(targetIds));</span>
+
+            // So we can find all - distinct - Patients.
+<span class="fc" id="L114">            Set&lt;Long&gt; targetOwnerIds = collectIdsOfDistinctTargetOwners(records);</span>
+
+            // DB round-trip #3 - and phrase a more accurate question about actors permissions.
+<span class="fc" id="L117">            var targetOwners = personRepository.findByIds(targetOwnerIds)</span>
+<span class="fc" id="L118">                    .map(personMapper::entityToDataModel);</span>
+
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">            if (targetOwnerIds.size() != targetOwners.size()) {</span>
+<span class="nc" id="L121">                SetView&lt;Long&gt; difference = Sets.difference(targetOwnerIds.toJavaSet(), targetOwners.map(Person::getId).toJavaSet());</span>
+<span class="nc" id="L122">                throw new IllegalStateException(format(&quot;Could not find Patients with the following ids=%s&quot;, difference));</span>
+            }
+
+<span class="fc" id="L125">            io.vavr.collection.List&lt;TargetMeta&lt;?&gt;&gt; targets = createTargetMetaForEachTargetOwner(targetType, targetOwners)</span>
+<span class="fc" id="L126">                    .appendAll(inputs.targets().filter(CONTAINS_ANY_IDENTIFIER));</span>
+
+            // DB round-trip(s) #4+
+<span class="fc" id="L129">            AuthorizationData readAuthorizationData = authorizationDataService.fetch(ImmutableAuthorizationInputs.copyOf(inputs)</span>
+<span class="fc" id="L130">                    .withAction(action)</span>
+<span class="fc" id="L131">                    .withTargets(targets));</span>
+
+<span class="fc" id="L133">            return authorizationService.authorize(readAuthorizationData).allowedTargetOwnersByTargets();</span>
+        }
+
+<span class="fc" id="L136">        return Map();</span>
+    }
+
+    private AccessFilter searchAccessFilter(AuthorizationInputs inputs) {
+<span class="fc" id="L140">        Option&lt;BaseTeam&gt; actorTeam = inputs.authenticatedUserTeam();</span>
+        // TODO: https://pkbdev.atlassian.net/browse/PHR-7728
+        // System user is not catered for in this list
+<span class="fc" id="L143">        return ImmutableAccessFilter</span>
+<span class="fc" id="L144">                .builder()</span>
+<span class="fc" id="L145">                .isTeamDataViewApplicable(false)</span>
+<span class="fc" id="L146">                .isPiggyback(false)</span>
+<span class="fc" id="L147">                .isConsentNotRequired(true)</span>
+<span class="fc" id="L148">                .isBreakTheGlassActive(false)</span>
+<span class="fc" id="L149">                .isPatientViewSuspendedRequired(false)</span>
+<span class="fc" id="L150">                .actorPersonId(inputs.findAuthenticatedUserWithActorId().toJavaOptional()) </span>
+<span class="fc" id="L151">                .actorTeamId(actorTeam.map(Identifiable::getId).toJavaOptional())</span>
+<span class="fc" id="L152">                .actorOrgId(actorTeam.map(BaseTeam::getOrgId).toJavaOptional())</span>
+<span class="fc" id="L153">                .isAccountLinksJoinPermitted(false)</span>
+<span class="fc" id="L154">                .build();</span>
+    }
+
+    private Class&lt;?&gt; getTargetType(@NotNull AuthorizationInputs inputs) {
+<span class="fc" id="L158">        return inputs.targets()</span>
+<span class="fc" id="L159">                .filter(HAS_NO_IDENTIFIER)</span>
+<span class="fc" id="L160">                .map((Function&lt;TargetMeta, Class&lt;?&gt;&gt;) TargetMeta::targetType)</span>
+<span class="fc" id="L161">                .single();</span>
+    }
+
+    private Set&lt;Long&gt; collectIdsOfDistinctTargetOwners(List&lt;AppMenuData&gt; records) {
+<span class="fc" id="L165">        return ofAll(records)</span>
+<span class="fc" id="L166">                .peek((menuData) -&gt; {</span>
+<span class="fc" id="L167">                    String patientId = menuData.getString03();</span>
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">                    if (patientId == null) {</span>
+<span class="nc" id="L169">                        throw new IllegalStateException(format(&quot;Menu Data entry id=[%s] is invalid. string03 (Patient ID) is unexpectedly null&quot;, menuData.getId()));</span>
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">                    } else if (!isNumeric(patientId)) {</span>
+<span class="nc" id="L171">                        throw new IllegalStateException(format(&quot;Menu Data entry id=[%s] is invalid. string03 (Patient ID) is unexpectedly not a number&quot;, menuData.getId()));</span>
+                    }
+<span class="fc" id="L173">                })</span>
+<span class="fc" id="L174">                .map(GET_PARTICIPANT_ID)</span>
+<span class="fc" id="L175">                .distinct()</span>
+<span class="fc" id="L176">                .toSet();</span>
+    }
+
+    private io.vavr.collection.List&lt;TargetMeta&lt;?&gt;&gt; createTargetMetaForEachTargetOwner(Class&lt;?&gt; targetType, List&lt;Person&gt; users) {
+<span class="fc" id="L180">        return ofAll(users)</span>
+<span class="fc" id="L181">                .map(Person::getPublicId)</span>
+<span class="fc" id="L182">                .map(targetOwnerPublicId -&gt; targetMeta(targetType, Set(), Option.of(targetOwnerPublicId), true));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

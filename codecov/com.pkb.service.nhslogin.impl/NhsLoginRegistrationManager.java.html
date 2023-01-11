@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>NhsLoginRegistrationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.nhslogin.impl</a> &gt; <span class="el_source">NhsLoginRegistrationManager.java</span></div><h1>NhsLoginRegistrationManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.nhslogin.impl;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.IdentityVerification;
+import com.pkb.datamodel.ImmutableIdentityVerification;
+import com.pkb.datamodel.ImmutableRegistrationEventNew;
+import com.pkb.domain.IdentityVerificationService;
+import com.pkb.domain.RegistrationEventService;
+import com.pkb.entities.enums.PhotoIdType;
+import com.pkb.entities.enums.RegistrationMethod;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.enums.VerificationStatus;
+import com.pkb.institute.entity.Team;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.kms.shared.representation.KmsError;
+import com.pkb.kms.shared.representation.LoginRequest;
+import com.pkb.kms.shared.representation.NhsLoginRequest;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.prometheus.client.Counter;
+import io.vavr.control.Either;
+import org.immutables.value.Value.Immutable;
+import org.immutables.value.Value.Style;
+
+import java.util.Base64;
+import java.util.Optional;
+import java.util.UUID;
+
+public class NhsLoginRegistrationManager extends TransactionManager {
+
+    private final Kms kmsClient;
+    private final PatientConsentManager patientConsentManager;
+    private final RegistrationEventService registrationEventService;
+    private final TeamUserManager teamUserManager;
+    private final UserManager userManager;
+    private final IdentityVerificationService identityVerificationService;
+
+<span class="fc" id="L48">    private static final Counter PATIENT_TEAM_AFFILIATION = Counter.build()</span>
+<span class="fc" id="L49">            .name(&quot;pkb_nhs_login_registrations_team_affiliation&quot;)</span>
+<span class="fc" id="L50">            .labelNames(&quot;hasTeamAffiliation&quot;)</span>
+<span class="fc" id="L51">            .help(&quot;Number of NHS Login patient full registrations with or without team affiliation&quot;)</span>
+<span class="fc" id="L52">            .register();</span>
+
+    public NhsLoginRegistrationManager(
+            PhrConfig config,
+            TolvenBeanFactory beanFactory,
+            DateTimeService dateTimeService,
+            UUIDProvider uuidProvider,
+            Kms kmsClient,
+            PatientConsentManager patientConsentManager,
+            RegistrationEventService registrationEventService,
+            TeamUserManager teamUserManager,
+            UserManager userManager,
+            IdentityVerificationService identityVerificationService) {
+<span class="fc" id="L65">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L66">        this.kmsClient = kmsClient;</span>
+<span class="fc" id="L67">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L68">        this.registrationEventService = registrationEventService;</span>
+<span class="fc" id="L69">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L70">        this.userManager = userManager;</span>
+<span class="fc" id="L71">        this.identityVerificationService = identityVerificationService;</span>
+<span class="fc" id="L72">    }</span>
+
+    @Immutable
+    @Style(stagedBuilder = true)
+    public interface NhsLoginPatientMetadata {
+
+        PKBPersonDTO patient();
+
+        String password();
+
+        String securityQuestion();
+
+        String securityQuestionAnswer();
+
+        Optional&lt;Team&gt; team();
+
+        String nhsLoginCredentials();
+
+        Route route();
+
+    }
+    /**
+     * Full patient registration using information from NHS Login:
+     *   - patient and credentials creation
+     *   - patient authentication to provide information for subsequent requests
+     *   - password backup creation based on provided security question (and answer)
+     *   - account creation/activation and, if team affiliaion exists, creation of patient consent
+     *   - creation of registration event
+     *   - addition of NHS Login credentials
+     *   - addition of external credential recovery (for password reset) if no team affiliation
+     *
+     * @param context
+     *          {@link EHRRequestContext}
+     * @param metadata
+     *          {@link NhsLoginPatientMetadata}
+     */
+    public void registerPatient(EHRRequestContext context, NhsLoginPatientMetadata metadata) {
+
+<span class="fc" id="L110">        PKBPerson registeredPerson = transactional(() -&gt; {</span>
+<span class="fc" id="L111">            PKBPerson person = userManager.registerUser(context, metadata.patient());</span>
+<span class="fc" id="L112">            userManager.backUpPassword(person.getId(), metadata.password(), metadata.securityQuestion(), metadata.securityQuestionAnswer());</span>
+<span class="fc" id="L113">            var registeringContext = context.withRegisteringUser(person.getId());</span>
+<span class="fc" id="L114">            metadata.team().ifPresentOrElse(team -&gt; {</span>
+<span class="fc" id="L115">                userManager.activatePerson(registeringContext, person, team.getId(), metadata.password());</span>
+<span class="fc" id="L116">                grantAccessToTeam(context, metadata.route(), person, team);</span>
+<span class="fc" id="L117">                identityVerificationService.save(buildIdentityVerificationWithTeamAffiliation(person, team));</span>
+<span class="fc" id="L118">            }, () -&gt; {</span>
+<span class="fc" id="L119">                userManager.activatePerson(registeringContext, person, null, metadata.password());</span>
+<span class="fc" id="L120">                identityVerificationService.save(buildIdentityVerification(person));</span>
+<span class="fc" id="L121">            });</span>
+
+<span class="fc" id="L123">            PATIENT_TEAM_AFFILIATION.labels(Boolean.toString(metadata.team().isPresent())).inc();</span>
+
+<span class="fc" id="L125">            registrationEventService.create(ImmutableRegistrationEventNew.builder()</span>
+<span class="fc" id="L126">                    .registrationMethod(RegistrationMethod.NHS_LOGIN)</span>
+<span class="fc" id="L127">                    .registeredOn(dateTimeService.now())</span>
+<span class="fc" id="L128">                    .registeredOnConfirmed(true)</span>
+<span class="fc" id="L129">                    .personId(person.getId())</span>
+<span class="fc" id="L130">                    .build());</span>
+<span class="fc" id="L131">            return person;</span>
+        });
+
+<span class="fc" id="L134">        String requestId = context.getCorrelationId().toString();</span>
+<span class="fc" id="L135">        kmsClient.addNhsLoginCredentials(requestId, new NhsLoginRequest(registeredPerson.getPublicId(), Base64.getDecoder().decode(metadata.nhsLoginCredentials())));</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">        if (metadata.team().isEmpty()) {</span>
+<span class="fc" id="L137">            addExternalCredentialRecovery(requestId, registeredPerson.getPublicId());</span>
+        }
+<span class="fc" id="L139">    }</span>
+
+    /**
+     * Grants default consent to team and sets sponsorship status to active.
+     *
+     * @param context {@link EHRRequestContext}
+     * @param route the route the request is coming from
+     * @param person the patient giving access to the team
+     * @param team the team the patient is giving access to
+     */
+    public void grantAccessToTeam(EHRRequestContext context, Route route, PKBPerson person, Team team) {
+<span class="fc" id="L150">        patientConsentManager.grantDefaultConsentToTeam(context, person, team, route);</span>
+<span class="fc" id="L151">        teamUserManager.updateStatus(team.getId(), person.getId(), SponsorshipStatus.ACTIVE);</span>
+<span class="fc" id="L152">    }</span>
+
+    /**
+     * Add external credential recovery for a non-affiliated patient
+     * @param password
+     * @param personPublicId
+     *              {@link UUID} user's public id
+     */
+    public void addExternalCredentialRecovery(char[] password, UUID personPublicId) {
+<span class="fc" id="L161">        String requestId = UUID.randomUUID().toString();</span>
+<span class="fc" id="L162">        addExternalCredentialRecovery(requestId, personPublicId)</span>
+<span class="fc" id="L163">                .mapLeft($ -&gt; kmsClient.login(requestId, new LoginRequest(personPublicId, password, false))</span>
+<span class="fc" id="L164">                        .peek($$ -&gt; addExternalCredentialRecovery(requestId, personPublicId)));</span>
+<span class="fc" id="L165">    }</span>
+
+    private Either&lt;KmsError, Void&gt; addExternalCredentialRecovery(String requestId, UUID personPublicId) {
+<span class="fc" id="L168">        return kmsClient.addExternalCredentialRecovery(requestId, personPublicId);</span>
+    }
+
+    @VisibleForTesting
+    protected IdentityVerification buildIdentityVerification(PKBPerson person) {
+<span class="fc" id="L173">        return ImmutableIdentityVerification.builder()</span>
+<span class="fc" id="L174">                .signedConsentForm(false)</span>
+<span class="fc" id="L175">                .verificationDate(dateTimeService.now())</span>
+<span class="fc" id="L176">                .status(VerificationStatus.VERIFIED)</span>
+<span class="fc" id="L177">                .photoIdType(PhotoIdType.NHS_LOGIN)</span>
+<span class="fc" id="L178">                .photoIdNumber(&quot;Vouched for by NHS Login&quot;)</span>
+<span class="fc" id="L179">                .personId(person.getId())</span>
+<span class="fc" id="L180">                .build();</span>
+    }
+
+    @VisibleForTesting
+    protected IdentityVerification buildIdentityVerificationWithTeamAffiliation(PKBPerson person, Team team) {
+<span class="fc" id="L185">        return ImmutableIdentityVerification.copyOf(buildIdentityVerification(person))</span>
+<span class="fc" id="L186">                .withVerifyingTeamId(team.getId());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

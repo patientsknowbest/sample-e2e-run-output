@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DatabaseTable.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.deletion.model</a> &gt; <span class="el_source">DatabaseTable.java</span></div><h1>DatabaseTable.java</h1><pre class="source lang-java linenums">package com.pkb.deletion.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.pkb.deletion.model.errors.DeletionServiceError;
+import com.pkb.deletion.repository.DeleteOperationRepository;
+import io.vavr.control.Either;
+import org.immutables.gson.Gson;
+import org.immutables.value.Value;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.deletion.model.PkColumn.pk;
+import static java.util.Collections.emptyList;
+
+/**
+ * Represents a database table from which we might want to delete records
+ */
+@Value.Immutable
+@Gson.TypeAdapters
+<span class="fc" id="L24">public abstract class DatabaseTable&lt;PK_TYPE&gt;  {</span>
+
+<span class="fc" id="L26">    private static final Map&lt;String, DatabaseTable&lt;?&gt;&gt; TABLE_BY_NAME = new HashMap&lt;&gt;();</span>
+
+    public abstract String getTableName();
+    @JsonIgnore @Value.Redacted public abstract Class&lt;PK_TYPE&gt; getPkClass();
+    @JsonIgnore @Value.Redacted public abstract PkColumn&lt;PK_TYPE&gt; getPkColumn();
+
+    /**
+     * In addition to the primary key column, against which most database references will be made,
+     * some tables also have other, secondary unique ids. The most common example is &quot;public_id&quot; that
+     * exists on various tables. We most follow references to these as well and delete dependent data.
+     */
+    @JsonIgnore @Gson.Ignore @Value.Redacted public abstract List&lt;IdColumn&lt;?, PK_TYPE&gt;&gt; getSecondaryIdColumns();
+
+    @Value.Derived
+    @JsonIgnore @Gson.Ignore @Value.Redacted public List&lt;IdColumn&lt;?, PK_TYPE&gt;&gt; getAllIdColumns() {
+<span class="fc" id="L41">        return Stream.concat(Stream.of(getPkColumn()), getSecondaryIdColumns().stream())</span>
+<span class="fc" id="L42">                .collect(Collectors.toList());</span>
+    }
+
+    /**
+     * Some dependent services will have a bunch of objects that reference e.g. pkbperson.public_id. Rather than
+     * having to enumerate and process these all separately, this flag allows us to define a &quot;virtual&quot; pkbperson table
+     * for those services to hold the person ids that tie all the other objects together, but no attempt will be made
+     * to validate. delete or rollback this table
+     */
+    @Value.Default
+<span class="fc" id="L52">    public boolean isVirtual() { return false; }</span>
+
+    @Value.Check
+    void postConstruct() {
+<span class="pc bpc" id="L56" title="1 of 2 branches missed.">        if(TABLE_BY_NAME.put(this.getTableName(), this) != null) {</span>
+<span class="nc" id="L57">            throw new IllegalStateException(&quot;More than one table defined for name &quot; + this.getTableName());</span>
+        }
+<span class="fc" id="L59">    }</span>
+
+    static DatabaseTable&lt;?&gt; forName(String name) {
+<span class="fc" id="L62">        return TABLE_BY_NAME.get(name);</span>
+    }
+
+    public Either&lt;DeletionServiceError, Integer&gt; buildDependentDeletionGraph(DeleteOperation deleteOperation, DeleteOperationRepository queryExecutor) {
+<span class="fc" id="L66">        return Either.sequenceRight(io.vavr.collection.Stream.ofAll(Stream.concat(</span>
+<span class="fc" id="L67">                getAllIdColumns().stream().map(idColumn -&gt; idColumn.expandSelfReferences(deleteOperation.getId(), getTableName(), queryExecutor)),</span>
+<span class="fc" id="L68">                getAllIdColumns().stream().map(idColumn -&gt; idColumn.writeDependentDeletionLists(deleteOperation, queryExecutor))</span>
+<span class="fc" id="L69">        ))).map(descendantCounts -&gt; descendantCounts.fold(0, Integer::sum));</span>
+    }
+
+
+
+
+    public static DatabaseTable&lt;Long&gt; table(String name) {
+<span class="fc" id="L76">        return  table(name, emptyList());</span>
+    }
+
+    public static DatabaseTable&lt;Long&gt; table(String name, List&lt;InboundForeignKeyReference&lt;?, Long&gt;&gt; inboundForeignKeyReferences) {
+<span class="fc" id="L80">        return  ImmutableDatabaseTable.&lt;Long&gt;builder().tableName(name).pkColumn(pk(Long.class, inboundForeignKeyReferences)).pkClass(Long.class).build();</span>
+    }
+
+
+    public static DatabaseTable&lt;Long&gt; multiIdTable(String name, PkColumn&lt;Long&gt; pkColumn, List&lt;IdColumn&lt;?, Long&gt;&gt; idColumns) {
+<span class="fc" id="L85">        return ImmutableDatabaseTable.&lt;Long&gt;builder().tableName(name).pkColumn(pkColumn).secondaryIdColumns(idColumns).pkClass(Long.class).build();</span>
+    }
+
+
+    public static &lt;PK_TYPE&gt; ImmutableDatabaseTable.Builder&lt;PK_TYPE&gt; builderFor(Class&lt;PK_TYPE&gt; pkClass) {
+<span class="fc" id="L90">        return ImmutableDatabaseTable.&lt;PK_TYPE&gt;builder().pkClass(pkClass);</span>
+    }
+
+    public static ImmutableDatabaseTable.Builder&lt;Long&gt; builderForLong() {
+<span class="fc" id="L94">        return ImmutableDatabaseTable.&lt;Long&gt;builder().pkClass(Long.class);</span>
+    }
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

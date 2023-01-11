@@ -1,0 +1,588 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AddCommonTestResultsAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.test</a> &gt; <span class="el_source">AddCommonTestResultsAction.java</span></div><h1>AddCommonTestResultsAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.test;
+
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.databind.JsonSerializer;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.pkb.action.file.ChunkedUploadAction;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.dto.ActionItemDto;
+import com.pkb.dto.ImmutableActionItemDto;
+import com.pkb.exception.PKBException;
+import com.pkb.file.FileDtoType;
+import com.pkb.file.entity.FileDTO;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.file.FileManager;
+import com.pkb.service.test.LoincManager;
+import com.pkb.service.test.TestManager;
+import com.pkb.test.entity.LoincCommonForm;
+import com.pkb.test.entity.LoincTest;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.test.entity.TestResultType.ValueType;
+import io.vavr.Tuple2;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.math.NumberUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.io.IOException;
+import java.io.StringWriter;
+import java.lang.invoke.MethodHandles;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import static com.pkb.util.StringUtil.isDecimalNumber;
+import static java.lang.String.format;
+import static java.util.Collections.singleton;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * Upload test plus a few user-set fields
+ *
+ * @author robwhelan
+ */
+<span class="fc" id="L65">public class AddCommonTestResultsAction extends ChunkedUploadAction implements PreselectableAddDataPointPage {</span>
+
+<span class="fc" id="L67">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+    private static final long serialVersionUID = -6338006964925286293L;
+    private static final String SOURCE_FILE_ID = &quot;SOURCE_FILE_ID&quot;;
+    private static final String NAMESPACE_TEST = &quot;test&quot;;
+
+<span class="fc" id="L72">    private static final DateTimeFormatter HOURS_MINUTES = DateTimeFormatter.ofPattern(&quot;HH:mm&quot;);</span>
+<span class="fc" id="L73">    private static final Pattern LINUX_NEWLINE_PATTERN = Pattern.compile(&quot;\n&quot;, Pattern.LITERAL);</span>
+<span class="fc" id="L74">    private static final Pattern WINDOWS_CARRIAGE_RETURN_PATTERN = Pattern.compile(&quot;\r&quot;, Pattern.LITERAL);</span>
+    private static final String ESCAPED_QUOTE = &quot;\\\&quot;&quot;; // unescaped to \&quot;
+<span class="fc" id="L76">    private static final Pattern ESCAPED_QUOTE_PATTERN = Pattern.compile(ESCAPED_QUOTE, Pattern.LITERAL);</span>
+    private static final String TRIPLE_ESCAPED_QUOTE = &quot;\\\\\\\&quot;&quot;; // unescaped to \\\&quot; which is needed for json parsing in jsp
+
+<span class="fc" id="L79">    private final String tab = &quot;health&quot;;</span>
+<span class="fc" id="L80">    private final String subTab = &quot;laboratory&quot;;</span>
+    private String testResultTypeId;
+
+    private Optional&lt;String&gt; showOnPageLoadDataPointId;
+
+    private List&lt;LoincCommonForm&gt; commonFormList;
+
+    private String testDate;
+
+    private String startTime;
+
+<span class="fc" id="L91">    private Date validTestDate = null;</span>
+
+    private List&lt;LoincTest&gt; loincTestList;
+
+    private TestManager testManager;
+
+    @Autowired
+    private LoincManager loincManager;
+
+    private FileManager fileManager;
+
+    private List&lt;ActionItemDto&gt; inputCardActions;
+
+    private Map&lt;Long, String&gt; testIdToResult;
+
+    private Map&lt;Long, String&gt; testIdToMinimum;
+
+    private Map&lt;Long, String&gt; testIdToMaximum;
+
+    private Map&lt;Long, String&gt; comments;
+
+    private LoggedInEHRRequestContext loggedInContext;
+
+    @Override
+    public void prepare() throws Exception {
+<span class="fc" id="L116">        super.prepare();</span>
+<span class="fc" id="L117">        setDefaultFlag();</span>
+<span class="fc" id="L118">        loggedInContext = getLoggedInEHRRequestContext();</span>
+<span class="pc bpc" id="L119" title="2 of 4 branches missed.">        if ((testDate == null) &amp;&amp; (startTime == null)) {</span>
+<span class="fc" id="L120">            Tuple2&lt;String, String&gt; currentDateAndTime = getCurrentDateAndTime();</span>
+<span class="fc" id="L121">            testDate = currentDateAndTime._1;</span>
+<span class="fc" id="L122">            startTime = currentDateAndTime._2;</span>
+        }
+<span class="fc" id="L124">    }</span>
+
+    public String selectInput() {
+        // clear out any holdover attachments from earlier validation problems or cancellations
+<span class="fc" id="L128">        messageWebBean.removeAttachmentsFromSession(session);</span>
+<span class="fc" id="L129">        showOnPageLoadDataPointId = convertToShowOnPageLoadDataPointId(testResultTypeId);</span>
+<span class="fc" id="L130">        return SUCCESS;</span>
+    }
+
+    private String addInput() {
+        // store file upload if selected (optional field)
+<span class="fc bfc" id="L135" title="All 2 branches covered.">        if (isNotEmpty(attachmentDocIds)) {</span>
+            try {
+<span class="fc" id="L137">                long patientId = getPatientId();</span>
+<span class="fc" id="L138">                attachments = generateAttachmentsFromInputs();</span>
+<span class="fc" id="L139">                Long sourceFileId = uploadFile(patientId, validTestDate);</span>
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">                if (sourceFileId != null) {</span>
+<span class="fc" id="L141">                    getSession().put(SOURCE_FILE_ID, sourceFileId);</span>
+                } else {
+<span class="nc" id="L143">                    addActionError(getText(&quot;addCommonTestResultsAction.err.uploading_tests&quot;));</span>
+<span class="nc" id="L144">                    return INPUT;</span>
+                }
+<span class="nc" id="L146">            } catch (PKBException pkbe) {</span>
+<span class="nc" id="L147">                LOGGER.error(&quot;Add test result upload error&quot;, pkbe);</span>
+<span class="nc" id="L148">                addActionError(getText(&quot;addCommonTestResultsAction.err.uploading_tests&quot;));</span>
+<span class="nc" id="L149">                return INPUT;</span>
+<span class="fc" id="L150">            }</span>
+        }
+
+<span class="fc" id="L153">        return SUCCESS;</span>
+    }
+
+
+    void validateTestDateAndTime() {
+<span class="fc" id="L158">        boolean dateError = false;</span>
+        try {
+<span class="fc" id="L160">            LocalDate localDate = LocalDate.parse(testDate, getGlobalDateInputFormatter());</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">            if (localDate.isAfter(dateTimeService.todayAtZoneId(getZoneIdOfLoggedInUser()))) {</span>
+<span class="fc" id="L162">                addFieldError(&quot;testDate&quot;, getText(&quot;addCommonTestResultsAction.err.date_must_be_past&quot;));</span>
+<span class="fc" id="L163">                dateError = true;</span>
+            }
+<span class="fc" id="L165">        } catch (DateTimeParseException ignored) {</span>
+<span class="fc" id="L166">            addFieldError(&quot;testDate&quot;, getText(&quot;addCommonTestResultsAction.err.invalid_date&quot;));</span>
+<span class="fc" id="L167">            dateError = true;</span>
+<span class="fc" id="L168">        }</span>
+
+        try {
+<span class="fc bfc" id="L171" title="All 2 branches covered.">            if (dateError) {</span>
+<span class="fc" id="L172">                HOURS_MINUTES.parse(startTime);</span>
+            } else {
+<span class="fc" id="L174">                DateTimeFormatter formatter = getDateWithHHmmFormatter();</span>
+<span class="fc" id="L175">                ZonedDateTime zonedDateTime = dateTimeService.ofLocalDateTime(LocalDateTime.parse(testDate + &quot; &quot; + startTime, formatter), getZoneIdOfLoggedInUser());</span>
+<span class="fc" id="L176">                validTestDate = Date.from(zonedDateTime.toInstant());</span>
+            }
+<span class="fc" id="L178">        } catch (DateTimeParseException ignored) {</span>
+<span class="fc" id="L179">            addFieldError(&quot;startTime&quot;, getText(&quot;addCommonTestResultsAction.err.invalid_time&quot;));</span>
+<span class="fc" id="L180">        }</span>
+<span class="fc" id="L181">    }</span>
+
+    /**
+     * called automatically for execute()
+     * some test values can be missing
+     * but if they entered a range value, they need both range values and the test value
+     * also return if they didn't enter any values at all
+     */
+    @Override
+    public void validate() {
+<span class="fc" id="L191">        refillPrivacyFlags();</span>
+<span class="fc" id="L192">        validateTestDateAndTime();</span>
+<span class="fc" id="L193">        validateTestResultInputs();</span>
+<span class="fc" id="L194">    }</span>
+
+    private void validateTestResultInputs() {
+<span class="fc" id="L197">        var tests = loincManager.loadLoincTestsByIds(testIdToResult);</span>
+<span class="fc" id="L198">        testIdToResult.forEach((resultKey, resultValue) -&gt; {</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">            if (isNotBlank(resultValue)) {</span>
+<span class="fc" id="L200">                LoincTest test = tests.get(resultKey);</span>
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">                if (test != null) {</span>
+                    // i18n - so getName() will be already localized
+<span class="fc" id="L203">                    test.setNameLocal(getText(test.getNameKey()));</span>
+
+<span class="fc" id="L205">                    String minString = testIdToMinimum.get(resultKey);</span>
+<span class="fc" id="L206">                    String maxString = testIdToMaximum.get(resultKey);</span>
+
+<span class="fc" id="L208">                    validateValue(isDecimalNumber(resultValue), test, resultKey);</span>
+<span class="fc" id="L209">                    validateMinString(minString, test, resultKey);</span>
+<span class="fc" id="L210">                    validateMaxString(maxString, test, resultKey);</span>
+<span class="fc" id="L211">                    validateMinMax(minString, maxString, test, resultKey);</span>
+                }
+            }
+<span class="fc" id="L214">        });</span>
+<span class="fc" id="L215">    }</span>
+
+    private void validateValue(boolean validValue, LoincTest test, long testId) {
+<span class="fc bfc" id="L218" title="All 2 branches covered.">        if (!validValue) {</span>
+            // lookup test -- maybe text is ok?  Error if not.
+<span class="fc" id="L220">            ValueType expectedType = test.getExpectedValueType();</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">            if (ValueType.NUMERIC == expectedType) {</span>
+<span class="fc" id="L222">                addActionAndFieldErrors(&quot;value_not_number&quot;, singleton(&quot;testIdToResult&quot;), test, testId);</span>
+            }
+        }
+<span class="fc" id="L225">    }</span>
+
+    private void addActionAndFieldErrors(String actionError, Set&lt;String&gt; fields, LoincTest test, long resultId) {
+<span class="fc" id="L228">        addActionError(getText(format(&quot;addCommonTestResultsAction.err.%s&quot;, actionError), new String[]{ test.getName() }));</span>
+<span class="fc" id="L229">        fields.forEach(field -&gt; addFieldError(format(&quot;%s[%d]&quot;, field, resultId), getText(&quot;&quot;)));</span>
+<span class="fc" id="L230">    }</span>
+
+    private void validateRanges(String extreme, LoincTest test, long resultKey, String field, String actionError) {
+<span class="pc bpc" id="L233" title="1 of 4 branches missed.">        if (isNotBlank(extreme) &amp;&amp; !isDecimalNumber(extreme)) {</span>
+<span class="nc" id="L234">            addActionAndFieldErrors(actionError, singleton(field), test, resultKey);</span>
+        }
+<span class="fc" id="L236">    }</span>
+
+    private void validateMinString(String minString, LoincTest test, Long resultKey) {
+<span class="fc" id="L239">        validateRanges(minString, test, resultKey, &quot;loincTestMinimum&quot;, &quot;minimum_not_number&quot;);</span>
+<span class="fc" id="L240">    }</span>
+
+    private void validateMaxString(String maxString, LoincTest test, Long resultKey) {
+<span class="fc" id="L243">        validateRanges(maxString, test, resultKey, &quot;loincTestMaximum&quot;, &quot;maximum_not_number&quot;);</span>
+<span class="fc" id="L244">    }</span>
+
+    private void validateMinMax(String minString, String maxString, LoincTest test, Long resultKey) {
+<span class="fc bfc" id="L247" title="All 4 branches covered.">        if ((isNotBlank(minString) &amp;&amp; isNotBlank(maxString)) &amp;&amp;</span>
+<span class="pc bpc" id="L248" title="2 of 4 branches missed.">                isDecimalNumber(minString) &amp;&amp; isDecimalNumber(maxString)</span>
+<span class="fc bfc" id="L249" title="All 2 branches covered.">                &amp;&amp; (Double.parseDouble(minString) &gt; Double.parseDouble(maxString))) {</span>
+<span class="fc" id="L250">            addActionAndFieldErrors(&quot;maximum_below_minimum&quot;, Set.of(&quot;loincTestMinimum, loincTestMaximum&quot;), test, resultKey);</span>
+        }
+<span class="fc" id="L252">    }</span>
+
+    @Override
+    public String execute() {
+<span class="fc" id="L256">        String inputResult = addInput();</span>
+
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">        if (!Objects.equals(inputResult, SUCCESS)) {</span>
+<span class="nc" id="L259">            return inputResult;</span>
+        }
+
+        // save all entered test values
+        // show success message back on myTests screen
+        try {
+<span class="fc" id="L265">            long patientId = getPatientId();</span>
+
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">            if (validTestDate == null) {</span>
+<span class="nc" id="L268">                return INPUT;</span>
+            }
+
+<span class="fc" id="L271">            var requestContext = getLoggedInEHRRequestContext();</span>
+
+            // save the file (from the session) using the FileManager, and remove it
+<span class="fc" id="L274">            Long sourceFileId = (Long) getSession().get(SOURCE_FILE_ID);</span>
+
+<span class="fc" id="L276">            Map&lt;Long, LoincTest&gt; loincTests = loincManager.loadLoincTestsByIds(testIdToResult);</span>
+<span class="fc" id="L277">            List&lt;TestResultDTO&gt; resultList = testIdToResult.entrySet().stream()</span>
+<span class="fc" id="L278">                    .filter(entry -&gt; isNotBlank(entry.getValue()))</span>
+<span class="fc" id="L279">                    .map(longStringEntry -&gt; {</span>
+<span class="fc" id="L280">                        TestResultDTO dto = new TestResultDTO(new SourceDetails(requestContext));</span>
+<span class="fc" id="L281">                        Long testId = longStringEntry.getKey();</span>
+<span class="fc" id="L282">                        dto.setComments(comments.get(testId));</span>
+<span class="fc" id="L283">                        dto.setLoincTestId(testId);</span>
+<span class="fc" id="L284">                        dto.setTestDate(validTestDate.toInstant());</span>
+
+<span class="fc" id="L286">                        LoincTest test = loincTests.get(testId);</span>
+<span class="fc" id="L287">                        String resultString = longStringEntry.getValue();</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">                        if (test != null) {</span>
+<span class="fc bfc" id="L289" title="All 2 branches covered.">                            if (test.expectsTextualValue()) {</span>
+<span class="fc" id="L290">                                dto.setTextValue(resultString);</span>
+                            } else {
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">                                if (NumberUtils.isCreatable(resultString)) {</span>
+<span class="fc" id="L293">                                    dto.setValue(Double.valueOf(resultString));</span>
+                                } else {
+<span class="nc" id="L295">                                    dto.setTextValue(resultString);</span>
+                                }
+                            }
+                        }
+
+<span class="fc" id="L300">                        setRanges(testIdToMinimum, testId, dto::setRangeLow, dto::setRangeLowInclusive);</span>
+<span class="fc" id="L301">                        setRanges(testIdToMaximum, testId, dto::setRangeHigh, dto::setRangeHighInclusive);</span>
+
+<span class="fc" id="L303">                        dto.setSourceFileId(sourceFileId);</span>
+
+<span class="fc" id="L305">                        fillPrivacyFlagIn(dto);</span>
+
+<span class="fc" id="L307">                        return dto;</span>
+<span class="fc" id="L308">                    }).collect(Collectors.toList());</span>
+
+<span class="fc" id="L310">            testManager.transactional(() -&gt; {</span>
+<span class="fc" id="L311">                testManager.saveTestResults(requestContext, resultList, patientId);</span>
+                // consent from first test result is enough
+<span class="fc" id="L313">                logActivityByOthers(Activity.Action.UPLOADED_LAB_RESULTS, dateTimeService.now(), true, resultList.get(0));</span>
+<span class="fc" id="L314">            });</span>
+
+<span class="fc" id="L316">            addActionMessage(getText(&quot;addCommonTestResultsAction.txt.results_uploaded&quot;));</span>
+<span class="nc" id="L317">        } catch (Exception e) {</span>
+<span class="nc" id="L318">            LOGGER.error(&quot;Add test result upload error&quot;, e);</span>
+<span class="nc" id="L319">            addActionError(getText(&quot;addCommonTestResultsAction.err.uploading_tests&quot;));</span>
+        } finally {
+<span class="fc" id="L321">            clearSession();</span>
+        }
+<span class="fc" id="L323">        LOGGER.info(&quot;Exiting execute&quot;);</span>
+<span class="fc" id="L324">        return SUCCESS;</span>
+    }
+
+    private void setRanges(Map&lt;Long, String&gt; extremesMap, long resultId, Consumer&lt;Double&gt; setter, Consumer&lt;Boolean&gt; inclusiveSetter) {
+<span class="fc bfc" id="L328" title="All 2 branches covered.">        if (isNotBlank(extremesMap.get(resultId))) {</span>
+<span class="fc" id="L329">            setter.accept(Double.parseDouble(extremesMap.get(resultId)));</span>
+<span class="fc" id="L330">            inclusiveSetter.accept(true);</span>
+        }
+<span class="fc" id="L332">    }</span>
+
+    private long getPatientId() {
+<span class="fc" id="L335">        return contextUserUtil.getContextOrLoggedInUserId();</span>
+    }
+
+    private Long uploadFile(long userId, Date validDate) {
+<span class="fc" id="L339">        Long accountId = userManager.getDefaultAccountId(userId);</span>
+<span class="fc" id="L340">        getSession().put(ACCOUNT_ID, accountId);</span>
+<span class="fc" id="L341">        String documentIdString = attachmentDocIds.get(0);</span>
+<span class="fc" id="L342">        getSession().put(BASE_FILE_ID, documentIdString);</span>
+        // save file meta data in menu_data
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(documentIdString)) {</span>
+<span class="fc" id="L345">            FileDTO fileDTO = new FileDTO(new SourceDetails(getEHRRequestContext()));</span>
+<span class="fc" id="L346">            fileDTO.setDate(validDate);</span>
+<span class="fc" id="L347">            fileDTO.setFileName(attachmentFileNames.get(0));</span>
+<span class="fc" id="L348">            fileDTO.setMediaType(attachments.get(0).getMediaType());</span>
+<span class="fc" id="L349">            fileDTO.getBaseFields().generateNewRandomUniqueId();</span>
+<span class="fc" id="L350">            UUID documentId = UUID.fromString(documentIdString);</span>
+<span class="fc" id="L351">            fileDTO.setDocumentMetadataId(documentId);</span>
+<span class="fc" id="L352">            fileManager.addFile(getEHRRequestContext(), fileDTO, userId, FileDtoType.FILE);</span>
+<span class="fc" id="L353">            return fileDTO.getId();</span>
+        } else {
+<span class="nc" id="L355">            return null;</span>
+        }
+    }
+
+    @Override
+    public String getNamespace() {
+<span class="fc" id="L361">        return NAMESPACE_TEST;</span>
+    }
+
+    @Override
+    protected void clearSession() {
+<span class="fc" id="L366">        super.clearSession();</span>
+<span class="fc" id="L367">        getSession().remove(SOURCE_FILE_ID);</span>
+<span class="fc" id="L368">    }</span>
+
+    @Override
+    public String input() {
+<span class="nc" id="L372">        return INPUT;</span>
+    }
+
+    public String cancel() {
+        // redirect to myTests; no message
+<span class="nc" id="L377">        return CANCEL;</span>
+    }
+
+    public String getTab() {
+<span class="fc" id="L381">        return tab;</span>
+    }
+
+<span class="fc" id="L384">    private class LoincSerializer extends JsonSerializer&lt;LoincCommonForm&gt; {</span>
+        @Override
+        public void serialize(LoincCommonForm value, JsonGenerator jgen, SerializerProvider provider) throws IOException {
+<span class="fc" id="L387">            jgen.writeStartObject();</span>
+<span class="fc" id="L388">            jgen.writeNumberField(&quot;id&quot;, value.getId());</span>
+<span class="fc" id="L389">            jgen.writeStringField(&quot;name&quot;, getText(value.getName()));</span>
+<span class="fc" id="L390">            jgen.writeStringField(&quot;description&quot;, getText(value.getDescription()));</span>
+<span class="fc" id="L391">            jgen.writeArrayFieldStart(&quot;children&quot;);</span>
+
+<span class="fc bfc" id="L393" title="All 2 branches covered.">            for (LoincTest test : value.getLoincTestList()) {</span>
+<span class="fc" id="L394">                jgen.writeStartObject();</span>
+<span class="fc" id="L395">                jgen.writeNumberField(&quot;id&quot;, test.getId());</span>
+<span class="fc" id="L396">                jgen.writeStringField(&quot;name&quot;, test.getName());</span>
+<span class="fc" id="L397">                jgen.writeStringField(&quot;unit&quot;, test.getUnit());</span>
+<span class="fc" id="L398">                jgen.writeStringField(&quot;type&quot;, test.getExpectedValueType().name());</span>
+<span class="fc" id="L399">                jgen.writeEndObject();</span>
+<span class="fc" id="L400">            }</span>
+<span class="fc" id="L401">            jgen.writeEndArray();</span>
+<span class="fc" id="L402">            jgen.writeEndObject();</span>
+<span class="fc" id="L403">        }</span>
+
+        @Override
+        public Class&lt;LoincCommonForm&gt; handledType() {
+<span class="fc" id="L407">            return LoincCommonForm.class;</span>
+        }
+    }
+
+    private List&lt;LoincTest&gt; prepareLoincTestList() {
+<span class="fc" id="L412">        List&lt;LoincTest&gt; loincs = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L414" title="All 2 branches covered.">        for (LoincCommonForm form : getCommonFormList()) {</span>
+            //i18n and sorting happens in getCommonFormList
+<span class="fc" id="L416">            List&lt;LoincTest&gt; sortedTests = form.getLoincTestList();</span>
+<span class="fc" id="L417">            loincs.addAll(sortedTests);</span>
+<span class="fc" id="L418">        }</span>
+        //remove duplicates
+<span class="fc" id="L420">        return new ArrayList&lt;&gt;(new HashSet&lt;&gt;(loincs));</span>
+    }
+
+    private void localizeAndSort(List&lt;LoincCommonForm&gt; commonFormList) {
+<span class="fc bfc" id="L424" title="All 2 branches covered.">        for (LoincCommonForm form : commonFormList) {</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">            for (LoincTest test : form.getLoincTestList()) {</span>
+<span class="fc" id="L426">                test.setNameLocal(getText(test.getNameKey()));</span>
+<span class="fc" id="L427">            }</span>
+
+<span class="fc" id="L429">            form.getSortedLoincTestList();</span>
+<span class="fc" id="L430">        }</span>
+<span class="fc" id="L431">    }</span>
+
+    private &lt;T&gt; String getElementsInJson(List&lt;T&gt; serializableList, JsonSerializer&lt;T&gt; serializer) {
+<span class="fc" id="L434">        ObjectMapper mapper = new ObjectMapper();</span>
+<span class="fc" id="L435">        SimpleModule module = new SimpleModule();</span>
+<span class="fc" id="L436">        module.addSerializer(serializer);</span>
+<span class="fc" id="L437">        mapper.registerModule(module);</span>
+<span class="fc" id="L438">        mapper.enable(SerializationFeature.INDENT_OUTPUT);</span>
+
+<span class="fc" id="L440">        StringWriter jsonBuffer = new StringWriter();</span>
+        try {
+<span class="fc" id="L442">            mapper.writeValue(jsonBuffer, serializableList);</span>
+<span class="fc" id="L443">            return ESCAPED_QUOTE_PATTERN</span>
+<span class="fc" id="L444">                    .matcher(WINDOWS_CARRIAGE_RETURN_PATTERN</span>
+<span class="fc" id="L445">                            .matcher(LINUX_NEWLINE_PATTERN</span>
+<span class="fc" id="L446">                                    .matcher(jsonBuffer.toString())</span>
+<span class="fc" id="L447">                                    .replaceAll(Matcher.quoteReplacement(&quot;&quot;)))</span>
+<span class="fc" id="L448">                            .replaceAll(Matcher.quoteReplacement(&quot;&quot;)))</span>
+<span class="fc" id="L449">                    .replaceAll(Matcher.quoteReplacement(TRIPLE_ESCAPED_QUOTE));</span>
+<span class="nc" id="L450">        } catch (IOException e) {</span>
+<span class="nc" id="L451">            throw new RuntimeException(e);//this can't happen</span>
+        }
+    }
+
+    public String getNewLabTestsJson() {
+<span class="fc" id="L456">        return getElementsInJson(getCommonFormList(), new LoincSerializer());</span>
+    }
+
+    public void setTestManager(TestManager testManager) {
+<span class="fc" id="L460">        this.testManager = testManager;</span>
+<span class="fc" id="L461">    }</span>
+
+    private List&lt;LoincCommonForm&gt; getCommonFormList() {
+<span class="fc bfc" id="L464" title="All 2 branches covered.">        if (commonFormList == null) {</span>
+            try {
+<span class="fc" id="L466">                commonFormList = testManager.getLoincCommonFormList();</span>
+<span class="nc" id="L467">            } catch (PKBException e) {</span>
+<span class="nc" id="L468">                throw new RuntimeException(e);</span>
+<span class="fc" id="L469">            }</span>
+<span class="fc" id="L470">            localizeAndSort(commonFormList);</span>
+        }
+<span class="fc" id="L472">        return commonFormList;</span>
+    }
+
+    public String getTestDate() {
+<span class="fc" id="L476">        return testDate;</span>
+    }
+
+    public void setTestDate(String testDate) {
+<span class="fc" id="L480">        this.testDate = testDate;</span>
+<span class="fc" id="L481">    }</span>
+
+    Date getValidTestDate() {
+<span class="nc" id="L484">        return validTestDate;</span>
+    }
+
+    public void setFileManager(FileManager fileManager) {
+<span class="fc" id="L488">        this.fileManager = fileManager;</span>
+<span class="fc" id="L489">    }</span>
+
+    public String getSubTab() {
+<span class="fc" id="L492">        return subTab;</span>
+    }
+
+    public void setTestResultTypeId(String testResultTypeId) {
+<span class="fc" id="L496">        this.testResultTypeId = testResultTypeId;</span>
+<span class="fc" id="L497">    }</span>
+
+    @Override
+    public Optional&lt;String&gt; getShowOnPageLoadDataPointId() {
+<span class="fc" id="L501">        return showOnPageLoadDataPointId.map(nr -&gt; nr.toString());</span>
+    }
+
+    public List&lt;LoincTest&gt; getLoincTestList() {
+<span class="pc bpc" id="L505" title="1 of 2 branches missed.">        if (loincTestList == null) {</span>
+<span class="fc" id="L506">            this.loincTestList = prepareLoincTestList();</span>
+        }
+<span class="fc" id="L508">        return loincTestList;</span>
+    }
+
+    public void setLoincTestList(List&lt;LoincTest&gt; loincTestList) {
+<span class="nc" id="L512">        this.loincTestList = loincTestList;</span>
+<span class="nc" id="L513">    }</span>
+
+    public String getStartTime() {
+<span class="fc" id="L516">        return startTime;</span>
+    }
+
+    public void setStartTime(String startTime) {
+<span class="fc" id="L520">        this.startTime = startTime;</span>
+<span class="fc" id="L521">    }</span>
+
+    public List&lt;ActionItemDto&gt; getInputCardActions() {
+<span class="fc" id="L524">        inputCardActions = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L526">        inputCardActions.add(ImmutableActionItemDto.builder()</span>
+<span class="fc" id="L527">                .iconCssClass(&quot;discuss&quot;)</span>
+<span class="fc" id="L528">                .text(pkbServiceUtil.getMessage(&quot;datapoint.txt.add_comment&quot;, getLocale()))</span>
+<span class="fc" id="L529">                .build());</span>
+
+<span class="fc" id="L531">        inputCardActions.add(ImmutableActionItemDto.builder()</span>
+<span class="fc" id="L532">                .iconCssClass(&quot;delete-data&quot;)</span>
+<span class="fc" id="L533">                .text(pkbServiceUtil.getMessage(&quot;datapoint.txt.delete&quot;, getLocale()))</span>
+<span class="fc" id="L534">                .build());</span>
+
+<span class="fc" id="L536">        return inputCardActions;</span>
+    }
+
+    public void setInputCardActions(List&lt;ActionItemDto&gt; inputCardActions) {
+<span class="nc" id="L540">        this.inputCardActions = inputCardActions;</span>
+<span class="nc" id="L541">    }</span>
+
+    public Map&lt;Long, String&gt; getTestIdToResult() {
+<span class="fc" id="L544">        return testIdToResult;</span>
+    }
+
+    public void setTestIdToResult(Map&lt;Long, String&gt; testIdToResult) {
+<span class="fc" id="L548">        this.testIdToResult = testIdToResult;</span>
+<span class="fc" id="L549">    }</span>
+
+    public Map&lt;Long, String&gt; getTestIdToMinimum() {
+<span class="fc" id="L552">        return testIdToMinimum;</span>
+    }
+
+    public void setTestIdToMinimum(Map&lt;Long, String&gt; testIdToMinimum) {
+<span class="fc" id="L556">        this.testIdToMinimum = testIdToMinimum;</span>
+<span class="fc" id="L557">    }</span>
+
+    public Map&lt;Long, String&gt; getTestIdToMaximum() {
+<span class="fc" id="L560">        return testIdToMaximum;</span>
+    }
+
+    public void setTestIdToMaximum(Map&lt;Long, String&gt; testIdToMaximum) {
+<span class="fc" id="L564">        this.testIdToMaximum = testIdToMaximum;</span>
+<span class="fc" id="L565">    }</span>
+
+    public Map&lt;Long, String&gt; getComments() {
+<span class="fc" id="L568">        return comments;</span>
+    }
+
+    public void setComments(Map&lt;Long, String&gt; comments) {
+<span class="fc" id="L572">        this.comments = comments;</span>
+<span class="fc" id="L573">    }</span>
+
+    public LoggedInEHRRequestContext getLoggedInContext() {
+<span class="fc" id="L576">        return loggedInContext;</span>
+    }
+
+    public void setLoggedInContext(LoggedInEHRRequestContext loggedInContext) {
+<span class="nc" id="L580">        this.loggedInContext = loggedInContext;</span>
+<span class="nc" id="L581">    }</span>
+
+    @Override
+    public String getCustomStyle() {
+<span class="fc" id="L585">        return MOBILE_OPTIMIZED_STYLE;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

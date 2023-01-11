@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ManageMedicationsAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.medications</a> &gt; <span class="el_source">ManageMedicationsAction.java</span></div><h1>ManageMedicationsAction.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: ManageMedicationsAction.java 11 Mar 2011 11:11:11 Steve Gilbert$
+//
+//---------------------------------------------------------------------------
+
+package com.pkb.action.medications;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.action.message.ComposeMessageAction;
+import com.pkb.action.support.MedicationGroupTransformer;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.bean.IMedicationWebBean;
+import com.pkb.bean.IMessageWebBean;
+import com.pkb.institute.entity.Team;
+import com.pkb.mappers.ImmutableEntityDependency;
+import com.pkb.medication.entity.Medication;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.datapoint.DataWithUIPermissions;
+import com.pkb.service.medication.MedicationManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.util.MedicationDTO;
+import com.pkb.util.MedicationGroupDTO;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import static com.pkb.action.BaseAction.NhsAppPage.PRESCRIPTIONS;
+import static java.util.Comparator.comparing;
+import static java.util.Comparator.nullsLast;
+import static java.util.stream.Collectors.toList;
+
+// Produces and manages lists of MedicationSummaryDTO objects which are used to
+// 1. Generate the dashboard medication summaries
+// 2. Populate the lists on the 'Manage Medications' page
+
+<span class="fc" id="L50">public class ManageMedicationsAction extends BaseAction {</span>
+
+<span class="fc" id="L52">    static final Comparator&lt;MedicationDTO&gt; BY_START_DATE = comparing(MedicationDTO::getStartDate, nullsLast(Instant::compareTo))</span>
+<span class="fc" id="L53">            .thenComparing(MedicationDTO::getId, Long::compareTo);</span>
+<span class="fc" id="L54">    static final Comparator&lt;MedicationDTO&gt; BY_END_DATE = comparing(MedicationDTO::getEndDate, nullsLast(Instant::compareTo))</span>
+<span class="fc" id="L55">            .thenComparing(MedicationDTO::getId, Long::compareTo);</span>
+    private static final long serialVersionUID = 1L;
+    private static final String UNAVAILABLE = &quot;unavailable&quot;;
+    private static final String UNKNOWN = &quot;unknown&quot;;
+    private static final String YOU = &quot;you&quot;;
+    private static final String BLANK = &quot;&quot;;
+    private DateTimeFormatter dateFormat;
+<span class="fc" id="L62">    private String tab = &quot;treatment&quot;;</span>
+<span class="fc" id="L63">    private String subTab = &quot;medications&quot;;</span>
+    private MedicationManager medicationManager;
+    private IMedicationWebBean medicationWebBean;
+    private IMessageWebBean messageWebBean;
+    private String currentPrescriptionRole;
+    private List&lt;MedicationGroupDTO&gt; currentMedicationGroups;
+    private List&lt;MedicationGroupDTO&gt; pastMedicationGroups;
+    //for deleting a specific medication:
+    private Long medicationId;
+    //for discussMedications only
+    private List&lt;Long&gt; medicationIds;
+    private Long loggedInUserId;
+    private Long patientId;
+    private Long patientAccountId;
+    private boolean callerIsClinician;
+    private Long callerTeamId;
+    private String discussMessage;
+    private String discussTopic;
+    @Autowired
+    private MedicationGroupTransformer medicationGroupTransformer;
+
+    public List&lt;MedicationGroupDTO&gt; getCurrentMedicationGroups() {
+<span class="nc" id="L85">        return currentMedicationGroups;</span>
+    }
+
+    public void setCurrentMedicationGroups(List&lt;MedicationGroupDTO&gt; currentMedicationGroups) {
+<span class="nc" id="L89">        this.currentMedicationGroups = currentMedicationGroups;</span>
+<span class="nc" id="L90">    }</span>
+
+    public List&lt;MedicationGroupDTO&gt; getPastMedicationGroups() {
+<span class="nc" id="L93">        return pastMedicationGroups;</span>
+    }
+
+    public void setPastMedicationGroups(List&lt;MedicationGroupDTO&gt; pastMedicationGroups) {
+<span class="nc" id="L97">        this.pastMedicationGroups = pastMedicationGroups;</span>
+<span class="nc" id="L98">    }</span>
+
+    private BaseAction.Users setUserVariables() {
+<span class="fc" id="L101">        var users = getContextAndLoggedInUsers();</span>
+<span class="fc" id="L102">        loggedInUserId = users.loggedInUser().getId();</span>
+<span class="fc" id="L103">        patientId = users.contextUser().getId();</span>
+<span class="fc" id="L104">        patientAccountId = userManager.getDefaultAccountId(patientId);</span>
+
+<span class="fc" id="L106">        callerIsClinician = isLoggedInUserProfessional();</span>
+
+<span class="fc" id="L108">        Team callerTeam = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">        callerTeamId = callerTeam == null ? null : callerTeam.getId();</span>
+<span class="fc" id="L110">        return users;</span>
+    }
+
+    @Override
+    public String execute() throws Exception {
+<span class="fc" id="L115">        setNhsAppPage(PRESCRIPTIONS.name());</span>
+
+<span class="fc" id="L117">        var users = setUserVariables();</span>
+<span class="fc" id="L118">        List&lt;Medication&gt; medications = medicationGroupTransformer.transformMedication(medicationManager.getAllMedications(getLoggedInEHRRequestContext(), users.contextUser().getId(), patientAccountId,</span>
+                false/*exclude medication not taken*/));
+
+<span class="fc" id="L121">        List&lt;DataWithUIPermissions&lt;Medication&gt;&gt; medicationsWithPermissions = dataPointManager.getPermissions(medications, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam());</span>
+
+<span class="fc" id="L123">        List&lt;MedicationDTO&gt; medicationDTOs = medicationWebBean.convertMedicationsToDTOs(medicationsWithPermissions, buildDependency());</span>
+
+
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        currentMedicationGroups = medicationGroupTransformer.transformMedicationDTOsWithoutGrouping(medicationDTOs.stream().filter(m -&gt; !m.isPast()).collect(toList()));</span>
+
+<span class="fc" id="L128">        pastMedicationGroups = medicationGroupTransformer.groupByEndDateAndAlphabetical(medicationDTOs.stream().filter(MedicationDTO::isPast).collect(toList()));</span>
+
+<span class="fc" id="L130">        return Action.SUCCESS;</span>
+    }
+
+    /**
+     * for handling the deletePatientMedication action - ask for confirmation of deleting the medication assigned to medicationId
+     */
+    public String deletePatientMedication() {
+<span class="fc" id="L137">        return INPUT;</span>
+    }
+
+    public String cancelDelete() {
+<span class="fc" id="L141">        return &quot;cancel&quot;;</span>
+    }
+
+    /**
+     * Deletes the medication assigned to medicationId
+     */
+    public String confirmDelete() {
+<span class="fc" id="L148">        setUserVariables();</span>
+<span class="fc" id="L149">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L150">        Medication medication = medicationManager.getMedication(loggedInEHRRequestContext, patientAccountId, medicationId);</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">        if (hasNotPermissionsToDeleteDatapoint(medication, loggedInEHRRequestContext)) {</span>
+<span class="nc" id="L152">            return CANCEL;</span>
+        }
+        //must call delete inside a transaction:
+<span class="fc" id="L155">        SourceDetails deletedBy = new SourceDetails();</span>
+<span class="fc" id="L156">        deletedBy.init(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L158">        medicationManager.transactional(() -&gt; {</span>
+<span class="fc" id="L159">            medicationManager.deleteMedications(getLoggedInEHRRequestContext(), patientAccountId, List.of(medicationId), deletedBy)</span>
+<span class="fc" id="L160">                    .forEach(deletedMedication -&gt;</span>
+<span class="fc" id="L161">                            logActivityByOthers(Activity.Action.DELETED_MEDICATION_RECORD, dateTimeService.now(), true, deletedMedication, getLoggedInEHRRequestContext()));</span>
+<span class="fc" id="L162">        });</span>
+
+<span class="fc" id="L164">        return SUCCESS;</span>
+    }
+
+    @Override
+    public String input() {
+
+<span class="nc" id="L170">        currentMedicationGroups = null;</span>
+<span class="nc" id="L171">        pastMedicationGroups = null;</span>
+<span class="nc" id="L172">        return Action.INPUT;</span>
+    }
+
+    @Override
+    public void validate() {
+
+<span class="fc" id="L178">        currentMedicationGroups = null;</span>
+<span class="fc" id="L179">        pastMedicationGroups = null;</span>
+<span class="fc" id="L180">    }</span>
+
+    public String getCurrentPrescriptionRole() {
+<span class="nc" id="L183">        return currentPrescriptionRole;</span>
+    }
+
+    public void setCurrentPrescriptionRole(String currentPrescriptionRole) {
+<span class="nc" id="L187">        this.currentPrescriptionRole = currentPrescriptionRole;</span>
+<span class="nc" id="L188">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L191">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L195">        this.userManager = userManager;</span>
+<span class="fc" id="L196">    }</span>
+
+    public MedicationManager getMedicationManager() {
+<span class="nc" id="L199">        return medicationManager;</span>
+    }
+
+    public void setMedicationManager(MedicationManager medicationManager) {
+<span class="fc" id="L203">        this.medicationManager = medicationManager;</span>
+<span class="fc" id="L204">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L207">        return tab;</span>
+    }
+
+    public void setTab(String tab) {
+<span class="fc" id="L211">        this.tab = tab;</span>
+<span class="fc" id="L212">    }</span>
+
+    public String getSubTab() {
+<span class="fc" id="L215">        return subTab;</span>
+    }
+
+    public void setSubTab(String subTab) {
+<span class="fc" id="L219">        this.subTab = subTab;</span>
+<span class="fc" id="L220">    }</span>
+
+    public Map&lt;String, List&lt;MedicationGroupDTO&gt;&gt; getAllMedicationGroups() {
+<span class="fc" id="L223">        Map&lt;String, List&lt;MedicationGroupDTO&gt;&gt; allMedicationGroups = new LinkedHashMap&lt;&gt;();</span>
+<span class="fc" id="L224">        allMedicationGroups.put(&quot;current&quot;, currentMedicationGroups);</span>
+<span class="fc" id="L225">        allMedicationGroups.put(&quot;past&quot;, pastMedicationGroups);</span>
+<span class="fc" id="L226">        return allMedicationGroups;</span>
+    }
+
+    public Long getMedicationId() {
+<span class="fc" id="L230">        return medicationId;</span>
+    }
+
+    public void setMedicationId(Long medicationId) {
+<span class="fc" id="L234">        this.medicationId = medicationId;</span>
+<span class="fc" id="L235">    }</span>
+
+    public void setMedicationWebBean(IMedicationWebBean medicationWebBean) {
+<span class="fc" id="L238">        this.medicationWebBean = medicationWebBean;</span>
+<span class="fc" id="L239">    }</span>
+
+    public String discussMedications() {
+
+<span class="pc bpc" id="L243" title="2 of 4 branches missed.">        if ((medicationIds == null) || medicationIds.isEmpty()) {</span>
+<span class="nc" id="L244">            addActionError(getText(&quot;manageMedications.txt.err.select_at_least_one&quot;));</span>
+<span class="nc" id="L245">            return RELOAD;</span>
+        }
+
+        //we have move ids to java collection because struts uses binds ids to
+        //com.opensymphony.xwork2.util.XWorkList, which can't be found in ejb jar
+        //and results in ClassNotFoundException when marshalling ejb parameters
+<span class="fc" id="L251">        List&lt;Long&gt; goodMedicationIds = new ArrayList&lt;&gt;(medicationIds);</span>
+<span class="fc" id="L252">        setUserVariables();</span>
+<span class="fc" id="L253">        List&lt;DataWithUIPermissions&lt;Medication&gt;&gt; medications = medicationManager.getMedications(getLoggedInEHRRequestContext(), patientId, patientAccountId,</span>
+                false/*exclude medication not taken*/, goodMedicationIds)
+<span class="fc" id="L255">                .stream().map(DataWithUIPermissions::new).collect(toList());</span>
+
+
+<span class="fc" id="L258">        List&lt;MedicationDTO&gt; medicationDTOs = medicationWebBean.convertMedicationsToDTOs(medications, buildDependency());</span>
+
+
+<span class="fc" id="L261">        StringBuilder message = new StringBuilder();</span>
+
+<span class="fc bfc" id="L263" title="All 2 branches covered.">        for (MedicationDTO medication : medicationDTOs) {</span>
+<span class="fc" id="L264">            appendDescription(message, medication);</span>
+<span class="fc" id="L265">        }</span>
+
+<span class="fc" id="L267">        discussMessage = message.toString();</span>
+<span class="fc" id="L268">        discussTopic = ComposeMessageAction.TOPIC_MEDICATIONS;</span>
+<span class="fc" id="L269">        sessionUtil.setContextRecipientId(getLoggedInEHRRequestContext());</span>
+
+<span class="fc" id="L271">        return DISCUSS;</span>
+    }
+
+    @NotNull
+    private ImmutableEntityDependency&lt;Medication&gt; buildDependency() {
+<span class="fc" id="L276">        return ImmutableEntityDependency.&lt;Medication&gt;builder()</span>
+<span class="fc" id="L277">                .locale(getLocale())</span>
+<span class="fc" id="L278">                .allowNHSAppAttachmentDownload(sessionUtil.getDynamicFeatures().allowNHSAppAttachmentDownload())</span>
+<span class="fc" id="L279">                .iOSDevice(userAgentAnalyzerBean.isAnIOSDevice())</span>
+<span class="fc" id="L280">                .loggedInRequestContext(getLoggedInEHRRequestContext())</span>
+<span class="fc" id="L281">                .build();</span>
+    }
+
+    private void appendDescription(StringBuilder message, MedicationDTO medication) {
+<span class="fc" id="L285">        message.append(&quot;\n&quot;);</span>
+
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">        if (medication.getStartDate() != null) {</span>
+<span class="fc" id="L288">            message.append(getText(&quot;manageMedications.txt.start_date&quot;))</span>
+<span class="fc" id="L289">                    .append(&quot; : &quot;)</span>
+<span class="fc" id="L290">                    .append(dateToString(Date.from(medication.getStartDate()), dateFormat))</span>
+<span class="fc" id="L291">                    .append(&quot;\n&quot;);</span>
+        }
+
+<span class="fc bfc" id="L294" title="All 2 branches covered.">        if (medication.getEndDate() != null) {</span>
+<span class="fc" id="L295">            message.append(getText(&quot;manageMedications.txt.end_date&quot;))</span>
+<span class="fc" id="L296">                    .append(&quot; : &quot;)</span>
+<span class="fc" id="L297">                    .append(dateToString(Date.from(medication.getEndDate()), dateFormat))</span>
+<span class="fc" id="L298">                    .append(&quot;\n&quot;);</span>
+        }
+
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(medication.getCompleteMedicationText())) {</span>
+<span class="fc" id="L302">            message.append(getText(&quot;manageMedications.txt.medication&quot;))</span>
+<span class="fc" id="L303">                    .append(&quot; : &quot;)</span>
+<span class="fc" id="L304">                    .append(medication.getCompleteMedicationText())</span>
+<span class="fc" id="L305">                    .append(&quot;\n&quot;);</span>
+        }
+<span class="fc" id="L307">    }</span>
+
+    public List&lt;Long&gt; getMedicationIds() {
+<span class="fc" id="L310">        return medicationIds;</span>
+    }
+
+    public void setMedicationIds(List&lt;Long&gt; medicationIds) {
+<span class="fc" id="L314">        this.medicationIds = medicationIds;</span>
+<span class="fc" id="L315">    }</span>
+
+    public void setMessageWebBean(IMessageWebBean messageWebBean) {
+<span class="fc" id="L318">        this.messageWebBean = messageWebBean;</span>
+<span class="fc" id="L319">    }</span>
+
+    public String getDiscussMessage() {
+<span class="fc" id="L322">        return discussMessage;</span>
+    }
+
+    public void setDiscussMessage(String discussMessage) {
+<span class="nc" id="L326">        this.discussMessage = discussMessage;</span>
+<span class="nc" id="L327">    }</span>
+
+    public String getDiscussTopic() {
+<span class="fc" id="L330">        return discussTopic;</span>
+    }
+
+    public void setDiscussTopic(String discussTopic) {
+<span class="nc" id="L334">        this.discussTopic = discussTopic;</span>
+<span class="nc" id="L335">    }</span>
+
+    @Override
+    public void prepare() throws Exception {
+<span class="fc" id="L339">        super.prepare();</span>
+<span class="fc" id="L340">        dateFormat = getGlobalDateInputFormatter();</span>
+<span class="fc" id="L341">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

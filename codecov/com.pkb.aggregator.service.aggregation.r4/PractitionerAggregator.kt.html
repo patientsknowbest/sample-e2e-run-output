@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PractitionerAggregator.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.service.aggregation.r4</a> &gt; <span class="el_source">PractitionerAggregator.kt</span></div><h1>PractitionerAggregator.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.service.aggregation.r4
+
+import com.pkb.aggregator.R4Element
+import com.pkb.aggregator.R4Extension
+import com.pkb.aggregator.R4Practitioner
+import com.pkb.aggregator.extension.findAllSourcedReference
+import com.pkb.aggregator.extension.findSingleR4UpstreamTagExtension
+import com.pkb.aggregator.extension.getSourcedReference
+import com.pkb.aggregator.extension.safeAddAll
+import com.pkb.aggregator.extension.safeAddExtensions
+import com.pkb.aggregator.extension.simpleResourceId
+import com.pkb.aggregator.extension.untagSource
+import com.pkb.aggregator.service.PractitionerIdentifierService
+import com.pkb.aggregator.service.aggregation.ResourceAggregator
+import com.pkb.aggregator.service.exception.UnexpectedTypeException
+import com.pkb.aggregator.service.reference.PhrReferenceHelper
+import com.pkb.aggregator.service.reference.ReferenceExtractor
+import com.pkb.aggregator.service.reference.ReferenceExtractor.IdentifierMap
+import com.pkb.aggregator.service.reference.UpstreamDownstreamIdPair
+import org.hl7.fhir.instance.model.api.IDomainResource
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+
+/**
+ * Aggregates multiple resources referring to the same practitioner into a single resource for the downstream store
+ */
+<span class="fc" id="L29">@Service</span>
+<span class="fc" id="L30">class PractitionerAggregator(</span>
+<span class="fc" id="L31">    private val practitionerIdentifierService: PractitionerIdentifierService,</span>
+<span class="fc" id="L32">    private val referenceExtractor: ReferenceExtractor,</span>
+<span class="fc" id="L33">    private val phrReferenceHelper: PhrReferenceHelper,</span>
+) : ResourceAggregator&lt;R4Practitioner&gt; {
+
+<span class="fc" id="L36">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    fun mergeAll(upstreamResources: List&lt;IDomainResource&gt;, references: IdentifierMap) =
+<span class="nc" id="L39">        practitionerIdentifierService.groupResourcesByPractitioner(upstreamResources)</span>
+<span class="nc" id="L40">            .map { merge(it.value, it.key, references) }</span>
+
+    override fun createDownstreamInstance(downstreamId: String) =
+<span class="fc" id="L43">        R4Practitioner().apply {</span>
+<span class="fc" id="L44">            this.active = true</span>
+<span class="fc" id="L45">            this.id = downstreamId</span>
+<span class="fc" id="L46">        }</span>
+
+    override fun mergeResource(
+        downstreamResource: R4Practitioner,
+        upstreamResource: IDomainResource,
+        references: IdentifierMap
+    ) {
+
+<span class="pc bpc" id="L54" title="2 of 4 branches missed.">        val upstreamPractitioner = upstreamResource as? R4Practitioner</span>
+<span class="nc" id="L55">            ?: throw UnexpectedTypeException(upstreamResource)</span>
+<span class="fc" id="L56">        val sourceTag = upstreamPractitioner.findSingleR4UpstreamTagExtension()</span>
+
+<span class="fc" id="L58">        downstreamResource.identifier.safeAddAll(upstreamPractitioner.identifier, sourceTag)</span>
+<span class="fc" id="L59">        downstreamResource.name.safeAddAll(upstreamPractitioner.name, sourceTag)</span>
+<span class="fc" id="L60">        val newTelecoms = createTelecomsWithTranslatedReferences(upstreamPractitioner, references)</span>
+<span class="fc" id="L61">        downstreamResource.telecom.safeAddAll(newTelecoms, sourceTag)</span>
+<span class="fc" id="L62">        downstreamResource.address.safeAddAll(upstreamPractitioner.address, sourceTag)</span>
+<span class="fc" id="L63">        downstreamResource.photo.safeAddAll(upstreamPractitioner.photo, sourceTag)</span>
+<span class="fc" id="L64">        downstreamResource.qualification.safeAddAll(upstreamPractitioner.qualification, sourceTag)</span>
+<span class="fc" id="L65">        downstreamResource.communication.safeAddAll(upstreamPractitioner.communication, sourceTag)</span>
+
+        // merge extensions
+<span class="fc" id="L68">        val newExtensions = createTranslatedPhrExtensionReferences(</span>
+<span class="fc" id="L69">            upstreamPractitioner.getSourcedReference(),</span>
+<span class="fc" id="L70">            upstreamPractitioner.extension,</span>
+<span class="fc" id="L71">            references,</span>
+<span class="fc" id="L72">            phrReferenceHelper</span>
+        )
+<span class="fc" id="L74">        downstreamResource.safeAddExtensions(newExtensions)</span>
+<span class="fc" id="L75">    }</span>
+
+    override fun stripResource(downstreamResource: R4Practitioner, sourceTag: R4Extension) {
+<span class="nc" id="L78">        downstreamResource.identifier.untagSource(sourceTag)</span>
+<span class="nc" id="L79">        downstreamResource.name.untagSource(sourceTag)</span>
+<span class="nc" id="L80">        downstreamResource.address.untagSource(sourceTag)</span>
+<span class="nc" id="L81">        downstreamResource.telecom.untagSource(sourceTag)</span>
+
+<span class="nc" id="L83">        downstreamResource.extension.removeIf { it.equalsDeep(sourceTag) }</span>
+<span class="nc" id="L84">    }</span>
+
+    override fun mergeIdentifiers(downstreamResource: R4Practitioner) {
+<span class="fc" id="L87">        val newIdentifiers = practitionerIdentifierService.mergeIdentifiers(downstreamResource)</span>
+<span class="fc bfc" id="L88" title="All 2 branches covered.">        if (newIdentifiers &gt; 0) {</span>
+<span class="fc" id="L89">            log.info(</span>
+<span class="fc" id="L90">                &quot;Created {} new identifiers for downstream practitioner {}&quot;,</span>
+<span class="fc" id="L91">                newIdentifiers, downstreamResource.simpleResourceId()</span>
+            )
+        }
+<span class="fc" id="L94">    }</span>
+
+    override fun deriveDownstreamResourceId(currentDownstreamId: String?, resources: List&lt;IDomainResource&gt;) =
+<span class="pc bpc" id="L97" title="1 of 2 branches missed.">        currentDownstreamId ?: practitionerIdentifierService.deriveDownstreamResourceId(resources)</span>
+
+    override fun updateReferences(downstreamResource: R4Practitioner, references: IdentifierMap) {
+<span class="fc" id="L100">        val downstreamResourceId = downstreamResource.simpleResourceId()</span>
+<span class="fc" id="L101">        val idPairs = downstreamResource.findAllSourcedReference()</span>
+<span class="fc" id="L102">            .map {</span>
+<span class="fc" id="L103">                UpstreamDownstreamIdPair(</span>
+<span class="fc" id="L104">                    upstream = it,</span>
+<span class="fc" id="L105">                    downstreamId = downstreamResourceId</span>
+                )
+            }
+<span class="fc" id="L108">        references.practitioners.addAll(idPairs)</span>
+<span class="fc" id="L109">    }</span>
+
+    fun updateOrCreate(
+        practitioner: R4Practitioner,
+        currentDownstream: R4Practitioner?,
+        downstreamResourceId: String?
+    ): R4Practitioner {
+<span class="fc" id="L116">        val resources = listOf(practitioner)</span>
+<span class="fc" id="L117">        val references = referenceExtractor.extract(resources)</span>
+<span class="fc" id="L118">        val result = merge(resources, currentDownstream, downstreamResourceId, references)</span>
+<span class="fc" id="L119">        log.debug(</span>
+<span class="fc" id="L120">            &quot;Aggregated upstream practitioner {} to downstream practitioner {}&quot;,</span>
+<span class="fc" id="L121">            practitioner.simpleResourceId(),</span>
+<span class="fc" id="L122">            result.simpleResourceId()</span>
+        )
+<span class="fc" id="L124">        return result</span>
+    }
+
+    private fun createTelecomsWithTranslatedReferences(practitioner: R4Practitioner, references: IdentifierMap) =
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">        if (practitioner.hasTelecom()) {</span>
+<span class="fc" id="L129">            tmp(practitioner.telecom, references).toMutableList()</span>
+        } else {
+<span class="nc" id="L131">            mutableListOf()</span>
+<span class="fc" id="L132">        }</span>
+
+    private fun &lt;T : R4Element&gt; tmp(els: List&lt;T&gt;, references: IdentifierMap) =
+<span class="fc" id="L135">        els.map { upstreamElement -&gt;</span>
+<span class="fc" id="L136">            @Suppress(&quot;UNCHECKED_CAST&quot;) val downstreamElement = upstreamElement.copy() as T</span>
+<span class="fc" id="L137">            val source = upstreamElement.getSourcedReference()</span>
+
+<span class="pc bpc" id="L139" title="1 of 2 branches missed.">            if (upstreamElement.hasExtension()) {</span>
+<span class="fc" id="L140">                downstreamElement.extension = createTranslatedPhrExtensionReferences(</span>
+<span class="fc" id="L141">                    source,</span>
+<span class="fc" id="L142">                    upstreamElement.extension,</span>
+<span class="fc" id="L143">                    references,</span>
+<span class="fc" id="L144">                    phrReferenceHelper</span>
+                )
+            }
+
+<span class="fc" id="L148">            downstreamElement</span>
+<span class="fc" id="L149">        }.toMutableList()</span>
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

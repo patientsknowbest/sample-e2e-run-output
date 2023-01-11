@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>NhsAppNotificationSender.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.notification.nhs</a> &gt; <span class="el_source">NhsAppNotificationSender.java</span></div><h1>NhsAppNotificationSender.java</h1><pre class="source lang-java linenums">package com.pkb.service.notification.nhs;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.util.FrameFilter;
+import com.pkb.integration.nhs.NhsAppNotificationClient;
+import com.pkb.integration.nhs.mapper.ErrorResponseMapper;
+import com.pkb.integration.nhs.model.ImmutableContentReference;
+import com.pkb.integration.nhs.model.ImmutableIdentifier;
+import com.pkb.integration.nhs.model.ImmutablePayload;
+import com.pkb.integration.nhs.model.ImmutableRecipient;
+import com.pkb.integration.nhs.model.request.ImmutableNotificationRequest;
+import com.pkb.integration.nhs.model.request.NotificationRequest;
+import com.pkb.integration.nhs.model.response.ErrorResponse;
+import com.pkb.integration.nhs.model.response.NotificationResponse;
+import com.pkb.integration.nhs.model.response.TokenResponse;
+import com.pkb.service.notification.nhs.pubsub.payload.NhsApiNotificationMessage;
+import com.pkb.service.notification.nhs.pubsub.payload.NhsApiNotificationTriggerType;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.vavr.API;
+import io.vavr.collection.Set;
+import io.vavr.control.Try;
+import org.apache.camel.ProducerTemplate;
+import org.apache.http.client.utils.URIBuilder;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import retrofit2.Response;
+
+import java.io.IOException;
+import java.lang.invoke.MethodHandles;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+public class NhsAppNotificationSender {
+
+<span class="fc" id="L39">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L40">    private static final Set&lt;Integer&gt; RETRYABLE_ERROR_CODES = API.Set(401, 429);</span>
+<span class="fc" id="L41">    private static final Set&lt;Integer&gt; REQUEUEABLE_ERROR_CODES = API.Set(500);</span>
+
+    private final Supplier&lt;TokenResponse&gt; accessTokenSupplier;
+    private final NhsAppNotificationClient client;
+    private final ProducerTemplate nhsNotificationProducer;
+    private final ErrorResponseMapper errorResponseMapper;
+    private final MeterRegistry meterRegistry;
+    private final PhrConfig config;
+    private final NhsAppNotificationLogManager nhsAppNotificationLogManager;
+    private final ObjectMapper objectMapper;
+
+    public NhsAppNotificationSender(NhsAppNotificationClient client,
+                                    Supplier&lt;TokenResponse&gt; accessTokenSupplier,
+                                    ProducerTemplate nhsNotificationProducer,
+                                    ErrorResponseMapper errorResponseMapper,
+                                    MeterRegistry meterRegistry,
+                                    PhrConfig config,
+                                    NhsAppNotificationLogManager nhsAppNotificationLogManager,
+<span class="fc" id="L59">                                    ObjectMapper objectMapper) {</span>
+<span class="fc" id="L60">        this.accessTokenSupplier = accessTokenSupplier;</span>
+<span class="fc" id="L61">        this.client = client;</span>
+<span class="fc" id="L62">        this.nhsNotificationProducer = nhsNotificationProducer;</span>
+<span class="fc" id="L63">        this.errorResponseMapper = errorResponseMapper;</span>
+<span class="fc" id="L64">        this.meterRegistry = meterRegistry;</span>
+<span class="fc" id="L65">        this.config = config;</span>
+<span class="fc" id="L66">        this.nhsAppNotificationLogManager= nhsAppNotificationLogManager;</span>
+<span class="fc" id="L67">        this.objectMapper = objectMapper;</span>
+<span class="fc" id="L68">    }</span>
+
+     private Counter counter(String outcome, NhsApiNotificationTriggerType trigger) {
+<span class="fc" id="L71">        return Counter.builder(&quot;pkb_phr_nhs_app_notifications_count&quot;)</span>
+<span class="fc" id="L72">                .description(&quot;Count of NHS App notifications sent&quot;)</span>
+<span class="fc" id="L73">                .tags(&quot;outcome&quot;, outcome, &quot;trigger&quot;, trigger.name())</span>
+<span class="fc" id="L74">                .register(meterRegistry);</span>
+    }
+
+    void sendMessage(NhsApiNotificationMessage message) {
+<span class="fc" id="L78">        String accessToken = accessTokenSupplier.get().getAccessToken();</span>
+<span class="fc" id="L79">        NotificationRequest request = buildRequest(message);</span>
+        try {
+<span class="fc" id="L81">            Response&lt;NotificationResponse&gt; response = client.sendNotification(</span>
+<span class="fc" id="L82">                    message.getRequestId(),</span>
+                    &quot;Bearer &quot; + accessToken,
+<span class="fc" id="L84">                    request).execute();</span>
+
+<span class="fc bfc" id="L86" title="All 2 branches covered.">            if (response.isSuccessful()) {</span>
+<span class="fc" id="L87">                counter(&quot;success&quot;, message.getTrigger()).increment();</span>
+<span class="fc" id="L88">                nhsAppNotificationLogManager.reportSuccess(message);</span>
+            } else {
+<span class="fc" id="L90">                counter(&quot;failure&quot;, message.getTrigger()).increment();</span>
+<span class="fc" id="L91">                processError(message, response);</span>
+            }
+<span class="nc" id="L93">        } catch (IOException e) {</span>
+<span class="nc" id="L94">            counter(&quot;failure&quot;, message.getTrigger()).increment();</span>
+<span class="nc" id="L95">            LOGGER.error(&quot;Unexpected error calling NHS API. Message will be retried&quot;, FrameFilter.filter(e));</span>
+<span class="nc" id="L96">            throw new RuntimeException(e);</span>
+<span class="fc" id="L97">        }</span>
+<span class="fc" id="L98">    }</span>
+
+    @NotNull
+    private NotificationRequest buildRequest(@NotNull NhsApiNotificationMessage message) {
+
+<span class="fc" id="L103">        String inboxUrl = buildInboxUrl();</span>
+<span class="fc" id="L104">        return ImmutableNotificationRequest.builder()</span>
+<span class="fc" id="L105">                .resourceType(&quot;CommunicationRequest&quot;)</span>
+<span class="fc" id="L106">                .addPayload(ImmutablePayload.builder()</span>
+<span class="fc" id="L107">                        .contentReference(ImmutableContentReference.builder()</span>
+<span class="fc" id="L108">                                .reference(inboxUrl)</span>
+<span class="fc" id="L109">                                .display(message.getMessage())</span>
+<span class="fc" id="L110">                                .build())</span>
+<span class="fc" id="L111">                        .build())</span>
+<span class="fc" id="L112">                .addRecipient(ImmutableRecipient.builder()</span>
+<span class="fc" id="L113">                        .identifier(ImmutableIdentifier.builder()</span>
+<span class="fc" id="L114">                                .system(&quot;https://fhir.nhs.uk/Id/nhs-number&quot;)</span>
+<span class="fc" id="L115">                                .value(message.getNhsNumber())</span>
+<span class="fc" id="L116">                                .build())</span>
+<span class="fc" id="L117">                        .build())</span>
+<span class="fc" id="L118">                .build();</span>
+    }
+
+    private String buildInboxUrl() {
+<span class="fc" id="L122">        String inbox = Try.of(() -&gt; new URIBuilder()</span>
+<span class="fc" id="L123">                .setPath(config.getNhsAppNotificationInboxCallbackPath())</span>
+<span class="fc" id="L124">                .addParameter(&quot;tab&quot;, &quot;messages&quot;)</span>
+<span class="fc" id="L125">                .addParameter(&quot;nhsNotification&quot;, String.valueOf(true))</span>
+<span class="fc" id="L126">                .toString())</span>
+<span class="fc" id="L127">                .getOrElseThrow((Function&lt;Throwable, RuntimeException&gt;) RuntimeException::new);</span>
+
+<span class="fc" id="L129">        return Try.of(() -&gt; new URIBuilder(config.getBaseURL())</span>
+<span class="fc" id="L130">                .setPath(config.getNhsIntegrationUrl())</span>
+<span class="fc" id="L131">                .addParameter(&quot;phrPath&quot;, inbox)</span>
+<span class="fc" id="L132">                .build()</span>
+<span class="fc" id="L133">                .toString())</span>
+<span class="fc" id="L134">                .getOrElseThrow((Function&lt;Throwable, RuntimeException&gt;) RuntimeException::new);</span>
+    }
+
+    private void processError(NhsApiNotificationMessage message, Response&lt;NotificationResponse&gt; response) throws JsonProcessingException {
+
+<span class="fc" id="L139">        ErrorResponse errorResponse = errorResponseMapper.map(response);</span>
+
+        // Workaround for https://stackoverflow.com/questions/40264792/cannot-convert-retrofit-response-to-error-custom-object-twice
+<span class="fc" id="L142">        nhsAppNotificationLogManager.reportFailure(message,objectMapper.writeValueAsString(errorResponse));</span>
+
+<span class="pc bpc" id="L144" title="1 of 2 branches missed.">        if (RETRYABLE_ERROR_CODES.contains(response.code())) {</span>
+            // throw an exception so that the pubsub message is not acknowledged, and gets retried later
+<span class="nc" id="L146">            throw new RuntimeException(&quot;Failed to send NHS App notification, will retry: &quot; + errorResponse.toString());</span>
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">        } else if (REQUEUEABLE_ERROR_CODES.contains(response.code())) {</span>
+            // post the message back to the end of the queue to retry _after_ other stuff on the queue
+<span class="nc" id="L149">            int retries = message.getManualRetryCount();</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">            if (retries &gt;= config.getNhsAppNotificationManualRetry()) {</span>
+                // TODO PHR-8745 store audit trail record and give up on this one by not posting it again
+            } else {
+                // Manually post this to the end of the queue with an incremented retry counter
+<span class="nc" id="L154">                NhsApiNotificationMessage retry = NhsApiNotificationMessage.newBuilder(message)</span>
+<span class="nc" id="L155">                        .setManualRetryCount(retries + 1)</span>
+<span class="nc" id="L156">                        .build();</span>
+<span class="nc" id="L157">                nhsNotificationProducer.sendBody(retry);</span>
+            }
+        } else {
+            // TODO PHR-8745 if we have a non-retryable error (e.g. message too long, invalid id etc) record it for someone to look at manually
+        }
+<span class="fc" id="L162">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

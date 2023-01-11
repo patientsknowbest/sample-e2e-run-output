@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ObservationHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.batch.impl.observation</a> &gt; <span class="el_source">ObservationHandler.java</span></div><h1>ObservationHandler.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.batch.impl.observation;
+
+import com.google.common.collect.Table;
+import com.pkb.app.dto.DataPointSaveResult;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.coding.entity.CodeableConcept;
+import com.pkb.coding.entity.CodingReceived;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.dataupload.emis.esv2.EmisEsProcessedRow;
+import com.pkb.emis.es.dto.DeduplicationCandidateDto;
+import com.pkb.entities.enums.CodingDataType;
+import com.pkb.institute.OrgMergeHelper;
+import com.pkb.institute.entity.Org;
+import com.pkb.service.dataupload.emis.esv2.batch.EmisRequestContextProvider;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.EmisEsDateTimeProcessor;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.EmisEsProblemStatusDescriptionHelperMixin;
+import com.pkb.service.dataupload.emis.esv2.model.AdminPatient;
+import com.pkb.service.dataupload.emis.esv2.model.AdminUserInRole;
+import com.pkb.service.dataupload.emis.esv2.model.CareRecordObservation;
+import com.pkb.service.dataupload.emis.esv2.model.PKBPersonInfo;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.test.entity.LoincMapping;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import io.vavr.Tuple;
+import io.vavr.Tuple3;
+import io.vavr.collection.Map;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+/**
+ * Handler for a CareRecordObservation.
+ * PKB represents a CRO to different internal entities,
+ * and there should be a specialized handler for each
+ * internal entity.
+ */
+public abstract class ObservationHandler&lt;T&gt; extends TransactionManager implements EmisEsDateTimeProcessor, EmisEsProblemStatusDescriptionHelperMixin, EmisRequestContextProvider {
+
+<span class="fc" id="L54">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L55">    private static final Counter DUPLICATES = Counter.builder(&quot;pkb_phr_integration_emis_observationhandler_duplicate_count&quot;)</span>
+<span class="fc" id="L56">            .description(&quot;Number of duplicate records detected during extract&quot;)</span>
+<span class="fc" id="L57">            .register(Metrics.globalRegistry);</span>
+
+    private static final String TAG_PHASE = &quot;phase&quot;;
+    private static final String OBSERVATION_TIMER_NAME = &quot;pkb_phr_integration_emis_csv_observation_handler_timings&quot;;
+<span class="fc" id="L61">    private static final Timer OBSERVATION_TIMER = Timer.builder(OBSERVATION_TIMER_NAME)</span>
+<span class="fc" id="L62">            .tags(TAG_PHASE, &quot;&quot;)</span>
+<span class="fc" id="L63">            .description(&quot;Time needed to execute various phases of observation processing&quot;)</span>
+<span class="fc" id="L64">            .publishPercentiles(0.5, 0.95)</span>
+<span class="fc" id="L65">            .publishPercentileHistogram()</span>
+<span class="fc" id="L66">            .percentilePrecision(2)</span>
+<span class="fc" id="L67">            .register(Metrics.globalRegistry);</span>
+
+    ObservationHandler(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider) {
+<span class="fc" id="L70">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L71">    }</span>
+
+    public abstract CodingDataType getHandledDataType();
+
+    public DataPointSaveResult&lt;T&gt; handle(
+            Set&lt;CareRecordObservation&gt; observations,
+            Map&lt;CareRecordObservation, OrgMergeHelper&gt; recordToOrgMergeHelper,
+            Map&lt;CareRecordObservation, PKBPersonInfo&gt; recordToPatient,
+            Map&lt;CareRecordObservation, AdminPatient&gt; adminPatients,
+            Map&lt;CareRecordObservation, Long&gt; recordToDefaultAccountId,
+            Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys,
+            Map&lt;CareRecordObservation, AdminUserInRole&gt; recordToEnteredBy,
+            Map&lt;CareRecordObservation, CodingReceived&gt; recordToCodingReceived,
+            Map&lt;CareRecordObservation, CodeableConcept&gt; recordToCodeableConcept,
+            Map&lt;CareRecordObservation, LoincMapping&gt; recordToLoincMapping,
+            EmisEsProcessedRow fileState,
+            Table&lt;String, UUID, UUID&gt; observerationGuidToUniqueId) {
+<span class="fc" id="L88">        LOGGER.info(&quot;Handling {} {}&quot;, observations.size(), getHandledDataType());</span>
+
+<span class="fc" id="L90">        java.util.Set&lt;CareRecordObservation&gt; deletions = observations.stream().filter(epdp -&gt; epdp.isHandleAsDeleted(adminPatients.get(epdp).getOrNull())).collect(toSet());</span>
+<span class="pc bpc" id="L91" title="1 of 2 branches missed.">        if (!deletions.isEmpty()) {</span>
+<span class="nc" id="L92">            throw new RuntimeException(</span>
+                    &quot;Deletions must be handled by UnknownHandler as in theory we never know what data type are we handling&quot;);
+        }
+
+<span class="fc" id="L96">        Map&lt;CareRecordObservation, Org&gt; recordToSurvivorOrg = recordToOrgMergeHelper.mapValues(OrgMergeHelper::getOrg);</span>
+
+<span class="fc" id="L98">        io.vavr.collection.List&lt;Tuple3&lt;CareRecordObservation, T, EHRRequestContext&gt;&gt; pkbObservations = recordTime(&quot;map&quot;, () -&gt; observations.stream().map(</span>
+                observation -&gt; {
+<span class="fc" id="L100">                    var recordContext = getEmisContextWithDefaultTeam(recordToSurvivorOrg.get(observation).getOrNull());</span>
+<span class="fc" id="L101">                    var org = recordToSurvivorOrg.apply(observation);</span>
+<span class="fc" id="L102">                    return Tuple.of(observation,</span>
+<span class="fc" id="L103">                            create(observation, observerationGuidToUniqueId.get(observation.observationGuid(), org.getPublicId()), org,</span>
+<span class="fc" id="L104">                                    recordToPatient.apply(observation).id(),</span>
+<span class="fc" id="L105">                                    adminPatients.get(observation).getOrNull(),</span>
+<span class="fc" id="L106">                                    recordToDefaultAccountId.apply(observation),</span>
+<span class="fc" id="L107">                                    recordToEnteredBy.getOrElse(observation, null),</span>
+<span class="fc" id="L108">                                    recordToCodingReceived.apply(observation),</span>
+<span class="fc" id="L109">                                    recordToCodeableConcept.apply(observation),</span>
+                                    fileState,
+                                    recordContext,
+<span class="fc" id="L112">                                    recordToLoincMapping.getOrElse(observation, null)), recordContext);</span>
+                })
+<span class="fc" id="L114">                .collect(io.vavr.collection.List.collector()));</span>
+
+<span class="fc" id="L116">        io.vavr.collection.List&lt;Tuple3&lt;CareRecordObservation, T, EHRRequestContext&gt;&gt; dedupedObservations = recordTime(&quot;dedup&quot;, () -&gt; removeDuplicates(observations, pkbObservations, recordToCodingReceived, accountIdToAccountKeys));</span>
+
+<span class="fc" id="L118">        DataPointSaveResult&lt;T&gt; dataPointSaveResult = recordTime(&quot;save&quot;, () -&gt; transactional(() -&gt; saveWithExternalIds(</span>
+<span class="fc" id="L119">                dedupedObservations.map(dedeupedObs -&gt; Tuple.of(dedeupedObs._2, recordToCodingReceived.apply(dedeupedObs._1), dedeupedObs._3)).toJavaList())));</span>
+
+<span class="fc" id="L121">        return dataPointSaveResult;</span>
+    }
+
+    private io.vavr.collection.List&lt;Tuple3&lt;CareRecordObservation, T, EHRRequestContext&gt;&gt; removeDuplicates(
+            Set&lt;CareRecordObservation&gt; observations,
+            io.vavr.collection.List&lt;Tuple3&lt;CareRecordObservation, T, EHRRequestContext&gt;&gt; pkbObservations,
+            Map&lt;CareRecordObservation, CodingReceived&gt; recordToCodingReceived,
+            Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys) {
+
+<span class="fc" id="L130">        io.vavr.collection.List&lt;DeduplicationCandidateDto&lt;T&gt;&gt; candidates = pkbObservations</span>
+<span class="fc" id="L131">                .map(obs -&gt; DeduplicationCandidateDto.coded(obs._1.transientProcessingId(), obs._2, recordToCodingReceived.apply(obs._1), obs._3));</span>
+
+<span class="fc" id="L133">        var duplicateTransientIds = checkForDuplicates(candidates, accountIdToAccountKeys);</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">        if (isNotEmpty(duplicateTransientIds)) {</span>
+<span class="fc" id="L135">            observations.removeIf(obs -&gt; duplicateTransientIds.contains(obs.transientProcessingId()));</span>
+<span class="fc" id="L136">            DUPLICATES.increment(duplicateTransientIds.size());</span>
+        }
+
+<span class="fc" id="L139">        return pkbObservations.filter(t -&gt; observations.contains(t._1));</span>
+    }
+
+    protected abstract Set&lt;UUID&gt; checkForDuplicates(
+            io.vavr.collection.List&lt;DeduplicationCandidateDto&lt;T&gt;&gt; candidates,
+            Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys);
+
+    @Nullable
+    protected abstract DataPointSaveResult&lt;T&gt; saveWithExternalIds(
+            @NotNull List&lt;Tuple3&lt;T, CodingReceived, EHRRequestContext&gt;&gt; observationsToSave);
+
+    @Nullable
+    protected abstract T create(
+            CareRecordObservation observation,
+            UUID uniqueId,
+            Org org,
+            long patientId,
+            @Nullable AdminPatient adminPatient,
+            long defaultAccountId,
+            @Nullable AdminUserInRole enteredBy,
+            CodingReceived codingReceived,
+            CodeableConcept codeableConcept,
+            EmisEsProcessedRow fileState,
+            EHRRequestContext recordContext,
+            @Nullable LoincMapping loincMapping);
+
+    private &lt;T&gt; T recordTime(String phase, Callable&lt;T&gt; toMeasure) {
+        try {
+<span class="fc" id="L167">            return Metrics.timer(OBSERVATION_TIMER_NAME, TAG_PHASE, phase).recordCallable(toMeasure);</span>
+<span class="nc" id="L168">        } catch (Exception e) {</span>
+<span class="nc" id="L169">            throw new RuntimeException(e);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

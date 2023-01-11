@@ -1,0 +1,568 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DataUploadManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.impl</a> &gt; <span class="el_source">DataUploadManager.java</span></div><h1>DataUploadManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.impl;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Charsets;
+import com.google.common.collect.Ordering;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.document.Document;
+import com.pkb.datamodel.UploadedDataMismatches;
+import com.pkb.dataupload.entity.FieldMismatch;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.dataupload.entity.UploadedData.Destination;
+import com.pkb.dataupload.entity.UploadedData.Format;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.domain.UploadedDataDomainService;
+import com.pkb.entities.enums.HL7MessageType;
+import com.pkb.institute.entity.Org;
+import com.pkb.model.RecordWithId;
+import com.pkb.repository.legacy.LegacyUploadedDataRepository;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.dataupload.hl7.HL7XmlDoc;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.CSVTableBuilder;
+import com.pkb.util.DbUtil;
+import com.pkb.util.OutputStreamCSVTableBuilder;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.Tuple;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.PageRequest;
+
+import javax.ejb.EJBTransactionRolledbackException;
+import javax.persistence.OptimisticLockException;
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLOutputFactory;
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamReader;
+import java.io.BufferedWriter;
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.StringReader;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static com.pkb.util.EncryptedDocumentMapperHelper.ACCOUNT_ID_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.genericMetadata;
+import static com.pkb.util.PersonUtil.getNationalId;
+import static java.lang.String.format;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptyMap;
+import static java.util.Comparator.comparing;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+@SuppressWarnings(&quot;ClassWithTooManyMethods&quot;)
+public class DataUploadManager extends TransactionManager {
+
+<span class="fc" id="L86">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L87">    private static final DateTimeFormatter RECEIVED_DATE_OUTPUT_FORMATTER = DateTimeFormatter.ofPattern(&quot;dd-MMM-yyyy&quot;, Locale.UK)</span>
+<span class="fc" id="L88">            .withZone(ZoneId.systemDefault());</span>
+    static final String TEXT_XML = &quot;text/xml&quot;;
+    static final String UPLOADED_DATA = &quot;uploadedData&quot;;
+
+    private UploadedDataDomainService uploadedDataService;
+    private final LegacyUploadedDataRepository uploadedDataRepository;
+    private final DocumentManager documentManager;
+
+    public DataUploadManager(PhrConfig config,
+                             TolvenBeanFactory beanFactory,
+                             DateTimeService dateTimeService,
+                             UUIDProvider uuidProvider,
+                             UploadedDataDomainService uploadedDataService,
+                             LegacyUploadedDataRepository uploadedDataRepository,
+                             DocumentManager documentManager) {
+<span class="fc" id="L103">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L104">        this.uploadedDataService = uploadedDataService;</span>
+<span class="fc" id="L105">        this.uploadedDataRepository = uploadedDataRepository;</span>
+<span class="fc" id="L106">        this.documentManager = documentManager;</span>
+<span class="fc" id="L107">    }</span>
+
+    /**
+     * Retrieves UploadedDataDTO without its content -- sources need the id and document ID
+     */
+    public UploadedDataDTO addUploadedData(UploadedDataDTO dto, PKBPerson person, @NotNull EHRRequestContext requestContext) {
+        try {
+            // returns the DTO without content, but WITH both the new ID and document ID
+<span class="fc" id="L115">            var updatedDto = addUploadedData(requestContext, dto, person);</span>
+            // update the IDs in the orig dto (common pattern...)
+<span class="fc" id="L117">            dto.setId(updatedDto.getId());</span>
+<span class="fc" id="L118">            dto.setDocumentMetadataId(updatedDto.getDocumentMetadataId());</span>
+<span class="fc" id="L119">            return dto;</span>
+<span class="nc" id="L120">        } catch (Exception e) {</span>
+<span class="nc" id="L121">            throw new RuntimeException(&quot;error adding uploaded HL7 for user id=[&quot; + person.getId() + &quot;]&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Retrieves an UploadedDataDTOs by IDs.
+     */
+    public List&lt;UploadedDataDTO&gt; getUploadedData(@NotNull LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; ids) {
+        try {
+<span class="fc" id="L130">            var entites = DbUtil.getInBatches(ids,</span>
+<span class="fc" id="L131">                    config.getUploadedDataFetchSize(),</span>
+<span class="fc" id="L132">                    uploadedDataRepository::getUploadedDataByIdIn,</span>
+<span class="fc" id="L133">                    comparing(UploadedData::getId, Ordering.natural()));</span>
+<span class="fc" id="L134">            return populateDTOs(entites, true, requestContext);</span>
+<span class="nc" id="L135">        } catch (Exception e) {</span>
+<span class="nc" id="L136">            throw new RuntimeException(&quot;Failed getting uploadedData for ids: &quot; + ids.stream().map(String::valueOf).collect(Collectors.joining(&quot;,&quot;)), e);</span>
+        }
+    }
+
+    public int updateUploadedDataStatus(@Nullable Collection&lt;Long&gt; ids, UploadedData.Status status) {
+<span class="fc bfc" id="L141" title="All 2 branches covered.">        if (isEmpty(ids)) {</span>
+<span class="fc" id="L142">            return 0;</span>
+        }
+<span class="fc" id="L144">        return transactional(() -&gt; uploadedDataRepository.updateUploadedDataWithIdIn(Date.from(dateTimeService.now()), status, ids));</span>
+    }
+
+    public List&lt;Long&gt; getNewUploadedDataIds(Long patientUserId, UploadedData.Destination destination) {
+<span class="fc" id="L148">        return uploadedDataRepository.getUploadedDataIdsByPersonIdAndDestinationAndStatus(patientUserId, destination, UploadedData.Status.NEW);</span>
+    }
+
+    /**
+     * Count the number of mismatches
+     */
+    public long getHL7UploadedDataPatientMismatchCount(long orgId) {
+        // No HL7 messages have been added without a source org since 04/02/2015, so safe to use that attribute directly instead of linking via InstituteUser
+<span class="fc" id="L156">        return uploadedDataRepository.countBySourceOrgOrConnectingOrgAndStatusAndFormat(orgId, UploadedData.Status.PATIENT_INFO_MISMATCH, Format.HL7);</span>
+    }
+
+    /**
+     * Fetches all DataUploads of HL7 messages w/ mismatched patient info, for the given org
+     */
+    public List&lt;UploadedDataDTO&gt; getHL7UploadedDataPatientMismatches(@NotNull LoggedInEHRRequestContext requestContext, long orgId, int pageSize, int offset) {
+
+<span class="fc" id="L164">        var ids = uploadedDataRepository.getUploadedDataIdsBySourceOrgOrConnectingOrgAndStatusAndFormatPageable(orgId,</span>
+                UploadedData.Status.PATIENT_INFO_MISMATCH,
+                Format.HL7,
+<span class="fc" id="L167">                PageRequest.of(offset, pageSize));</span>
+<span class="fc" id="L168">        var entites = DbUtil.getInBatches(ids,</span>
+<span class="fc" id="L169">                config.getUploadedDataFetchSize(),</span>
+<span class="fc" id="L170">                uploadedDataRepository::getUploadedDataByIdIn,</span>
+<span class="fc" id="L171">                comparing(UploadedData::getId, Ordering.explicit(ids)));</span>
+<span class="fc" id="L172">        return populateDTOs(entites, false, requestContext);</span>
+    }
+
+    /**
+     * Gets a list of all the ids of HL7 uploaded data where the status = patient info mimatch. Limited to those
+     * that the specified org has permission to reject/approve - i.e. where the org is the connecting org or source org
+     */
+    public void confirmOrgHasPermissionToReview(@NotNull Set&lt;Long&gt; uploadedDataIds, long orgId) {
+<span class="fc" id="L180">        var uploadedDataIdsForOrg = uploadedDataRepository.getUploadedDataIdsBySourceOrgOrConnectingOrgAndStatusAndFormat(orgId, UploadedData.Status.PATIENT_INFO_MISMATCH, Format.HL7);</span>
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">        var illegalAccess = uploadedDataIds.stream().filter(id -&gt; !uploadedDataIdsForOrg.contains(id)).sorted().collect(Collectors.toUnmodifiableList());</span>
+<span class="pc bpc" id="L182" title="1 of 2 branches missed.">        if (!illegalAccess.isEmpty()) {</span>
+<span class="nc" id="L183">            throw new RuntimeException(format(&quot;Admin of org with id %d attempted to review uploaded data ids [%s] but does not have permission&quot;, orgId, illegalAccess));</span>
+        }
+<span class="fc" id="L185">    }</span>
+
+    /**
+     * Fetches the DataUploads w/ mismatched patient info with given IDs
+     */
+    public List&lt;UploadedDataDTO&gt; findUploadedDataPatientMismatches(@NotNull LoggedInEHRRequestContext requestContext, List&lt;Long&gt; uploadedDataIds) {
+        try {
+<span class="fc" id="L192">            var entityList = DbUtil.getInBatches(uploadedDataIds,</span>
+<span class="fc" id="L193">                    config.getUploadedDataFetchSize(),</span>
+                    this::findUploadedDataPatientMismatches,
+<span class="fc" id="L195">                    comparing(UploadedData::getId, Ordering.natural()));</span>
+<span class="fc" id="L196">            return populateDTOs(entityList, true, requestContext);</span>
+<span class="nc" id="L197">        } catch (Exception e) {</span>
+<span class="nc" id="L198">            throw new RuntimeException(&quot;error getting uploaded data patient mismatch messages of ids &quot; + uploadedDataIds.stream().map(String::valueOf).collect(Collectors.joining(&quot;,&quot;)) + &quot; with status &quot; + UploadedData.Status.PATIENT_INFO_MISMATCH, e);</span>
+        }
+    }
+
+    private List&lt;UploadedData&gt; findUploadedDataPatientMismatches(Iterable&lt;Long&gt; ids) {
+<span class="fc" id="L203">        return uploadedDataRepository.getUploadedDataByIdInAndStatus(ids, UploadedData.Status.PATIENT_INFO_MISMATCH);</span>
+    }
+
+    /**
+     * Valid status: NEW, COMPLETED
+     */
+    public void updateUploadedDataStatus(long id, Long version, UploadedData.Status status) {
+        try {
+<span class="fc" id="L211">            var possibleEntity = uploadedDataRepository.findById(id);</span>
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">            if (possibleEntity.isEmpty()) {</span>
+                //noinspection ThrowCaughtLocally
+<span class="nc" id="L214">                throw new RuntimeException(&quot;invalid id for UploadedData entity: &quot; + id);</span>
+            }
+<span class="fc" id="L216">            var entity = possibleEntity.get();</span>
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">            entity.setVersion(version == null ? 0L : version);</span>
+<span class="pc bpc" id="L218" title="1 of 2 branches missed.">            if (entity.getStatus() == status) {</span>
+<span class="nc" id="L219">                LOGGER.warn(&quot;Caught conflict: status for {} is already {}&quot;, entity.getId(), status);</span>
+            } else {
+<span class="fc" id="L221">                entity.setStatus(status);</span>
+<span class="fc" id="L222">                entity.setEdited(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L223">                transactional(() -&gt; uploadedDataRepository.save(entity));</span>
+            }
+<span class="nc" id="L225">        } catch (EJBTransactionRolledbackException exception) {</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            if (exception.getCause() instanceof OptimisticLockException) {</span>
+                //noinspection ThrowInsideCatchBlockWhichIgnoresCaughtException
+<span class="nc" id="L228">                throw (OptimisticLockException) exception.getCause();</span>
+            } else {
+<span class="nc" id="L230">                throw createUploadedDataStatusError(id, status, exception);</span>
+            }
+<span class="nc" id="L232">        } catch (Exception e) {</span>
+<span class="nc" id="L233">            throw createUploadedDataStatusError(id, status, e);</span>
+<span class="fc" id="L234">        }</span>
+<span class="fc" id="L235">    }</span>
+
+    @NotNull
+    private RuntimeException createUploadedDataStatusError(long id, UploadedData.Status status, Exception e) {
+<span class="nc" id="L239">        return new RuntimeException(&quot;error updating HL7 status &quot; + id + &quot;; status &quot; + status, e);</span>
+    }
+
+    /**
+     * Have we seen a given embeddedId already? (ie this is an update to an existing record?)
+     */
+    public Optional&lt;Long&gt; findPreviousDataUploadId(Destination destination, String embeddedId) {
+        try {
+<span class="fc" id="L247">            var list = uploadedDataRepository.getUploadedDataIdsByDestinationAndEmbeddedId(destination, embeddedId);</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">            if (list.isEmpty()) {</span>
+<span class="fc" id="L249">                return Optional.empty();</span>
+            }
+<span class="fc" id="L251">            return Optional.of(list.get(0));</span>
+<span class="nc" id="L252">        } catch (Exception e) {</span>
+<span class="nc" id="L253">            throw new RuntimeException(&quot;error checking for known embeddedId-&quot; + embeddedId, e);</span>
+        }
+
+    }
+
+    /**
+     * Have we seen a given embeddedId already?
+     * New version needed for SciStore which can use the same embeddedId with differant patients
+     */
+    public Optional&lt;Long&gt; findPreviousDataUploadId(Destination destination, Format format, long patientId, String embeddedId) {
+        try {
+<span class="fc" id="L264">            var list = uploadedDataRepository.getUploadedDataIdsByDestinationAndFormatAndPersonIdAndEmbeddedIdAndStatus(destination,</span>
+                    format,
+<span class="fc" id="L266">                    patientId,</span>
+                    embeddedId,
+                    UploadedData.Status.COMPLETED);
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">            if (list.isEmpty()) {</span>
+<span class="fc" id="L270">                return Optional.empty();</span>
+            }
+<span class="nc" id="L272">            return Optional.of(list.get(0));</span>
+<span class="nc" id="L273">        } catch (Exception e) {</span>
+<span class="nc" id="L274">            throw new RuntimeException(&quot;error checking for known embeddedId-&quot; + embeddedId, e);</span>
+        }
+
+    }
+
+    public void exportMismatchedUploadedDataForOrg(UserManager userManager, Org org, OutputStream stream) {
+<span class="fc" id="L280">        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(stream))) {</span>
+<span class="fc" id="L281">            OutputStreamCSVTableBuilder tableBuilder = new OutputStreamCSVTableBuilder(writer);</span>
+<span class="fc" id="L282">            List&lt;UploadedDataMismatches&gt; uploadedDataList = uploadedDataService.getMismatches(org.getId());</span>
+<span class="fc" id="L283">            Set&lt;Long&gt; personIds = uploadedDataList.stream().map(UploadedDataMismatches::personId).collect(toSet());</span>
+<span class="fc" id="L284">            Map&lt;Long, PKBPerson&gt; pkbPersonMap = userManager.getPKBPersonList(personIds, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS)</span>
+<span class="fc" id="L285">                    .stream().collect(toMap(PKBPerson::getId, identity()));</span>
+<span class="fc" id="L286">            Map&lt;Long, String&gt; personNationalIdMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L287">            uploadedDataList.forEach(dto -&gt; {</span>
+<span class="fc" id="L288">                long personId = dto.personId();</span>
+<span class="fc" id="L289">                PKBPerson person = pkbPersonMap.get(personId);</span>
+<span class="fc" id="L290">                personNationalIdMap.putIfAbsent(personId, getNationalId(person, org));</span>
+<span class="fc" id="L291">            });</span>
+<span class="fc" id="L292">            addMismatchRows(tableBuilder, uploadedDataList, personNationalIdMap);</span>
+<span class="nc" id="L293">        } catch (Exception e) {</span>
+<span class="nc" id="L294">            throw new RuntimeException(&quot;Error while exporting uploaded data mismatches for Org &quot; + org.getId(), e);</span>
+<span class="fc" id="L295">        }</span>
+<span class="fc" id="L296">    }</span>
+
+    private void addMismatchRows(CSVTableBuilder csvTableBuilder, List&lt;UploadedDataMismatches&gt; uploadedDataList, Map&lt;Long, String&gt; personNationalIdMap) {
+<span class="fc bfc" id="L299" title="All 2 branches covered.">        for (UploadedDataMismatches ud : uploadedDataList) {</span>
+
+<span class="fc" id="L301">            csvTableBuilder.addCell(&quot;First Name&quot;, ud.personFirstName());</span>
+<span class="fc" id="L302">            csvTableBuilder.addCell(&quot;Last Name&quot;, ud.personLastName());</span>
+<span class="fc" id="L303">            csvTableBuilder.addCell(&quot;National ID&quot;, personNationalIdMap.get(ud.personId()));</span>
+<span class="fc" id="L304">            csvTableBuilder.addCell(&quot;Received&quot;, RECEIVED_DATE_OUTPUT_FORMATTER.format(ud.created()));</span>
+<span class="fc" id="L305">            csvTableBuilder.addCell(&quot;Destination&quot;, ud.destination().name());</span>
+
+<span class="fc" id="L307">            String diffs = Optional.ofNullable(unmarshalFieldMismatches(ud.patientInfoMismatches()))</span>
+<span class="fc" id="L308">                    .orElse(Collections.emptyList())</span>
+<span class="fc" id="L309">                    .stream()</span>
+<span class="fc" id="L310">                    .map(m -&gt; m.getFieldName() + &quot; = { PKB: &quot; + m.getPkbValue() + &quot;, HL7: &quot; + m.getReceivedValue() + &quot; }&quot;)</span>
+<span class="fc" id="L311">                    .collect(Collectors.joining(&quot;, &quot;));</span>
+
+<span class="fc" id="L313">            csvTableBuilder.addCell(&quot;Details&quot;, diffs);</span>
+<span class="fc" id="L314">            csvTableBuilder.endRow();</span>
+<span class="fc" id="L315">        }</span>
+<span class="fc" id="L316">    }</span>
+
+    public UploadedDataDTO recordHL7DataUpload(HL7ConnContext hl7ConnContext, HL7XmlDoc hl7,
+                                               String externalMessageId, Destination destination,
+                                               UploadedData.Status status, List&lt;FieldMismatch&gt; pidMismatches,
+                                               PKBPerson patient, Long subsetOfParentId) {
+
+<span class="fc" id="L323">        var dto = new UploadedDataDTO();</span>
+<span class="fc" id="L324">        dto.setSourceOrg(hl7ConnContext.getSourceOrg());</span>
+<span class="fc" id="L325">        dto.setConnectingOrg(hl7ConnContext.getConnectingOrg());</span>
+<span class="fc" id="L326">        dto.setHl7PartnerId(hl7ConnContext.getHl7Partner().flatMap(hl7p -&gt; hl7p.getId().toJavaOptional()).orElse(null));</span>
+<span class="fc" id="L327">        dto.setSourceTeam(hl7ConnContext.getSourceTeam().orElse(null));</span>
+<span class="fc" id="L328">        dto.setData(hl7.getOriginalXml());</span>
+<span class="fc" id="L329">        dto.setEmbeddedId(hl7.getMessageIdString());</span>
+<span class="fc" id="L330">        dto.setExternalMessageId(externalMessageId);</span>
+<span class="fc" id="L331">        dto.setDestination(destination);</span>
+<span class="fc" id="L332">        dto.setFormat(Format.HL7);</span>
+<span class="fc" id="L333">        dto.setStatus(status);</span>
+<span class="fc" id="L334">        dto.setPatientInfoMismatches(pidMismatches);</span>
+<span class="fc" id="L335">        dto.setSubsetOfParentId(subsetOfParentId);</span>
+<span class="fc" id="L336">        dto.setHl7MessageType(hl7.getMessageType().getCode());</span>
+<span class="fc" id="L337">        dto.setResponsibleOrganisationIdentifier(hl7ConnContext.getMaybeResponsibleOrganisationIdentifier().orElse(null));</span>
+<span class="fc" id="L338">        dto = addUploadedData(dto, patient, hl7ConnContext.getEHRRequestContext());</span>
+<span class="fc" id="L339">        return dto;</span>
+    }
+
+    public List&lt;UploadedData&gt; searchHl7UploadedData(@NotNull Destination destination, long sourceOrgId, @NotNull String externalMessageId, long patientId) {
+<span class="fc" id="L343">        return uploadedDataRepository.getUploadedDataByDestinationAndSourceOrgIdAndExternalMessageIdAndPersonIdAndFormat(destination, sourceOrgId, externalMessageId, patientId, Format.HL7);</span>
+    }
+
+    @VisibleForTesting
+    UploadedDataDTO addUploadedData(EHRRequestContext requestContext, UploadedDataDTO dto, PKBPerson person) {
+<span class="fc" id="L348">        var accountId = person.getDefaultAccountId();</span>
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">        if (accountId == null) {</span>
+<span class="nc" id="L350">            throw new IllegalStateException(String.format(&quot;Could not find active default account for patient: %s&quot;, person.getId()));</span>
+        }
+
+        // validate status
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">        if (dto.getStatus() == null) {</span>
+<span class="nc" id="L355">            dto.setStatus(UploadedData.Status.NEW);</span>
+        }
+
+        try {
+<span class="fc" id="L359">            transactional(() -&gt; {</span>
+<span class="fc" id="L360">                var document = beanFactory.getEhrRemote().createDocument(</span>
+                        requestContext,
+<span class="fc" id="L362">                        dto.getData().getBytes(Charsets.UTF_8),</span>
+<span class="fc" id="L363">                        accountId, genericMetadata(TEXT_XML, (String) null, UPLOADED_DATA).toJavaMap());</span>
+<span class="fc" id="L364">                var docId = documentManager.create(document);</span>
+<span class="fc" id="L365">                var entity = new UploadedData();</span>
+<span class="fc" id="L366">                entity.setSourceOrg(dto.getSourceOrg());</span>
+<span class="fc" id="L367">                entity.setConnectingOrg(dto.getConnectingOrg());</span>
+<span class="fc" id="L368">                entity.setHl7PartnerId(dto.getHl7PartnerId());</span>
+<span class="fc" id="L369">                entity.setSourceTeam(dto.getSourceTeam());</span>
+<span class="fc" id="L370">                entity.setPersonId(person.getId());</span>
+<span class="fc" id="L371">                entity.setDestination(dto.getDestination());</span>
+<span class="fc" id="L372">                entity.setFormat(dto.getFormat());</span>
+<span class="fc" id="L373">                entity.setStatus(dto.getStatus()); // could be already processed</span>
+<span class="fc" id="L374">                entity.setEmbeddedId(dto.getEmbeddedId());</span>
+<span class="fc" id="L375">                entity.setExternalMessageId(dto.getExternalMessageId());</span>
+<span class="fc" id="L376">                entity.setDocumentMetadataId(docId);</span>
+<span class="fc" id="L377">                entity.setCreated(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L378">                entity.setUpdateTo(dto.getUpdateTo());</span>
+<span class="fc" id="L379">                entity.setSubsetOfParentId(dto.getSubsetOfParentId());</span>
+<span class="fc" id="L380">                entity.setDestinationSpecificData(dto.getDestinationSpecificData());</span>
+<span class="fc" id="L381">                entity.setHl7MessageType(HL7MessageType.get(dto.getHl7MessageType()));</span>
+<span class="fc" id="L382">                entity.setPatientInfoMismatchXml(marshalFieldMismatches(dto.getPatientInfoMismatches()).orElse(null));</span>
+<span class="fc" id="L383">                entity.setResponsibleOrganisationIdentifier(dto.getResponsibleOrganisationIdentifier());</span>
+<span class="fc" id="L384">                entity = uploadedDataRepository.saveAndFlush(entity);</span>
+
+                // Send back the DTO with the new ID, documentId and version
+<span class="fc" id="L387">                dto.setId(entity.getId());</span>
+<span class="fc" id="L388">                dto.setDocumentMetadataId(docId);</span>
+<span class="fc" id="L389">                dto.setVersion(entity.getVersion());</span>
+<span class="fc" id="L390">            });</span>
+<span class="nc" id="L391">        } catch (Exception e) {</span>
+<span class="nc" id="L392">            throw new RuntimeException(&quot;Exception while saving UploadedData for &quot; + person.getId(), e);</span>
+<span class="fc" id="L393">        }</span>
+<span class="fc" id="L394">        return dto;</span>
+    }
+
+    /**
+     * &lt;fieldMismatches&gt;
+     * &lt;mismatch fieldName=&quot;firstname&quot;&gt;&lt;pkbValue&gt;Bob&lt;/pkbValue&gt;&lt;receivedValue&gt;Robert&lt;/receivedValue&gt;&lt;/mismatch&gt;
+     * &lt;fieldMismatches&gt;
+     */
+    @VisibleForTesting
+    Optional&lt;String&gt; marshalFieldMismatches(List&lt;FieldMismatch&gt; mismatchList) {
+<span class="fc bfc" id="L404" title="All 2 branches covered.">        if (isEmpty(mismatchList)) {</span>
+<span class="fc" id="L405">            return Optional.empty();</span>
+        }
+
+<span class="fc" id="L408">        var outputStream = new ByteArrayOutputStream();</span>
+        try {
+<span class="fc" id="L410">            var factory = XMLOutputFactory.newInstance();</span>
+            // This is needed here but was not when the same code/includes was in the EJB
+<span class="fc" id="L412">            factory.setProperty(&quot;com.ctc.wstx.useDoubleQuotesInXmlDecl&quot;, &quot;true&quot;);</span>
+<span class="fc" id="L413">            var writer = factory.createXMLStreamWriter(outputStream);</span>
+<span class="fc" id="L414">            writer.writeStartDocument(&quot;UTF-8&quot;, &quot;1.0&quot;);</span>
+<span class="fc" id="L415">            writer.writeStartElement(&quot;fieldMismatches&quot;);</span>
+<span class="fc bfc" id="L416" title="All 2 branches covered.">            for (FieldMismatch mismatch : mismatchList) {</span>
+<span class="fc" id="L417">                writer.writeStartElement(&quot;mismatch&quot;);</span>
+<span class="fc" id="L418">                writer.writeAttribute(&quot;fieldName&quot;, mismatch.getFieldName());</span>
+
+<span class="fc" id="L420">                writer.writeStartElement(&quot;pkbValue&quot;);</span>
+<span class="fc" id="L421">                writer.writeCData(StringUtils.trimToEmpty(mismatch.getPkbValue()));</span>
+<span class="fc" id="L422">                writer.writeEndElement();</span>
+
+<span class="fc" id="L424">                writer.writeStartElement(&quot;receivedValue&quot;);</span>
+<span class="fc" id="L425">                writer.writeCData(StringUtils.trimToEmpty(mismatch.getReceivedValue()));</span>
+<span class="fc" id="L426">                writer.writeEndElement();</span>
+
+<span class="fc" id="L428">                writer.writeEndElement();</span>
+<span class="fc" id="L429">            }</span>
+<span class="fc" id="L430">            writer.writeEndElement(); // fieldMismatches</span>
+<span class="fc" id="L431">            writer.writeEndDocument();</span>
+<span class="fc" id="L432">            writer.close();</span>
+<span class="nc" id="L433">        } catch (Exception e) {</span>
+<span class="nc" id="L434">            LOGGER.error(&quot;Failed marshaling field mismatches {}&quot;, mismatchList);</span>
+<span class="nc" id="L435">            throw new RuntimeException(&quot;failed marshaling field mismatches&quot;, e);</span>
+<span class="fc" id="L436">        }</span>
+<span class="fc" id="L437">        return Optional.of(outputStream.toString());</span>
+    }
+
+    private List&lt;UploadedDataDTO&gt; populateDTOs(Collection&lt;UploadedData&gt; entities, boolean loadContent, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc bfc" id="L441" title="All 2 branches covered.">        if (isEmpty(entities)) {</span>
+<span class="fc" id="L442">            return emptyList();</span>
+        }
+<span class="fc" id="L444">        Function&lt;UploadedData, Long&gt; keyProvider = UploadedData::getId;</span>
+<span class="fc" id="L445">        var documents = findEncryptedDocuments(entities, keyProvider);</span>
+<span class="fc" id="L446">        var decryptedData = getDecryptedContents(documents, entities, keyProvider, loadContent, context);</span>
+<span class="fc" id="L447">        return entities.stream()</span>
+<span class="fc" id="L448">                .map(e -&gt; populateDTO(e, keyProvider, documents, decryptedData))</span>
+<span class="fc" id="L449">                .collect(toList());</span>
+    }
+
+    private &lt;ID&gt; Map&lt;ID, Document&gt; findEncryptedDocuments(Collection&lt;UploadedData&gt; uploadedData, Function&lt;UploadedData, ID&gt; keyProvider) {
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">        if (uploadedData.isEmpty()) {</span>
+<span class="nc" id="L454">            return emptyMap();</span>
+        }
+<span class="fc" id="L456">        var documentIds = new HashSet&lt;UUID&gt;(uploadedData.size());</span>
+<span class="fc" id="L457">        var nullDocumentIds = new ArrayList&lt;String&gt;();</span>
+<span class="fc" id="L458">        uploadedData.forEach(actual -&gt; {</span>
+<span class="pc bpc" id="L459" title="1 of 2 branches missed.">            if (actual.getDocumentMetadataId() == null) {</span>
+<span class="nc" id="L460">                nullDocumentIds.add(actual.getId().toString());</span>
+            } else {
+<span class="fc" id="L462">                documentIds.add(actual.getDocumentMetadataId());</span>
+            }
+<span class="fc" id="L464">        });</span>
+<span class="pc bpc" id="L465" title="1 of 2 branches missed.">        if (isNotEmpty(nullDocumentIds)) {</span>
+<span class="nc" id="L466">            throw new IllegalStateException(&quot;Uploaded data has null document meta data UUIDs, uploaded data id: &quot; + nullDocumentIds.stream().map(String::valueOf).collect(Collectors.joining(&quot;,&quot;)));</span>
+        }
+<span class="fc" id="L468">        var documentMap = documentManager.retrieve(documentIds);</span>
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">        if (documentMap.keySet().size() != documentIds.size()) {</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">            throw new IllegalStateException(&quot;Cannot find document(s) for uploaded data, docIds: &quot; + documentIds.stream().filter(uuid -&gt; !documentMap.containsKey(uuid)).map(UUID::toString).collect(Collectors.joining(&quot;,&quot;)));</span>
+        }
+
+<span class="fc" id="L473">        return uploadedData.stream().collect(toMap(keyProvider, ud -&gt; documentMap.get(ud.getDocumentMetadataId())));</span>
+    }
+
+    private Map&lt;Long, String&gt; getDecryptedContents(Map&lt;Long, Document&gt; documents, Collection&lt;UploadedData&gt; entities, Function&lt;UploadedData, Long&gt; keyProvider, boolean loadContent, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc bfc" id="L477" title="All 2 branches covered.">        if (!loadContent) {</span>
+<span class="fc" id="L478">            return emptyMap();</span>
+        }
+
+<span class="fc" id="L481">        var toDecryptList = entities.stream()</span>
+<span class="fc" id="L482">                .map(ud -&gt; RecordWithId.of(keyProvider.apply(ud), Tuple.of(documents.get(keyProvider.apply(ud)), context.fillMissingContextUser(ud.getPersonId()))))</span>
+<span class="fc" id="L483">                .collect(toList());</span>
+
+<span class="fc" id="L485">        return beanFactory.getEhrRemote().decryptDoc(toDecryptList).stream().collect(toMap(RecordWithId::id, t -&gt; new String(t.record().plainText())));</span>
+    }
+
+    @SuppressWarnings(&quot;ResultOfMethodCallIgnored&quot;)
+    private &lt;ID&gt; UploadedDataDTO populateDTO(UploadedData entity, Function&lt;UploadedData, ID&gt; keyProvider, Map&lt;ID, Document&gt; documents, Map&lt;ID, String&gt; decryptedData) {
+<span class="fc" id="L490">        var dto = new UploadedDataDTO();</span>
+<span class="fc" id="L491">        dto.setId(entity.getId());</span>
+<span class="fc" id="L492">        dto.setVersion(entity.getVersion());</span>
+<span class="fc" id="L493">        dto.setSourceOrg(entity.getSourceOrg());</span>
+<span class="fc" id="L494">        dto.setConnectingOrg(entity.getConnectingOrg());</span>
+<span class="fc" id="L495">        dto.setHl7PartnerId(entity.getHl7PartnerId());</span>
+<span class="fc" id="L496">        dto.setSourceTeam(entity.getSourceTeam());</span>
+<span class="fc" id="L497">        dto.setResponsibleOrganisationIdentifier(entity.getResponsibleOrganisationIdentifier());</span>
+<span class="fc" id="L498">        dto.setDestination(entity.getDestination());</span>
+<span class="fc" id="L499">        dto.setFormat(entity.getFormat());</span>
+<span class="fc" id="L500">        dto.setEmbeddedId(entity.getEmbeddedId());</span>
+<span class="fc" id="L501">        dto.setExternalMessageId(entity.getExternalMessageId());</span>
+<span class="fc" id="L502">        dto.setUpdateTo(entity.getUpdateTo());</span>
+<span class="fc" id="L503">        dto.setSubsetOfParentId(entity.getSubsetOfParentId());</span>
+<span class="fc" id="L504">        dto.setPatientInfoMismatches(unmarshalFieldMismatches(entity.getPatientInfoMismatchXml()));</span>
+<span class="fc" id="L505">        dto.setCreated(entity.getCreated());</span>
+        // need CURRENT user and account of document for decryption
+        // might not be the document's author... don't assume that
+<span class="fc" id="L508">        var document = documents.get(keyProvider.apply(entity));</span>
+<span class="pc bpc" id="L509" title="1 of 2 branches missed.">        if (document == null) {</span>
+<span class="nc" id="L510">            throw new RuntimeException(&quot;Cannot find encrypted document in the store for id: &quot; + entity.getId());</span>
+        }
+<span class="fc" id="L512">        dto.setAccountId(ACCOUNT_ID_PROVIDER.apply(document)); // track the owning account</span>
+<span class="fc" id="L513">        var content = decryptedData.get(keyProvider.apply(entity));</span>
+<span class="fc bfc" id="L514" title="All 2 branches covered.">        if (content != null) {</span>
+<span class="fc" id="L515">            dto.setData(content);</span>
+        }
+<span class="fc" id="L517">        return dto;</span>
+    }
+
+    @VisibleForTesting
+    @Nullable
+    List&lt;FieldMismatch&gt; unmarshalFieldMismatches(String xml) {
+<span class="fc bfc" id="L523" title="All 2 branches covered.">        if (StringUtils.isBlank(xml)) {</span>
+<span class="fc" id="L524">            return null;</span>
+        }
+
+<span class="fc" id="L527">        var list = new ArrayList&lt;FieldMismatch&gt;();</span>
+<span class="fc" id="L528">        XMLStreamReader reader = null;</span>
+
+        try {
+<span class="fc" id="L531">            var factory = XMLInputFactory.newInstance();</span>
+<span class="fc" id="L532">            reader = factory.createXMLStreamReader(new StringReader(xml));</span>
+
+<span class="fc bfc" id="L534" title="All 2 branches covered.">            while (reader.hasNext()) {</span>
+<span class="fc" id="L535">                reader.next();</span>
+<span class="fc bfc" id="L536" title="All 4 branches covered.">                if ((reader.getEventType() == XMLStreamConstants.START_ELEMENT) &amp;&amp; &quot;mismatch&quot;.equals(reader.getName().getLocalPart())) {</span>
+<span class="fc" id="L537">                    String fieldName = null;</span>
+<span class="fc" id="L538">                    String pkbValue = null;</span>
+<span class="fc" id="L539">                    String receivedValue = null;</span>
+
+                    // only 1 attribute
+<span class="fc" id="L542">                    fieldName = reader.getAttributeValue(0);</span>
+
+<span class="fc bfc" id="L544" title="All 2 branches covered.">                    for (int i = 0; i &lt; 2; i++) { // two iterations: pkbValue &amp; receivedValue</span>
+<span class="fc" id="L545">                        reader.next();</span>
+<span class="fc bfc" id="L546" title="All 2 branches covered.">                        if (&quot;pkbValue&quot;.equals(reader.getName().getLocalPart())) {</span>
+<span class="fc" id="L547">                            pkbValue = reader.getElementText();</span>
+<span class="pc bpc" id="L548" title="1 of 2 branches missed.">                        } else if (&quot;receivedValue&quot;.equals(reader.getName().getLocalPart())) {</span>
+<span class="fc" id="L549">                            receivedValue = reader.getElementText();</span>
+                        }
+                    }
+
+<span class="fc" id="L553">                    list.add(new FieldMismatch(fieldName, pkbValue, receivedValue));</span>
+<span class="fc" id="L554">                }</span>
+            }
+<span class="nc" id="L556">        } catch (Exception e) {</span>
+<span class="nc" id="L557">            throw new RuntimeException(&quot;failed unmarshaling field mismatches&quot;, e);</span>
+        } finally {
+            try {
+<span class="fc" id="L560">                reader.close();</span>
+<span class="nc" id="L561">            } catch (Exception e) {</span>
+<span class="nc" id="L562">                LOGGER.error(&quot;Error closing xml reader&quot;, e);</span>
+<span class="fc" id="L563">            } // ignore</span>
+        }
+<span class="fc" id="L565">        return list;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

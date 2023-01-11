@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AppointmentRepository.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.repository</a> &gt; <span class="el_source">AppointmentRepository.java</span></div><h1>AppointmentRepository.java</h1><pre class="source lang-java linenums">package com.pkb.domain.repository;
+
+import com.pkb.datamodel.AccountKeys;
+import com.pkb.datamodel.AppMenuDataWithSourceObjects;
+import com.pkb.datamodel.Appointment;
+import com.pkb.datamodel.AppointmentParticipant;
+import com.pkb.datamodel.ReferenceDatumCache;
+import com.pkb.datamodel.authorization.TargetOwnerData;
+import com.pkb.datamodel.entity.mapper.AppointmentMapper;
+import com.pkb.datamodel.entity.mapper.PersonMapper;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.criteria.CriteriaResult;
+import com.pkb.domain.criteria.ImmutableCriteriaResult;
+import com.pkb.domain.criteria.TemporalRangeRestriction;
+import com.pkb.domain.internal.repository.AbstractMenuDataRepository;
+import com.pkb.domain.internal.repository.AppMenuDataRepository;
+import com.pkb.domain.internal.repository.ReferenceDatumRepository;
+import com.pkb.domain.repository.mapper.AccessFilterMapper;
+import com.pkb.domain.repository.util.BoundedDateRangeRestrictions;
+import com.pkb.ehrdata.AccessFilter;
+import com.pkb.ehrdata.ImmutableSearchSpec;
+import com.pkb.ehrdata.OrderBy.Direction;
+import com.pkb.ehrdata.SearchSpec;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.ReferenceDataType;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import org.jetbrains.annotations.NotNull;
+
+import java.time.LocalDate;
+
+import static com.pkb.domain.criteria.CriteriaResult.emptyCriteriaResult;
+import static com.pkb.ehrdata.LatestFilterFields.defaultLatestFields;
+import static java.util.function.Function.identity;
+
+public class AppointmentRepository extends AbstractMenuDataRepository {
+    private final AppointmentMapper appointmentMapper;
+    private final AccessFilterMapper accessFilterMapper;
+    private final AppointmentParticipantRepository appointmentParticipantRepository;
+    private final PersonMapper personMapper;
+
+    public AppointmentRepository(AppMenuDataRepository menuDataRepository,
+                                 ReferenceDatumRepository referenceDatumRepository,
+                                 AppointmentMapper appointmentMapper,
+                                 AccessFilterMapper accessFilterMapper,
+                                 AppointmentParticipantRepository appointmentParticipantRepository,
+                                 PersonRepository personRepository, PersonMapper personMapper) {
+<span class="fc" id="L49">        super(menuDataRepository, referenceDatumRepository, personRepository);</span>
+<span class="fc" id="L50">        this.appointmentMapper = appointmentMapper;</span>
+<span class="fc" id="L51">        this.accessFilterMapper = accessFilterMapper;</span>
+<span class="fc" id="L52">        this.appointmentParticipantRepository = appointmentParticipantRepository;</span>
+<span class="fc" id="L53">        this.personMapper = personMapper;</span>
+<span class="fc" id="L54">    }</span>
+
+    @NotNull
+    public CriteriaResult&lt;Appointment&gt; findAppointments(AppointmentQuery appointmentQuery) {
+<span class="fc" id="L58">        TargetOwnerData targetOwnerData = appointmentQuery.authData().requireSingleTargetData();</span>
+
+<span class="fc" id="L60">        Long patientAccountId = targetOwnerData.account().getId();</span>
+<span class="fc" id="L61">        SearchSpec searchSpec = buildSearchSpec(</span>
+                patientAccountId,
+<span class="fc" id="L63">                appointmentQuery.dateRestriction(),</span>
+<span class="fc" id="L64">                appointmentQuery.maxNumberOfResources());</span>
+<span class="fc" id="L65">        AccessFilter accessFilter = accessFilterMapper.buildAccessFilter(appointmentQuery.authData());</span>
+
+<span class="fc" id="L67">        List&lt;Long&gt; appointmentIds = find(searchSpec, accessFilter);</span>
+<span class="fc bfc" id="L68" title="All 2 branches covered.">        if (appointmentIds.isEmpty()) {</span>
+<span class="fc" id="L69">            return emptyCriteriaResult();</span>
+        }
+
+<span class="fc" id="L72">        long total = appointmentIds.size();</span>
+<span class="pc bpc" id="L73" title="1 of 2 branches missed.">        if (total == appointmentQuery.maxNumberOfResources()) {</span>
+<span class="nc" id="L74">            total = count(searchSpec, accessFilter);</span>
+        }
+
+        // TODO in GDE-879 Read relevant rows from ReferenceDatum table into a code-&gt;value map which can be passed to appointmentWithoutParticipantsMapper.
+        // Their DTOBaseFields.getHospitalServiceCode() referenced as ReferenceDatum.ReferenceDataType.HOSPITAL_SERVICE is our Specialty string
+        // Within an Appointment, the encrypted String &quot;updatedSpeciality&quot; stores the latest specialty at the time the appointment was saved.
+
+<span class="fc" id="L81">        List&lt;AppMenuDataWithSourceObjects&gt; appointmentMenuData = findMenuDatasByIds(appointmentIds);</span>
+
+        // Retrieve account keys, checking that we have all the keys we need to decrypt the data we have loaded
+<span class="fc" id="L84">        AccountKeys accountKeys = checkAccountKeys(targetOwnerData, appointmentMenuData);</span>
+
+<span class="fc" id="L86">        Map&lt;Long, List&lt;AppointmentParticipant&gt;&gt; participantsByAppointmentId = appointmentParticipantRepository</span>
+<span class="fc" id="L87">                .findAppointmentParticipantsByAppointmentIds(patientAccountId, accessFilter, accountKeys, appointmentIds);</span>
+
+<span class="fc" id="L89">        var participantPersonIds = io.vavr.collection.HashSet.ofAll(participantsByAppointmentId.values())</span>
+<span class="fc" id="L90">                .flatMap(HashSet::ofAll)</span>
+<span class="fc" id="L91">                .map(AppointmentParticipant::participantPrivateId);</span>
+
+<span class="fc" id="L93">        var participantsById = personRepository.findByIds(participantPersonIds)</span>
+<span class="fc" id="L94">                .map(personMapper::entityToDataModel)</span>
+<span class="fc" id="L95">                .toMap(Person::getId, identity());</span>
+
+<span class="fc" id="L97">        ReferenceDatumCache specialtyCache = getReferenceDatumCache(appointmentMenuData,</span>
+                ReferenceDataType.HOSPITAL_SERVICE);
+
+<span class="fc" id="L100">        List&lt;Appointment&gt; appointmentsWithParticipants = appointmentMapper</span>
+<span class="fc" id="L101">                .mapToAppointments(appointmentMenuData, accountKeys, participantsByAppointmentId, participantsById, specialtyCache);</span>
+
+<span class="fc" id="L103">        return ImmutableCriteriaResult.&lt;Appointment&gt;builder().total(total).addAllPage(appointmentsWithParticipants).build();</span>
+    }
+
+    @NotNull
+    private ImmutableSearchSpec buildSearchSpec(@NotNull Long patientAccountId,
+            @NotNull TemporalRangeRestriction&lt;LocalDate&gt; dateRestriction,
+            int maxNumberOfResources) {
+<span class="fc" id="L110">        ImmutableSearchSpec.Builder searchSpecBuilder = getSearchSpecBuilder(patientAccountId, MenuDataType.appointment.name());</span>
+<span class="fc" id="L111">        BoundedDateRangeRestrictions.addDateRestrictions(&quot;date01&quot;, dateRestriction, searchSpecBuilder);</span>
+<span class="fc" id="L112">        addOrderBy(&quot;date01&quot;, Direction.Asc, searchSpecBuilder);</span>
+<span class="fc" id="L113">        searchSpecBuilder.latestFilter(defaultLatestFields());</span>
+<span class="fc" id="L114">        addPageFilter(maxNumberOfResources, searchSpecBuilder);</span>
+<span class="fc" id="L115">        return searchSpecBuilder.build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

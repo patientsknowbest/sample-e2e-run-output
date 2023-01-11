@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlanExportManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.phplan</a> &gt; <span class="el_source">PlanExportManager.java</span></div><h1>PlanExportManager.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: PlanExportManager.java Sep 30, 2013 11:01:48 AM pravina$
+//
+//---------------------------------------------------------------------------
+package com.pkb.service.phplan;
+
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.document.Document;
+import com.pkb.crypto.document.PlaintextDocument;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.notification.entity.Activity;
+import com.pkb.notification.entity.Activity.Action;
+import com.pkb.phplan.entity.PHPlanTemplate;
+import com.pkb.phplan.entity.PlanExportDTO;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.phplan.export.ExportPlanRequestData;
+import com.pkb.service.phplan.export.ExportablePatientPlans;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.Constants;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import org.jetbrains.annotations.NotNull;
+
+import java.time.format.DateTimeFormatter;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.util.EncryptedDocumentMapperHelper.MEDIA_TYPE_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.genericMetadata;
+
+public class PlanExportManager extends TransactionManager {
+
+    public static final int PLAN_EXPORT_LIMIT = 1000;
+    private static final String PLAN = &quot;plan&quot;;
+
+<span class="fc" id="L51">    private final static DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern(&quot;dd-MM-yyyy&quot;).withLocale(Locale.UK).withZone(Constants.APPLICATION_TZ);</span>
+
+    private final LegacyPlanTemplateManager planTemplateManager;
+    private final DocumentManager documentManager;
+
+    public PlanExportManager(PhrConfig config,
+                             TolvenBeanFactory beanFactory,
+                             DateTimeService dateTimeService,
+                             UUIDProvider uuidProvider,
+                             LegacyPlanTemplateManager planTemplateManager,
+                             DocumentManager documentManager) {
+<span class="fc" id="L62">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L63">        this.planTemplateManager = planTemplateManager;</span>
+<span class="fc" id="L64">        this.documentManager = documentManager;</span>
+<span class="fc" id="L65">    }</span>
+
+    private PlanExportDTO createExportDto(ExportPlanRequestData exportPlanRequestData, ExportablePatientPlans exportablePatientPlans, String exportedContent) {
+<span class="fc" id="L68">        PlanExportDTO exportDTO = new PlanExportDTO(new SourceDetails(exportPlanRequestData.requestContext()));</span>
+<span class="fc" id="L69">        exportDTO.setExportDate(Date.from(exportablePatientPlans.getExportDate()));</span>
+<span class="fc" id="L70">        exportDTO.setExporter(exportPlanRequestData.loggedInUser());</span>
+<span class="fc" id="L71">        exportDTO.setTemplate(exportablePatientPlans.getTemplate());</span>
+<span class="fc" id="L72">        exportDTO.setMediaType(&quot;text/csv&quot;);</span>
+<span class="fc" id="L73">        exportDTO.setName(&quot;planExport&quot; + &quot;_&quot; + exportPlanRequestData.loggedInUser().getId() + &quot;_&quot; + DATE_FORMAT.format(exportablePatientPlans.getExportDate()) + &quot;.csv&quot;);</span>
+<span class="fc" id="L74">        exportDTO.setContent(exportedContent.getBytes());</span>
+<span class="fc" id="L75">        return exportDTO;</span>
+    }
+
+    public void savePlanExport(ExportPlanRequestData exportPlanRequestData, ExportablePatientPlans exportablePatientPlans, String exportedContent) {
+<span class="fc" id="L79">        transactional(() -&gt; {</span>
+<span class="fc" id="L80">            PlanExportDTO exportDto = createExportDto(exportPlanRequestData, exportablePatientPlans, exportedContent);</span>
+<span class="fc" id="L81">            List userIds = exportPlanRequestData.selectedClinicians().stream().map(Long::parseLong).collect(Collectors.toList());</span>
+<span class="fc" id="L82">            userIds.add(exportPlanRequestData.loggedInUser().getId());</span>
+<span class="fc" id="L83">            Map&lt;Long, Long&gt; defaultAccountIds = beanFactory.getPKBPersonBean().getDefaultAccountIds(userIds);</span>
+<span class="fc" id="L84">            saveExport(exportPlanRequestData.requestContext(), defaultAccountIds.get(exportPlanRequestData.loggedInUser().getId()), exportDto);</span>
+<span class="fc bfc" id="L85" title="All 2 branches covered.">            for (String clinicianId : exportPlanRequestData.selectedClinicians()) {</span>
+<span class="fc" id="L86">                saveExport(exportPlanRequestData.requestContext(), defaultAccountIds.get(Long.parseLong(clinicianId)), exportDto);</span>
+<span class="fc" id="L87">            }</span>
+            //log the activity in coordinator/exporters account
+<span class="fc" id="L89">            Activity activity = new Activity(dateTimeService.now(), Action.EXPORTED_PLANS, exportPlanRequestData.requestContext().getOrgId().orElse(null));</span>
+            //activity.setUrl(new URL(&quot;&quot;));
+<span class="fc" id="L91">            String loggedUserIdString = Long.toString(exportPlanRequestData.loggedInUser().getId());</span>
+<span class="fc" id="L92">            activity.setActorId(loggedUserIdString);</span>
+<span class="fc" id="L93">        });</span>
+<span class="fc" id="L94">    }</span>
+
+    public long saveExport(EHRRequestContext requestContext, long defaultAccountId, PlanExportDTO planExportDTO) {
+<span class="fc" id="L97">        PKBPerson exporter = planExportDTO.getExporter();</span>
+<span class="fc" id="L98">        Document doc = beanFactory.getEhrRemote().createDocument(requestContext,</span>
+<span class="fc" id="L99">                planExportDTO.getContent(),</span>
+                defaultAccountId,
+<span class="fc" id="L101">                genericMetadata(</span>
+<span class="fc" id="L102">                        planExportDTO.getMediaType(),</span>
+                        (String) null,
+<span class="fc" id="L104">                        PLAN).toJavaMap());</span>
+<span class="fc" id="L105">        UUID id = documentManager.create(doc);</span>
+
+<span class="fc" id="L107">        planExportDTO.setDocumentMetadataId(id);</span>
+<span class="fc" id="L108">        planExportDTO.setExporterId(exporter.getId());</span>
+<span class="fc" id="L109">        planExportDTO.setTemplateId(planExportDTO.getTemplate().getId());</span>
+
+<span class="pc bpc" id="L111" title="1 of 2 branches missed.">        if (!planExportDTO.getSource().isPopulated()) {</span>
+<span class="nc" id="L112">            throw new IllegalStateException(&quot;PHRZ-105,PHRZ-104: Source is null for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+        }
+<span class="fc" id="L114">        planExportDTO.generateNewRandomUniqueId();</span>
+<span class="fc" id="L115">        return beanFactory.getEhrRemote().saveEHRData(requestContext,</span>
+<span class="fc" id="L116">                beanFactory.getEhrRemote().populateEHRData(planExportDTO, defaultAccountId, MenuDataType.planExport, requestContext));</span>
+
+    }
+
+    public List&lt;PlanExportDTO&gt; getPlanExports(@NotNull LoggedInEHRRequestContext requestContext, long userId) throws Exception {
+<span class="fc" id="L121">        long accountId = beanFactory.getPKBPersonBean().getDefaultAccountId(userId);</span>
+
+<span class="fc" id="L123">        EHRSearch&lt;PlanExportDTO&gt; ehrSearch = new EHRSearch&lt;&gt;(accountId, PlanExportDTO.class, MenuDataType.planExport);</span>
+<span class="fc" id="L124">        List&lt;EHRData&gt; ehrList = beanFactory.getEhrRemote().queryAndDecryptEHRData(ehrSearch, requestContext);</span>
+<span class="fc" id="L125">        List&lt;PlanExportDTO&gt; results = beanFactory.getEhrRemote().populateDTOList(ehrList, PlanExportDTO.class, requestContext);</span>
+
+<span class="fc" id="L127">        Map&lt;Long, PKBPerson&gt; personMap = beanFactory.getPKBPersonBean().</span>
+<span class="fc" id="L128">                findPKBPersonMap(results.stream()</span>
+<span class="fc" id="L129">                        .map(t -&gt; t.getExporterId())</span>
+<span class="fc" id="L130">                        .filter(Objects::nonNull)</span>
+<span class="fc" id="L131">                        .collect(Collectors.toList()));</span>
+<span class="fc" id="L132">        Map&lt;Long, PHPlanTemplate&gt; templateMap = planTemplateManager</span>
+<span class="fc" id="L133">                .findPHPlanTemplateMap(results.stream()</span>
+<span class="fc" id="L134">                        .map(t -&gt; t.getTemplateId())</span>
+<span class="fc" id="L135">                        .filter(Objects::nonNull)</span>
+<span class="fc" id="L136">                        .collect(Collectors.toList()));</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">        for (PlanExportDTO result : results) {</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">            if (result.getExporterId() != null) {</span>
+<span class="fc" id="L139">                result.setExporter(personMap.get(result.getExporterId()));</span>
+            }
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">            if (result.getTemplateId() != null) {</span>
+<span class="fc" id="L142">                result.setTemplate(templateMap.get(result.getTemplateId()));</span>
+            }
+<span class="fc" id="L144">        }</span>
+<span class="fc" id="L145">        return results;</span>
+    }
+
+    public PlanExportDTO getPlanExportWithContent(@NotNull LoggedInEHRRequestContext requestContext, long userId, long planExportId) {
+<span class="fc" id="L149">        PlanExportDTO dto = beanFactory.getEhrRemote().findAndDecryptTypedData(requestContext, planExportId, PlanExportDTO.class);</span>
+<span class="fc" id="L150">        Document doc = documentManager.retrieveOrThrow(dto.getDocumentMetadataId());</span>
+        @NotNull
+<span class="fc" id="L152">        PlaintextDocument decryptedDoc = beanFactory.getEhrRemote().decryptDoc(doc, requestContext);</span>
+<span class="fc" id="L153">        dto.setContent(decryptedDoc.plainText());</span>
+<span class="fc" id="L154">        dto.setMediaType(MEDIA_TYPE_PROVIDER.apply(decryptedDoc));</span>
+
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">        if (dto.getExporterId() != null) {</span>
+<span class="fc" id="L157">            dto.setExporter(beanFactory.getPKBPersonBean().findPKBPerson(dto.getExporterId()).getOrNull());</span>
+        }
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">        if (dto.getTemplateId() != null) {</span>
+<span class="fc" id="L160">            planTemplateManager.getPHPlanTemplate(dto.getTemplateId())</span>
+<span class="fc" id="L161">                            .ifPresent(dto::setTemplate);</span>
+        }
+
+<span class="fc" id="L164">        return dto;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

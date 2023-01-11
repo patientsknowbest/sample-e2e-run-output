@@ -1,0 +1,774 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QueryBuilder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.ehrdata</a> &gt; <span class="el_source">QueryBuilder.java</span></div><h1>QueryBuilder.java</h1><pre class="source lang-java linenums">package com.pkb.ehrdata;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Maps;
+import com.pkb.ehrdata.OrderBy.Direction;
+import com.pkb.entities.enums.AccountUserStatus;
+import com.pkb.messaging.workflow.ConversationWorkflowFilterDTO;
+import io.vavr.Function1;
+import io.vavr.Function2;
+import io.vavr.Function3;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.DatePart;
+import org.jooq.Field;
+import org.jooq.Query;
+import org.jooq.Record1;
+import org.jooq.Record2;
+import org.jooq.SelectConditionStep;
+import org.jooq.SelectJoinStep;
+import org.jooq.SelectQuery;
+import org.jooq.SelectSeekStep2;
+import org.jooq.SelectSelectStep;
+import org.jooq.SortField;
+import org.jooq.Table;
+import org.jooq.conf.RenderNameStyle;
+import org.jooq.conf.Settings;
+import org.jooq.impl.DSL;
+
+import java.util.Collection;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+import static com.google.common.base.Preconditions.checkState;
+import static com.pkb.ehrdata.Filter.Operator.EQUAL;
+import static com.pkb.ehrdata.Filter.Operator.FALSE_OR_IS_NULL;
+import static com.pkb.ehrdata.Filter.Operator.GREATER;
+import static com.pkb.ehrdata.Filter.Operator.GREATER_OR_EQUAL;
+import static com.pkb.ehrdata.Filter.Operator.IN;
+import static com.pkb.ehrdata.Filter.Operator.IS_NOT_NULL;
+import static com.pkb.ehrdata.Filter.Operator.IS_NULL;
+import static com.pkb.ehrdata.Filter.Operator.LESS;
+import static com.pkb.ehrdata.Filter.Operator.LESS_OR_EQUAL;
+import static com.pkb.ehrdata.Filter.Operator.LIKE;
+import static com.pkb.ehrdata.Filter.Operator.NOT_EQUAL;
+import static com.pkb.ehrdata.Filter.Operator.NOT_EQUAL_OR_NULL;
+import static com.pkb.ehrdata.Filter.Operator.NOT_IN;
+import static com.pkb.ehrdata.Filter.Operator.NOT_IN_OR_NULL;
+import static com.pkb.ehrdata.Filter.Operator.TRUE_AND_IS_NOT_NULL;
+import static java.lang.String.format;
+import static java.util.stream.Collectors.collectingAndThen;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toList;
+import static org.jooq.SQLDialect.POSTGRES;
+import static org.jooq.impl.DSL.and;
+import static org.jooq.impl.DSL.cast;
+import static org.jooq.impl.DSL.condition;
+import static org.jooq.impl.DSL.exists;
+import static org.jooq.impl.DSL.field;
+import static org.jooq.impl.DSL.inline;
+import static org.jooq.impl.DSL.or;
+import static org.jooq.impl.DSL.rowNumber;
+import static org.jooq.impl.DSL.select;
+import static org.jooq.impl.DSL.selectOne;
+import static org.jooq.impl.DSL.table;
+import static org.jooq.impl.SQLDataType.BIGINT;
+
+public class QueryBuilder {
+
+    private final static String MENU_DATA_TYPE_CAST_TEMPLATE = &quot;cast ('%s' as menu_data_type)&quot;;
+    private final static String LATEST_PRIVACY_FLAGS_TABLE_ALIAS = &quot;latestPrivacyFlags&quot;;
+
+    /**
+     * This map converts {@link Filter.Operator} values to functions that build the corresponding jooq condition
+     */
+    // @formatter:off
+<span class="fc" id="L82">    private static final ImmutableMap&lt;Filter.Operator, Function2&lt;String, Object, Condition&gt;&gt; OPERATORS = Maps</span>
+<span class="fc" id="L83">            .immutableEnumMap(ImmutableMap.&lt;Filter.Operator, Function2&lt;String, Object, Condition&gt;&gt; builder()</span>
+<span class="fc" id="L84">                    .put(IS_NULL, (field, value) -&gt; field(field).isNull())</span>
+<span class="fc" id="L85">                    .put(IS_NOT_NULL, (field, value) -&gt; field(field).isNotNull())</span>
+<span class="fc" id="L86">                    .put(FALSE_OR_IS_NULL, (field, value) -&gt; field(field).eq(false).or(field(field).isNull()))</span>
+<span class="fc" id="L87">                    .put(TRUE_AND_IS_NOT_NULL, (field, value) -&gt; field(field).eq(true).and(field(field).isNotNull()))</span>
+<span class="fc" id="L88">                    .put(GREATER, (field, value) -&gt; field(field).gt(value))</span>
+<span class="fc" id="L89">                    .put(GREATER_OR_EQUAL, (field, value) -&gt; field(field).ge(value))</span>
+<span class="fc" id="L90">                    .put(LESS, (field, value) -&gt; field(field).lt(value))</span>
+<span class="fc" id="L91">                    .put(LESS_OR_EQUAL, (field, value) -&gt; field(field).le(value))</span>
+<span class="fc" id="L92">                    .put(EQUAL, (field, value) -&gt; field(field).eq(value))</span>
+<span class="fc" id="L93">                    .put(NOT_EQUAL, (field, value) -&gt; field(field).ne(value))</span>
+<span class="fc" id="L94">                    .put(NOT_EQUAL_OR_NULL, (field, value) -&gt; field(field).ne(value).or(field(field).isNull()))</span>
+<span class="pc" id="L95">                    .put(LIKE, (field, value) -&gt; field(field).like((String) value))</span>
+<span class="fc" id="L96">                    .put(IN, (field, value) -&gt; field(field).in((Collection) value))</span>
+<span class="pc" id="L97">                    .put(NOT_IN, (field, value) -&gt; field(field).notIn((Collection) value))</span>
+<span class="pc" id="L98">                    .put(NOT_IN_OR_NULL, (field, value) -&gt; field(field).notIn((Collection) value).or(field(field).isNull()))</span>
+<span class="fc" id="L99">                    .build());</span>
+    // @formatter:on
+
+    private ImmutableList.Builder&lt;SearchSpec&gt; specListBuilder;
+    private Optional&lt;AccessFilter&gt; accessFilter;
+    private boolean count;
+    private int pageSize;
+    private int offset;
+
+<span class="fc" id="L108">    private QueryBuilder() {</span>
+<span class="fc" id="L109">        specListBuilder = ImmutableList.builder();</span>
+<span class="fc" id="L110">        accessFilter = Optional.empty();</span>
+<span class="fc" id="L111">    }</span>
+
+    public static QueryBuilder newInstance() {
+<span class="fc" id="L114">        return new QueryBuilder();</span>
+    }
+
+    public static QueryBuilder newInstanceAsCount() {
+<span class="fc" id="L118">        QueryBuilder builder = new QueryBuilder();</span>
+<span class="fc" id="L119">        builder.count = true;</span>
+<span class="fc" id="L120">        return builder;</span>
+    }
+
+    public QueryBuilder withAccessFilter(@NotNull AccessFilter accessFilter) {
+<span class="fc" id="L124">        this.accessFilter = Optional.of(accessFilter);</span>
+<span class="fc" id="L125">        return this;</span>
+    }
+
+    public QueryBuilder withSearchSpec(@NotNull SearchSpec searchSpec) {
+<span class="fc" id="L129">        specListBuilder.add(searchSpec);</span>
+<span class="fc" id="L130">        return this;</span>
+    }
+
+    public QueryBuilder withSearchSpecs(@NotNull ImmutableList&lt;SearchSpec&gt; searchSpecs) {
+<span class="fc" id="L134">        specListBuilder.addAll(searchSpecs);</span>
+<span class="fc" id="L135">        return this;</span>
+    }
+
+    public QueryBuilder withPageSizeAndOffset(int pageSize, int offset) {
+<span class="fc" id="L139">        this.pageSize = pageSize;</span>
+<span class="fc" id="L140">        this.offset = offset;</span>
+<span class="fc" id="L141">        return this;</span>
+    }
+
+    @NotNull
+    public Query build() {
+<span class="fc" id="L146">        ImmutableList&lt;SearchSpec&gt; searchSpecs = specListBuilder.build();</span>
+<span class="fc" id="L147">        checkState(CollectionUtils.isNotEmpty(searchSpecs), &quot;searchSpecs is empty&quot;);</span>
+<span class="fc" id="L148">        checkState(SearchSpec.checkLatestFilters(searchSpecs), &quot;latestFilter must be the same across all searches&quot;);</span>
+
+        // Make sure ordering is consistent across all queries
+<span class="fc" id="L151">        OrderBy orderBy = SearchSpec.tryAgreeOrderBy(searchSpecs).orElseGet(OrderBy::defaultOrderBy);</span>
+<span class="fc" id="L152">        ImmutableList&lt;SearchSpec&gt; searches = searchSpecs.stream()</span>
+<span class="fc" id="L153">                .map(ImmutableSearchSpec::copyOf)</span>
+<span class="fc" id="L154">                .map(spec -&gt; spec.withOrderBy(orderBy))</span>
+<span class="fc" id="L155">                .collect(collectingAndThen(toList(), ImmutableList::copyOf));</span>
+
+<span class="fc" id="L157">        return getQuery(searches, orderBy);</span>
+    }
+
+    /**
+     * Generates the jooq query. If multiple search specs are provided, each will be turned into a query and then
+     * they are all unioned together.
+     *
+     * @param searchSpecs
+     *            The specifications for building the queries
+     * @param orderBy
+     *            Order field and direction
+     */
+    private Query getQuery(ImmutableList&lt;SearchSpec&gt; searchSpecs, OrderBy orderBy) {
+
+<span class="fc" id="L171">        Settings jooqSettings = new Settings();</span>
+<span class="fc" id="L172">        jooqSettings.setRenderNameStyle(RenderNameStyle.AS_IS);</span>
+<span class="fc" id="L173">        DSLContext create = DSL.using(POSTGRES, jooqSettings);</span>
+
+<span class="fc" id="L175">        Optional&lt;? extends SelectQuery&lt;?&gt;&gt; unionedQuery = searchSpecs</span>
+<span class="fc" id="L176">                .stream()</span>
+<span class="fc" id="L177">                .map(sspec -&gt; buildSelect(create, sspec, orderBy))</span>
+<span class="fc" id="L178">                .reduce((query1, query2) -&gt; (SelectQuery) query1.unionAll(query2));</span>
+
+<span class="fc" id="L180">        return unionedQuery.map(finalizeQuery(create, orderBy))</span>
+<span class="pc" id="L181">                .orElseThrow(() -&gt; new IllegalStateException(&quot;Reduced to empty collection while building query&quot;));</span>
+    }
+
+    private Function&lt;SelectQuery&lt;?&gt;, Query&gt; finalizeQuery(DSLContext create, OrderBy orderBy) {
+<span class="fc bfc" id="L185" title="All 2 branches covered.">        return select -&gt; count ? selectCount(create, select) : selectField(create, select, orderBy);</span>
+    }
+
+    private Query selectField(DSLContext create, SelectQuery&lt;?&gt; select, OrderBy orderBy) {
+<span class="fc" id="L189">        SelectSeekStep2&lt;Record1&lt;Object&gt;, Object, Object&gt; query = create.select(field(&quot;subquery.id&quot;))</span>
+<span class="fc" id="L190">                .from(select.asTable(&quot;subquery&quot;))</span>
+<span class="fc" id="L191">                .orderBy(createOrderBy(&quot;subquery.order_by&quot;, orderBy.getDirection()), createOrderBy(&quot;subquery.id&quot;, Direction.Asc));</span>
+
+<span class="fc bfc" id="L193" title="All 2 branches covered.">        if (pageSize == 0) {</span>
+<span class="fc" id="L194">            return query;</span>
+        }
+<span class="fc" id="L196">        return query.limit(pageSize).offset(offset);</span>
+    }
+
+    private Query selectCount(DSLContext create, SelectQuery&lt;?&gt; select) {
+<span class="fc" id="L200">        return create.selectCount().from(select.asTable(&quot;subquery&quot;)).getQuery();</span>
+    }
+
+    /**
+     * Builds a jooq select from a single spec. The query will select a menudata id based on conditions generated
+     * from the spec and any active access filter, and will apply a 'latest' filter if one is present in the spec
+     */
+    private org.jooq.SelectQuery&lt;?&gt; buildSelect(
+            DSLContext create,
+            SearchSpec searchSpec,
+            OrderBy orderBy) {
+
+        // returns EMPTY if af.getTeamId() is empty
+<span class="fc" id="L213">        Optional&lt;Long&gt; teamIdForParticipantFilter = searchSpec.getAccessFilter(accessFilter)</span>
+<span class="fc bfc" id="L214" title="All 6 branches covered.">                .flatMap(af -&gt; af.isTeamDataViewApplicable() &amp;&amp; searchSpec.isUseParticipantFilter() &amp;&amp; !af.isBreakTheGlassActive() ? af.actorTeamId() : Optional.empty());</span>
+
+<span class="fc" id="L216">        ImmutableList.Builder&lt;Condition&gt; conditionsBuilder = ImmutableList.&lt;Condition&gt; builder()</span>
+<span class="fc" id="L217">                .addAll(buildConditions(searchSpec, false, &quot;ed&quot;, teamIdForParticipantFilter.isPresent(), true))</span>
+<span class="fc" id="L218">                .add(condition(&quot;ed.datatype in (&quot; + menuDataTypeCast(searchSpec.getDataTypes()) + &quot;)&quot;));</span>
+
+<span class="fc bfc" id="L220" title="All 2 branches covered.">        if (!searchSpec.getAccountIds().isEmpty()) {</span>
+<span class="fc" id="L221">            conditionsBuilder.add(field(&quot;ed.account_id&quot;).in(searchSpec.getAccountIds()));</span>
+        }
+
+<span class="fc" id="L224">        String orderByField = searchSpec.getColumnMapper().apply(orderBy.getField());</span>
+
+<span class="fc" id="L226">        Table&lt;?&gt; candidateUniqueId = buildCandidateUniqueIdSubQuery(create, searchSpec);</span>
+<span class="fc" id="L227">        Table&lt;?&gt; latestPrivacyFlags = buildLatestPrivacyFlagsSubquery(create, candidateUniqueId);</span>
+
+<span class="fc" id="L229">        teamIdForParticipantFilter</span>
+<span class="fc" id="L230">                .ifPresent(ti -&gt; buildAccessConditionsWithParticipantTable(searchSpec.getAccessFilter(accessFilter).orElseThrow(IllegalAccessError::new), &quot;ed.&quot;)</span>
+<span class="fc" id="L231">                        .ifPresent(conditionsBuilder::add));</span>
+
+<span class="fc" id="L233">        ImmutableList&lt;Condition&gt; conditions = conditionsBuilder.build();</span>
+
+<span class="fc" id="L235">        Field field1 = field(&quot;ed.id&quot;);</span>
+<span class="fc" id="L236">        Field field2 = field(&quot;ed.uniqueid&quot;);</span>
+<span class="fc" id="L237">        SelectQuery&lt;?&gt; selectQuery = searchSpec.getLatestFilter().map(latestFilter -&gt; {</span>
+<span class="fc" id="L238">            Table&lt;?&gt; latestByType = buildLatestByTypeSubquery(create, searchSpec, latestFilter, teamIdForParticipantFilter.isPresent(), true);</span>
+
+<span class="fc" id="L240">            Field field3 = field(&quot;ed.&quot; + orderByField).as(&quot;order_by&quot;);</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">            SelectSelectStep sss = teamIdForParticipantFilter.isPresent() ? create.selectDistinct(field1, field2, field3) : create.select(field1, field2, field3);</span>
+
+<span class="fc" id="L243">            SelectJoinStep sjs = sss</span>
+<span class="fc" id="L244">                    .from(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="fc" id="L245">                    .innerJoin(latestByType).on(field(&quot;ed.id&quot;).eq(field(&quot;latestByType.id&quot;)))</span>
+<span class="fc" id="L246">                    .leftOuterJoin(latestPrivacyFlags).on(field2.eq(field(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.uniqueid&quot;)));</span>
+<span class="fc" id="L247">            SelectJoinStep finalSjs = sjs;</span>
+<span class="fc" id="L248">            sjs = teamIdForParticipantFilter.map(ti -&gt; addParticipantJoin(finalSjs, ti)).orElse(sjs);</span>
+
+<span class="fc bfc" id="L250" title="All 2 branches covered.">            if (searchSpec.getConversationWorkflowFilter().isPresent()) {</span>
+<span class="fc" id="L251">                sjs = addConversationWorkflowFilter(sjs, searchSpec.getConversationWorkflowFilter());</span>
+            }
+
+<span class="fc" id="L254">            sjs.where(conditions);</span>
+<span class="fc" id="L255">            return sjs.getQuery();</span>
+
+<span class="fc" id="L257">        }).orElseGet(() -&gt; {</span>
+<span class="fc" id="L258">            Field field3 = field(&quot;ed.&quot; + orderByField).as(&quot;order_by&quot;);</span>
+<span class="fc bfc" id="L259" title="All 2 branches covered.">            SelectSelectStep sss = teamIdForParticipantFilter.isPresent() ? create.selectDistinct(field1, field2, field3) : create.select(field1, field2, field3);</span>
+
+<span class="fc" id="L261">            SelectJoinStep sjs = sss</span>
+<span class="fc" id="L262">                    .from(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="fc" id="L263">                    .leftOuterJoin(latestPrivacyFlags).on(field2.eq(field(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.uniqueid&quot;)));</span>
+<span class="fc bfc" id="L264" title="All 2 branches covered.">            if (teamIdForParticipantFilter.isPresent()) {</span>
+<span class="fc" id="L265">                sjs = addParticipantJoin(sjs, teamIdForParticipantFilter.get());</span>
+            }
+
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">            if (searchSpec.getConversationWorkflowFilter().isPresent()) {</span>
+<span class="nc" id="L269">                sjs = addConversationWorkflowFilter(sjs, searchSpec.getConversationWorkflowFilter());</span>
+            }
+
+<span class="fc" id="L272">            return sjs.where(conditions).getQuery();</span>
+        });
+
+<span class="fc bfc" id="L275" title="All 4 branches covered.">        if (!count &amp;&amp; !searchSpec.getOneResultPerDay().isPresent()) {</span>
+<span class="fc" id="L276">            selectQuery.addOrderBy(createOrderBy(&quot;ed.&quot; + orderByField, orderBy.getDirection()));</span>
+        }
+<span class="fc" id="L278">        searchSpec.getPageFilter().ifPresent(pageFilter -&gt; {</span>
+<span class="fc" id="L279">            selectQuery.addOffset(pageFilter.getStartPosition());</span>
+<span class="fc" id="L280">            selectQuery.addLimit(pageFilter.getCount());</span>
+<span class="fc" id="L281">        });</span>
+
+<span class="fc" id="L283">        searchSpec.getOneResultPerDay().ifPresent(orpd -&gt; {</span>
+<span class="fc" id="L284">            selectQuery.addDistinctOn(DSL.trunc(field(orpd.fieldName()), DatePart.DAY));</span>
+<span class="fc" id="L285">            selectQuery.addOrderBy(DSL.trunc(field(orpd.fieldName()), DatePart.DAY), field(orpd.fieldName()));</span>
+<span class="fc" id="L286">        });</span>
+
+<span class="fc" id="L288">        return selectQuery;</span>
+    }
+
+    private SelectJoinStep addParticipantJoin(SelectJoinStep sjs, long teamId) {
+<span class="fc" id="L292">        return sjs.leftJoin(</span>
+<span class="fc" id="L293">                table(&quot;participant p&quot;))</span>
+<span class="fc" id="L294">                .on((field(&quot;p.team_id&quot;, BIGINT).eq(teamId)).and((field(&quot;ed.datatype&quot;).eq(inline(&quot;phplan&quot;)).and(field(&quot;p.uniqueid&quot;).eq(field(&quot;ed.uniqueid&quot;))))</span>
+<span class="fc" id="L295">                        .or((field(&quot;ed.datatype&quot;).eq(inline(&quot;message&quot;)).and(field(&quot;p.uniqueid&quot;).eq(field(&quot;ed.uuid01&quot;)))))));</span>
+    }
+
+    private SelectJoinStep addConversationWorkflowFilter(SelectJoinStep sjs, Optional&lt;ConversationWorkflowFilterDTO&gt; optFilters) {
+<span class="fc" id="L299">        return optFilters.map(filters -&gt; {</span>
+<span class="fc bfc" id="L300" title="All 2 branches covered.">            if (filters.isWorkflowEnabled()) {</span>
+<span class="fc" id="L301">                Condition joinCondition = (field(&quot;cw.conversation_id&quot;).eq(field(&quot;ed.uuid01&quot;)))</span>
+<span class="fc" id="L302">                        .and(field(&quot;cw.team_id&quot;).eq(filters.teamId()));</span>
+
+<span class="fc" id="L304">                Condition archivedCondition = null;</span>
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">                if (filters.isArchivingEnabled()) {</span>
+<span class="fc bfc" id="L306" title="All 3 branches covered.">                    switch (filters.archivedStatus()) {</span>
+                    case ARCHIVED:
+<span class="fc" id="L308">                        archivedCondition = OPERATORS.get(TRUE_AND_IS_NOT_NULL).apply(&quot;cw.archived&quot;, null);</span>
+<span class="fc" id="L309">                        break;</span>
+                    case UNARCHIVED:
+<span class="fc" id="L311">                        archivedCondition = OPERATORS.get(FALSE_OR_IS_NULL).apply(&quot;cw.archived&quot;, null);</span>
+                        break;
+                    }
+                }
+
+<span class="fc" id="L316">                Condition assignedCondition = null;</span>
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">                if (filters.isAssigningEnabled()) {</span>
+<span class="fc bfc" id="L318" title="All 3 branches covered.">                    switch (filters.assignStatus()) {</span>
+                    case ASSIGNED:
+<span class="fc" id="L320">                        assignedCondition = OPERATORS.get(IS_NOT_NULL).apply(&quot;cw.assigned_person_id&quot;, null);</span>
+<span class="fc" id="L321">                        break;</span>
+                    case UNASSIGNED:
+<span class="fc" id="L323">                        assignedCondition = OPERATORS.get(IS_NULL).apply(&quot;cw.assigned_person_id&quot;, null);</span>
+                        break;
+                    }
+                }
+
+<span class="fc" id="L328">                return Stream.of(archivedCondition, assignedCondition)</span>
+<span class="fc bfc" id="L329" title="All 2 branches covered.">                        .filter(cond -&gt; cond != null)</span>
+<span class="fc" id="L330">                        .reduce((a, b) -&gt; a.and(b))</span>
+<span class="fc" id="L331">                        .map(wfCond -&gt; (SelectJoinStep) sjs.leftOuterJoin(table(&quot;conversation_workflow cw&quot;))</span>
+<span class="fc" id="L332">                                .on(joinCondition).where(wfCond))</span>
+<span class="fc" id="L333">                        .orElse(sjs);</span>
+
+            } else {
+<span class="fc" id="L336">                return sjs;</span>
+            }
+
+<span class="fc" id="L339">        }).orElse(sjs);</span>
+    }
+
+    /**
+     * Builds a subquery that effectively selects the most recent record (based on a date column of the caller's choice)
+     * that has a particular value in another column (also specified by the caller). For example, find all the records
+     * with a particular uniqueid and return the one with the most recent entereddata
+     */
+    private Table&lt;?&gt; buildLatestByTypeSubquery(
+            DSLContext create,
+            SearchSpec searchSpec,
+            LatestFilterFields latestFilter,
+            boolean usingParticipantTable,
+            boolean includePrivacyFlags) {
+<span class="fc" id="L353">        ImmutableList.Builder&lt;Condition&gt; conditionsBuilder = ImmutableList.builder();</span>
+
+<span class="fc bfc" id="L355" title="All 2 branches covered.">        if (Boolean.TRUE.equals(searchSpec.latestByVisibleType())) {</span>
+<span class="fc" id="L356">            conditionsBuilder</span>
+<span class="fc" id="L357">                    .addAll(buildAccessConditions(accessFilter.orElseThrow(IllegalStateException::new), &quot;ed.&quot;, includePrivacyFlags,</span>
+                            usingParticipantTable));
+<span class="fc" id="L359">            conditionsBuilder.addAll(buildConditions(searchSpec, true, &quot;ed&quot;, usingParticipantTable, includePrivacyFlags));</span>
+        } else {
+<span class="fc" id="L361">            conditionsBuilder.addAll(buildConditions(searchSpec, true, &quot;ed&quot;, false, false));</span>
+        }
+
+<span class="fc" id="L364">        conditionsBuilder.add(condition(&quot;ed.datatype in (&quot; + menuDataTypeCast(searchSpec.getDataTypes()) + &quot;)&quot;));</span>
+
+<span class="fc bfc" id="L366" title="All 2 branches covered.">        if (!searchSpec.getAccountIds().isEmpty()) {</span>
+<span class="fc" id="L367">            conditionsBuilder.add(field(&quot;ed.account_id&quot;).in(searchSpec.getAccountIds()));</span>
+        }
+
+<span class="fc" id="L370">        ImmutableList&lt;Condition&gt; conditions = conditionsBuilder.build();</span>
+
+<span class="fc" id="L372">        String typeField = searchSpec.getColumnMapper().apply(latestFilter.getTypeField());</span>
+<span class="fc" id="L373">        String dateField = searchSpec.getColumnMapper().apply(latestFilter.getDateField());</span>
+<span class="fc" id="L374">        SortField orderByDateField = null;</span>
+<span class="pc bpc" id="L375" title="1 of 4 branches missed.">        if (searchSpec.getLatestFilter().isPresent() &amp;&amp; searchSpec.getLatestFilter().get().getOrder() == OrderBy.Direction.Asc) {</span>
+<span class="fc" id="L376">            orderByDateField = field(&quot;ed.&quot; + dateField).asc();</span>
+        } else {
+<span class="fc" id="L378">            orderByDateField = field(&quot;ed.&quot; + dateField).desc();</span>
+        }
+
+<span class="fc" id="L381">        SelectJoinStep&lt;Record2&lt;Long, Integer&gt;&gt; sortedByTypeSJS = create</span>
+<span class="fc" id="L382">                .select(</span>
+<span class="fc" id="L383">                        field(&quot;ed.id&quot;).coerce(Long.class),</span>
+<span class="fc" id="L384">                        rowNumber().over()</span>
+<span class="fc" id="L385">                                .partitionBy(field(&quot;ed.&quot; + typeField))</span>
+<span class="fc" id="L386">                                .orderBy(</span>
+                                        orderByDateField,
+<span class="fc" id="L388">                                        field(&quot;ed.id&quot;).desc())</span>
+<span class="fc" id="L389">                                .as(&quot;rn&quot;))</span>
+<span class="fc" id="L390">                .from(</span>
+<span class="fc" id="L391">                        table(&quot;app.menu_data&quot;).as(&quot;ed&quot;));</span>
+<span class="fc bfc" id="L392" title="All 2 branches covered.">        if (Boolean.TRUE.equals(searchSpec.latestByVisibleType())) {</span>
+<span class="fc" id="L393">            Table&lt;?&gt; candidateUniqueId = buildCandidateUniqueIdSubQuery(create, searchSpec);</span>
+<span class="fc" id="L394">            Table&lt;?&gt; latestPrivacyFlags = buildLatestPrivacyFlagsSubquery(create, candidateUniqueId);</span>
+<span class="fc" id="L395">            sortedByTypeSJS = sortedByTypeSJS.leftOuterJoin(latestPrivacyFlags)</span>
+<span class="fc" id="L396">                    .on(field(&quot;ed.uniqueid&quot;).eq(field(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.uniqueid&quot;)));</span>
+        }
+<span class="fc" id="L398">        Table&lt;Record2&lt;Long, Integer&gt;&gt; sortedByType = sortedByTypeSJS.where(conditions)</span>
+<span class="fc" id="L399">                .orderBy(</span>
+<span class="fc" id="L400">                        field(&quot;ed.&quot; + typeField),</span>
+<span class="fc" id="L401">                        field(&quot;ed.&quot; + dateField))</span>
+<span class="fc" id="L402">                .asTable(&quot;sortedByType&quot;);</span>
+
+<span class="fc" id="L404">        Table&lt;?&gt; latestByType = create</span>
+<span class="fc" id="L405">                .select(</span>
+<span class="fc" id="L406">                        field(&quot;sortedByType.id&quot;).coerce(Long.class))</span>
+<span class="fc" id="L407">                .from(sortedByType)</span>
+<span class="fc" id="L408">                .where(</span>
+<span class="fc" id="L409">                        field(&quot;sortedByType.rn&quot;).eq(1))</span>
+<span class="fc" id="L410">                .asTable(&quot;latestByType&quot;);</span>
+
+<span class="fc" id="L412">        return latestByType;</span>
+    }
+
+    /**
+     * Build a sub-query that we can use to limit the scope of results processed when obtaining latest privacy flags
+     * record for a given uniqueId.
+     */
+    private Table&lt;?&gt; buildCandidateUniqueIdSubQuery(
+            DSLContext create,
+            SearchSpec searchSpec) {
+
+<span class="fc" id="L423">        ImmutableList.Builder&lt;Condition&gt; conditionsBuilder = ImmutableList.&lt;Condition&gt; builder()</span>
+<span class="fc" id="L424">                .addAll(buildConditions(searchSpec, true, &quot;ed1&quot;, false, false))</span>
+<span class="fc" id="L425">                .add(condition(&quot;ed1.datatype in (&quot; + menuDataTypeCast(searchSpec.getDataTypes()) + &quot;)&quot;));</span>
+
+<span class="fc bfc" id="L427" title="All 2 branches covered.">        if (!searchSpec.getAccountIds().isEmpty()) {</span>
+<span class="fc" id="L428">            conditionsBuilder.add(field(&quot;ed1.account_id&quot;).in(searchSpec.getAccountIds()));</span>
+        }
+
+<span class="fc" id="L431">        ImmutableList&lt;Condition&gt; conditions = conditionsBuilder.build();</span>
+
+<span class="fc" id="L433">        Table&lt;?&gt; candidateUniqueId = create</span>
+<span class="fc" id="L434">                .selectDistinct(field(&quot;ed1.uniqueid&quot;).coerce(String.class))</span>
+<span class="fc" id="L435">                .from(table(&quot;app.menu_data&quot;).as(&quot;ed1&quot;))</span>
+<span class="fc" id="L436">                .where(conditions)</span>
+<span class="fc" id="L437">                .asTable(&quot;candidateUniqueId&quot;);</span>
+
+<span class="fc" id="L439">        return candidateUniqueId;</span>
+    }
+
+    private Table&lt;?&gt; buildLatestPrivacyFlagsSubquery(
+            DSLContext create,
+            Table&lt;?&gt; candidateUniqueId) {
+
+<span class="fc" id="L446">        Table&lt;?&gt; sortedPrivacyFlags = create</span>
+<span class="fc" id="L447">                .select(</span>
+<span class="fc" id="L448">                        field(&quot;pf.id&quot;).coerce(Long.class),</span>
+<span class="fc" id="L449">                        field(&quot;pf.uniqueid&quot;).coerce(String.class),</span>
+<span class="fc" id="L450">                        field(&quot;pf.require_general&quot;).coerce(Boolean.class),</span>
+<span class="fc" id="L451">                        field(&quot;pf.require_mental_health&quot;).coerce(Boolean.class),</span>
+<span class="fc" id="L452">                        field(&quot;pf.require_sexual_health&quot;).coerce(Boolean.class),</span>
+<span class="fc" id="L453">                        field(&quot;pf.require_social_care&quot;).coerce(Boolean.class),</span>
+<span class="fc" id="L454">                        rowNumber().over()</span>
+<span class="fc" id="L455">                                .partitionBy(field(&quot;pf.uniqueid&quot;))</span>
+<span class="fc" id="L456">                                .orderBy(</span>
+<span class="fc" id="L457">                                        field(&quot;pf.override&quot;).desc(),</span>
+<span class="fc" id="L458">                                        field(&quot;pf.change_date&quot;).desc(),</span>
+<span class="fc" id="L459">                                        field(&quot;pf.id&quot;).desc())</span>
+<span class="fc" id="L460">                                .as(&quot;rn&quot;))</span>
+<span class="fc" id="L461">                .from(table(&quot;privacy_flags&quot;).as(&quot;pf&quot;))</span>
+<span class="fc" id="L462">                .innerJoin(candidateUniqueId).on(field(&quot;pf.uniqueid&quot;).eq(field(&quot;candidateUniqueId.uniqueid&quot;)))</span>
+<span class="fc" id="L463">                .asTable(&quot;sortedPrivacyFlags&quot;);</span>
+
+<span class="fc" id="L465">        Table&lt;?&gt; latestPrivacyFlags = create</span>
+<span class="fc" id="L466">                .select(</span>
+<span class="fc" id="L467">                        field(&quot;sortedPrivacyFlags.id&quot;).coerce(Long.class),</span>
+<span class="fc" id="L468">                        field(&quot;sortedPrivacyFlags.uniqueid&quot;).coerce(String.class),</span>
+<span class="fc" id="L469">                        field(&quot;sortedPrivacyFlags.require_general&quot;).coerce(Boolean.class),</span>
+<span class="fc" id="L470">                        field(&quot;sortedPrivacyFlags.require_mental_health&quot;).coerce(Boolean.class),</span>
+<span class="fc" id="L471">                        field(&quot;sortedPrivacyFlags.require_sexual_health&quot;).coerce(Boolean.class),</span>
+<span class="fc" id="L472">                        field(&quot;sortedPrivacyFlags.require_social_care&quot;).coerce(Boolean.class))</span>
+<span class="fc" id="L473">                .from(sortedPrivacyFlags)</span>
+<span class="fc" id="L474">                .where(field(&quot;sortedPrivacyFlags.rn&quot;).eq(1))</span>
+<span class="fc" id="L475">                .asTable(LATEST_PRIVACY_FLAGS_TABLE_ALIAS);</span>
+
+<span class="fc" id="L477">        return latestPrivacyFlags;</span>
+    }
+
+    private SortField&lt;Object&gt; createOrderBy(OrderBy orderBy) {
+<span class="nc" id="L481">        return createOrderBy(orderBy.getField(), orderBy.getDirection());</span>
+    }
+
+    private SortField&lt;Object&gt; createOrderBy(String fieldName, OrderBy.Direction direction) {
+<span class="fc bfc" id="L485" title="All 2 branches covered.">        return direction == OrderBy.Direction.Asc</span>
+<span class="fc" id="L486">                ? field(fieldName).asc()</span>
+<span class="fc" id="L487">                : field(fieldName).desc();</span>
+    }
+
+    /**
+     * Builds a list of conditions to be used in the WHERE clause of the query
+     */
+    @NotNull
+    private ImmutableList&lt;Condition&gt; buildConditions(
+            SearchSpec searchSpec,
+            boolean choosingLatest,
+            String prefix,
+            boolean usingParticipantTable,
+            boolean includePrivacyFlags) {
+
+<span class="pc bpc" id="L501" title="1 of 2 branches missed.">        String prefixDot = StringUtils.isNotEmpty(prefix) ? prefix + &quot;.&quot; : &quot;&quot;;</span>
+
+<span class="fc" id="L503">        ImmutableList.Builder builder = ImmutableList.&lt;Condition&gt; builder();</span>
+
+        // access conditions do not apply when we're choosing the latest version
+<span class="fc bfc" id="L506" title="All 2 branches covered.">        ImmutableList&lt;Condition&gt; accessConditions = choosingLatest ? ImmutableList.of()</span>
+<span class="fc" id="L507">                : searchSpec.getAccessFilter(accessFilter)</span>
+<span class="fc" id="L508">                        .map(filter -&gt; buildAccessConditions(filter, prefixDot, includePrivacyFlags, usingParticipantTable))</span>
+<span class="fc" id="L509">                        .orElse(ImmutableList.of());</span>
+<span class="fc" id="L510">        builder.addAll(accessConditions);</span>
+
+<span class="fc" id="L512">        ImmutableList&lt;Condition&gt; filterConditions = buildFilterConditions(searchSpec, prefixDot, choosingLatest);</span>
+
+<span class="fc" id="L514">        return builder.addAll(filterConditions).build();</span>
+    }
+
+    /**
+     * Builds a list of conditions based on filters provided by the caller, e.g. rows where a specified column contains
+     * a value greater than some other value, or in some list of values, etc)
+     */
+    @NotNull
+    private ImmutableList&lt;Condition&gt; buildFilterConditions(SearchSpec searchSpec, String prefixDot, boolean choosingLatest) {
+
+        // Collect all the filters that apply, based on whether we want latest-only, and whether we included deleted data
+<span class="fc" id="L525">        ImmutableSet.Builder&lt;Filter&gt; filterBuilder = ImmutableSet.builder();</span>
+<span class="fc" id="L526">        filterBuilder.addAll(searchSpec.getApplicableFilters(choosingLatest));</span>
+<span class="fc bfc" id="L527" title="All 4 branches covered.">        if (!(choosingLatest || searchSpec.isIncludeDeleted())) {</span>
+<span class="fc" id="L528">            filterBuilder.add(Filter.excludeDeleted());</span>
+        }
+<span class="fc" id="L530">        ImmutableSet&lt;Filter&gt; filters = filterBuilder.build();</span>
+
+        // Partially apply search spec and prefix to create a function for mapping a Filter to a jooq Condition
+<span class="fc" id="L533">        Function1&lt;Filter, Condition&gt; filterToConditionMapper = Function3.of(this::filterToCondition).apply(searchSpec, prefixDot);</span>
+
+        // Convert each filter into a jooq condition
+<span class="fc" id="L536">        return filters.stream()</span>
+<span class="fc" id="L537">                .map(filterToConditionMapper)</span>
+<span class="fc" id="L538">                .collect(collectingAndThen(toList(), ImmutableList::copyOf));</span>
+    }
+
+    private Condition filterToCondition(SearchSpec searchSpec, String prefixDot, Filter filter) {
+
+        // Get the field the filter applies to, run through the column mapper
+<span class="fc" id="L544">        String mappedField = searchSpec.getColumnMapper().apply(filter.getField());</span>
+
+        // Map the prefixed field and operator to a jooq condition
+<span class="fc" id="L547">        String field = prefixDot + mappedField;</span>
+<span class="fc" id="L548">        Object value = filter.getValue().orElse(null);</span>
+<span class="fc" id="L549">        return OPERATORS.get(filter.getOperator()).apply(field, value);</span>
+    }
+
+    /**
+     * Builds a list of conditions based on the active access filter, e.g. break-the-glass status, etc
+     */
+    @NotNull
+    private ImmutableList&lt;Condition&gt; buildAccessConditions(@NotNull AccessFilter accessFilter, @NotNull String prefixDot,
+            boolean includePrivacyFlags, boolean usingParticipantTable) {
+
+<span class="fc" id="L559">        ImmutableList.Builder&lt;Condition&gt; builder = ImmutableList.builder();</span>
+
+<span class="fc bfc" id="L561" title="All 2 branches covered.">        if (!usingParticipantTable) {</span>
+<span class="fc bfc" id="L562" title="All 2 branches covered.">            Optional&lt;Condition&gt; tdvCondition = accessFilter.isTeamDataViewApplicable()</span>
+<span class="fc" id="L563">                    ? Optional.of(field(prefixDot + &quot;sourceTeamId&quot;).eq(accessFilter.actorTeamId().orElseThrow(IllegalStateException::new)))</span>
+<span class="fc" id="L564">                    : Optional.empty();</span>
+
+<span class="fc bfc" id="L566" title="All 2 branches covered.">            if (!accessFilter.isConsentFilteringBypassed()) {</span>
+<span class="fc bfc" id="L567" title="All 2 branches covered.">                if (accessFilter.isTeamDataViewOnly()) {</span>
+<span class="fc" id="L568">                    tdvCondition.map(builder::add);</span>
+                } else {
+<span class="fc" id="L570">                    accessFilter.getPrivacyFilter()</span>
+<span class="fc" id="L571">                            .map(privacy -&gt; setPrivacyOrTdvConditions(privacy, prefixDot, tdvCondition, includePrivacyFlags))</span>
+<span class="fc" id="L572">                            .map(builder::addAll);</span>
+
+                }
+                // introduced by PHR-4930
+<span class="fc bfc" id="L576" title="All 2 branches covered.">            } else if (accessFilter.isReadReceiptApplicable().isPresent()) {</span>
+<span class="pc bpc" id="L577" title="1 of 2 branches missed.">                Optional&lt;Condition&gt; readReceiptCondition = accessFilter.isReadReceiptApplicable().get()</span>
+<span class="fc" id="L578">                        ? Optional.of(field(prefixDot + &quot;sourceOrgId&quot;).eq(accessFilter.sourceOrgId().orElseThrow(IllegalStateException::new)))</span>
+<span class="pc" id="L579">                        : Optional.empty();</span>
+<span class="fc" id="L580">                readReceiptCondition.map(builder::add);</span>
+            }
+            // introduced by PHR-4930
+        }
+
+<span class="fc" id="L585">        patientViewSuspendedCondition(accessFilter).ifPresent(builder::add);</span>
+<span class="fc" id="L586">        decryptionAccessCondition(accessFilter).ifPresent(builder::add);</span>
+<span class="fc" id="L587">        return builder.build();</span>
+    }
+
+    private Optional&lt;Condition&gt; decryptionAccessCondition(AccessFilter accessFilter) {
+<span class="fc bfc" id="L591" title="All 2 branches covered.">        if (!accessFilter.isDecryptAccessRequired()) {</span>
+<span class="fc" id="L592">            return Optional.empty();</span>
+        }
+
+        // Crypto access can be asserted in one of three ways - via account_org, via account_user, or via
+        // view_account_key_links (which checks both, but is slow due to a limitation of the postgres query planner).
+        // The order of these checks is important, don't change it unless you have a specific reason to
+
+<span class="fc" id="L599">        return buildDecryptionAccessViaAccountLinksViewCondition(accessFilter)</span>
+<span class="fc" id="L600">                .or(() -&gt; buildDecryptionAccessViaOrgAccountCondition(accessFilter.actorOrgId())</span>
+<span class="fc" id="L601">                        .or(() -&gt; buildDecryptionAccessViaAccountUserCondition(accessFilter.actorPersonId())))</span>
+<span class="fc" id="L602">                .map(condition -&gt; and(exists(condition)));</span>
+    }
+
+    /**
+     * Asserts current crypto access via account_org (e.g. for a team pro)
+     */
+    private Optional&lt;SelectConditionStep&lt;?&gt;&gt; buildDecryptionAccessViaOrgAccountCondition(Optional&lt;Long&gt; maybeActorOrgId) {
+<span class="fc" id="L609">        return maybeActorOrgId.map(actorOrgId -&gt; selectOne()</span>
+<span class="fc" id="L610">                .from(&quot;core.account_org&quot;)</span>
+<span class="fc" id="L611">                .where(field(&quot;account_id&quot;).eq(field(&quot;ed.account_id&quot;)))</span>
+<span class="fc" id="L612">                .and(field(&quot;org_id&quot;).eq(actorOrgId)));</span>
+    }
+
+    /**
+     * Asserts current crypto access via account_user (e.g. for a patient, indiv pro, carer etc)
+     */
+    private Optional&lt;SelectConditionStep&lt;?&gt;&gt; buildDecryptionAccessViaAccountUserCondition(Optional&lt;Long&gt; maybeActorPersonId) {
+<span class="fc" id="L619">        return maybeActorPersonId.map(actorPersonId -&gt; selectOne()</span>
+<span class="fc" id="L620">                .from(&quot;core.account_user&quot;)</span>
+<span class="fc" id="L621">                .where(field(&quot;account_id&quot;).eq(field(&quot;ed.account_id&quot;)))</span>
+<span class="fc" id="L622">                .and(field(&quot;person_id&quot;).eq(actorPersonId))</span>
+<span class="fc" id="L623">                .and(field(&quot;status&quot;).eq(AccountUserStatus.ACTIVE.toString())));</span>
+    }
+
+    /**
+     * Asserts current crypto access via view_account_key_links (warning: slow). Will only apply if
+     * accessFilter.isAccountLinksJoinPermitted is true
+     */
+    private Optional&lt;SelectConditionStep&lt;?&gt;&gt; buildDecryptionAccessViaAccountLinksViewCondition(AccessFilter accessFilter) {
+<span class="fc bfc" id="L631" title="All 2 branches covered.">        if (accessFilter.isAccountLinksJoinPermitted()) {</span>
+<span class="fc" id="L632">            return accessFilter.actorPersonId().map(actorPersonId -&gt; selectOne()</span>
+<span class="fc" id="L633">                    .from(&quot;core.view_account_key_links_2&quot;)</span>
+<span class="fc" id="L634">                    .where(field(&quot;person_id&quot;).eq(actorPersonId))</span>
+<span class="fc" id="L635">                    .and(field(&quot;ed.account_id&quot;).eq(field(&quot;account_id&quot;))));</span>
+        }
+
+<span class="fc" id="L638">        return Optional.empty();</span>
+    }
+
+    /**
+     * Builds a condition for the patient view suspended based on the supplied accessFilter
+     */
+    private Optional&lt;Condition&gt; patientViewSuspendedCondition(AccessFilter accessFilter) {
+<span class="fc bfc" id="L645" title="All 2 branches covered.">        if (accessFilter.isPatientViewSuspendedRequired()) {</span>
+<span class="fc" id="L646">            return Optional.of(</span>
+<span class="fc" id="L647">                    or(</span>
+<span class="fc" id="L648">                            field(&quot;ed.sourceOrgId&quot;).isNull(),</span>
+<span class="fc" id="L649">                            cast(field(&quot;ed.datatype&quot;), String.class)</span>
+<span class="fc" id="L650">                                    .in(&quot;phplan&quot;, &quot;phPlanAttachment&quot;),</span>
+<span class="fc" id="L651">                            and(</span>
+<span class="fc" id="L652">                                    cast(field(&quot;ed.datatype&quot;), String.class).eq(&quot;message&quot;),</span>
+<span class="fc" id="L653">                                    field(&quot;ed.sourcePersonId&quot;).isNotNull()),</span>
+<span class="fc" id="L654">                            exists(select(field(&quot;org.id&quot;)).from(table(&quot;public.org&quot;).as(&quot;org&quot;)).where((field(&quot;org.id&quot;).eq(cast(field(&quot;ed.sourceOrgId&quot;), Long.class))),</span>
+<span class="fc" id="L655">                                    field(&quot;org.patientviewsuspended&quot;).eq(false)))));</span>
+        }
+<span class="fc" id="L657">        return Optional.empty();</span>
+    }
+
+    private Optional&lt;Condition&gt; buildAccessConditionsWithParticipantTable(@NotNull AccessFilter accessFilter, @NotNull String prefixDot) {
+
+<span class="pc bpc" id="L662" title="1 of 2 branches missed.">        Optional&lt;Condition&gt; tdvCondition = accessFilter.isTeamDataViewApplicable()</span>
+<span class="fc" id="L663">                ? Optional.of(field(prefixDot + &quot;sourceTeamId&quot;).eq(accessFilter.actorTeamId().orElseThrow(IllegalStateException::new)))</span>
+<span class="pc" id="L664">                : Optional.empty();</span>
+
+<span class="fc" id="L666">        PrivacyFilter privacyFilter = null;</span>
+<span class="fc" id="L667">        Condition participantCondition = field(&quot;p.id&quot;).isNotNull();</span>
+
+<span class="pc bpc" id="L669" title="1 of 4 branches missed.">        if (accessFilter.isTeamDataViewOnly() &amp;&amp; tdvCondition.isPresent() /* To satisfy CI*/) {</span>
+<span class="fc" id="L670">            return Optional.of(participantCondition.or(tdvCondition.get()));</span>
+        }
+<span class="pc bpc" id="L672" title="1 of 2 branches missed.">        if (accessFilter.getPrivacyFilter().isPresent()) {</span>
+<span class="fc" id="L673">            privacyFilter = accessFilter.getPrivacyFilter().get();</span>
+<span class="fc" id="L674">            ImmutableList&lt;Condition&gt; privacyConditions = setPrivacyOrTdvConditions(privacyFilter, prefixDot,</span>
+                    tdvCondition, true);
+<span class="fc" id="L676">            return Optional.of(DSL.and(privacyConditions).or(participantCondition));</span>
+        }
+<span class="nc" id="L678">        return Optional.of(participantCondition);</span>
+    }
+
+    /**
+     * Builds a List of conditions based on the privacy settings of the active access filter, e.g. granted consent,
+     * team data view, privacy flags, etc
+     */
+    @NotNull
+    private ImmutableList&lt;Condition&gt; setPrivacyOrTdvConditions(
+            PrivacyFilter privacy,
+            String prefixDot,
+            Optional&lt;Condition&gt; tdvCondition,
+            boolean includePrivacyFlags) {
+
+<span class="fc" id="L692">        ImmutableList&lt;Condition&gt; basePrivacyConditions = buildBasePrivacyConditions(privacy, prefixDot, tdvCondition);</span>
+
+<span class="pc bpc" id="L694" title="1 of 2 branches missed.">        if (includePrivacyFlags) {</span>
+<span class="fc" id="L695">            ImmutableList&lt;Condition&gt; privacyFlagsConditions = buildLatestPrivacyFlagsConditions(privacy, tdvCondition);</span>
+
+<span class="pc bpc" id="L697" title="1 of 4 branches missed.">            return privacyFlagsConditions.isEmpty() &amp;&amp; basePrivacyConditions.isEmpty() ? ImmutableList.of()</span>
+<span class="fc" id="L698">                    : ImmutableList.of(</span>
+<span class="fc" id="L699">                            joinConditions(field(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.id&quot;).isNotNull(), privacyFlagsConditions)</span>
+<span class="fc" id="L700">                                    .or(joinConditions(field(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.id&quot;).isNull(), basePrivacyConditions)));</span>
+        } else {
+<span class="nc" id="L702">            return basePrivacyConditions;</span>
+        }
+    }
+
+    /**
+     * Conditions if no privacy flags present (use base consent in menu_data)
+     */
+    private ImmutableList&lt;Condition&gt; buildBasePrivacyConditions(PrivacyFilter privacy, String prefixDot, Optional&lt;Condition&gt; tdvCondition) {
+
+<span class="fc" id="L711">        ImmutableList.Builder&lt;Condition&gt; builder = ImmutableList.builder();</span>
+<span class="fc bfc" id="L712" title="All 2 branches covered.">        if (!privacy.isGeneralConsentGranted()) {</span>
+<span class="fc" id="L713">            builder.add(buildConsentOrTdvCondition(prefixDot + &quot;requireGeneral&quot;, tdvCondition, true));</span>
+        }
+<span class="fc bfc" id="L715" title="All 2 branches covered.">        if (!privacy.isMentalHealthConsentGranted()) {</span>
+<span class="fc" id="L716">            builder.add(buildConsentOrTdvCondition(prefixDot + &quot;requireMentalHealth&quot;, tdvCondition, true));</span>
+        }
+<span class="fc bfc" id="L718" title="All 2 branches covered.">        if (!privacy.isSexualHealthConsentGranted()) {</span>
+<span class="fc" id="L719">            builder.add(buildConsentOrTdvCondition(prefixDot + &quot;requireSexualHealth&quot;, tdvCondition, true));</span>
+        }
+<span class="fc bfc" id="L721" title="All 2 branches covered.">        if (!privacy.isSocialCareConsentGranted()) {</span>
+<span class="fc" id="L722">            builder.add(buildConsentOrTdvCondition(prefixDot + &quot;requireSocialCare&quot;, tdvCondition, true));</span>
+        }
+
+<span class="fc" id="L725">        return builder.build();</span>
+    }
+
+    /**
+     * Conditions if privacy flags present (we use latest for each uniqueid)
+     */
+    private ImmutableList&lt;Condition&gt; buildLatestPrivacyFlagsConditions(PrivacyFilter privacy, Optional&lt;Condition&gt; tdvCondition) {
+
+<span class="fc" id="L733">        ImmutableList.Builder&lt;Condition&gt; builder = ImmutableList.builder();</span>
+<span class="fc bfc" id="L734" title="All 2 branches covered.">        if (!privacy.isGeneralConsentGranted()) {</span>
+<span class="fc" id="L735">            builder.add(buildConsentOrTdvCondition(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.require_general&quot;, tdvCondition, false));</span>
+        }
+<span class="fc bfc" id="L737" title="All 2 branches covered.">        if (!privacy.isMentalHealthConsentGranted()) {</span>
+<span class="fc" id="L738">            builder.add(buildConsentOrTdvCondition(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.require_mental_health&quot;, tdvCondition, false));</span>
+        }
+<span class="fc bfc" id="L740" title="All 2 branches covered.">        if (!privacy.isSexualHealthConsentGranted()) {</span>
+<span class="fc" id="L741">            builder.add(buildConsentOrTdvCondition(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.require_sexual_health&quot;, tdvCondition, false));</span>
+        }
+<span class="fc bfc" id="L743" title="All 2 branches covered.">        if (!privacy.isSocialCareConsentGranted()) {</span>
+<span class="fc" id="L744">            builder.add(buildConsentOrTdvCondition(LATEST_PRIVACY_FLAGS_TABLE_ALIAS + &quot;.require_social_care&quot;, tdvCondition, false));</span>
+        }
+
+<span class="fc" id="L747">        return builder.build();</span>
+    }
+
+    @NotNull
+    private Condition buildConsentOrTdvCondition(String prefixedField, Optional&lt;Condition&gt; tdvCondition, boolean fieldIsNullable) {
+<span class="fc" id="L752">        Condition consentCondition = field(prefixedField).eq(false);</span>
+
+<span class="fc bfc" id="L754" title="All 2 branches covered.">        if (fieldIsNullable) {</span>
+<span class="fc" id="L755">            consentCondition = consentCondition.or(field(prefixedField).isNull());</span>
+        }
+
+<span class="fc" id="L758">        return tdvCondition.map(consentCondition::or).orElse(consentCondition);</span>
+    }
+
+    private Condition joinConditions(Condition baseCondition, ImmutableList&lt;Condition&gt; conditions) {
+<span class="fc" id="L762">        return conditions.stream()</span>
+<span class="fc" id="L763">                .reduce(baseCondition, (ret, condition) -&gt; ret.and(condition));</span>
+    }
+
+    @NotNull
+    private String menuDataTypeCast(ImmutableSet&lt;String&gt; types) {
+<span class="fc" id="L768">        return types.stream()</span>
+<span class="fc" id="L769">                .map(t -&gt; format(MENU_DATA_TYPE_CAST_TEMPLATE, t))</span>
+<span class="fc" id="L770">                .collect(joining(&quot;,&quot;));</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

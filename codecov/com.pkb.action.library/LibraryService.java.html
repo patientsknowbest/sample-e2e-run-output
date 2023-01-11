@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LibraryService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.library</a> &gt; <span class="el_source">LibraryService.java</span></div><h1>LibraryService.java</h1><pre class="source lang-java linenums">package com.pkb.action.library;
+
+import com.google.common.collect.ImmutableMap;
+import com.pkb.action.AbstractService;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.dto.BreadcrumbDto;
+import com.pkb.dto.ImmutableBreadcrumbDto;
+import com.pkb.dto.ImmutableCheckboxDto;
+import com.pkb.dto.ImmutableInstituteLibraryDto;
+import com.pkb.dto.ImmutableLibraryEntryDto;
+import com.pkb.dto.ImmutablePersonalLibraryEntryDto;
+import com.pkb.dto.InstituteLibraryDto;
+import com.pkb.dto.LibraryEntryDto;
+import com.pkb.dto.PersonalLibraryEntryDto;
+import com.pkb.institute.entity.InstituteLibraryEntry;
+import com.pkb.institute.entity.Team;
+import com.pkb.personallibrary.entity.PersonalLibraryEntryDTO;
+import com.pkb.service.datapoint.DataWithUIPermissions;
+import com.pkb.service.datapoint.impl.DataPointManager;
+import com.pkb.service.personallibrary.PersonalLibraryManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.util.UrlUtil;
+import io.micrometer.core.instrument.Metrics;
+import org.apache.commons.lang3.NotImplementedException;
+import org.apache.http.client.utils.URIBuilder;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.springframework.context.MessageSource;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.SortedSet;
+import java.util.stream.Collectors;
+
+import static com.opensymphony.xwork2.Action.INPUT;
+import static com.pkb.action.library.ShowLibraryAction.PATIENT_REFERER;
+import static com.pkb.institute.entity.InstituteLibraryEntry.ContentType.LINK;
+import static com.pkb.util.WebNamespace.LIBRARY;
+import static org.apache.commons.collections.CollectionUtils.isNotEmpty;
+
+public class LibraryService extends AbstractService {
+
+    private static final String LIBRARY_SERVICE_TIMER_NAME = &quot;pkb_phr_library_service&quot;;
+
+    private final PersonalLibraryManager personalLibraryManager;
+    private final TeamUserManager teamUserManager;
+
+    public LibraryService(PersonalLibraryManager personalLibraryManager,
+                          DataPointManager dataPointManager,
+                          MessageSource messageSource,
+                          TeamUserManager teamUserManager) {
+<span class="fc" id="L59">        super(dataPointManager, messageSource);</span>
+<span class="fc" id="L60">        this.personalLibraryManager = personalLibraryManager;</span>
+<span class="fc" id="L61">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L62">    }</span>
+
+    @Value.Immutable
+    public interface BuildLibrariesRequest extends BaseRequest, NhsStyleRequest {
+        Optional&lt;String&gt; tkid();
+    }
+
+    public UILibraryDto buildLibraries(BuildLibrariesRequest request) {
+<span class="fc" id="L70">        return Metrics.timer(LIBRARY_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;build&quot;).record(() -&gt;</span>
+<span class="fc" id="L71">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L72">                    UILibraryDto dto = new UILibraryDto();</span>
+<span class="fc" id="L73">                    boolean nhsStyle = request.nhsStyle();</span>
+<span class="fc" id="L74">                    dto.setNhsStyle(nhsStyle);</span>
+
+                    //populate personal library entries
+<span class="fc" id="L77">                    List&lt;PersonalLibraryEntryDTO&gt; libraryEntryEntities = personalLibraryManager.getLibrary(loggedInContext);</span>
+<span class="fc" id="L78">                    HashSet&lt;DataWithUIPermissions&lt;PersonalLibraryEntryDTO&gt;&gt; dataWithUIPermissions = new HashSet&lt;&gt;</span>
+<span class="fc" id="L79">                            (dataPointManager.getPermissions(libraryEntryEntities, request.getEHRRequestContext()));</span>
+<span class="fc" id="L80">                    dto.setLibraryEntryDtos(dataWithUIPermissions.stream()</span>
+<span class="fc" id="L81">                            .map(d -&gt; mapToPersonalLibraryEntryDto(d, nhsStyle, request))</span>
+<span class="fc" id="L82">                            .collect(Collectors.toList()));</span>
+
+                    //populate institute libraries
+<span class="fc" id="L85">                    List&lt;Team&gt; teams = teamUserManager.getUserTeamsStrictlyFiltered(loggedInContext, true, Team.Lazy.LIBRARY);</span>
+
+<span class="pc bpc" id="L87" title="1 of 4 branches missed.">                    if (loggedInContext.isPatientAccount() &amp;&amp; !teams.isEmpty()) {</span>
+                        //deduplicate the list
+<span class="fc" id="L89">                        LinkedHashSet&lt;Team&gt; teamSet = new LinkedHashSet&lt;&gt;(teams);</span>
+<span class="fc" id="L90">                        LinkedList&lt;InstituteLibraryDto&gt; instituteLibraries = new LinkedList&lt;&gt;();</span>
+
+<span class="fc" id="L92">                        teamSet.forEach(team -&gt; {</span>
+<span class="fc" id="L93">                            SortedSet&lt;InstituteLibraryEntry&gt; teamLibraryEntries = team.getLibraryEntries();</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">                            if (isNotEmpty(teamLibraryEntries)) {</span>
+<span class="fc" id="L95">                                Long teamId = team.getId();</span>
+
+<span class="fc" id="L97">                                long userId = loggedInContext.getContextOrAccessingUserId();</span>
+<span class="fc" id="L98">                                instituteLibraries.addFirst(ImmutableInstituteLibraryDto.builder()</span>
+<span class="fc" id="L99">                                        .teamId(teamId)</span>
+<span class="fc" id="L100">                                        .orgAndTeamName(team.getOrg().getName() + &quot; &quot; + team.getName())</span>
+<span class="fc" id="L101">                                        .libraryEntries(teamLibraryEntries.stream()</span>
+<span class="fc" id="L102">                                                .filter(e -&gt; isDisplayedAtCurrentFolderLevel(request.tkid(), e, teamSet))</span>
+<span class="fc" id="L103">                                                .map(d -&gt; mapToLibraryEntryDto(d, nhsStyle, loggedInContext, request)).collect(Collectors.toList()))</span>
+<span class="fc" id="L104">                                        .homeBreadCrumbUrl(buildHomeBreadcrumbUrl(teamId, userId))</span>
+<span class="fc" id="L105">                                        .addAllCrumbs(buildBreadcrumbs(request.tkid(), teamId, teamSet, userId))</span>
+<span class="fc" id="L106">                                        .build());</span>
+                            }
+<span class="fc" id="L108">                        });</span>
+<span class="fc" id="L109">                        dto.setInstituteLibraries(instituteLibraries);</span>
+                    }
+
+<span class="fc" id="L112">                    dto.setActionResult(INPUT);</span>
+<span class="fc" id="L113">                    return dto;</span>
+                }
+<span class="fc" id="L115">        ).orElseThrow(loggedInContextNotFoundException(&quot;build library&quot;)));</span>
+    }
+
+    private PersonalLibraryEntryDto mapToPersonalLibraryEntryDto(DataWithUIPermissions&lt;PersonalLibraryEntryDTO&gt; dataWithUIPermissions,
+                                                                 boolean nhsStyle, BuildLibrariesRequest request) {
+<span class="fc" id="L120">        Long contextUserId = request.getEHRRequestContext().getContextUserId().orElse(null);</span>
+<span class="fc" id="L121">        PersonalLibraryEntryDTO entity = dataWithUIPermissions.getData();</span>
+<span class="fc" id="L122">        return ImmutablePersonalLibraryEntryDto.builder()</span>
+<span class="fc" id="L123">                .from(buildLibraryEntryDto(entity.getDescription(), LINK, nhsStyle, request)</span>
+<span class="fc" id="L124">                        .href(entity.getUrl())</span>
+<span class="fc" id="L125">                        .discussCheckbox(ImmutableCheckboxDto.builder()</span>
+<span class="fc" id="L126">                                .name(&quot;selectedPersonalLibraryIds&quot;)</span>
+<span class="fc" id="L127">                                .value(String.valueOf(entity.getId()))</span>
+<span class="fc" id="L128">                                .build())</span>
+<span class="fc" id="L129">                        .build())</span>
+<span class="fc" id="L130">                .editUrl(buildUrlIfApplicable(dataWithUIPermissions.isEditOrDeletable(),</span>
+<span class="fc" id="L131">                        &quot;editLibrary&quot;, &quot;editingId&quot;, entity.getId(), contextUserId))</span>
+<span class="fc" id="L132">                .editPrivacyUrl(buildUrlIfApplicable(dataWithUIPermissions.isPrivacyFlagEditable(),</span>
+<span class="fc" id="L133">                        &quot;editLibraryPrivacy&quot;, &quot;dataPointId&quot;, entity.getId(), contextUserId))</span>
+<span class="fc" id="L134">                .deleteUrl(buildUrlIfApplicable(dataWithUIPermissions.isEditOrDeletable(),</span>
+<span class="fc" id="L135">                        &quot;deleteLibraryEntry&quot;, &quot;deleteId&quot;, entity.getId(), contextUserId))</span>
+<span class="fc" id="L136">                .baseFields(entity.getBaseFields())</span>
+<span class="fc" id="L137">                .build();</span>
+    }
+
+    @NotNull
+    private Optional&lt;String&gt; buildUrlIfApplicable(boolean isApplicable, String action, String parameterName,
+                                                  Long entityId, Long contextUserId) {
+<span class="fc bfc" id="L143" title="All 2 branches covered.">        return isApplicable ? Optional.of(UrlUtil.buildHref(LIBRARY, action,</span>
+<span class="fc" id="L144">                ImmutableMap.of(parameterName, String.valueOf(entityId)),</span>
+<span class="fc" id="L145">                contextUserId)) : Optional.empty();</span>
+    }
+
+    private LibraryEntryDto mapToLibraryEntryDto(InstituteLibraryEntry entity, boolean nhsStyle,
+                                                 LoggedInEHRRequestContext loggedInContext, BuildLibrariesRequest request) {
+<span class="fc" id="L150">        return buildLibraryEntryDto(entity.getDescription(), entity.getContentType(), nhsStyle, request)</span>
+<span class="fc" id="L151">                .href(buildHref(entity, loggedInContext))</span>
+<span class="fc" id="L152">                .discussCheckbox(ImmutableCheckboxDto.builder()</span>
+<span class="fc" id="L153">                        .name(&quot;selectedInstituteLibraryIds&quot;)</span>
+<span class="fc" id="L154">                        .value(String.format(&quot;%d,%d&quot;, entity.getId(),</span>
+<span class="fc" id="L155">                                entity.getInstitute().getId()))</span>
+<span class="fc" id="L156">                        .build())</span>
+<span class="fc" id="L157">                .build();</span>
+    }
+
+    private ImmutableLibraryEntryDto.Builder buildLibraryEntryDto(String text,
+                                                                  InstituteLibraryEntry.ContentType contentType,
+                                                                  boolean nhsStyle,
+                                                                  BuildLibrariesRequest request) {
+<span class="fc" id="L164">        String target = &quot;&quot;;</span>
+<span class="fc" id="L165">        Optional&lt;String&gt; icon = Optional.empty();</span>
+<span class="fc" id="L166">        String title = &quot;&quot;;</span>
+
+<span class="pc bpc" id="L168" title="2 of 5 branches missed.">        switch (contentType) {</span>
+            case LINK:
+<span class="fc" id="L170">                target = &quot;_blank&quot;;</span>
+<span class="fc" id="L171">                title = messageSource.getMessage(&quot;viewLibrary.txt.open_in_new_window&quot;, null, request.getLocale());</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">                icon = nhsStyle ? Optional.empty() : Optional.of(&quot;fa fa-link&quot;);</span>
+<span class="fc" id="L173">                break;</span>
+            case FOLDER:
+<span class="fc bfc" id="L175" title="All 2 branches covered.">                icon = nhsStyle ? Optional.of(&quot;folder&quot;) : Optional.of(&quot;fa fa-folder&quot;);</span>
+<span class="fc" id="L176">                break;</span>
+            case MEDIA:
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                icon = nhsStyle ? Optional.empty() : Optional.of(&quot;fa fa-video-camera&quot;);</span>
+<span class="nc" id="L179">                break;</span>
+            case FILE:
+<span class="fc bfc" id="L181" title="All 2 branches covered.">                icon = nhsStyle ? Optional.empty() : Optional.of(&quot;fa fa-file&quot;);</span>
+<span class="fc" id="L182">                break;</span>
+            default:
+<span class="nc" id="L184">                throw new NotImplementedException(&quot;Content type &quot; + contentType + &quot; not implemented yet!&quot;);</span>
+        }
+
+<span class="fc" id="L187">        return ImmutableLibraryEntryDto.builder()</span>
+<span class="fc" id="L188">                .text(text)</span>
+<span class="fc" id="L189">                .target(target)</span>
+<span class="fc" id="L190">                .iconCssClass(icon)</span>
+<span class="fc" id="L191">                .title(title);</span>
+    }
+
+    private String buildHref(InstituteLibraryEntry entry, LoggedInEHRRequestContext loggedInContext) {
+<span class="fc bfc" id="L195" title="All 3 branches covered.">        switch (entry.getContentType()) {</span>
+            case FILE:
+<span class="fc" id="L197">                return LibraryUtil.buildLibraryFileURL(entry.getUrl());</span>
+            case FOLDER:
+<span class="fc" id="L199">                return LibraryUtil.buildLibraryFolderURL(entry, PATIENT_REFERER, Optional.of(entry.getInstitute().getId()),</span>
+<span class="fc" id="L200">                        Optional.of(loggedInContext.getContextOrAccessingUserId()));</span>
+            default:
+<span class="fc" id="L202">                return entry.getUrl();</span>
+        }
+    }
+
+    /*
+     This method checks whether a given entry should be shown or not according to where we are in the folder hierarchy.
+     As the entries can be arranged into folders, subfolders etc not all of a teams entries will necessarily be shown
+     at the same time, some could be hidden inside a folder or be a level further up for example.
+    */
+    private boolean isDisplayedAtCurrentFolderLevel(Optional&lt;String&gt; tkid, InstituteLibraryEntry entry, LinkedHashSet&lt;Team&gt; teams) {
+<span class="fc" id="L212">        return tkid.map(tk -&gt; {</span>
+            //we are in folder, find what team the folder belongs to
+<span class="fc" id="L214">            long folderId = Long.parseLong(tk.trim());</span>
+<span class="fc" id="L215">            Optional&lt;Long&gt; teamIdOfFolder = getTeamIdOfFolder(teams, folderId);</span>
+<span class="pc bpc" id="L216" title="1 of 4 branches missed.">            if (teamIdOfFolder.isPresent() &amp;&amp; Objects.equals(entry.getInstitute().getId(), teamIdOfFolder.get())) {</span>
+                //the entry belongs to the team who's folder we are in, so it can only be displayed if it is a direct
+                //child of the folder
+<span class="fc bfc" id="L219" title="All 4 branches covered.">                return entry.getParentId() != null &amp;&amp; entry.getParentId().equals(folderId);</span>
+            } else {
+                //the entry belongs to a team who's library is at the root level (we are only ever in one folder at a
+                //time all other teams reset to root when we enter a folder), all of a teams root entries should be shown,
+                //aka those with no parent id
+<span class="fc bfc" id="L224" title="All 2 branches covered.">                return entry.getParentId() == null;</span>
+            }
+<span class="fc bfc" id="L226" title="All 2 branches covered.">        }).orElse(entry.getParentId() == null); //we are at the root, all of a teams root entries should be shown,</span>
+        // aka those with no parent id
+    }
+
+    @NotNull
+    private Optional&lt;Long&gt; getTeamIdOfFolder(LinkedHashSet&lt;Team&gt; teams, long folderId) {
+<span class="fc" id="L232">        return findLibraryEntryById(folderId, teams)</span>
+<span class="fc" id="L233">                .map(InstituteLibraryEntry::getInstitute)</span>
+<span class="fc" id="L234">                .map(Team::getId);</span>
+    }
+
+    private String buildHomeBreadcrumbUrl(Long teamId, Long userId)  {
+<span class="fc" id="L238">        URIBuilder uriBuilder = new URIBuilder();</span>
+<span class="fc" id="L239">        uriBuilder.setPath(&quot;/library/manageLibrary.action&quot;);</span>
+<span class="fc" id="L240">        uriBuilder.addParameter(&quot;contextUserId&quot;, String.valueOf(userId));</span>
+<span class="fc" id="L241">        uriBuilder.setFragment(&quot;team-&quot; + teamId);</span>
+<span class="fc" id="L242">        return uriBuilder.toString();</span>
+    }
+
+    /*
+     This method builds the list of breadcrumbs for a given team, they are used to navigate around the folder hierarchy.
+     They are basically a list of folder links representing the folder hierarchy of the current location. If we are in
+     a folder for one team all other teams get reset to the root level.
+     */
+    private List&lt;BreadcrumbDto&gt; buildBreadcrumbs(Optional&lt;String&gt; tkid, Long teamId, LinkedHashSet&lt;Team&gt; teams, long userId) {
+<span class="fc" id="L251">        return tkid.map(tk -&gt; {</span>
+            //we are in folder, find what team the folder belongs to
+<span class="fc" id="L253">            long folderId = Long.parseLong(tk.trim());</span>
+<span class="fc" id="L254">            Optional&lt;Long&gt; teamIdOfFolder = getTeamIdOfFolder(teams, folderId);</span>
+<span class="fc" id="L255">            return teamIdOfFolder.map(tf -&gt; {</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">                if (Objects.equals(teamId, tf)) {</span>
+                    //the folder id belongs to the team we are building the breadcrumbs for, get the folder entry
+<span class="fc" id="L258">                    Optional&lt;InstituteLibraryEntry&gt; currentFolderEntry = findLibraryEntryById(folderId, teams);</span>
+<span class="fc" id="L259">                    List&lt;BreadcrumbDto&gt; breadcrumbs = new ArrayList&lt;&gt;();</span>
+
+                    //add the current folder as a breadcrumb, this should not be clickable as we are at this location already
+<span class="fc" id="L262">                    currentFolderEntry.ifPresent(entry -&gt;</span>
+<span class="fc" id="L263">                            breadcrumbs.add(ImmutableBreadcrumbDto.builder()</span>
+<span class="fc" id="L264">                                    .text(entry.getDescription())</span>
+<span class="fc" id="L265">                                    .href(&quot;&quot;)</span>
+<span class="fc" id="L266">                                    .build()));</span>
+
+                    //move up the folder hierarchy and add each folder as a breadcrumb, until we hit the root, these should all be clickable
+<span class="fc" id="L269">                    boolean isRoot = false;</span>
+<span class="pc bpc" id="L270" title="1 of 4 branches missed.">                    while (!isRoot &amp;&amp; currentFolderEntry.isPresent()) {</span>
+<span class="fc bfc" id="L271" title="All 2 branches covered.">                        if (currentFolderEntry.get().getParentId() == null) {</span>
+<span class="fc" id="L272">                            isRoot = true;</span>
+                        } else {
+<span class="fc" id="L274">                            currentFolderEntry = findLibraryEntryById(currentFolderEntry.get().getParentId(), teams);</span>
+<span class="fc" id="L275">                            currentFolderEntry.ifPresent(entry -&gt;</span>
+<span class="fc" id="L276">                                    breadcrumbs.add(ImmutableBreadcrumbDto.builder()</span>
+<span class="fc" id="L277">                                            .text(entry.getDescription())</span>
+<span class="fc" id="L278">                                            .href(LibraryUtil.buildLibraryFolderURL(entry, PATIENT_REFERER,</span>
+<span class="fc" id="L279">                                                    Optional.of(teamId), Optional.of(userId)))</span>
+<span class="fc" id="L280">                                            .build()));</span>
+                        }
+                    }
+                    //reverse the breadcrumbs so the first one is the closest to the root and the last one is the current location
+<span class="fc" id="L284">                    Collections.reverse(breadcrumbs);</span>
+<span class="fc" id="L285">                    return breadcrumbs;</span>
+                } else {
+                    //the folder id belongs to a different team, so this team is at the root level, no breadcrumbs required
+<span class="fc" id="L288">                    return new ArrayList&lt;BreadcrumbDto&gt;();</span>
+                }
+<span class="fc" id="L290">            }).orElse(List.of());//we fail to find the team id of the folder, return to root level</span>
+<span class="fc" id="L291">        }).orElse(List.of()); //we are not in a folder, all the teams are at root level, no breadcrumbs required</span>
+    }
+
+    private Optional&lt;InstituteLibraryEntry&gt; findLibraryEntryById(Long id, LinkedHashSet&lt;Team&gt; teams) {
+<span class="fc" id="L295">        return teams.stream()</span>
+<span class="fc" id="L296">                .map(Team::getLibraryEntries)</span>
+<span class="fc" id="L297">                .flatMap(Collection::stream)</span>
+<span class="fc" id="L298">                .filter(libraryEntry -&gt; Objects.equals(libraryEntry.getId(), id))</span>
+<span class="fc" id="L299">                .findFirst();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

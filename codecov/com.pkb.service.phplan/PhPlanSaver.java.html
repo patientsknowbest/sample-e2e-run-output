@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PhPlanSaver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.phplan</a> &gt; <span class="el_source">PhPlanSaver.java</span></div><h1>PhPlanSaver.java</h1><pre class="source lang-java linenums">package com.pkb.service.phplan;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.datamodel.plantemplate.TemplateAttachment;
+import com.pkb.document.entity.Attachment;
+import com.pkb.phplan.entity.PHPlan;
+import com.pkb.phplan.entity.PHPlanAttachment;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.util.ImageUtil;
+import com.pkb.util.security.FileSecurityHandler;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.stereotype.Component;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+
+@Component
+public class PhPlanSaver {
+    private final UserManager userManager;
+    private final FileSecurityHandler fileSecurityHandler;
+    private final PhrConfig config;
+    private final PlanManager planManager;
+    private final PlanAttachmentManager planAttachmentManager;
+
+    @Autowired
+    public PhPlanSaver(UserManager userManager,
+                       FileSecurityHandler fileSecurityHandler,
+                       PhrConfig config,
+                       @Lazy PlanManager planManager,
+<span class="fc" id="L44">                       @Lazy PlanAttachmentManager planAttachmentManager) {</span>
+<span class="fc" id="L45">        this.userManager = userManager;</span>
+<span class="fc" id="L46">        this.fileSecurityHandler = fileSecurityHandler;</span>
+<span class="fc" id="L47">        this.config = config;</span>
+<span class="fc" id="L48">        this.planManager = planManager;</span>
+<span class="fc" id="L49">        this.planAttachmentManager = planAttachmentManager;</span>
+<span class="fc" id="L50">    }</span>
+
+    public PhPlanSaveResult insertOrOverwriteUserPlan(SourceDetails sourceDetails, @NotNull EHRRequestContext requestContext, long userId, PHPlan pHPlan, List&lt;TemplateAttachment&gt; planTemplateAttachments) {
+<span class="fc" id="L53">        Long userAccountId = userManager.getDefaultAccountId(userId);</span>
+<span class="fc" id="L54">        pHPlan.setId(null);</span>
+<span class="fc" id="L55">        boolean isUpdate = planManager.previousVersionExists(pHPlan.getBaseFields().getUniqueId());</span>
+
+<span class="fc" id="L57">        Long planId = savePHPlan(requestContext, userAccountId, pHPlan);</span>
+
+<span class="fc bfc" id="L59" title="All 2 branches covered.">        if (pHPlan.getAttachmentAsActionPlanContent() != null) {</span>
+<span class="fc" id="L60">            PHPlanAttachment binaryContent = buildPhplanAttachment(pHPlan.getAttachmentAsActionPlanContent(), userId, userAccountId, sourceDetails);</span>
+<span class="fc" id="L61">            binaryContent.setCarePlanMainContent(Boolean.TRUE);</span>
+<span class="fc" id="L62">            addAttachment(sourceDetails, requestContext, planId, binaryContent);</span>
+        }
+
+<span class="fc" id="L65">        createAttachments(sourceDetails, requestContext, userId, planTemplateAttachments, null, null, userAccountId, new HashMap&lt;&gt;(), planId);</span>
+<span class="fc" id="L66">        return new PhPlanSaveResult(planId, isUpdate);</span>
+    }
+
+
+    PhPlanSaveResult saveUserPlan(SourceDetails sourceDetails, @NotNull LoggedInEHRRequestContext requestContext, long loggedInUserId, long userId, PHPlan pHPlan,
+                                  List&lt;TemplateAttachment&gt; planTemplateAttachments, Set&lt;Long&gt; wantedAttachmentIds,
+                                  List&lt;Attachment&gt; nonTemplateAttachments) {
+
+<span class="fc" id="L74">        Long userAccountId = userManager.getDefaultAccountId(userId);</span>
+
+<span class="fc" id="L76">        Optional&lt;PHPlan&gt; maybePreviousPlan = getPreviousPlan(requestContext, pHPlan, userAccountId);</span>
+
+<span class="fc" id="L78">        Map&lt;String, PHPlanAttachment&gt; planAttachmentMap = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        if (maybePreviousPlan.isPresent()) {</span>
+<span class="fc" id="L80">            planAttachmentMap = getPlanAttachmentMap(requestContext, maybePreviousPlan.get(), userAccountId);</span>
+        }
+
+<span class="fc bfc" id="L83" title="All 4 branches covered.">        if (maybePreviousPlan.isEmpty() || (maybePreviousPlan.get().getStatus() != PHPlan.PlanStatus.INDRAFT)) {</span>
+<span class="fc" id="L84">            pHPlan.setId(null);</span>
+        } else {
+<span class="fc" id="L86">            pHPlan.setId(maybePreviousPlan.get().getId()); // overwrite draft</span>
+        }
+
+<span class="fc" id="L89">        Long planId = savePHPlan(requestContext, userAccountId, pHPlan);</span>
+
+<span class="fc bfc" id="L91" title="All 2 branches covered.">        if (pHPlan.getAttachmentAsActionPlanContent() != null) {</span>
+<span class="fc" id="L92">            PHPlanAttachment binaryContent = buildPhplanAttachment(pHPlan.getAttachmentAsActionPlanContent(), loggedInUserId, userAccountId, sourceDetails);</span>
+<span class="fc" id="L93">            binaryContent.setCarePlanMainContent(Boolean.TRUE);</span>
+<span class="fc" id="L94">            addAttachment(sourceDetails, requestContext, planId, binaryContent);</span>
+        }
+
+        // Two cases for attachments
+        // 1. We are overwriting an existing draft: so everything in patientPlanAttachmentMap is already there
+        // 2. We are creating a fresh document so nothing is already there
+
+<span class="fc bfc" id="L101" title="All 2 branches covered.">        if (isDraftPlanUpdate(maybePreviousPlan)) {</span>
+<span class="fc" id="L102">            updateAttachments(sourceDetails, requestContext, userId, planTemplateAttachments, wantedAttachmentIds, nonTemplateAttachments, userAccountId, planAttachmentMap, planId);</span>
+        } else {
+<span class="fc" id="L104">            createAttachments(sourceDetails, requestContext, loggedInUserId, planTemplateAttachments, wantedAttachmentIds, nonTemplateAttachments, userAccountId, planAttachmentMap, planId);</span>
+        }
+<span class="fc" id="L106">        return new PhPlanSaveResult(planId, maybePreviousPlan.isPresent());</span>
+    }
+
+    private void createAttachments(SourceDetails sourceDetails, EHRRequestContext requestContext, long loggedInUserId, List&lt;TemplateAttachment&gt; planTemplateAttachments, Set&lt;Long&gt; wantedAttachmentIds, List&lt;Attachment&gt; nonTemplateAttachments, Long userAccountId, Map&lt;String, PHPlanAttachment&gt; planAttachmentMap, Long planId) {
+        PHPlanAttachment planAttachment;
+<span class="fc bfc" id="L111" title="All 2 branches covered.">        for (TemplateAttachment templateAttachment : planTemplateAttachments) {</span>
+<span class="pc bpc" id="L112" title="1 of 2 branches missed.">            if (wantedAttachmentIds.contains(templateAttachment.getId())) {</span>
+<span class="nc" id="L113">                planAttachment = planAttachmentMap.get(templateAttachment.getName());</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">                if (planAttachment == null) {</span>
+<span class="nc" id="L115">                    planAttachment = buildPhplanAttachment(templateAttachment, loggedInUserId, userAccountId, sourceDetails);</span>
+                }
+<span class="nc" id="L117">                addAttachment(sourceDetails, requestContext, planId, planAttachment);</span>
+            }
+<span class="fc" id="L119">        }</span>
+
+<span class="fc bfc" id="L121" title="All 2 branches covered.">        if (nonTemplateAttachments != null) {</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">            for (Attachment attachment : nonTemplateAttachments) {</span>
+<span class="fc" id="L123">                planAttachment = planAttachmentMap.get(attachment.getFilename());</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">                if (planAttachment == null) {</span>
+<span class="fc" id="L125">                    planAttachment = buildPhplanAttachment(attachment, loggedInUserId, userAccountId, sourceDetails);</span>
+                }
+<span class="fc" id="L127">                addAttachment(sourceDetails, requestContext, planId, planAttachment);</span>
+<span class="fc" id="L128">            }</span>
+        }
+<span class="fc" id="L130">    }</span>
+
+    private void updateAttachments(SourceDetails sourceDetails, EHRRequestContext requestContext, long userId, List&lt;TemplateAttachment&gt; planTemplateAttachments, Set&lt;Long&gt; wantedAttachmentIds, List&lt;Attachment&gt; nonTemplateAttachments, Long userAccountId, Map&lt;String, PHPlanAttachment&gt; planAttachmentMap, Long planId) {
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        for (TemplateAttachment templateAttachment : planTemplateAttachments) {</span>
+<span class="fc" id="L134">            PHPlanAttachment planAttachment = planAttachmentMap.get(templateAttachment.getName());</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">            if (wantedAttachmentIds.contains(templateAttachment.getId())) {</span>
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">                if (planAttachment == null) {</span>
+<span class="fc" id="L137">                    planAttachment = buildPhplanAttachment(templateAttachment, userId, userAccountId, sourceDetails);</span>
+<span class="fc" id="L138">                    addAttachment(sourceDetails, requestContext, planId, planAttachment);</span>
+                } else {
+<span class="nc" id="L140">                    planAttachmentMap.remove(templateAttachment.getName());</span>
+                }
+            }
+<span class="fc" id="L143">        }</span>
+
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">        if (nonTemplateAttachments != null) {</span>
+<span class="fc bfc" id="L146" title="All 2 branches covered.">            for (Attachment attachment : nonTemplateAttachments) {</span>
+<span class="fc" id="L147">                PHPlanAttachment planAttachment = planAttachmentMap.get(attachment.getFilename());</span>
+<span class="fc bfc" id="L148" title="All 2 branches covered.">                if (planAttachment == null) {</span>
+<span class="fc" id="L149">                    planAttachment = buildPhplanAttachment(attachment, userId, userAccountId, sourceDetails);</span>
+<span class="fc" id="L150">                    addAttachment(sourceDetails, requestContext, planId, planAttachment);</span>
+                } else {
+<span class="fc" id="L152">                    planAttachmentMap.remove(attachment.getFilename());</span>
+                }
+<span class="fc" id="L154">            }</span>
+        }
+
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">        for (Map.Entry&lt;String, PHPlanAttachment&gt; unwantedAttachment : planAttachmentMap.entrySet()) {</span>
+<span class="nc" id="L158">            deleteAttachment(unwantedAttachment.getValue());</span>
+<span class="nc" id="L159">        }</span>
+<span class="fc" id="L160">    }</span>
+
+    private boolean isDraftPlanUpdate(Optional&lt;PHPlan&gt; previousPlan) {
+<span class="fc bfc" id="L163" title="All 2 branches covered.">        return previousPlan.map(plan -&gt; plan.getStatus() == PHPlan.PlanStatus.INDRAFT)</span>
+<span class="fc" id="L164">                .orElse(false);</span>
+    }
+
+    private Optional&lt;PHPlan&gt; getPreviousPlan(@NotNull LoggedInEHRRequestContext requestContext, PHPlan pHPlan, Long userAccountId) {
+<span class="fc" id="L168">        return planManager.findPHPlanForAccountId(pHPlan.getBaseFields().getUniqueId(), requestContext, userAccountId, false);</span>
+    }
+
+    private PHPlanAttachment buildPhplanAttachment(TemplateAttachment templateAttachment, long userId,
+                                                   Long accountId, SourceDetails sourceDetails) {
+
+<span class="fc" id="L174">        PHPlanAttachment planAttachment = new PHPlanAttachment(sourceDetails);</span>
+<span class="fc" id="L175">        planAttachment.setAccountId(accountId);</span>
+<span class="fc" id="L176">        planAttachment.setLabel(templateAttachment.getLabel());</span>
+<span class="fc" id="L177">        planAttachment.setName(templateAttachment.getName());</span>
+
+<span class="fc" id="L179">        Attachment att = new Attachment();</span>
+<span class="fc" id="L180">        att.setAccountId(accountId);</span>
+<span class="fc" id="L181">        att.setUserId(userId);</span>
+
+<span class="fc" id="L183">        Path file = Paths.get(config.getImageUploadPHPlanTemplateImageBaseDirectory()).resolve(templateAttachment.getName());</span>
+<span class="fc" id="L184">        String fileName = file.getFileName().toString();</span>
+<span class="fc" id="L185">        att.setFilename(fileName);</span>
+        byte[] content;
+        try {
+<span class="fc" id="L188">            content = Files.readAllBytes(file);</span>
+<span class="nc" id="L189">        } catch (IOException e) {</span>
+<span class="nc" id="L190">            throw new RuntimeException(e);</span>
+<span class="fc" id="L191">        }</span>
+<span class="fc" id="L192">        att.setContent(content);</span>
+
+<span class="fc" id="L194">        String mediaType = getMediaType(att, fileName, templateAttachment.getMediaType().orElse(null));</span>
+
+<span class="fc" id="L196">        String fixedMediaType = fileSecurityHandler.runChecks(fileName, content, mediaType)</span>
+<span class="fc" id="L197">                .getOrElseThrow((Function&lt;String, RuntimeException&gt;) RuntimeException::new);</span>
+
+<span class="fc" id="L199">        att.setMediaType(fixedMediaType);</span>
+<span class="fc" id="L200">        planAttachment.setAttachment(att);</span>
+<span class="fc" id="L201">        planAttachment.generateNewRandomUniqueId();</span>
+<span class="fc" id="L202">        return planAttachment;</span>
+    }
+
+    private PHPlanAttachment buildPhplanAttachment(Attachment nonTemplateAttachment, long userId,
+                                                   Long accountId, SourceDetails sourceDetails) {
+
+<span class="fc" id="L208">        PHPlanAttachment planAttachment = new PHPlanAttachment(sourceDetails);</span>
+<span class="fc" id="L209">        planAttachment.setAccountId(accountId);</span>
+
+<span class="fc" id="L211">        String fileName = nonTemplateAttachment.getFilename();</span>
+<span class="fc" id="L212">        String label = fileName.substring(0, fileName.indexOf('.'));</span>
+<span class="fc" id="L213">        planAttachment.setLabel(label);</span>
+<span class="fc" id="L214">        planAttachment.setName(fileName);</span>
+
+<span class="fc" id="L216">        Attachment att = new Attachment();</span>
+<span class="fc" id="L217">        att.setAccountId(accountId);</span>
+<span class="fc" id="L218">        att.setUserId(userId);</span>
+<span class="fc" id="L219">        att.setFilename(fileName);</span>
+<span class="fc bfc" id="L220" title="All 2 branches covered.">        if (nonTemplateAttachment.getDocMetadataId() != null) {</span>
+            //attachment was uploaded asynchronously - this is what we expect
+<span class="fc" id="L222">            att.setDocMetadataId(nonTemplateAttachment.getDocMetadataId());</span>
+<span class="fc" id="L223">            att.setMediaType(nonTemplateAttachment.getMediaType());</span>
+<span class="fc" id="L224">            att.setUploadTime(nonTemplateAttachment.getUploadTime());</span>
+
+        } else {
+<span class="fc" id="L227">            att.setContent(nonTemplateAttachment.getContent());</span>
+<span class="fc" id="L228">            String mediaType = getMediaType(att, fileName, nonTemplateAttachment.getMediaType());</span>
+<span class="fc" id="L229">            String fixedMediaType = fileSecurityHandler.runChecks(fileName, nonTemplateAttachment.getContent(), mediaType)</span>
+<span class="fc" id="L230">                    .getOrElseThrow((Function&lt;String, RuntimeException&gt;) RuntimeException::new);</span>
+<span class="fc" id="L231">            att.setMediaType(fixedMediaType);</span>
+        }
+
+<span class="fc" id="L234">        planAttachment.setAttachment(att);</span>
+<span class="fc" id="L235">        planAttachment.generateNewRandomUniqueId();</span>
+<span class="fc" id="L236">        return planAttachment;</span>
+    }
+
+    @NotNull
+    private String getMediaType(Attachment att, String fileName, String originalMediaType) {
+<span class="fc" id="L241">        String mediaType = originalMediaType;</span>
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">        if (StringUtils.isBlank(mediaType)) {</span>
+            try {
+<span class="nc" id="L244">                mediaType = ImageUtil.getContentType(att.getContent());</span>
+<span class="nc" id="L245">            } catch (IOException e) {</span>
+<span class="nc" id="L246">                throw new RuntimeException(e);</span>
+<span class="nc" id="L247">            }</span>
+        }
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">        if (StringUtils.isBlank(mediaType)) {</span>
+            // not an image, and media type was not set during upload... guess common options, or default to generic binary file
+<span class="nc bnc" id="L251" title="All 2 branches missed.">            if (fileName.toLowerCase().endsWith(&quot;.pdf&quot;)) {</span>
+<span class="nc" id="L252">                mediaType = &quot;application/pdf&quot;;</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            } else if (fileName.toLowerCase().endsWith(&quot;.zip&quot;)) {</span>
+<span class="nc" id="L254">                mediaType = &quot;application/zip&quot;;</span>
+            } else {
+<span class="nc" id="L256">                mediaType = &quot;application/octet-stream&quot;;</span>
+            }
+        }
+<span class="fc" id="L259">        return mediaType;</span>
+    }
+
+    /**
+     * These are all the attachments for the last saved version of the plan
+     *
+     * @return attachment map for the plan
+     */
+    private Map&lt;String, PHPlanAttachment&gt; getPlanAttachmentMap(@NotNull LoggedInEHRRequestContext requestContext, PHPlan pHPlan, Long accountId) {
+<span class="fc" id="L268">        Map&lt;String, PHPlanAttachment&gt; attachmentMap = null;</span>
+<span class="fc" id="L269">        attachmentMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L270">        Long planId = pHPlan.getId();</span>
+<span class="fc bfc" id="L271" title="All 2 branches covered.">        for (PHPlanAttachment pkbAttachment : getAttachments(planId, requestContext, accountId)) {</span>
+<span class="fc" id="L272">            attachmentMap.put(pkbAttachment.getName(), pkbAttachment);</span>
+<span class="fc" id="L273">        }</span>
+<span class="fc" id="L274">        return attachmentMap;</span>
+    }
+
+    /**
+     * Get the list of attachments to the plan
+     *
+     * @return List of {@link PHPlanAttachment}
+     */
+    private List&lt;PHPlanAttachment&gt; getAttachments(Long planId, @NotNull LoggedInEHRRequestContext requestContext, Long accountId) {
+<span class="fc" id="L283">        return planAttachmentManager.getAttachments(planId, requestContext, accountId);</span>
+    }
+
+    /**
+     * Add attachment to the plan
+     */
+    private void addAttachment(SourceDetails sourceDetails, EHRRequestContext requestContext, Long planId, PHPlanAttachment attachment) {
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">        if (!attachment.getSource().isPopulated()) {</span>
+<span class="nc" id="L291">            attachment.getSource().init(sourceDetails);</span>
+        }
+<span class="fc" id="L293">        planAttachmentManager.addAttachment(requestContext, planId, attachment);</span>
+<span class="fc" id="L294">    }</span>
+
+    private Long savePHPlan(EHRRequestContext requestContext, Long accountId, PHPlan plan) {
+<span class="fc" id="L297">        return planManager.savePHPlan(requestContext, accountId, plan);</span>
+    }
+
+    /**
+     * Delete attachment
+     */
+    private void deleteAttachment(PHPlanAttachment attachment) {
+<span class="nc" id="L304">        planAttachmentManager.deleteAttachment(attachment.getAttachmentId());</span>
+<span class="nc" id="L305">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,320 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LetterInvitationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.invitation.impl</a> &gt; <span class="el_source">LetterInvitationManager.java</span></div><h1>LetterInvitationManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.invitation.impl;
+
+import com.google.common.base.Functions;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.Email;
+import com.pkb.domain.AccountUserService;
+import com.pkb.domain.LetterInvitationService;
+import com.pkb.domain.PkbPasswordRecoveryService;
+import com.pkb.domain.UserCredentialsService;
+import com.pkb.domain.duplicate.TeamDomainService;
+import com.pkb.entities.core.CoreAccountUser;
+import com.pkb.entities.embeddables.EncodedEncryptedPrivateKeyInfo;
+import com.pkb.entities.embeddables.EncodedEncryptedPrivateKeyInfoWithSecretDeriv;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.pub.PublicLetterInvitation;
+import com.pkb.entities.pub.PublicTeam;
+import com.pkb.entities.pub.PublicUserCredentials;
+import com.pkb.exception.ValidationErrors;
+import com.pkb.exception.ValidationException;
+import com.pkb.mappers.AccountPrivateKeyMapper;
+import com.pkb.patient.activation.letter.AccountDetailsDTO;
+import com.pkb.patient.activation.letter.InvitationTokenDTO;
+import com.pkb.patient.activation.nhslogin.NhsLoginAccountDetailsDTO;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.PKBPersonRemote;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import org.jetbrains.annotations.NotNull;
+import org.tolven.core.entity.AccountUser;
+import org.tolven.security.key.AccountPrivateKey;
+import org.tolven.security.key.AccountSecretKey;
+
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.time.LocalDate;
+import java.util.Date;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.crypto.util.RandomUtil.randomPassword;
+import static com.pkb.datamodel.ImmutableDisclosingEmail.disclosingEmail;
+import static com.pkb.dto.LetterInvitationDTO.EC_DOB_MISMATCH;
+import static com.pkb.dto.LetterInvitationDTO.EC_EMAIL_TAKEN;
+import static com.pkb.dto.LetterInvitationDTO.EC_INCORRECT_CODE;
+import static com.pkb.dto.LetterInvitationDTO.EC_INCORRECT_TOKEN;
+import static com.pkb.dto.LetterInvitationDTO.EC_INVALID_CREDENTIALS;
+import static com.pkb.dto.LetterInvitationDTO.EC_INVALID_SECURITY_QUESTION;
+import static com.pkb.dto.LetterInvitationDTO.EC_INVITATION_CODES_EXPIRED;
+import static com.pkb.dto.LetterInvitationDTO.EC_INVITATION_CODES_INVALID;
+import static com.pkb.dto.LetterInvitationDTO.EC_INVITATION_EXPIRED;
+import static com.pkb.dto.LetterInvitationDTO.EC_INVITATION_INVALID;
+import static com.pkb.dto.LetterInvitationDTO.EC_INVITATION_INVALID_CODE;
+import static com.pkb.dto.LetterInvitationDTO.EC_SYSTEM_ID;
+import static com.pkb.entities.enums.UserStatus.PATIENT_INVITED_NOT_REGISTERED;
+import static com.pkb.entities.enums.UserStatus.PATIENT_NOT_INVITED_NOT_REGISTERED;
+import static com.pkb.exception.ValidationErrors.fail;
+import static java.lang.String.format;
+
+public class LetterInvitationManager extends TransactionManager {
+
+    private static final int INITIAL_PASSWORD_LENGTH = 10;
+
+    private final LetterInvitationUtility letterInvitationUtility;
+    private final LetterInvitationService letterInvitationService;
+    private final LetterInvitationValidator validator;
+    private final TeamDomainService teamService;
+    private final UserCredentialsService userCredentialsService;
+    private final AccountUserService accountUserService;
+    private final AccountPrivateKeyMapper accountPrivateKeyMapper;
+    private final PkbPasswordRecoveryService passwordRecoveryService;
+    private final PersonContactManager personContactManager;
+    private final UserAccessManager userAccessManager;
+
+    public LetterInvitationManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider,
+                                   LetterInvitationUtility letterInvitationUtility, LetterInvitationService letterInvitationService,
+                                   LetterInvitationValidator validator, TeamDomainService teamService, UserCredentialsService userCredentialsService,
+                                   AccountUserService accountUserService, AccountPrivateKeyMapper accountPrivateKeyMapper,
+                                   PkbPasswordRecoveryService passwordRecoveryService, PersonContactManager personContactManager,
+                                   UserAccessManager userAccessManager) {
+<span class="fc" id="L86">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L87">        this.letterInvitationUtility = letterInvitationUtility;</span>
+<span class="fc" id="L88">        this.letterInvitationService = letterInvitationService;</span>
+<span class="fc" id="L89">        this.validator = validator;</span>
+<span class="fc" id="L90">        this.teamService = teamService;</span>
+<span class="fc" id="L91">        this.userCredentialsService = userCredentialsService;</span>
+<span class="fc" id="L92">        this.accountUserService = accountUserService;</span>
+<span class="fc" id="L93">        this.accountPrivateKeyMapper = accountPrivateKeyMapper;</span>
+<span class="fc" id="L94">        this.passwordRecoveryService = passwordRecoveryService;</span>
+<span class="fc" id="L95">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L96">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L97">    }</span>
+
+    PublicLetterInvitation setUpInviteeStatus(PublicLetterInvitation invitation, PKBPerson patient) {
+<span class="fc bfc" id="L100" title="All 2 branches covered.">        if (PATIENT_INVITED_NOT_REGISTERED.contains(patient.getStatus())) {</span>
+<span class="fc" id="L101">            invitation.setInviteeStatus(PublicLetterInvitation.Status.INVITED_NOT_REGISTERED);</span>
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">        } else if (PATIENT_NOT_INVITED_NOT_REGISTERED.contains(patient.getStatus())) {</span>
+<span class="fc" id="L103">            invitation.setInviteeStatus(PublicLetterInvitation.Status.NOT_INVITED_NOT_REGISTERED);</span>
+        } else {
+<span class="nc" id="L105">            throw new IllegalStateException(&quot;Patient has unsupported status[&quot; + patient.getStatus() + &quot;] for token registration&quot;);</span>
+        }
+<span class="fc" id="L107">        return invitation;</span>
+    }
+
+    public @NotNull SensitiveLetterInvitation generateLetterInvitation(@NotNull LoggedInEHRRequestContext context, long patientId) {
+<span class="fc" id="L111">        return transactional(() -&gt; {</span>
+<span class="fc" id="L112">            PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L113">            PKBPerson patient = personBean.findPKBPerson(patientId).getOrElseThrow(() -&gt; {</span>
+<span class="nc" id="L114">                fail(EC_SYSTEM_ID, &quot;No record exists for this patient&quot;, patientId);</span>
+<span class="nc" id="L115">                throw new IllegalStateException(&quot;No record exists for this patient &quot; + patientId);</span>
+            });
+
+<span class="fc" id="L118">            validator.validate(patient);</span>
+
+<span class="fc" id="L120">            AccountUser patientAccount = Optional.ofNullable(personBean.getActiveDefaultAccountUser(patient.getId()))</span>
+<span class="pc" id="L121">                    .orElseThrow(() -&gt; new IllegalStateException(&quot;No account user exists for this patient &quot; + patient.getId()));</span>
+<span class="fc" id="L122">            PublicLetterInvitation invitation = new PublicLetterInvitation();</span>
+<span class="fc" id="L123">            invitation.setCode(letterInvitationUtility.generateAccessCode(config.getLetterInvitationAccessCodeSize()));</span>
+<span class="fc" id="L124">            invitation.setCreated(dateTimeService.now());</span>
+<span class="fc" id="L125">            invitation.setExpiration(letterInvitationUtility.calculateTokenExpiry(invitation.getCreated(), config.getLetterInvitationExpiry()));</span>
+
+<span class="fc" id="L127">            SecretToken secret = letterInvitationUtility.generateToken(config.getLetterInvitationTokenSize());</span>
+            try {
+<span class="fc" id="L129">                AccountPrivateKey key = beanFactory.getHealthRecordAccessRemote().grant(</span>
+                        context,
+<span class="fc" id="L131">                        new String(secret.getValue()),</span>
+<span class="fc" id="L132">                        patientAccount.getAccount().getId());</span>
+<span class="fc" id="L133">                AccountSecretKey secretKey = key.getSecretKey();</span>
+<span class="fc" id="L134">                EncodedEncryptedPrivateKeyInfoWithSecretDeriv accountPrivateKey = new EncodedEncryptedPrivateKeyInfoWithSecretDeriv(</span>
+<span class="fc" id="L135">                        key.getEncodedEncryptedPrivateKeyInfo(), key.getKeySize(), key.getAlgorithm(), secretKey.getEncryptedKey(), secretKey.getAlgorithm(),</span>
+<span class="fc" id="L136">                        secretKey.getSecretKeyDerivAlgorithm(), secretKey.getSecretKeyDerivDataLength(), secretKey.getSecretKeyDerivationSalt(), secretKey.getSecretKeyDerivIterations());</span>
+<span class="fc" id="L137">                invitation.setAccountPrivateKey(accountPrivateKey);</span>
+<span class="nc" id="L138">            } catch (GeneralSecurityException | IOException e) {</span>
+<span class="nc" id="L139">                throw new RuntimeException(&quot;Unable to generate invitation token&quot;, e);</span>
+<span class="fc" id="L140">            }</span>
+
+<span class="fc" id="L142">            context.getMaybeAccessingUserId().ifPresent(invitation::setAuthorId);</span>
+
+<span class="fc" id="L144">            context.getTeamId().ifPresent(invitation::setTeamId);</span>
+
+<span class="fc" id="L146">            invitation.setInviteeId(patientAccount.getId());</span>
+<span class="fc" id="L147">            letterInvitationService.save(invitation);</span>
+<span class="fc" id="L148">            return new SensitiveLetterInvitation(secret, setUpInviteeStatus(invitation, patient));</span>
+        });
+    }
+
+    private boolean isIncorrect(PublicLetterInvitation invitation, String token) {
+        try {
+<span class="fc" id="L154">            accountPrivateKeyMapper.getAccountPrivateKeyFromEncodedEncryptedPrivateKeyInfoWithSecretDeriv(invitation.getAccountPrivateKey(), token);</span>
+<span class="fc" id="L155">            return false;</span>
+<span class="fc" id="L156">        } catch (Exception ignored) {</span>
+<span class="fc" id="L157">            return true;</span>
+        }
+    }
+
+    private PublicLetterInvitation validatedInvitation(InvitationTokenDTO invitationSecrets) {
+<span class="fc" id="L162">        PublicLetterInvitation invitation = findByCode(invitationSecrets.getInvitationCode());</span>
+
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if (invitation.getInvalidated()) {</span>
+<span class="nc" id="L165">            fail(EC_INVITATION_INVALID, &quot;Invitation invalid&quot;, config.getBaseURL(), config.getSupportNewTicketUrl());</span>
+        }
+<span class="fc bfc" id="L167" title="All 2 branches covered.">        if (invitation.getExpiration().isBefore(dateTimeService.now())) {</span>
+<span class="pc bfc" id="L168" title="All 2 branches covered.">            fail(config.isDefaultTokenRegistrationErrorMessages() ? EC_INVITATION_CODES_EXPIRED : EC_INVITATION_EXPIRED, &quot;Invitation expired&quot;, config.getSupportNewTicketUrl());</span>
+        }
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        if (isIncorrect(invitation, invitationSecrets.getDecryptToken())) {</span>
+<span class="pc bfc" id="L171" title="All 2 branches covered.">            fail(config.isDefaultTokenRegistrationErrorMessages() ? EC_INVITATION_CODES_INVALID : EC_INCORRECT_TOKEN, &quot;Incorrect token&quot;);</span>
+        }
+<span class="fc" id="L173">        return invitation;</span>
+    }
+
+    boolean isEmailValid(PKBPerson person, Email email) {
+<span class="fc" id="L177">        return personContactManager.findPersonByConfirmedOrPrimaryEmail(email).stream()</span>
+<span class="fc" id="L178">                .map(p -&gt; p.getPerson().getId())</span>
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">                .filter(id -&gt; !id.equals(person.getId()))</span>
+<span class="fc" id="L180">                .findFirst()</span>
+<span class="fc" id="L181">                .map(Functions.constant(false))</span>
+<span class="fc" id="L182">                .orElse(true);</span>
+    }
+
+    PKBPerson validatedPerson(PublicLetterInvitation invitation, AccountDetailsDTO patientDetails) {
+<span class="fc" id="L186">        long accountId = accountUserService.findAccountUserById(invitation.getInviteeId())</span>
+<span class="fc" id="L187">                .map(CoreAccountUser::getAccountId)</span>
+<span class="pc" id="L188">                .orElseThrow(() -&gt; new RuntimeException(&quot;No account found for account user &quot; + invitation.getInviteeId()));</span>
+<span class="fc" id="L189">        PKBPerson person = Optional.ofNullable(beanFactory.getPKBPersonBean().getAccountOwner(accountId))</span>
+<span class="pc" id="L190">                .orElseThrow(() -&gt; new RuntimeException(&quot;No account owner found for account &quot; + accountId));</span>
+
+<span class="fc" id="L192">        validator.validate(person); //maybe registered in the meantime</span>
+
+        //after previous validation are sure that realDateOfBirth is not null, what is more claimedDateOfBirth cannot be null -- we trust AccountDetailsDTO implementation
+<span class="fc" id="L195">        LocalDate claimedDateOfBirth = patientDetails.getClaimedDateOfBirth();</span>
+<span class="fc" id="L196">        LocalDate realDateOfBirth = person.findDateOfBirth()</span>
+<span class="pc" id="L197">                .orElseThrow(() -&gt; new IllegalStateException(format(&quot;Cannot find Persons's Date Of Birth (Person ID=[%s])&quot;, person.getId())));</span>
+
+<span class="fc" id="L199">        new ValidationErrors()</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">                .error(() -&gt; !realDateOfBirth.equals(claimedDateOfBirth),</span>
+                        EC_DOB_MISMATCH, &quot;The date of birth you entered does not match&quot;)
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">                .error(() -&gt; !passwordRecoveryService.isPasswordRecoveryQuestion(patientDetails.getQuestionId()),</span>
+                        EC_INVALID_SECURITY_QUESTION, &quot;Invalid security question&quot;)
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">                .error(() -&gt; !isEmailValid(person, patientDetails.getAccountCredentials().getEmail()),</span>
+<span class="fc" id="L205">                        EC_EMAIL_TAKEN, &quot;Email is already taken&quot;, config.getBaseURL())</span>
+<span class="fc" id="L206">                .check();</span>
+
+<span class="fc" id="L208">        return person;</span>
+    }
+
+    public @NotNull PublicLetterInvitation activatePatient(@NotNull InvitationTokenDTO invitationSecrets, @NotNull AccountDetailsDTO patientDetails) {
+<span class="fc" id="L212">        return transactional(() -&gt; {</span>
+<span class="fc" id="L213">            PublicLetterInvitation invitation = validatedInvitation(invitationSecrets);</span>
+<span class="fc" id="L214">            PKBPerson person = validatedPerson(invitation, patientDetails);</span>
+
+<span class="fc" id="L216">            char[] password = patientDetails.getAccountCredentials().getPassword();</span>
+
+<span class="fc" id="L218">            PublicUserCredentials credentials = userCredentialsService.overrideCredentials(person.getId(), person.getPublicId(), password);</span>
+<span class="fc" id="L219">            AccountPrivateKey granted = beanFactory.getHealthRecordAccessRemote().grant(</span>
+<span class="fc" id="L220">                    accountPrivateKeyMapper.getAccountPrivateKeyFromEncodedEncryptedPrivateKeyInfoWithSecretDeriv(invitation.getAccountPrivateKey(), invitationSecrets.getDecryptToken()),</span>
+<span class="fc" id="L221">                    invitationSecrets.getDecryptToken(),</span>
+<span class="fc" id="L222">                    userCredentialsService.getPublicKey(person.getId()));</span>
+
+            //Sets the account private key on the account
+<span class="fc" id="L225">            EncodedEncryptedPrivateKeyInfo accountPrivateKey = accountPrivateKeyMapper.getEncodedEncryptedPrivateKeyInfoFromAccountPrivateKey(granted);</span>
+<span class="fc" id="L226">            CoreAccountUser accountUser = accountUserService.findAccountUserById(invitation.getInviteeId())</span>
+<span class="fc" id="L227">                    .map(au -&gt; {</span>
+<span class="fc" id="L228">                        au.setAccountPrivateKey(accountPrivateKey);</span>
+<span class="fc" id="L229">                        return au;</span>
+                    })
+<span class="pc" id="L231">                    .orElseThrow(() -&gt; new RuntimeException(&quot;Failed to find accountUser for invitee id &quot; + invitation.getInviteeId()));</span>
+<span class="fc" id="L232">            accountUserService.saveAccountUser(accountUser);</span>
+<span class="fc" id="L233">            invitation.setClaimedEmail(patientDetails.getAccountCredentials().getEmail().address());</span>
+<span class="fc" id="L234">            invitation.setVerificationCode(letterInvitationUtility.generateConfirmationCode());</span>
+
+<span class="fc" id="L236">            userAccessManager.removeUnusedPasswordAccess(person.getId());</span>
+<span class="fc" id="L237">            passwordRecoveryService.backupLoginPassword(credentials.getUserId(), password, patientDetails.getQuestion(), patientDetails.getAnswer());</span>
+
+<span class="fc" id="L239">            letterInvitationService.save(invitation);</span>
+
+<span class="fc" id="L241">            return invitation;</span>
+        });
+    }
+
+    @NotNull
+    public PublicLetterInvitation verifyEmail(@NotNull EHRRequestContext context, @NotNull String verificationCode, char[] password) {
+<span class="fc" id="L247">        return transactional(() -&gt; {</span>
+<span class="fc" id="L248">            PublicLetterInvitation invitation = findByVerificationCode(verificationCode);</span>
+
+<span class="fc" id="L250">            PKBPersonRemote pkbPersonBean = beanFactory.getPKBPersonBean();</span>
+
+<span class="fc" id="L252">            long accountId = accountUserService.findAccountUserById(invitation.getInviteeId())</span>
+<span class="fc" id="L253">                    .map(CoreAccountUser::getAccountId)</span>
+<span class="pc" id="L254">                    .orElseThrow(() -&gt; new RuntimeException(format(&quot;No account found for account user %d&quot;, invitation.getInviteeId())));</span>
+<span class="fc" id="L255">            PKBPerson person = Optional.ofNullable(pkbPersonBean.getAccountOwner(accountId))</span>
+<span class="pc" id="L256">                    .orElseThrow(() -&gt; new RuntimeException(format(&quot;No account owner found for account id %d&quot;, accountId)));</span>
+
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">            if (!isEmailValid(person, disclosingEmail(invitation.getClaimedEmail()))) {</span>
+<span class="nc" id="L259">                fail(EC_EMAIL_TAKEN, &quot;Email is already taken&quot;, config.getBaseURL());</span>
+            }
+<span class="fc bfc" id="L261" title="All 2 branches covered.">            if (!userCredentialsService.authenticate(person.getId(), password)) {</span>
+<span class="nc" id="L262">                fail(EC_INVALID_CREDENTIALS, &quot;Invalid email or password&quot;);</span>
+            }
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">            if (invitation.getInvalidated()) {</span>
+<span class="nc" id="L265">                fail(EC_INVITATION_INVALID, &quot;Invitation is now expired&quot;, config.getBaseURL(), config.getSupportNewTicketUrl());</span>
+            }
+
+<span class="fc" id="L268">            personContactManager.saveNewPrimaryEmail(context, person.getId(), disclosingEmail(invitation.getClaimedEmail()), true);</span>
+
+<span class="fc" id="L270">            letterInvitationService.invalidateInvitations(invitation.getInviteeId());</span>
+
+<span class="fc" id="L272">            person.setStatus(UserStatus.EMAIL_CONFIRMED, dateTimeService.now());</span>
+<span class="fc" id="L273">            person.setRegisteredOn(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L274">            pkbPersonBean.updatePKBPerson(context.withRegisteringUser(person.getId()), person);</span>
+
+<span class="fc" id="L276">            return invitation;</span>
+        });
+    }
+
+    @NotNull PublicLetterInvitation findByCode(@NotNull String code) {
+<span class="fc" id="L281">        return letterInvitationService.findByCode(code)</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">                .orElseThrow(() -&gt; new ValidationException(config.isDefaultTokenRegistrationErrorMessages() ? EC_INVITATION_CODES_INVALID : EC_INCORRECT_CODE, &quot;Invitation not found&quot;));</span>
+    }
+
+    public Optional&lt;PublicTeam&gt; getTeam(long letterInvitationId) {
+<span class="fc" id="L286">        return letterInvitationService.findById(letterInvitationId)</span>
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">                .filter(invitation -&gt; invitation.getTeamId() != null)</span>
+<span class="fc" id="L288">                .flatMap(invitation -&gt; teamService.findById(invitation.getTeamId()));</span>
+    }
+
+    @NotNull PublicLetterInvitation findByVerificationCode(@NotNull String verificationCode) {
+<span class="fc" id="L292">        return letterInvitationService.findByVerificationCode(verificationCode)</span>
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">                .orElseThrow(() -&gt; new ValidationException(config.isDefaultTokenRegistrationErrorMessages() ? EC_INVITATION_CODES_INVALID : EC_INVITATION_INVALID_CODE, &quot;Invitation not found&quot;));</span>
+    }
+
+    @NotNull PublicLetterInvitation findById(long letterInvitationId) {
+<span class="fc" id="L297">        return letterInvitationService.findById(letterInvitationId)</span>
+<span class="pc" id="L298">                .orElseThrow(() -&gt; new ValidationException(EC_INVITATION_INVALID, &quot;Invitation not found&quot;, config.getBaseURL(), config.getSupportNewTicketUrl()));</span>
+    }
+
+    PKBPerson activateNhsLoginPatient(long personId, UUID personPublicId, NhsLoginAccountDetailsDTO accountDetails) {
+<span class="fc" id="L302">        return transactional(() -&gt; {</span>
+<span class="fc" id="L303">            char[] password = accountDetails.getAccountCredentials().getPassword();</span>
+<span class="fc" id="L304">            PublicUserCredentials credentials = userCredentialsService.overrideCredentials(personId, personPublicId, password);</span>
+<span class="fc" id="L305">            userAccessManager.removeUnusedPasswordAccess(personId);</span>
+<span class="fc" id="L306">            passwordRecoveryService.backupLoginPassword(credentials.getUserId(), password, accountDetails.getQuestion(), accountDetails.getAnswer());</span>
+<span class="fc" id="L307">            return beanFactory.getPKBPersonBean().findPKBPerson(personId).getOrNull();</span>
+        });
+    }
+
+    String initPersonCredential(long personId, UUID patientPublicId) {
+<span class="fc" id="L312">        return transactional(() -&gt; {</span>
+<span class="fc" id="L313">            String password = randomPassword(INITIAL_PASSWORD_LENGTH);</span>
+<span class="fc" id="L314">            userCredentialsService.overrideCredentials(personId, patientPublicId, password.toCharArray());</span>
+<span class="fc" id="L315">            userAccessManager.removeUnusedPasswordAccess(personId);</span>
+<span class="fc" id="L316">            return password;</span>
+        });
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

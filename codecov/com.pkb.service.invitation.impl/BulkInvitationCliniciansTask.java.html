@@ -1,0 +1,385 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BulkInvitationCliniciansTask.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.invitation.impl</a> &gt; <span class="el_source">BulkInvitationCliniciansTask.java</span></div><h1>BulkInvitationCliniciansTask.java</h1><pre class="source lang-java linenums">package com.pkb.service.invitation.impl;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.Email;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.InstituteUser;
+import com.pkb.institute.entity.Team;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Either;
+import org.apache.commons.csv.CSVRecord;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Collection;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.datamodel.ImmutableDisclosingEmail.disclosingEmail;
+import static io.vavr.API.unchecked;
+
+public class BulkInvitationCliniciansTask implements Runnable {
+
+<span class="fc" id="L47">    public static final String[] headerExpected = {&quot;Title&quot;, &quot;First name&quot;, &quot;Last name&quot;, &quot;E-mail&quot;, &quot;Job title&quot;, &quot;DoB YYYY&quot;, &quot;DoB MM&quot;,</span>
+            &quot;DoB DD&quot;, &quot;Address1&quot;, &quot;Address2&quot;, &quot;City&quot;, &quot;State/Province/County&quot;, &quot;Post Code&quot;, &quot;Phone&quot;};
+<span class="fc" id="L49">    public static final int COLUMN_SIZE = headerExpected.length;</span>
+
+<span class="fc" id="L51">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L53">    private static final DateTimeFormatter DOB_INPUT_FORMATTER = DateTimeFormatter.ofPattern(&quot;d/M/yyyy&quot;).withLocale(Locale.UK).withZone(ZoneId.of(&quot;UTC&quot;));</span>
+<span class="fc" id="L54">    private static final LocalDate OLDEST_DOB_ALLOWED = LocalDate.of(1900, 1, 1);</span>
+
+    private final LoggedInEHRRequestContext requestContext;
+
+    private TeamManager teamManager;
+    private TeamUserManager teamUserManager;
+    private UserManager userManager;
+    private UserAccessManager userAccessManager;
+    private PKBEmailMessageManager pkbEmailMessageManager;
+    private InvitationManager invitationManager;
+    private final DateTimeService dateTimeService;
+    private Team team;
+    private PKBPerson coord;
+    private List&lt;CSVRecord&gt; records;
+
+    private int recordsProcessed;
+    private int accountsCreated;
+    private int existingCliniciansInvited;
+    private int existingCliniciansReminded;
+    private int existingCliniciansAlreadyLinked;
+    private int existingCliniciansInvitedElsewhere;
+    private boolean thisRecordRejected;
+    private int recordsRejected;
+    private String recordErrors;
+    private boolean adminHasAccess;
+    private boolean clinicianActive;
+
+    public BulkInvitationCliniciansTask(LoggedInEHRRequestContext requestContext,
+                                        TeamManager teamManager,
+                                        TeamUserManager teamUserManager,
+                                        UserManager userManager,
+                                        UserAccessManager userAccessManager,
+                                        PKBEmailMessageManager pkbEmailMessageManager,
+                                        InvitationManager invitationManager,
+                                        Team team,
+                                        PKBPerson coord,
+                                        List&lt;CSVRecord&gt; records,
+<span class="fc" id="L91">                                        DateTimeService dateTimeService) {</span>
+<span class="fc" id="L92">        this.requestContext = requestContext;</span>
+<span class="fc" id="L93">        this.teamManager = teamManager;</span>
+<span class="fc" id="L94">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L95">        this.userManager = userManager;</span>
+<span class="fc" id="L96">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L97">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L98">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L99">        this.team = team;</span>
+<span class="fc" id="L100">        this.coord = coord;</span>
+<span class="fc" id="L101">        this.records = records;</span>
+<span class="fc" id="L102">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L103">    }</span>
+
+    @Override
+    public void run() {
+        try {
+<span class="fc" id="L108">            recordsProcessed = 0;</span>
+<span class="fc" id="L109">            accountsCreated = 0;</span>
+<span class="fc" id="L110">            existingCliniciansInvited = 0;</span>
+<span class="fc" id="L111">            existingCliniciansReminded = 0;</span>
+<span class="fc" id="L112">            existingCliniciansAlreadyLinked = 0;</span>
+<span class="fc" id="L113">            existingCliniciansInvitedElsewhere = 0;</span>
+<span class="fc" id="L114">            thisRecordRejected = false;</span>
+<span class="fc" id="L115">            recordsRejected = 0;</span>
+<span class="fc" id="L116">            recordErrors = &quot;&quot;;</span>
+
+<span class="fc" id="L118">            int rowNum = -1; // Header is record 0, first proper record is record 1...</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">            for (CSVRecord row : records) {</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">                if (++rowNum &gt; 0) {</span>
+<span class="fc" id="L121">                    processRow(rowNum, row);</span>
+                }
+<span class="fc" id="L123">            }</span>
+
+<span class="fc" id="L125">            pkbEmailMessageManager.notifyCoordinatorClinicianBulkAccountCreationCompleted(coord, team, recordsProcessed, accountsCreated,</span>
+                    existingCliniciansInvited, existingCliniciansReminded, existingCliniciansAlreadyLinked,
+<span class="fc" id="L127">                    existingCliniciansInvitedElsewhere, recordsRejected, recordErrors, requestContext.getContextUserId().toString());</span>
+<span class="nc" id="L128">        } catch (Exception e) {</span>
+<span class="nc" id="L129">            LOGGER.error(&quot;Exception in BulkAccountCreation&quot;, e);</span>
+<span class="fc" id="L130">        }</span>
+<span class="fc" id="L131">    }</span>
+
+    // TODO i18n error messages
+
+    private void processRow(int rowNum, CSVRecord record) {
+        try {
+<span class="fc" id="L137">            ++recordsProcessed;</span>
+
+            //logger.info(&quot;SJG: &quot;+rowNum+&quot;: &quot;+record);
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">            if (record.size() != COLUMN_SIZE) {</span>
+<span class="nc" id="L141">                ++recordsRejected;</span>
+<span class="nc" id="L142">                recordErrors += (&quot;Record &quot; + rowNum + &quot;: has &quot; + record.size() + &quot; fields instead of &quot; + COLUMN_SIZE + &quot;\n&quot;);</span>
+<span class="nc" id="L143">                return;</span>
+            }
+
+<span class="fc" id="L146">            thisRecordRejected = false;</span>
+
+<span class="fc" id="L148">            PKBPersonDTO clinicianDTO = new PKBPersonDTO();</span>
+
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">            if (record.get(0).isEmpty()) {</span>
+<span class="nc" id="L151">                thisRecordRejected = true;</span>
+<span class="nc" id="L152">                recordErrors += (&quot;Record &quot; + rowNum + &quot;: must have a title\n&quot;);</span>
+            } else {
+<span class="fc" id="L154">                clinicianDTO.setTitle(record.get(0));</span>
+            }
+
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">            if (record.get(1).isEmpty()) {</span>
+<span class="nc" id="L158">                thisRecordRejected = true;</span>
+<span class="nc" id="L159">                recordErrors += (&quot;Record &quot; + rowNum + &quot;: must have a first name\n&quot;);</span>
+            } else {
+<span class="fc" id="L161">                clinicianDTO.setFirstName(record.get(1));</span>
+            }
+
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">            if (record.get(2).isEmpty()) {</span>
+<span class="nc" id="L165">                thisRecordRejected = true;</span>
+<span class="nc" id="L166">                recordErrors += (&quot;Record &quot; + rowNum + &quot;: must have a last name\n&quot;);</span>
+            } else {
+<span class="fc" id="L168">                clinicianDTO.setLastName(record.get(2));</span>
+            }
+
+            boolean recordGet3isNotValidEmail;
+            try {
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">                if (record.get(3).contains(&quot;@&quot;)) {</span>
+<span class="fc" id="L174">                    disclosingEmail(record.get(3));</span>
+<span class="fc" id="L175">                    recordGet3isNotValidEmail = false;</span>
+                } else {
+<span class="nc" id="L177">                    recordGet3isNotValidEmail = true;</span>
+                }
+<span class="nc" id="L179">            } catch (Exception ignored) {</span>
+<span class="nc" id="L180">                recordGet3isNotValidEmail = true;</span>
+<span class="fc" id="L181">            }</span>
+
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">            if (record.get(3).isEmpty()) {</span>
+<span class="nc" id="L184">                thisRecordRejected = true;</span>
+<span class="nc" id="L185">                recordErrors += (&quot;Record &quot; + rowNum + &quot;: must have an E-mail\n&quot;);</span>
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">            } else if (recordGet3isNotValidEmail) {</span>
+<span class="nc" id="L187">                thisRecordRejected = true;</span>
+<span class="nc" id="L188">                recordErrors += (&quot;Record &quot; + rowNum + &quot; (&quot; + record.get(1) + &quot; &quot; + record.get(2) + &quot;): has invalid email '&quot; + record.get(3)</span>
+                        + &quot;'\n&quot;);
+            } else {
+<span class="fc" id="L191">                clinicianDTO.setEmailId(disclosingEmail(record.get(3)));</span>
+            }
+
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">            if (!record.get(4).isEmpty()) {</span>
+<span class="fc" id="L195">                clinicianDTO.setJobTitle(record.get(4));</span>
+            }
+
+<span class="pc bpc" id="L198" title="3 of 6 branches missed.">            if (!record.get(5).isEmpty() &amp;&amp; !record.get(6).isEmpty() &amp;&amp; !record.get(7).isEmpty()) {</span>
+<span class="fc" id="L199">                Either&lt;Tuple2&lt;Boolean, String&gt;, String&gt; dobResult = handleDOB(record.get(5), record.get(6), record.get(7), rowNum, record.get(1), record.get(2));</span>
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">                if (dobResult.isLeft()) {</span>
+<span class="nc" id="L201">                    thisRecordRejected = dobResult.getLeft()._1;</span>
+<span class="nc" id="L202">                    recordErrors += dobResult.getLeft()._2;</span>
+                } else {
+<span class="fc" id="L204">                    clinicianDTO.setDateOfBirthString(dobResult.get());</span>
+                }
+            }
+
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">            if (!record.get(8).isEmpty()) {</span>
+<span class="fc" id="L209">                clinicianDTO.setAddress1(record.get(8));</span>
+            }
+
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">            if (!record.get(9).isEmpty()) {</span>
+<span class="nc" id="L213">                clinicianDTO.setAddress2(record.get(9));</span>
+            }
+
+<span class="pc bpc" id="L216" title="1 of 2 branches missed.">            if (!record.get(10).isEmpty()) {</span>
+<span class="fc" id="L217">                clinicianDTO.setCity(record.get(10));</span>
+            }
+
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">            if (!record.get(11).isEmpty()) {</span>
+<span class="fc" id="L221">                clinicianDTO.setState(record.get(11));</span>
+            }
+
+<span class="pc bpc" id="L224" title="1 of 2 branches missed.">            if (!record.get(12).isEmpty()) {</span>
+<span class="fc" id="L225">                clinicianDTO.setPostalCode(record.get(12));</span>
+            }
+
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">            if (!record.get(13).isEmpty()) {</span>
+<span class="fc" id="L229">                clinicianDTO.setPhone(record.get(13));</span>
+            }
+
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">            if (!thisRecordRejected) {</span>
+<span class="fc" id="L233">                inviteClinician(clinicianDTO, rowNum);</span>
+            }
+
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">            if (thisRecordRejected) {</span>
+<span class="nc" id="L237">                ++recordsRejected;</span>
+            }
+
+<span class="nc" id="L240">        } catch (Exception e) {</span>
+<span class="nc" id="L241">            ++recordsRejected;</span>
+<span class="nc" id="L242">            recordErrors += (&quot;Record &quot; + rowNum + &quot; (&quot; + record.get(1) + &quot; &quot; + record.get(2) + &quot;): failed due to unexpected error &quot;</span>
+<span class="nc" id="L243">                    + e.getMessage() + &quot;\n&quot;);</span>
+<span class="fc" id="L244">        }</span>
+<span class="fc" id="L245">    }</span>
+
+    @VisibleForTesting
+    Either&lt;Tuple2&lt;Boolean, String&gt;, String&gt; handleDOB(String year, String month, String day, int rowNum, String firstName, String lastName) {
+<span class="fc" id="L249">        String dobString = day + &quot;/&quot; + month + &quot;/&quot; + year;</span>
+        try {
+<span class="fc" id="L251">            LocalDate dob = LocalDate.parse(dobString, DOB_INPUT_FORMATTER);</span>
+
+            // TODO: Abracadabra! Magic logic.
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">            if (dob.isBefore(OLDEST_DOB_ALLOWED)) {</span>
+<span class="nc" id="L255">                String error = (&quot;Record &quot; + rowNum + &quot; (&quot; + firstName + &quot; &quot; + lastName + &quot;): has DoB '&quot; + dobString + &quot;' before &quot; + OLDEST_DOB_ALLOWED.format(DOB_INPUT_FORMATTER)</span>
+                        + &quot;\n&quot;);
+<span class="nc" id="L257">                return Either.left(Tuple.of(true, error));</span>
+            }
+
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">            if (dob.isAfter(dateTimeService.today())) {</span>
+<span class="nc" id="L261">                String error = (&quot;Record &quot; + rowNum + &quot; (&quot; + firstName + &quot; &quot; + lastName + &quot;): has DoB '&quot; + dobString + &quot;' in the future\n&quot;);</span>
+<span class="nc" id="L262">                return Either.left(Tuple.of(true, error));</span>
+            }
+
+<span class="fc" id="L265">            return Either.right(dob.format(PKBPerson.DOB_FORMATTER));</span>
+<span class="nc" id="L266">        } catch (Exception ignored) {</span>
+<span class="nc" id="L267">            String error = (&quot;Record &quot; + rowNum + &quot; (&quot; + firstName + &quot; &quot; + lastName + &quot;): has invalid DoB '&quot; + dobString + &quot;'\n&quot;);</span>
+<span class="nc" id="L268">            return Either.left(Tuple.of(true, error));</span>
+        }
+    }
+
+    // TODO - centralize everything below here into UserWebBean.inviteClinicianForTeam()
+
+    public boolean isSameUser(@NotNull Email email) {
+<span class="fc" id="L275">        return coord.hasEmail(email);</span>
+    }
+
+    private void inviteClinician(PKBPersonDTO clinicianDTO, int rowNum) {
+        try {
+<span class="fc" id="L280">            String instituteCode = team.getCode();</span>
+<span class="fc" id="L281">            Email emailId = clinicianDTO.getEmailId();</span>
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">            if (isSameUser(emailId)) {</span>
+<span class="nc" id="L283">                thisRecordRejected = true;</span>
+<span class="nc" id="L284">                recordErrors += (&quot;Record &quot; + rowNum + &quot; is inviting the current coordinator\n&quot;);</span>
+            } else {
+<span class="fc" id="L286">                adminHasAccess = false;</span>
+<span class="fc" id="L287">                clinicianActive = false;</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">                if (adminInviteClinicianValidation(clinicianDTO, rowNum)) {</span>
+<span class="pc bpc" id="L289" title="3 of 4 branches missed.">                    if (clinicianActive &amp;&amp; !adminHasAccess) {</span>
+                        // clinician is active but admin does not have accees
+                        // send access request
+
+                        // TODO: MULTIPLE-TEAMS Safe to use the first clinician we find with this email address?
+<span class="nc" id="L294">                        PKBPerson clinician = userManager.getPKBPersonByConfirmedOrPrimaryEmail(emailId, PersonContact.Lazy.PERSON_W_CONTACTS).get(0);</span>
+<span class="nc" id="L295">                        pkbEmailMessageManager.sendAccessRequest(clinician, team, coord);</span>
+<span class="nc" id="L296">                        ++existingCliniciansInvited;</span>
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">                    } else if (&quot;resend&quot;.equals(adminInvitesClinician(requestContext, clinicianDTO))) {</span>
+<span class="nc" id="L298">                        ++existingCliniciansReminded;</span>
+                    } else {
+<span class="fc" id="L300">                        ++accountsCreated;</span>
+                    }
+                }
+            }
+<span class="nc" id="L304">        } catch (PKBException e) {</span>
+<span class="nc" id="L305">            thisRecordRejected = true;</span>
+<span class="nc" id="L306">            recordErrors += (&quot;Error processing record &quot; + rowNum + &quot;: &quot; + e.getMessage() + &quot;\n&quot;);</span>
+<span class="nc" id="L307">            LOGGER.error(&quot;error&quot;, e);</span>
+<span class="nc" id="L308">        } catch (MailException e) {</span>
+<span class="nc" id="L309">            thisRecordRejected = true;</span>
+<span class="nc" id="L310">            recordErrors += (&quot;Error mailing invitation for record &quot; + rowNum + &quot;: &quot; + e.getMessage() + &quot;\n&quot;);</span>
+<span class="nc" id="L311">            LOGGER.error(&quot;Mailer exception: {}&quot;, e.getCause(), e);</span>
+<span class="pc" id="L312">        }</span>
+
+<span class="fc" id="L314">    }</span>
+
+    private boolean adminInviteClinicianValidation(PKBPersonDTO clinicianDTO, int rowNum) {
+<span class="fc" id="L317">        List&lt;PKBPerson&gt; personsWithInvitedEmailId = userManager.getPKBPersonByConfirmedOrPrimaryEmail(clinicianDTO.getEmailId(), PersonContact.Lazy.PERSON_W_CONTACTS);</span>
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">        if (!personsWithInvitedEmailId.isEmpty()) {</span>
+            // Must be a clinician
+<span class="nc bnc" id="L320" title="All 2 branches missed.">            if (UserType.REG_CLINICIAN != personsWithInvitedEmailId.get(0).getUserType()) {</span>
+<span class="nc" id="L321">                thisRecordRejected = true;</span>
+<span class="nc" id="L322">                recordErrors += (&quot;Record &quot; + rowNum + &quot; invites an existing user who is not a clinician\n&quot;);</span>
+<span class="nc" id="L323">                return false;</span>
+            }
+
+            // matching users with the same email
+<span class="nc" id="L327">            Stream&lt;Email&gt; emailsViaMatch = personsWithInvitedEmailId</span>
+<span class="nc" id="L328">                    .stream()</span>
+<span class="nc" id="L329">                    .map(PKBPerson::getEmail);</span>
+
+            // some may have other users linked by humanuuid (but not email... rare but possible)
+<span class="nc" id="L332">            Stream&lt;Email&gt; emailsViaHumanUuid = personsWithInvitedEmailId.stream()</span>
+<span class="nc" id="L333">                    .map(PKBPerson::getHumanUUID)</span>
+<span class="nc" id="L334">                    .filter(StringUtils::isNotEmpty)</span>
+<span class="nc" id="L335">                    .map(humanuuid -&gt; teamUserManager.getAllPersonasForHuman(requestContext, humanuuid))</span>
+<span class="nc" id="L336">                    .flatMap(List::stream)</span>
+<span class="nc" id="L337">                    .map(PKBPerson::getEmail);</span>
+
+            // concat then check the Set
+<span class="nc" id="L340">            Set&lt;Email&gt; emailAddresses = Stream.concat(emailsViaMatch, emailsViaHumanUuid)</span>
+<span class="nc" id="L341">                    .collect(Collectors.toSet());</span>
+
+<span class="nc" id="L343">            List&lt;InstituteUser&gt; teamClinicians = teamUserManager.getTeamCliniciansByEmailAddress(</span>
+<span class="nc" id="L344">                    team.getId(), emailAddresses);</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">            if (!teamClinicians.isEmpty()) {</span>
+<span class="nc" id="L346">                LOGGER.warn(&quot;clinician {} is already on team {}&quot;, teamClinicians.get(0).getPerson().getEmail(), team.getCode());</span>
+<span class="nc" id="L347">                clinicianActive = true;</span>
+<span class="nc" id="L348">                ++existingCliniciansAlreadyLinked;</span>
+<span class="nc" id="L349">                return false;</span>
+            }
+        }
+
+<span class="fc" id="L353">        return true;</span>
+    }
+
+    private String adminInvitesClinician(EHRRequestContext requestContext, PKBPersonDTO clinicianDTO) {
+
+        // Load admins for team
+<span class="fc" id="L359">        List&lt;PKBPerson&gt; admins = teamManager.getTeamCoord(team.getId());</span>
+
+<span class="fc" id="L361">        return findAnyInvitation(clinicianDTO, admins)</span>
+<span class="fc" id="L362">                .map(unchecked(this::resendInvitation))</span>
+<span class="fc" id="L363">                .orElseGet(() -&gt; sendNewInvitation(clinicianDTO));</span>
+    }
+
+    private Optional&lt;PKBInvitation&gt; findAnyInvitation(PKBPersonDTO clinicianDTO, Collection&lt;PKBPerson&gt; admins) {
+<span class="fc" id="L367">        return invitationManager.findActiveInvitationsForTargetEmailFromAuthors(requestContext, clinicianDTO.getEmailId(), admins)</span>
+<span class="fc" id="L368">                .stream()</span>
+<span class="fc" id="L369">                .findFirst();</span>
+    }
+
+    private String resendInvitation(PKBInvitation invitation) throws MailException {
+<span class="nc" id="L373">        pkbEmailMessageManager.inviteClinicianToUpgrade(team, coord, invitation.getTargetUser(), invitation.getPublicId());</span>
+<span class="nc" id="L374">        return &quot;resend&quot;;</span>
+    }
+
+    private String sendNewInvitation(PKBPersonDTO clinician) {
+<span class="fc" id="L378">        return unchecked(() -&gt; {</span>
+<span class="fc" id="L379">            teamUserManager.inviteClinician(requestContext, team, clinician, coord, null);</span>
+<span class="fc" id="L380">            return &quot;success&quot;;</span>
+<span class="fc" id="L381">        }).get();</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

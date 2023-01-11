@@ -1,0 +1,783 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ManageDevicesAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.devices</a> &gt; <span class="el_source">ManageDevicesAction.java</span></div><h1>ManageDevicesAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.devices;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Functions;
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.ClearableInternalState;
+import com.pkb.coreDevices.entity.CoreDevicesSyncRecord;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.dataupload.entity.UploadedData.Destination;
+import com.pkb.dataupload.entity.UploadedData.Format;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.entities.enums.Route;
+import com.pkb.exception.PKBException;
+import com.pkb.integration.coredevices.CoreDevice;
+import com.pkb.integration.coredevices.CoreDeviceDataBatch;
+import com.pkb.integration.coredevices.CoreDeviceDataRecord;
+import com.pkb.integration.coredevices.ImmutableNotification;
+import com.pkb.integration.coredevices.Notification;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import com.pkb.service.dataupload.processor.parser.json.ValidicErrorHelper;
+import com.pkb.service.devices.coredevices.CoreDevicesManager;
+import com.pkb.service.test.LoincManager;
+import com.pkb.service.test.MeasurementManager;
+import com.pkb.service.test.TestManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.test.entity.LoincTest;
+import com.pkb.test.entity.MeasurementCategory;
+import com.pkb.test.entity.MeasurementDTO;
+import com.pkb.test.entity.PredefinedMeasurementType;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.util.DbUtil;
+import io.vavr.Tuple;
+import io.vavr.Tuple3;
+import io.vavr.control.Option;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import javax.annotation.PostConstruct;
+import javax.security.auth.login.LoginException;
+import java.io.BufferedReader;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.action.devices.ManageDevicesAction.FieldHandlerResult.EMPTY;
+import static com.pkb.action.devices.ManageDevicesAction.FieldHandlerResult.UNMAPPED;
+import static io.vavr.control.Option.ofOptional;
+
+<span class="fc" id="L68">public class ManageDevicesAction extends BaseAction implements ClearableInternalState {</span>
+
+    private static final long serialVersionUID = 4588758358640708663L;
+
+<span class="fc" id="L72">    private final String tab = &quot;devices&quot;;</span>
+
+    private List&lt;CoreDevice&gt; coreDevices;
+
+    // From manageDecices.jsp
+    private Long deviceId;
+
+    // To addDevice.jsp
+    private List&lt;String&gt; availableDevices;
+
+    // From addDevice.jsp
+    private String deviceName;
+
+    // Redirects user to Service Provider for authentication
+    private String redirectURL;
+
+    // Authentication callback from Service Provider
+    private String userid;
+    private String firstname;
+    private String lastname;
+    private String oauth_token;
+    private String oauth_verifier;
+    private String oauth_version;
+
+    @Autowired
+    private CoreDevicesManager coreDevicesManager;
+    @Autowired
+    private TestManager testManager;
+    @Autowired
+    private LoincManager loincManager;
+    @Autowired
+    private DataUploadManager dataUploadManager;
+    @Autowired
+    private MeasurementManager measurementManager;
+    @Autowired
+    private ValidicErrorHelper validicErrorHelper;
+
+<span class="fc" id="L109">    private int measurementCount = 0;</span>
+<span class="fc" id="L110">    private int testResultCount = 0;</span>
+
+    private String device;
+
+<span class="fc" id="L114">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L116">    private static final Map&lt;Tuple3&lt;String, String, String&gt;, ProcessingState&gt; PUSH_NOTIFICATION_PROCESSING_STATE = new HashMap&lt;&gt;();</span>
+    private static ValidicErrorHelper staticValidicErrorHelper;
+
+    @PostConstruct
+    public void setup() {
+<span class="fc" id="L121">        ManageDevicesAction.staticValidicErrorHelper = validicErrorHelper;</span>
+<span class="fc" id="L122">    }</span>
+
+<span class="fc" id="L124">    private enum ProcessingState {</span>
+<span class="fc" id="L125">        WAITING,</span>
+<span class="fc" id="L126">        PROCESSING</span>
+    }
+
+<span class="fc" id="L129">    private enum ProcessingStage {</span>
+<span class="fc" id="L130">        START,</span>
+<span class="fc" id="L131">        FINISH</span>
+    }
+
+    public String manageDevices() {
+        try {
+<span class="fc" id="L136">            Long patientId = contextUserUtil.getContextUserId();</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">            if (patientId == null) {</span>
+<span class="fc" id="L138">                patientId = loggedInUserUtil.getLoggedInUserId();</span>
+            }
+
+<span class="fc" id="L141">            coreDevices = coreDevicesManager.fetchConnectedDevices(patientId);</span>
+<span class="fc" id="L142">            String redirectBackToPKBURL = getConfig().getBaseURL() + &quot;/devices/manageDevices.action&quot;;</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">            for (CoreDevice device : coreDevices) {</span>
+<span class="fc" id="L144">                device.setDisconnectURL(device.getDisconnectURL() + &quot;&amp;redirect_uri=&quot; + redirectBackToPKBURL);</span>
+<span class="fc" id="L145">            }</span>
+<span class="nc" id="L146">        } catch (Exception e) {</span>
+<span class="nc" id="L147">            LOGGER.error(&quot;Error while listing devices&quot;, e);</span>
+<span class="fc" id="L148">        }</span>
+
+<span class="fc" id="L150">        return SUCCESS;</span>
+    }
+
+    public String listAvailableDevices() {
+        try {
+<span class="fc" id="L155">            long patientId = contextUserUtil.getContextOrLoggedInUserId();</span>
+
+<span class="fc" id="L157">            availableDevices = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">            if (getConfig().isDisplayOfSensitiveErrorInformationEnabled()) {</span>
+<span class="fc" id="L159">                availableDevices.add(&quot;Acute&quot;); // only enable for UAT, for now</span>
+            }
+
+<span class="fc" id="L162">            coreDevices = coreDevicesManager.fetchAvailableDevices(patientId);</span>
+<span class="fc" id="L163">            coreDevices.sort((o1, o2) -&gt; o1.getName().compareToIgnoreCase(o2.getName()));</span>
+
+<span class="nc" id="L165">        } catch (Exception e) {</span>
+<span class="nc" id="L166">            LOGGER.error(&quot;Error while listing available devices&quot;, e);</span>
+<span class="fc" id="L167">        }</span>
+
+<span class="fc" id="L169">        return SUCCESS;</span>
+    }
+
+    public String addDevice() {
+        // TODO: this method seems to be empty. Why?
+
+<span class="nc" id="L175">        return SUCCESS;</span>
+    }
+
+    public String coreDeviceConnectedCallback() {
+        try {
+<span class="fc" id="L180">            long patientId = contextUserUtil.getContextOrLoggedInUserId();</span>
+<span class="fc" id="L181">            LOGGER.info(&quot;Got connection callback for patient-{} device-{}&quot;, patientId, device);</span>
+
+<span class="fc" id="L183">            fetchCoreDevicesHistoricData(getEHRRequestContext(), patientId, device);</span>
+<span class="nc" id="L184">        } catch (Exception e) {</span>
+<span class="nc" id="L185">            LOGGER.error(&quot;Error while downloading historic data&quot;, e);</span>
+<span class="nc" id="L186">            addActionMessage(getText(&quot;manageDevicesAction.msg.connection_successful&quot;));</span>
+<span class="fc" id="L187">        }</span>
+<span class="fc" id="L188">        return SUCCESS;</span>
+    }
+
+    public String processPushNotification() { // Dummy for Withings notifications that still arrive direct
+<span class="nc" id="L192">        return SUCCESS;</span>
+    }
+
+    @SuppressWarnings(&quot;ThrowCaughtLocally&quot;)
+    public String coreDevicesPushNotification() {
+        try {
+<span class="fc" id="L198">            StringBuilder lineBuilder = new StringBuilder();</span>
+<span class="fc" id="L199">            BufferedReader in = getRequest().getReader();</span>
+            String line;
+<span class="fc bfc" id="L201" title="All 2 branches covered.">            while ((line = in.readLine()) != null) {</span>
+<span class="fc" id="L202">                lineBuilder.append(line);</span>
+            }
+<span class="fc" id="L204">            in.close();</span>
+<span class="fc" id="L205">            String json = lineBuilder.toString();</span>
+<span class="fc" id="L206">            LOGGER.info(&quot;Processing Core Devices Push Notification batch&quot;);</span>
+
+<span class="fc" id="L208">            JsonNode root = OBJECT_MAPPER.readTree(json);</span>
+
+<span class="fc" id="L210">            JsonNode data = root.findValue(&quot;data&quot;);</span>
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">            if (data == null) {</span>
+<span class="nc" id="L212">                throw new RuntimeException(&quot;Missing 'data' field&quot;);</span>
+            }
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">            if (!data.isArray()) {</span>
+<span class="nc" id="L215">                throw new RuntimeException(&quot;'data' field is not an array&quot;);</span>
+            }
+
+<span class="fc" id="L218">            Set&lt;Notification&gt; notifications = new TreeSet&lt;&gt;();</span>
+<span class="fc" id="L219">            Set&lt;String&gt; coreDevicesUserIds = new TreeSet&lt;&gt;();</span>
+
+<span class="fc bfc" id="L221" title="All 2 branches covered.">            for (JsonNode record : data) {</span>
+<span class="fc" id="L222">                Notification notification = ImmutableNotification.builder()</span>
+<span class="fc" id="L223">                        .coreDevicesUserId(getStringField(record, &quot;_id&quot;))</span>
+<span class="fc" id="L224">                        .category(getStringField(record, &quot;activity_type&quot;))</span>
+<span class="fc" id="L225">                        .source(getStringField(record, &quot;source&quot;))</span>
+<span class="fc" id="L226">                        .originalJson(record.toString())</span>
+<span class="fc" id="L227">                        .build();</span>
+
+<span class="fc" id="L229">                notifications.add(notification);</span>
+<span class="fc" id="L230">                coreDevicesManager.logPushNotification(notification);</span>
+
+<span class="fc" id="L232">                coreDevicesUserIds.add(getStringField(record, &quot;_id&quot;));</span>
+<span class="fc" id="L233">            }</span>
+<span class="fc" id="L234">            var personIds = coreDevicesUserIds.stream().map(coreDevicesManager::getPatientIdFromCoreDevicesUserId).filter(Objects::nonNull).collect(Collectors.toSet());</span>
+<span class="fc" id="L235">            var people = DbUtil.getInBatches(personIds, userManager::getPKBPersonList);</span>
+<span class="fc" id="L236">            people.forEach(person -&gt; {</span>
+<span class="fc" id="L237">                UploadedDataDTO dto = new UploadedDataDTO();</span>
+<span class="fc" id="L238">                dto.setDestination(Destination.DEVICE_NOTIFICATION);</span>
+<span class="fc" id="L239">                dto.setFormat(Format.JSON_VALIDIC);</span>
+<span class="fc" id="L240">                dto.setStatus(UploadedData.Status.COMPLETED);</span>
+<span class="fc" id="L241">                dto.setData(json);</span>
+<span class="fc" id="L242">                dto.setDestinationSpecificData(json);</span>
+<span class="fc" id="L243">                dataUploadManager.addUploadedData(dto, person, getEHRRequestContext());</span>
+<span class="fc" id="L244">            });</span>
+
+<span class="fc bfc" id="L246" title="All 2 branches covered.">            for (Notification notification : notifications) {</span>
+                try {
+<span class="fc" id="L248">                    fetchCoreDevicesDataBatched(notification);</span>
+<span class="nc" id="L249">                } catch (Exception e) {</span>
+<span class="nc" id="L250">                    LOGGER.error(&quot;Error while processing Core Devices notification for coreDevicesUserId-{} category-{} source-{}&quot;,</span>
+<span class="nc" id="L251">                            notification.getCoreDevicesUserId(), notification.getCategory(), notification.getSource(), e);</span>
+<span class="fc" id="L252">                }</span>
+<span class="fc" id="L253">            }</span>
+
+<span class="nc" id="L255">        } catch (Exception e) {</span>
+<span class="nc" id="L256">            LOGGER.error(&quot;Error while processing Core Devices notification&quot;, e);</span>
+<span class="fc" id="L257">        }</span>
+<span class="fc" id="L258">        return Action.SUCCESS;</span>
+    }
+
+    /**
+     * AI-353 We sometimes get lots of push notifications that would all trigger the same data fetch
+     * If we're already processing one in another request, leave the state as WAITING, and the thread that
+     * is currently doing the data fetch will do it again when it returns.
+     */
+    @VisibleForTesting
+    void fetchCoreDevicesDataBatched(Notification notification) {
+<span class="fc bfc" id="L268" title="All 2 branches covered.">        BiFunction&lt;ProcessingStage, ProcessingState, ProcessingState&gt; calculateNewState = (newStage, currentState) -&gt; newStage == ProcessingStage.START</span>
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">                ? currentState == null ? ProcessingState.PROCESSING : ProcessingState.WAITING</span>
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">                : currentState == ProcessingState.WAITING ? ProcessingState.PROCESSING : null;</span>
+
+<span class="fc" id="L272">        Function&lt;ProcessingStage, Boolean&gt; shouldProcess = (newStage) -&gt; {</span>
+<span class="fc" id="L273">            synchronized (PUSH_NOTIFICATION_PROCESSING_STATE) {</span>
+<span class="fc bfc" id="L274" title="All 2 branches covered.">                return PUSH_NOTIFICATION_PROCESSING_STATE.compute(processingKey(notification),</span>
+<span class="fc" id="L275">                        (k, v) -&gt; calculateNewState.apply(newStage, v)) == ProcessingState.PROCESSING;</span>
+            }
+        };
+
+<span class="fc" id="L279">        Supplier&lt;Boolean&gt; processAndCheckShouldContinue = () -&gt; {</span>
+            boolean result;
+            try {
+<span class="fc" id="L282">                fetchCoreDevicesData(getEHRRequestContext(), notification.getCoreDevicesUserId(), notification.getCategory(), notification.getSource(), notification.getOriginalJson());</span>
+            } finally {
+<span class="fc" id="L284">                result = shouldProcess.apply(ProcessingStage.FINISH);</span>
+            }
+<span class="fc" id="L286">            return result;</span>
+        };
+
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">        if (shouldProcess.apply(ProcessingStage.START)) {</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">            while (processAndCheckShouldContinue.get()) {</span>
+            }
+        }
+<span class="fc" id="L293">    }</span>
+
+    @VisibleForTesting
+    static Tuple3&lt;String, String, String&gt; processingKey(Notification notification) {
+<span class="fc" id="L297">        String coreDevicesUserId = notification.getCoreDevicesUserId();</span>
+<span class="fc" id="L298">        String category = notification.getCategory();</span>
+<span class="fc" id="L299">        String source = notification.getSource();</span>
+<span class="fc" id="L300">        return new Tuple3&lt;&gt;(coreDevicesUserId, category, source);</span>
+    }
+
+    private void fetchCoreDevicesHistoricData(EHRRequestContext requestContext, long patientId, String source) throws LoginException {
+
+<span class="fc" id="L305">        ofOptional(coreDevicesManager.getCoreDevicesUserId(patientId))</span>
+<span class="fc" id="L306">                .peek(coreDevicesUserId -&gt; {</span>
+<span class="fc" id="L307">                    fetchCoreDevicesData(requestContext, coreDevicesUserId, &quot;weight&quot;, source, null);</span>
+<span class="fc" id="L308">                    fetchCoreDevicesData(requestContext, coreDevicesUserId, &quot;diabetes&quot;, source, null);</span>
+<span class="fc" id="L309">                    fetchCoreDevicesData(requestContext, coreDevicesUserId, &quot;biometrics&quot;, source, null);</span>
+
+<span class="fc bfc" id="L311" title="All 2 branches covered.">                    if (measurementCount &gt; 0) {</span>
+<span class="fc" id="L312">                        addActionMessage(getText(&quot;manageDevicesAction.msg.downloaded_measurements&quot;, new String[]{Long.toString(measurementCount)}));</span>
+                    }
+<span class="fc bfc" id="L314" title="All 2 branches covered.">                    if (testResultCount &gt; 0) {</span>
+<span class="fc" id="L315">                        addActionMessage(getText(&quot;manageDevicesAction.msg.downloaded_test_results&quot;, new String[]{Long.toString(testResultCount)}));</span>
+                    }
+<span class="pc bpc" id="L317" title="1 of 4 branches missed.">                    if ((measurementCount == 0) &amp;&amp; (testResultCount == 0)) {</span>
+<span class="nc" id="L318">                        addActionMessage(getText(&quot;manageDevicesAction.msg.connection_successful&quot;));</span>
+                    }
+<span class="fc" id="L320">                })</span>
+<span class="pc" id="L321">                .onEmpty(() -&gt; LOGGER.warn(&quot;No core devices user id found for patient {}, no action taken&quot;, patientId));</span>
+<span class="fc" id="L322">    }</span>
+
+    private void fetchCoreDevicesData(@NotNull EHRRequestContext requestContext, @NotNull String coreDevicesUserId, String category, String source, String notificationJson) {
+        try {
+<span class="fc" id="L326">            coreDevicesManager.beginTransaction();</span>
+
+<span class="fc" id="L328">            Tuple3&lt;CoreDeviceDataBatch, CoreDevicesSyncRecord, Long&gt; batchAndSyncRecordAndAccountId = coreDevicesManager</span>
+<span class="fc" id="L329">                    .fetchData(requestContext, coreDevicesUserId, category, source);</span>
+<span class="fc" id="L330">            CoreDeviceDataBatch batch = batchAndSyncRecordAndAccountId._1;</span>
+<span class="fc" id="L331">            CoreDevicesSyncRecord syncRecord = batchAndSyncRecordAndAccountId._2;</span>
+<span class="fc" id="L332">            long patientAccountId = batchAndSyncRecordAndAccountId._3;</span>
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">            if (batch == null) {</span>
+<span class="nc" id="L334">                LOGGER.info(&quot;SJG: received null CoreDeviceDataBatch&quot;);</span>
+<span class="nc" id="L335">                return;</span>
+            }
+
+<span class="pc bpc" id="L338" title="1 of 4 branches missed.">            if (batch.getRecords().isEmpty() &amp;&amp; notificationJson != null) {</span>
+                // TODO: What might these variables contain? Anything sensitive?
+<span class="nc" id="L340">                LOGGER.warn(&quot;SJG: Got empty batch despite notification. Notification: '{}' Batch (censored): '{}'&quot;,</span>
+<span class="nc" id="L341">                        notificationJson, batch.getCensoredJson());</span>
+<span class="nc" id="L342">                return;</span>
+            }
+<span class="fc" id="L344">            boolean hasUnmappedData = processBatch(requestContext, batch, category);</span>
+
+<span class="fc" id="L346">            UploadedDataDTO dto = new UploadedDataDTO();</span>
+<span class="fc" id="L347">            dto.setDestination(Destination.DEVICE_DOWNLOAD);</span>
+<span class="fc" id="L348">            dto.setFormat(Format.JSON_VALIDIC);</span>
+            // Currently we never look at COMPLETED_UNMAPPED data again -- it's handled similarly to COMPLETED, it's simply a 'log'
+<span class="fc bfc" id="L350" title="All 2 branches covered.">            dto.setStatus(hasUnmappedData ? UploadedData.Status.COMPLETED_UNMAPPED : UploadedData.Status.COMPLETED);</span>
+<span class="fc" id="L351">            dto.setData(batch.getOriginalJson());</span>
+<span class="fc" id="L352">            dto.setDestinationSpecificData(batch.getCensoredJson());</span>
+<span class="fc" id="L353">            dataUploadManager.addUploadedData(dto, userManager.getPKBPerson(batch.getPatientId()), requestContext);</span>
+
+            // Emergency! Validic are sending records with differant data and the asme ids
+            //dropDuplicateRecords(batch);
+
+<span class="fc" id="L358">            coreDevicesManager.createOrUpdateSyncRecord(requestContext, patientAccountId, syncRecord);</span>
+<span class="fc" id="L359">            coreDevicesManager.commitTransaction();</span>
+
+        } finally {
+<span class="fc" id="L362">            coreDevicesManager.rollbackIfNotCommitted();</span>
+        }
+<span class="fc" id="L364">    }</span>
+
+<span class="fc" id="L366">    private static final io.vavr.collection.Map&lt;String, FieldHandlerFactory&gt; DEFAULT_IGNORES = io.vavr.API.Map(</span>
+<span class="fc" id="L367">            &quot;user_id&quot;, FieldHandlerFactory.noop(),</span>
+<span class="fc" id="L368">            &quot;_id&quot;, FieldHandlerFactory.noop(),</span>
+<span class="fc" id="L369">            &quot;validated&quot;, FieldHandlerFactory.noop()</span>
+    );
+
+<span class="fc" id="L372">    private static final io.vavr.collection.Map&lt;String, CategoryHandler&gt; HANDLER_MAP = io.vavr.API.List(</span>
+<span class="fc" id="L373">            new CategoryHandler(&quot;weight&quot;, io.vavr.API.Map(</span>
+<span class="fc" id="L374">                    &quot;weight&quot;, FieldHandlerFactory.doubleMeasurement(PredefinedMeasurementType.WEIGHT),</span>
+<span class="fc" id="L375">                    &quot;height&quot;, FieldHandlerFactory.doubleMeasurement(PredefinedMeasurementType.HEIGHT),</span>
+<span class="fc" id="L376">                    &quot;free_mass&quot;, FieldHandlerFactory.doubleMeasurement(PredefinedMeasurementType.FAT_FREE_MASS),</span>
+<span class="fc" id="L377">                    &quot;fat_percent&quot;, FieldHandlerFactory.doubleMeasurement(PredefinedMeasurementType.FAT_RATIO),</span>
+<span class="fc" id="L378">                    &quot;mass_weight&quot;, FieldHandlerFactory.doubleMeasurement(PredefinedMeasurementType.FAT_MASS_WEIGHT),</span>
+<span class="fc" id="L379">                    &quot;bmi&quot;, FieldHandlerFactory.noop()</span>
+            )),
+<span class="fc" id="L381">            new CategoryHandler(&quot;diabetes&quot;, io.vavr.API.Map(</span>
+<span class="fc" id="L382">                    &quot;spo2&quot;, FieldHandlerFactory.doubleMeasurement(PredefinedMeasurementType.SPO2),</span>
+<span class="fc" id="L383">                    &quot;c_peptide&quot;, FieldHandlerFactory.loincTest(&quot;1986-9&quot;, &quot;ng/mL&quot;),</span>
+<span class="fc" id="L384">                    &quot;fasting_plasma_glucose_test&quot;, FieldHandlerFactory.loincTest(&quot;1558-6&quot;, &quot;mg/dL&quot;),</span>
+<span class="fc" id="L385">                    &quot;hba1c&quot;, FieldHandlerFactory.loincTest(&quot;4548-4&quot;, &quot;%&quot;),</span>
+<span class="fc" id="L386">                    &quot;oral_glucose_tolerance_test&quot;, FieldHandlerFactory.loincTest(&quot;1518-0&quot;, &quot;mg/dL&quot;),</span>
+<span class="fc" id="L387">                    &quot;blood_glucose&quot;, FieldHandlerFactory.loincTest(&quot;2345-7&quot;, &quot;mg/dL&quot;),</span>
+<span class="fc" id="L388">                    &quot;random_plasma_glucose_test&quot;, FieldHandlerFactory.loincTest(&quot;2345-7&quot;, &quot;mg/dL&quot;),</span>
+<span class="fc" id="L389">                    &quot;triglyceride&quot;, FieldHandlerFactory.loincTest(&quot;2571-8&quot;, &quot;mg/dL&quot;)</span>
+            )),
+<span class="fc" id="L391">            new CategoryHandler(&quot;biometrics&quot;, io.vavr.collection.HashMap.ofEntries(</span>
+<span class="fc" id="L392">                    Tuple.of(&quot;systolic&quot;, FieldHandlerFactory.twinDoubleMeasurement(PredefinedMeasurementType.BLOOD_PRESSURE, &quot;diastolic&quot;)),</span>
+<span class="fc" id="L393">                    Tuple.of(&quot;diastolic&quot;, FieldHandlerFactory.noop()),</span>
+<span class="fc" id="L394">                    Tuple.of(&quot;resting_heartrate&quot;, FieldHandlerFactory.doubleMeasurement(PredefinedMeasurementType.PULSE)),</span>
+<span class="fc" id="L395">                    Tuple.of(&quot;spo2&quot;, FieldHandlerFactory.doubleMeasurement(PredefinedMeasurementType.SPO2)),</span>
+<span class="fc" id="L396">                    Tuple.of(&quot;blood_calcium&quot;, FieldHandlerFactory.loincTest(&quot;17861-6&quot;, &quot;mg/dL&quot;)),</span>
+<span class="fc" id="L397">                    Tuple.of(&quot;blood_calcium&quot;, FieldHandlerFactory.loincTest(&quot;17861-6&quot;, &quot;mg/dL&quot;)),</span>
+<span class="fc" id="L398">                    Tuple.of(&quot;blood_folic_acid&quot;, FieldHandlerFactory.loincTest(&quot;2284-8&quot;, &quot;ng/mL&quot;)),</span>
+<span class="fc" id="L399">                    Tuple.of(&quot;blood_magnesium&quot;, FieldHandlerFactory.loincTest(&quot;19123-9&quot;, &quot;mg/dL&quot;)),</span>
+<span class="fc" id="L400">                    Tuple.of(&quot;blood_potassium&quot;, FieldHandlerFactory.loincTest(&quot;2823-3&quot;, &quot;mEq/L&quot;)),</span>
+<span class="fc" id="L401">                    Tuple.of(&quot;blood_sodium&quot;, FieldHandlerFactory.loincTest(&quot;2951-2&quot;, &quot;mEq/L&quot;)),</span>
+<span class="fc" id="L402">                    Tuple.of(&quot;blood_vitamin_b12&quot;, FieldHandlerFactory.loincTest(&quot;2132-9&quot;, &quot;pg/mL&quot;)),</span>
+<span class="fc" id="L403">                    Tuple.of(&quot;blood_zinc&quot;, FieldHandlerFactory.loincTest(&quot;5763-8&quot;, &quot;ug/dL&quot;)),</span>
+<span class="fc" id="L404">                    Tuple.of(&quot;creatine_kinase&quot;, FieldHandlerFactory.loincTest(&quot;6773-6&quot;, &quot;U/L&quot;)),</span>
+<span class="fc" id="L405">                    Tuple.of(&quot;crp&quot;, FieldHandlerFactory.loincTest(&quot;1988-5&quot;, &quot;mg/L&quot;)),</span>
+<span class="fc" id="L406">                    Tuple.of(&quot;ferritin&quot;, FieldHandlerFactory.loincTest(&quot;2276-4&quot;, &quot;ng/mL&quot;)),</span>
+<span class="fc" id="L407">                    Tuple.of(&quot;testosterone&quot;, FieldHandlerFactory.loincTest(&quot;2986-8&quot;, &quot;ng/dL&quot;)),</span>
+<span class="fc" id="L408">                    Tuple.of(&quot;total_cholesterol&quot;, FieldHandlerFactory.loincTest(&quot;2093-3&quot;, &quot;mg/dL&quot;)),</span>
+<span class="fc" id="L409">                    Tuple.of(&quot;tsh&quot;, FieldHandlerFactory.loincTest(&quot;3016-3&quot;, &quot;mIU/L&quot;)),</span>
+<span class="fc" id="L410">                    Tuple.of(&quot;uric_acid&quot;, FieldHandlerFactory.loincTest(&quot;3084-1&quot;, &quot;mg/dL&quot;)),</span>
+<span class="fc" id="L411">                    Tuple.of(&quot;vitamin_d&quot;, FieldHandlerFactory.loincTest(&quot;49054-0&quot;, &quot;ng/mL&quot;)),</span>
+<span class="fc" id="L412">                    Tuple.of(&quot;white_cell_count&quot;, FieldHandlerFactory.loincTest(&quot;6690-2&quot;, &quot;billion/L or 10^9/L&quot;, val -&gt; val * 0.001 /*cells/uL -&gt; billions/L */))</span>
+
+            )),
+<span class="fc" id="L415">            new CategoryHandler(&quot;nutrition&quot;, CategoryHandler.buildMappingsFromApiRef(MeasurementCategory.NUTRITION, io.vavr.API.Map(&quot;calories&quot;, PredefinedMeasurementType.CALORIES_CONSUMED))),</span>
+<span class="fc" id="L416">            new CategoryHandler(&quot;fitness&quot;, CategoryHandler.buildMappingsFromApiRef(MeasurementCategory.FITNESS, io.vavr.API.Map(&quot;calories_burned&quot;, PredefinedMeasurementType.CALORIES_BURNED_FITNESS, &quot;distance&quot;, PredefinedMeasurementType.DISTANCE_FITNESS, &quot;type&quot;, PredefinedMeasurementType.ACTIVITY_TYPE, &quot;calories&quot;, PredefinedMeasurementType.CALORIES_BURNED_FITNESS, &quot;start_time&quot;, PredefinedMeasurementType.START_TIME, &quot;activity_category&quot;, PredefinedMeasurementType.ACTIVITY_TYPE))),</span>
+<span class="fc" id="L417">            new CategoryHandler(&quot;sleep&quot;, CategoryHandler.buildMappingsFromApiRef(MeasurementCategory.SLEEP, io.vavr.API.Map())),</span>
+<span class="fc" id="L418">            new UploadedDataCategoryHandler(&quot;routine&quot;, CategoryHandler.buildMappingsFromApiRef(MeasurementCategory.ROUTINE, io.vavr.API.Map(&quot;calories_burned&quot;, PredefinedMeasurementType.CALORIES_BURNED_ROUTINE, &quot;calories&quot;, PredefinedMeasurementType.CALORIES_BURNED_ROUTINE, &quot;distance&quot;, PredefinedMeasurementType.DISTANCE_ROUTINE, &quot;water&quot;, PredefinedMeasurementType.WATER)))</span>
+<span class="fc" id="L419">    ).toMap(CategoryHandler::getCategory, Functions.identity());</span>
+
+    /**
+     * @return whether the batch contained unmapped data
+     */
+    private boolean processBatch(EHRRequestContext requestContext, CoreDeviceDataBatch batch, String category) {
+<span class="fc" id="L425">        return HANDLER_MAP.get(category)</span>
+<span class="pc" id="L426">                .getOrElseThrow(() -&gt; new PKBException(&quot;Unmapped category: '&quot; + category + &quot;'&quot;))</span>
+<span class="fc" id="L427">                .handleBatch(batch, new ServiceAccess(requestContext))</span>
+<span class="fc" id="L428">                .map(results -&gt; {</span>
+<span class="fc bfc" id="L429" title="All 2 branches covered.">                    if (!results.getMeasurementDTOs().isEmpty()) {</span>
+<span class="fc" id="L430">                        measurementManager.saveMeasurements(requestContext, results.getMeasurementDTOs(), batch.getPatientId());</span>
+<span class="fc" id="L431">                        measurementCount += results.getMeasurementDTOs().size();</span>
+<span class="fc" id="L432">                        LOGGER.info(&quot;Received {} {} measurements for patient-{}&quot;, results.getMeasurementDTOs().size(), category, batch.getPatientId());</span>
+                    }
+
+<span class="fc bfc" id="L435" title="All 2 branches covered.">                    if (!results.getTestResultDTOs().isEmpty()) {</span>
+<span class="fc" id="L436">                        testManager.saveTestResultsNoUpdates(requestContext, results.getTestResultDTOs(), batch.getPatientId());</span>
+<span class="fc" id="L437">                        testResultCount += results.getTestResultDTOs().size();</span>
+<span class="fc" id="L438">                        LOGGER.info(&quot;Received {} {} test results for patient-{}&quot;, results.getTestResultDTOs().size(), category, batch.getPatientId());</span>
+                    }
+
+<span class="fc" id="L441">                    return results.getHasUnmapped();</span>
+                })
+<span class="fc" id="L443">                .getOrElse(false);</span>
+    }
+
+
+    @Value.Immutable
+    interface FieldHandlerResult {
+        List&lt;MeasurementDTO&gt; getMeasurementDTOs();
+
+        List&lt;TestResultDTO&gt; getTestResultDTOs();
+
+        @Value.Default
+        default boolean getHasUnmapped() {
+<span class="fc" id="L455">            return false;</span>
+        }
+
+        default FieldHandlerResult combine(FieldHandlerResult other) {
+<span class="fc" id="L459">            return ImmutableFieldHandlerResult.builder()</span>
+<span class="fc" id="L460">                    .from(other)</span>
+<span class="fc" id="L461">                    .addAllMeasurementDTOs(getMeasurementDTOs())</span>
+<span class="fc" id="L462">                    .addAllTestResultDTOs(getTestResultDTOs())</span>
+<span class="fc bfc" id="L463" title="All 4 branches covered.">                    .hasUnmapped(other.getHasUnmapped() || getHasUnmapped())</span>
+<span class="fc" id="L464">                    .build();</span>
+        }
+
+<span class="fc" id="L467">        FieldHandlerResult EMPTY = ImmutableFieldHandlerResult.builder().build();</span>
+<span class="fc" id="L468">        FieldHandlerResult UNMAPPED = ImmutableFieldHandlerResult.builder().hasUnmapped(true).build();</span>
+    }
+
+
+    @FunctionalInterface
+    private interface FieldHandler {
+
+        FieldHandlerResult handle(SourceDetails sourceDetails, String value, Instant recordTimestamp, Map&lt;String, String&gt; allRecordFields);
+
+        static boolean ignorableValue(String value) {
+<span class="pc bpc" id="L478" title="1 of 6 branches missed.">            return value == null || value.equals(&quot;0.0&quot;) || value.equals(&quot;null&quot;);</span>
+        }
+    }
+
+
+    private static class CategoryHandler {
+
+        private final String category;
+        private final io.vavr.collection.Map&lt;String, FieldHandlerFactory&gt; fieldHandlerFactories;
+
+<span class="fc" id="L488">        CategoryHandler(String category, io.vavr.collection.Map&lt;String, FieldHandlerFactory&gt; fieldHandlerFactories) {</span>
+<span class="fc" id="L489">            this.category = category;</span>
+<span class="fc" id="L490">            this.fieldHandlerFactories = fieldHandlerFactories.merge(DEFAULT_IGNORES);</span>
+<span class="fc" id="L491">        }</span>
+
+        private String getCategory() {
+<span class="fc" id="L494">            return category;</span>
+        }
+
+        private static io.vavr.collection.Map&lt;String, FieldHandlerFactory&gt; buildMappingsFromApiRef(MeasurementCategory pkbCategory, io.vavr.collection.Map&lt;String, PredefinedMeasurementType&gt; additionalMappings) {
+<span class="fc" id="L498">            return io.vavr.API.Seq(PredefinedMeasurementType.values())</span>
+<span class="fc bfc" id="L499" title="All 2 branches covered.">                    .filter(it -&gt; it.getType().category() == pkbCategory)</span>
+<span class="fc" id="L500">                    .map(it -&gt; Tuple.of(it.apiRef(), it))</span>
+<span class="fc" id="L501">                    .appendAll(additionalMappings.toList())</span>
+<span class="fc" id="L502">                    .map(mapping -&gt; mapping.map2(FieldHandlerFactory::doubleMeasurement))</span>
+<span class="fc" id="L503">                    .toMap(Functions.identity());</span>
+        }
+
+        Option&lt;FieldHandlerResult&gt; handleBatch(CoreDeviceDataBatch batch, ServiceAccess serviceAccess) {
+<span class="fc" id="L507">            return Option.ofOptional(batch.getRecords()</span>
+<span class="fc" id="L508">                    .stream()</span>
+<span class="fc" id="L509">                    .flatMap(record -&gt; handleRecord(record, batch.getPatientId(), serviceAccess))</span>
+<span class="fc" id="L510">                    .reduce(FieldHandlerResult::combine));</span>
+        }
+
+        Stream&lt;FieldHandlerResult&gt; handleRecord(CoreDeviceDataRecord record, long patientId, ServiceAccess serviceAccess) {
+<span class="fc" id="L514">            SourceDetails sd = new SourceDetails();</span>
+<span class="fc" id="L515">            sd.init(patientId, null, null, record.getSource(), Route.CORE_DEVICES, null);</span>
+<span class="fc" id="L516">            return record.getFields().entrySet()</span>
+<span class="fc" id="L517">                    .stream()</span>
+<span class="fc" id="L518">                    .map(entry -&gt;</span>
+<span class="fc" id="L519">                            fieldHandlerFactories.get(entry.getKey())</span>
+<span class="fc" id="L520">                                    .map(factory -&gt; factory.buildFieldHandler(serviceAccess))</span>
+<span class="fc" id="L521">                                    .getOrElse(() -&gt; FieldHandlerFactory.unrecognised(entry.getKey(), category))</span>
+<span class="fc" id="L522">                                    .handle(sd, entry.getValue(), record.getRecordTimestamp(), record.getFields())</span>
+                    );
+        }
+    }
+
+    private static final class UploadedDataCategoryHandler extends CategoryHandler {
+
+        UploadedDataCategoryHandler(String category, io.vavr.collection.Map&lt;String, FieldHandlerFactory&gt; fieldHandlerFactories) {
+<span class="fc" id="L530">            super(category, fieldHandlerFactories);</span>
+<span class="fc" id="L531">        }</span>
+
+        @Override
+        Stream&lt;FieldHandlerResult&gt; handleRecord(CoreDeviceDataRecord record, long patientId, ServiceAccess serviceAccess) {
+<span class="fc" id="L535">            var previousUploadRecordId = serviceAccess.lookupPreviousUploadedDataId(record.getCoreDevicesRecordId());</span>
+
+<span class="fc" id="L537">            UploadedData.Status status = UploadedData.Status.NEW;</span>
+<span class="fc" id="L538">            List&lt;FieldHandlerResult&gt; recordResults = Collections.emptyList();</span>
+
+<span class="fc bfc" id="L540" title="All 2 branches covered.">            if (previousUploadRecordId.isEmpty()) {</span>
+<span class="fc" id="L541">                recordResults = super.handleRecord(record, patientId, serviceAccess).collect(Collectors.toList());</span>
+<span class="pc bpc" id="L542" title="1 of 2 branches missed.">                status = recordResults.stream().anyMatch(FieldHandlerResult::getHasUnmapped) ? UploadedData.Status.COMPLETED_UNMAPPED : UploadedData.Status.COMPLETED;</span>
+            }
+            // else
+            // No way of telling which menudata to update using unencrypted fields
+            // Just queue the record for update when the patient logs in
+
+<span class="fc" id="L548">            UploadedDataDTO dto = new UploadedDataDTO();</span>
+<span class="fc" id="L549">            dto.setData(record.getOriginalJson());</span>
+<span class="fc" id="L550">            dto.setDestination(Destination.DEVICE_MEASUREMENTS);</span>
+<span class="fc" id="L551">            dto.setFormat(Format.JSON_VALIDIC);</span>
+<span class="fc" id="L552">            dto.setStatus(status);</span>
+<span class="fc" id="L553">            dto.setEmbeddedId(record.getCoreDevicesRecordId());</span>
+<span class="fc" id="L554">            long uploadedDataId = serviceAccess.addUploadedData(dto, patientId);</span>
+
+<span class="fc" id="L556">            recordResults.forEach(result -&gt; result.getMeasurementDTOs().forEach(measurement -&gt; measurement.setUploadedDataId(uploadedDataId)));</span>
+
+<span class="fc" id="L558">            return recordResults.stream();</span>
+        }
+
+    }
+
+
+    @FunctionalInterface
+    private interface FieldHandlerFactory {
+
+<span class="fc" id="L567">        FieldHandler NO_OP_FIELD_HANDLER = (sourceDetails, value, recordTimestamp, allRecordField) -&gt; FieldHandlerResult.EMPTY;</span>
+
+        FieldHandler buildFieldHandler(ServiceAccess serviceAccess);
+
+        static FieldHandlerFactory noop() {
+<span class="fc" id="L572">            return (unused) -&gt; NO_OP_FIELD_HANDLER;</span>
+        }
+
+        static FieldHandler unrecognised(String validicKey, String category) {
+<span class="fc" id="L576">            return (sourceDetails, value, recordTimestamp, allRecordField) -&gt; {</span>
+<span class="fc bfc" id="L577" title="All 2 branches covered.">                if (!FieldHandler.ignorableValue(value)) {</span>
+<span class="fc" id="L578">                    staticValidicErrorHelper.reportUnmappedField(validicKey, category);</span>
+<span class="fc" id="L579">                    return UNMAPPED;</span>
+                }
+<span class="fc" id="L581">                return EMPTY;</span>
+            };
+        }
+
+        static FieldHandlerFactory loincTest(String loincCode, String units) {
+<span class="fc" id="L586">            return loincTest(loincCode, units, Functions.identity());</span>
+        }
+
+        static FieldHandlerFactory loincTest(String loincCode, String units, Function&lt;Double, Double&gt; valueTransformer) {
+<span class="fc" id="L590">            return (serviceAccess -&gt; {</span>
+                try {
+<span class="fc" id="L592">                    long loincTestId = serviceAccess.lookupLoincTestId(loincCode, units);</span>
+<span class="fc" id="L593">                    return (sourceDetails, value, recordTimestamp, allRecordFields) -&gt; {</span>
+<span class="fc bfc" id="L594" title="All 2 branches covered.">                        if (FieldHandler.ignorableValue(value)) {</span>
+<span class="fc" id="L595">                            return EMPTY;</span>
+                        }
+<span class="fc" id="L597">                        TestResultDTO testResultDTO = new TestResultDTO(sourceDetails);</span>
+<span class="fc" id="L598">                        testResultDTO.setTestDate(recordTimestamp);</span>
+<span class="fc" id="L599">                        testResultDTO.setLoincTestId(loincTestId);</span>
+<span class="fc" id="L600">                        testResultDTO.setValue(valueTransformer.apply(Double.parseDouble(value)));</span>
+<span class="fc" id="L601">                        return ImmutableFieldHandlerResult.builder().addTestResultDTOs(testResultDTO).build();</span>
+                    };
+<span class="nc" id="L603">                } catch (Exception e) {</span>
+<span class="nc" id="L604">                    LOGGER.error(&quot;Error while looking up LoincTestId&quot;, e);</span>
+<span class="nc" id="L605">                    return (sourceDetails, value, recordTimestamp, allRecordFields) -&gt; UNMAPPED;</span>
+                }
+            });
+        }
+
+        static FieldHandlerFactory doubleMeasurement(PredefinedMeasurementType measurementType) {
+<span class="fc" id="L611">            return measurement(measurementType, (unused) -&gt; null);</span>
+        }
+
+        static FieldHandlerFactory twinDoubleMeasurement(PredefinedMeasurementType measurementType, String secondValidicKey) {
+<span class="fc" id="L615">            return measurement(measurementType, (fieldMap) -&gt; Option.of(fieldMap.get(secondValidicKey)).getOrNull());</span>
+        }
+
+
+        static FieldHandlerFactory measurement(PredefinedMeasurementType measurementType, Function&lt;Map&lt;String, String&gt;, String&gt; secondaryValueAccesor) {
+<span class="fc" id="L620">            return (unused) -&gt; (sourceDetails, value, recordTimestamp, allRecordFields) -&gt; {</span>
+<span class="fc" id="L621">                var secondaryValue = secondaryValueAccesor.apply(allRecordFields);</span>
+<span class="pc bpc" id="L622" title="1 of 6 branches missed.">                if (FieldHandler.ignorableValue(value) || (measurementType.isMultiValueMeasurement() &amp;&amp; secondaryValue == null)) {</span>
+<span class="fc" id="L623">                    return EMPTY;</span>
+                }
+<span class="fc" id="L625">                MeasurementDTO measurement = new MeasurementDTO(sourceDetails);</span>
+<span class="fc" id="L626">                measurement.setMeasureDate(recordTimestamp);</span>
+
+<span class="fc" id="L628">                measurementType.getType().writeToMeasurement(measurement, value, secondaryValue);</span>
+
+<span class="fc" id="L630">                return ImmutableFieldHandlerResult.builder().addMeasurementDTOs(measurement).build();</span>
+            };
+        }
+    }
+
+    private class ServiceAccess {
+        private final EHRRequestContext requestContext;
+
+<span class="fc" id="L638">        ServiceAccess(EHRRequestContext requestContext) {</span>
+<span class="fc" id="L639">            this.requestContext = requestContext;</span>
+<span class="fc" id="L640">        }</span>
+
+        long lookupLoincTestId(String loincCode, String units) {
+<span class="fc" id="L643">            return loincManager.findLoincTestByLoincCodeAndUnits(loincCode, units)</span>
+<span class="fc" id="L644">                    .map(LoincTest::getId)</span>
+<span class="pc" id="L645">                    .orElseThrow(() -&gt; new RuntimeException(&quot;No LoincTest for code='&quot; + loincCode + &quot;' units='&quot; + units + &quot;'&quot;));</span>
+        }
+
+        Optional&lt;Long&gt; lookupPreviousUploadedDataId(String coreDevicesRecordId) {
+<span class="fc" id="L649">            return dataUploadManager.findPreviousDataUploadId(Destination.DEVICE_MEASUREMENTS, coreDevicesRecordId);</span>
+        }
+
+        long addUploadedData(UploadedDataDTO dto, long patientId) {
+<span class="fc" id="L653">            return dataUploadManager.addUploadedData(dto, userManager.getPKBPerson(patientId), requestContext).getId();</span>
+        }
+    }
+
+
+    // Json utils
+
+    private String getStringField(JsonNode root, String fieldName) {
+<span class="fc" id="L661">        JsonNode node = root.findValue(fieldName);</span>
+<span class="pc bpc" id="L662" title="1 of 2 branches missed.">        if (node == null) {</span>
+<span class="nc" id="L663">            throw new RuntimeException(&quot;Missing '&quot; + fieldName + &quot;' field&quot;);</span>
+        }
+<span class="fc" id="L665">        return node.asText();</span>
+    }
+
+    public String getTab() {
+<span class="fc" id="L669">        return tab;</span>
+    }
+
+    public List&lt;String&gt; getAvailableDevices() {
+<span class="nc" id="L673">        return availableDevices;</span>
+    }
+
+    public String getDeviceName() {
+<span class="nc" id="L677">        return deviceName;</span>
+    }
+
+    public void setDeviceName(String deviceName) {
+<span class="nc" id="L681">        this.deviceName = deviceName;</span>
+<span class="nc" id="L682">    }</span>
+
+    public String getRedirectURL() {
+<span class="nc" id="L685">        return redirectURL;</span>
+    }
+
+    public void setRedirectURL(String redirectURL) {
+<span class="nc" id="L689">        this.redirectURL = redirectURL;</span>
+<span class="nc" id="L690">    }</span>
+
+    public String getUserid() {
+<span class="nc" id="L693">        return userid;</span>
+    }
+
+    public void setUserid(String userid) {
+<span class="nc" id="L697">        this.userid = userid;</span>
+<span class="nc" id="L698">    }</span>
+
+    public String getOauth_token() {
+<span class="nc" id="L701">        return oauth_token;</span>
+    }
+
+    public void setOauth_token(String oauth_token) {
+<span class="nc" id="L705">        this.oauth_token = oauth_token;</span>
+<span class="nc" id="L706">    }</span>
+
+    public String getOauth_verifier() {
+<span class="nc" id="L709">        return oauth_verifier;</span>
+    }
+
+    public void setOauth_verifier(String oauth_verifier) {
+<span class="nc" id="L713">        this.oauth_verifier = oauth_verifier;</span>
+<span class="nc" id="L714">    }</span>
+
+    public String getFirstname() {
+<span class="nc" id="L717">        return firstname;</span>
+    }
+
+    public String getLastname() {
+<span class="nc" id="L721">        return lastname;</span>
+    }
+
+    public void setFirstname(String firstname) {
+<span class="nc" id="L725">        this.firstname = firstname;</span>
+<span class="nc" id="L726">    }</span>
+
+    public void setLastname(String lastname) {
+<span class="nc" id="L729">        this.lastname = lastname;</span>
+<span class="nc" id="L730">    }</span>
+
+    public Long getDeviceId() {
+<span class="nc" id="L733">        return deviceId;</span>
+    }
+
+    public void setDeviceId(Long deviceId) {
+<span class="nc" id="L737">        this.deviceId = deviceId;</span>
+<span class="nc" id="L738">    }</span>
+
+    public void setAvailableDevices(List&lt;String&gt; availableDevices) {
+<span class="nc" id="L741">        this.availableDevices = availableDevices;</span>
+<span class="nc" id="L742">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L745">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L749">        this.userManager = userManager;</span>
+<span class="fc" id="L750">    }</span>
+
+    public String getOauth_version() {
+<span class="nc" id="L753">        return oauth_version;</span>
+    }
+
+    public void setOauth_version(String oauth_version) {
+<span class="nc" id="L757">        this.oauth_version = oauth_version;</span>
+<span class="nc" id="L758">    }</span>
+
+    public List&lt;CoreDevice&gt; getCoreDevices() {
+<span class="fc" id="L761">        return coreDevices;</span>
+    }
+
+    public void setCoreDevices(List&lt;CoreDevice&gt; coreDevices) {
+<span class="nc" id="L765">        this.coreDevices = coreDevices;</span>
+<span class="nc" id="L766">    }</span>
+
+    public String getDevice() {
+<span class="nc" id="L769">        return device;</span>
+    }
+
+    public void setDevice(String device) {
+<span class="fc" id="L773">        this.device = device;</span>
+<span class="fc" id="L774">    }</span>
+
+    @Override
+    public void clearState() {
+<span class="nc" id="L778">        synchronized (PUSH_NOTIFICATION_PROCESSING_STATE) {</span>
+<span class="nc" id="L779">            PUSH_NOTIFICATION_PROCESSING_STATE.clear();</span>
+<span class="nc" id="L780">        }</span>
+<span class="nc" id="L781">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

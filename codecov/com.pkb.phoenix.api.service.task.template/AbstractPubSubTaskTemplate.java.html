@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractPubSubTaskTemplate.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.phoenix.api.service.task.template</a> &gt; <span class="el_source">AbstractPubSubTaskTemplate.java</span></div><h1>AbstractPubSubTaskTemplate.java</h1><pre class="source lang-java linenums">package com.pkb.phoenix.api.service.task.template;
+
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.pkb.phoenix.repository.task.projection.Task;
+import com.pkb.phoenix.shared.structures.request.TaskRequest;
+import com.pkb.phoenix.shared.structures.response.TaskResponse;
+import org.apache.camel.ProducerTemplate;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.springframework.data.redis.connection.stream.ReadOffset;
+import org.springframework.data.redis.connection.stream.StreamOffset;
+import org.springframework.data.redis.connection.stream.StreamReadOptions;
+import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import reactor.core.publisher.Mono;
+import reactor.util.context.ContextView;
+
+import java.time.Duration;
+
+import static com.pkb.phoenix.api.service.task.TaskService.REDIS_RESPONSE_KEY;
+import static com.pkb.phoenix.api.service.task.TaskService.TASK_ID;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.slf4j.LoggerFactory.getLogger;
+import static reactor.core.publisher.Mono.error;
+import static reactor.core.publisher.Mono.just;
+
+/**
+ * Subtype from this type when there is no need for post processing (e.g.: &quot;talk&quot; to FreshDesk).
+ * @param &lt;PARAMETER&gt;  Parameter
+ * @param &lt;REQUEST&gt; Structure of request sent via PubSub to request a task to be executed.
+ * @param &lt;RESPONSE&gt; Structure of response expected from PubSub signaling a task was executed (either succeeded or failed).
+ * @param &lt;RESULT&gt;  Result
+ */
+public abstract class AbstractPubSubTaskTemplate&lt;
+        PARAMETER,
+        REQUEST extends TaskRequest,
+        RESPONSE extends TaskResponse&lt;?&gt;,
+        RESULT&gt; extends AbstractTaskTemplate&lt;PARAMETER, RESULT&gt; {
+
+<span class="fc" id="L40">    private static final Logger LOG = getLogger(lookup().lookupClass());</span>
+<span class="fc" id="L41">    private static final Duration MAX_REDIS_DURATION = Duration.ofSeconds(10);</span>
+
+    public static final String OUTBOUND_REQUEST_PATIENT_INFO = &quot;direct:outboundRequestPatientInfo&quot;;
+
+    private final ReactiveRedisTemplate&lt;String, String&gt; redis;
+    private final ProducerTemplate producer;
+    private final Translator&lt;PARAMETER, REQUEST, RESPONSE, RESULT&gt; translator;
+    private final String endpoint;
+    private final Duration timeout;
+
+    public AbstractPubSubTaskTemplate(TaskTemplateCode code,
+                                      Class&lt;PARAMETER&gt; type,
+                                      Translator&lt;PARAMETER, REQUEST, RESPONSE, RESULT&gt; translator,
+                                      ReactiveRedisTemplate&lt;String, String&gt; redis,
+                                      ProducerTemplate producer,
+                                      String endpoint,
+                                      ObjectReader json) {
+<span class="fc" id="L58">        this(code, type, translator, redis, producer, endpoint, json, MAX_REDIS_DURATION);</span>
+<span class="fc" id="L59">    }</span>
+
+    public AbstractPubSubTaskTemplate(TaskTemplateCode code,
+                                      Class&lt;PARAMETER&gt; type,
+                                      Translator&lt;PARAMETER, REQUEST, RESPONSE, RESULT&gt; translator,
+                                      ReactiveRedisTemplate&lt;String, String&gt; redis,
+                                      ProducerTemplate producer,
+                                      String endpoint,
+                                      ObjectReader json,
+                                      Duration timeout) {
+<span class="fc" id="L69">        super(code, type, json);</span>
+<span class="fc" id="L70">        this.redis = redis;</span>
+<span class="fc" id="L71">        this.producer = producer;</span>
+<span class="fc" id="L72">        this.translator = translator;</span>
+<span class="fc" id="L73">        this.endpoint = endpoint;</span>
+<span class="fc" id="L74">        this.timeout = timeout;</span>
+<span class="fc" id="L75">    }</span>
+
+    @Override
+    public final Mono&lt;RESULT&gt; execute(Task&lt;PARAMETER&gt; task) {
+<span class="fc" id="L79">        return just(task)</span>
+<span class="fc" id="L80">                .transformDeferredContextual((m, c) -&gt; m.map(translator.toRequest(c)))</span>
+<span class="fc" id="L81">                .transformDeferredContextual(this::dispatchAndWaitForResponse)</span>
+<span class="fc" id="L82">                .transformDeferredContextual((m, c) -&gt; m.map(translator.fromResponse(c)));</span>
+    }
+
+    /**
+     * PubSub is not meant to be used for Request/Response type messaging.
+     * We work around this by using redis streams.
+     * General idea:
+     * 1. We subscribe to a redis stream where the stream is named after the task id.
+     * 2. Once we are ready to handle events, we place our request onto a PubSub topic and
+     * 3. {@link com.pkb.phoenix.api.service.task.template.emaildeletion.TaskResponseListener TaskResponseListener} will listen for responses and route messages to the right redis stream.
+     * 4. Once a response is placed to the right stream we take it and delete the given stream.
+     */
+    private @NotNull Mono&lt;RESPONSE&gt; dispatchAndWaitForResponse(Mono&lt;REQUEST&gt; requestPublisher, ContextView context) {
+<span class="fc" id="L95">        var taskId = context.get(TASK_ID).toString();</span>
+
+<span class="fc" id="L97">        return requestPublisher</span>
+<span class="fc" id="L98">                .flatMap(request -&gt; {</span>
+                    @SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L100">                    var responsePublisher = redis.&lt;String, String&gt;opsForStream()</span>
+<span class="fc" id="L101">                            .read(</span>
+<span class="fc" id="L102">                                    StreamReadOptions.empty().block(timeout),</span>
+<span class="fc" id="L103">                                    StreamOffset.create(taskId, ReadOffset.from(&quot;0&quot;)))</span>
+<span class="fc" id="L104">                            .map(record -&gt; deserializeTaskResponse(record.getValue().get(REDIS_RESPONSE_KEY), translator.responseType()))</span>
+<span class="fc" id="L105">                            .next()</span>
+<span class="fc" id="L106">                            .flatMap(response -&gt; redis.delete(taskId).map(numberOfDeletedRecords -&gt; response))</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">                            .flatMap(response -&gt; response.status().isSuccessful() ? just(response) : error(() -&gt; new IllegalStateException(format(&quot;Task execution was not successful: %s&quot;, response.errorMessage()))));</span>
+
+                    try {
+<span class="fc" id="L110">                        producer.sendBody(endpoint, request);</span>
+<span class="fc" id="L111">                        return responsePublisher;</span>
+<span class="nc" id="L112">                    } catch (Exception cause) {</span>
+<span class="nc" id="L113">                        return error(cause);</span>
+                    }
+                });
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

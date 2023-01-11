@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CamelExtensions.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel</a> &gt; <span class="el_source">CamelExtensions.kt</span></div><h1>CamelExtensions.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel
+
+import org.apache.camel.AggregationStrategy
+import org.apache.camel.Expression
+import org.apache.camel.builder.Builder
+import org.apache.camel.builder.Builder.constant
+import org.apache.camel.builder.Builder.header
+import org.apache.camel.model.ProcessorDefinition
+import org.apache.camel.model.RecipientListDefinition
+import org.apache.camel.model.ToDefinition
+import org.apache.camel.support.builder.ValueBuilder
+import kotlin.reflect.KFunction
+import kotlin.reflect.full.instanceParameter
+import kotlin.reflect.jvm.javaMethod
+import kotlin.reflect.jvm.javaType
+
+/**
+ * Extends the camel route builder DSL to allow the use of method references without redundant class type declarations.
+ *
+ * It allows us to use
+ * ```
+ *     .beanMethod(PatientSearch::processResults)
+ * ```
+ * instead of
+ * ```
+ *     .bean(PatientSearch::class.java, PatientSearch::processResults.name)
+ * ```
+ */
+fun &lt;Type : ProcessorDefinition&lt;Type&gt;&gt; ProcessorDefinition&lt;Type&gt;.beanMethod(kFunction: KFunction&lt;*&gt;): Type {
+<span class="fc" id="L30">    val instance = kFunction.instanceParameter!!.type.javaType</span>
+<span class="fc" id="L31">    val javaMethod = kFunction.javaMethod!!</span>
+<span class="fc" id="L32">    return this.bean(instance.typeName, javaMethod.name)</span>
+}
+
+fun beanMethod(kFunction: KFunction&lt;*&gt;): ValueBuilder {
+<span class="fc" id="L36">    val instance = kFunction.instanceParameter!!.type.javaType</span>
+<span class="fc" id="L37">    val javaMethod = kFunction.javaMethod!!</span>
+<span class="fc" id="L38">    return Builder.method(instance.typeName, javaMethod.name)</span>
+}
+
+/**
+ * Sets fhir search url and recipient list, sends parallel requests, and then aggregates the results
+ */
+fun &lt;Type : ProcessorDefinition&lt;Type&gt;&gt; ProcessorDefinition&lt;Type&gt;.parallelFhirSearch(
+    expression: Expression,
+    routes: List&lt;String&gt;,
+    aggregationStrategy: AggregationStrategy,
+): RecipientListDefinition&lt;Type&gt; {
+<span class="fc" id="L49">    val nodeIdPart = id.replace(&quot;/&quot;, &quot;-&quot;)</span>
+<span class="fc" id="L50">    return this</span>
+<span class="fc" id="L51">        .setHeader(CAMELFHIR_URL_HEADER, expression).id(&quot;set-camelfhir-header-$nodeIdPart&quot;)</span>
+<span class="fc" id="L52">        .setHeader(CAMEL_RECIPIENT_LIST_HEADER_NAME, constant(routes.joinToString(&quot;,&quot;))).id(&quot;set-recipientlist-header-$nodeIdPart)&quot;)</span>
+<span class="fc" id="L53">        .recipientList(CAMEL_RECIPIENT_LIST_HEADER)</span>
+<span class="fc" id="L54">            .parallelProcessing()</span>
+<span class="fc" id="L55">            .aggregationStrategy(aggregationStrategy)!!</span>
+}
+
+/**
+ * Convenience method for performing a multicast route in parallel and aggregating the results
+ */
+fun &lt;Type : ProcessorDefinition&lt;Type&gt;&gt; ProcessorDefinition&lt;Type&gt;.parallelMulticast(
+    routes: Array&lt;String&gt;,
+    aggregationStrategy: AggregationStrategy,
+) =
+<span class="fc" id="L65">    this.multicast(aggregationStrategy)</span>
+<span class="fc" id="L66">        .parallelProcessing()</span>
+<span class="fc" id="L67">        .toMany(routes) { it.removePrefix(&quot;direct:aggregator/&quot;).replace(&quot;/&quot;, &quot;-&quot;) }</span>
+<span class="fc" id="L68">    .end()!!</span>
+
+fun &lt;Type : ProcessorDefinition&lt;Type&gt;&gt; ProcessorDefinition&lt;Type&gt;.toMany(
+    routes: Array&lt;String&gt;,
+    idGenerator: (String) -&gt; String
+): Type {
+<span class="fc" id="L74">    routes.forEach {</span>
+<span class="fc" id="L75">        addOutput(ToDefinition(it).apply {</span>
+<span class="fc" id="L76">            id = idGenerator(it)</span>
+<span class="fc" id="L77">        })</span>
+<span class="fc" id="L78">    }</span>
+    @Suppress(&quot;UNCHECKED_CAST&quot;)
+<span class="fc" id="L80">    return this as Type</span>
+}
+
+
+/**
+ * Header used for overriding the URL for the next FHIR request - see
+ * https://camel.apache.org/components/3.17.x/fhir-component.html#_api_search_method_searchByUrl
+ */
+const val CAMELFHIR_URL_HEADER = &quot;CamelFhir.url&quot;
+
+/**
+ * Header used to specify all the routes Camel must use when invoking the
+ * [Recipient List](https://camel.apache.org/components/3.17.x/eips/recipientList-eip.html) component
+ */
+const val CAMEL_RECIPIENT_LIST_HEADER_NAME = &quot;listOfRoutes&quot;
+
+/**
+ * [CAMEL_RECIPIENT_LIST_HEADER_NAME] expressed as a header expression
+ */
+<span class="pc" id="L99">val CAMEL_RECIPIENT_LIST_HEADER: org.apache.camel.builder.ValueBuilder = header(CAMEL_RECIPIENT_LIST_HEADER_NAME)</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

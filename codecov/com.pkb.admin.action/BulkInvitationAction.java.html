@@ -1,0 +1,400 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BulkInvitationAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.admin.action</a> &gt; <span class="el_source">BulkInvitationAction.java</span></div><h1>BulkInvitationAction.java</h1><pre class="source lang-java linenums">package com.pkb.admin.action;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.base.Error;
+import com.pkb.common.csv.CsvOpener;
+import com.pkb.common.csv.CsvRecord;
+import com.pkb.common.csv.ParsingError;
+import com.pkb.datamodel.consent.ImmutablePatientConsentUpdateTemplate;
+import com.pkb.datamodel.consent.PatientConsentUpdateTemplate;
+import com.pkb.entities.enums.ConsentReason;
+import com.pkb.institute.entity.InstituteUser;
+import com.pkb.institute.entity.Team;
+import com.pkb.mappers.SourceDetailsMapper;
+import com.pkb.patient.InvitationNationalIdValidator;
+import com.pkb.patient.invite.bulk.BulkInvitationTaskFactory;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.invitation.impl.BulkInvitationCliniciansTask;
+import com.pkb.service.invitation.impl.InvitationManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.control.Either;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.Reader;
+import java.lang.invoke.MethodHandles;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+import static com.pkb.common.base.ErrorBuilder.errorOf;
+
+/**
+ * This action class will send out mass invitations to patients
+ * This feature can be accessed from coordinator account
+ *
+ * @author pravinam
+ */
+<span class="fc" id="L55">public class BulkInvitationAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L59">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final String COORDINATOR_IS_PART_OF_ANY_TEAM_CODE = &quot;invitePatientInBulkForm.err.coordinator.is.part.of.any.team&quot;;
+<span class="fc" id="L62">    private List&lt;InstituteUser&gt; patientList = new ArrayList&lt;&gt;();</span>
+    private File source;
+    private String sourceFileName;
+    private long instituteId;
+
+    private InvitationManager invitationManager;
+    private TeamManager teamManager;
+    private TeamUserManager teamUserManager;
+    private UserAccessManager userAccessManager;
+    private PKBEmailMessageManager pkbEmailMessageManager;
+
+<span class="fc" id="L73">    private String tab = &quot;patients&quot;;</span>
+    private String subTab;
+
+    private Team team;
+
+    private ThreadPoolTaskExecutor taskExecutor;
+
+    @Autowired
+    @VisibleForTesting
+    CsvOpener csvOpener;
+
+    @Autowired
+    @VisibleForTesting
+    BulkInvitationTaskFactory taskFactory;
+
+    @Autowired
+    @VisibleForTesting
+    InvitationNationalIdValidator invitationNationalIdValidator;
+
+    @Autowired
+    SourceDetailsMapper sourceDetailsMapper;
+
+    @Override
+    public String input() {
+<span class="fc" id="L97">        return findLoggedInUsersTeam()</span>
+<span class="fc" id="L98">                .map(</span>
+                        loggedInUsersTeam -&gt; {
+<span class="fc" id="L100">                            team = loggedInUsersTeam;</span>
+<span class="fc" id="L101">                            return SUCCESS;</span>
+                        })
+<span class="fc" id="L103">                .mapLeft(</span>
+                        error -&gt; {
+<span class="nc bnc" id="L105" title="All 2 branches missed.">                            if (error.hasArguments()) {</span>
+<span class="nc" id="L106">                                addActionError(getText(error.getErrorCode(), error.getArguments()));</span>
+                            } else {
+<span class="nc" id="L108">                                addActionError(getText(error.getErrorCode()));</span>
+                            }
+<span class="nc" id="L110">                            return ERROR;</span>
+                        })
+<span class="fc" id="L112">                .fold(Function.identity(), Function.identity());</span>
+    }
+
+    public String inputClinicians() {
+<span class="fc" id="L116">        return SUCCESS;</span>
+    }
+
+    @Override
+    public String execute() {
+        try {
+
+<span class="fc" id="L123">            return attemptToProcessCsv();</span>
+
+<span class="nc" id="L125">        } catch (Exception cause) {</span>
+<span class="nc" id="L126">            LOGGER.error(&quot;Error while parsing bulk invitation file&quot;, cause);</span>
+<span class="nc" id="L127">            addActionError(getText(&quot;err.bulk.invite.unable.to.parse.file&quot;, new String[]{cause.getMessage()}));</span>
+<span class="nc" id="L128">            return ERROR;</span>
+        }
+    }
+
+    public String inviteClinicians() {
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">        if (source != null) {</span>
+            try {
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">                if (!source.canRead()) {</span>
+<span class="nc" id="L136">                    addActionError(getText(&quot;err.bulk.invite.unable.to.read.file&quot;));</span>
+<span class="nc" id="L137">                    return ERROR;</span>
+                }
+
+<span class="fc" id="L140">                FileReader fileReader = null;</span>
+<span class="fc" id="L141">                List&lt;CSVRecord&gt; records = null;</span>
+
+                try {
+<span class="fc" id="L144">                    fileReader = new FileReader(source);</span>
+<span class="fc" id="L145">                    BufferedReader br = new BufferedReader(fileReader);</span>
+<span class="fc" id="L146">                    CSVParser parser = new CSVParser(br, CSVFormat.DEFAULT);</span>
+
+<span class="fc" id="L148">                    records = parser.getRecords();</span>
+<span class="pc bpc" id="L149" title="1 of 2 branches missed.">                    if (records.isEmpty()) {</span>
+<span class="nc" id="L150">                        addActionError(getText(&quot;err.bulk.invite.file.empty&quot;));</span>
+<span class="nc" id="L151">                        return ERROR;</span>
+                    }
+
+<span class="fc" id="L154">                    CSVRecord header = records.get(0);</span>
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">                    if (header.size() != BulkInvitationCliniciansTask.COLUMN_SIZE) {</span>
+<span class="nc" id="L156">                        addActionError(getText(&quot;err.bulk.invite.number.of.cols&quot;, new String[]{Integer.toString(BulkInvitationCliniciansTask.COLUMN_SIZE)}));</span>
+<span class="nc" id="L157">                        return ERROR;</span>
+                    }
+
+<span class="fc bfc" id="L160" title="All 2 branches covered.">                    for (int i = 0; i &lt; BulkInvitationCliniciansTask.COLUMN_SIZE; ++i) {</span>
+<span class="fc" id="L161">                        if (!BulkInvitationCliniciansTask.headerExpected[i].trim().toLowerCase()</span>
+<span class="pc bpc" id="L162" title="1 of 2 branches missed.">                                .equals(header.get(i).trim().toLowerCase())) {</span>
+<span class="nc" id="L163">                            addActionError(getText(&quot;err.bulk.invite.missing.header&quot;));</span>
+<span class="nc" id="L164">                            return ERROR;</span>
+                        }
+                    }
+
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">                    if (records.size() == 1) {</span>
+<span class="nc" id="L169">                        addActionError(getText(&quot;err.bulk.invite.no.data&quot;));</span>
+<span class="nc" id="L170">                        return ERROR;</span>
+                    }
+<span class="nc" id="L172">                } catch (Exception e) {</span>
+<span class="nc" id="L173">                    LOGGER.error(&quot;Error while parsing bulk invitation file&quot;, e);</span>
+<span class="nc" id="L174">                    addActionError(getText(&quot;err.bulk.invite.unable.to.parse.file&quot;, new String[]{e.getMessage()}));</span>
+<span class="nc" id="L175">                    return ERROR;</span>
+                } finally {
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">                    if (fileReader != null) {</span>
+                        try {
+<span class="fc" id="L179">                            fileReader.close();</span>
+<span class="nc" id="L180">                        } catch (Exception e) {</span>
+<span class="nc" id="L181">                            LOGGER.error(&quot;Error while closing bulk invite csv file&quot;, e);</span>
+<span class="fc" id="L182">                        }</span>
+                    }
+                }
+
+<span class="fc" id="L186">                PKBPerson coord = userManager.getPKBPerson(loggedInUserUtil.getLoggedInUserId(), PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L187">                team = loggedInUserUtil.getLoggedInUserPrimaryTeam(getEHRRequestContext());</span>
+
+<span class="fc" id="L189">                List&lt;CSVRecord&gt; finalRecords = records;</span>
+<span class="fc" id="L190">                taskExecutor.execute(new BulkInvitationCliniciansTask(getLoggedInEHRRequestContext(),</span>
+                        teamManager,
+                        teamUserManager,
+                        userManager,
+                        userAccessManager,
+                        pkbEmailMessageManager,
+                        invitationManager,
+                        team,
+                        coord,
+                        finalRecords,
+                        dateTimeService));
+
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">                if (isTestServer()) {</span>
+<span class="fc" id="L203">                    LOGGER.info(&quot;Records: {}&quot;, records);</span>
+                } else {
+<span class="nc" id="L205">                    LOGGER.info(&quot;{} CSV records processed by BulkInvitationAction.inviteClinicians()&quot;, records.size());</span>
+                }
+
+<span class="fc" id="L208">                addActionMessage(getText(&quot;bulk.invite.you.will.be.notified&quot;));</span>
+
+<span class="nc" id="L210">            } catch (Exception e) {</span>
+<span class="nc" id="L211">                LOGGER.error(&quot;Error processing BulkAccountCreation&quot;, e);</span>
+                //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L213">                addActionError(e.getMessage());</span>
+<span class="nc" id="L214">                return ERROR;</span>
+<span class="fc" id="L215">            }</span>
+        }
+<span class="fc" id="L217">        return SUCCESS;</span>
+    }
+
+    // ========== Accessors and mutators below. ==========
+
+    public List&lt;InstituteUser&gt; getPatientList() {
+<span class="nc" id="L223">        return patientList;</span>
+    }
+
+    public void setPatientList(List&lt;InstituteUser&gt; patientList) {
+<span class="nc" id="L227">        this.patientList = patientList;</span>
+<span class="nc" id="L228">    }</span>
+
+    public InvitationManager getInvitationManager() {
+<span class="nc" id="L231">        return invitationManager;</span>
+    }
+
+    public void setInvitationManager(InvitationManager invitationManager) {
+<span class="fc" id="L235">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L236">    }</span>
+
+    public TeamUserManager getTeamUserManager() {
+<span class="nc" id="L239">        return teamUserManager;</span>
+    }
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L243">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L244">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L247">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L251">        this.userManager = userManager;</span>
+<span class="fc" id="L252">    }</span>
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L255">        return userAccessManager;</span>
+    }
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L259">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L260">    }</span>
+
+    public long getInstituteId() {
+<span class="nc" id="L263">        return instituteId;</span>
+    }
+
+    public void setTaskExecutor(ThreadPoolTaskExecutor taskExecutor) {
+<span class="fc" id="L267">        this.taskExecutor = taskExecutor;</span>
+<span class="fc" id="L268">    }</span>
+
+    public void setInstituteId(long instituteId) {
+<span class="nc" id="L271">        this.instituteId = instituteId;</span>
+<span class="nc" id="L272">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L275">        return tab;</span>
+    }
+
+    public void setTab(String tab) {
+<span class="fc" id="L279">        this.tab = tab;</span>
+<span class="fc" id="L280">    }</span>
+
+    public String getSubTab() {
+<span class="fc" id="L283">        return subTab;</span>
+    }
+
+    public void setSubTab(String subTab) {
+<span class="fc" id="L287">        this.subTab = subTab;</span>
+<span class="fc" id="L288">    }</span>
+
+    public File getSource() {
+<span class="fc" id="L291">        return source;</span>
+    }
+
+    public void setSource(File source) {
+<span class="fc" id="L295">        this.source = source;</span>
+<span class="fc" id="L296">    }</span>
+
+    public String getSourceFileName() {
+<span class="nc" id="L299">        return sourceFileName;</span>
+    }
+
+    public void setSourceFileName(String sourceFileName) {
+<span class="fc" id="L303">        this.sourceFileName = sourceFileName;</span>
+<span class="fc" id="L304">    }</span>
+
+    public PKBEmailMessageManager getPkbEmailMessageManager() {
+<span class="nc" id="L307">        return pkbEmailMessageManager;</span>
+    }
+
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L311">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L312">    }</span>
+
+    public TeamManager getTeamManager() {
+<span class="nc" id="L315">        return teamManager;</span>
+    }
+
+    public void setTeamManager(TeamManager teamManager) {
+<span class="fc" id="L319">        this.teamManager = teamManager;</span>
+<span class="fc" id="L320">    }</span>
+
+    public Team getTeam() {
+<span class="fc" id="L323">        return team;</span>
+    }
+
+    // ========== Helper methods below. ==========
+
+    private Either&lt;Error, Team&gt; findLoggedInUsersTeam() {
+        Either&lt;Error, Team&gt; result;
+
+<span class="fc" id="L331">        Team loggedInUsersTeam = loggedInUserUtil.getLoggedInUserPrimaryTeam(getEHRRequestContext());</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">        if (loggedInUsersTeam == null) {</span>
+<span class="nc" id="L333">            result = Either.left(errorOf(COORDINATOR_IS_PART_OF_ANY_TEAM_CODE, &quot;Coordinator is not part of any team&quot;));</span>
+        } else {
+<span class="fc" id="L335">            result = Either.right(loggedInUsersTeam);</span>
+        }
+
+<span class="fc" id="L338">        return result;</span>
+    }
+
+    private String attemptToProcessCsv() throws FileNotFoundException {
+<span class="pc bpc" id="L342" title="2 of 4 branches missed.">        if (source != null &amp;&amp; source.canRead()) {</span>
+<span class="fc" id="L343">            Either&lt;ParsingError&lt;List&lt;Error&gt;&gt;, Stream&lt;CsvRecord&gt;&gt; eitherCsvRecordsOrFailure = csvOpener.getCsvRecords(getFileContent());</span>
+
+<span class="fc" id="L345">            return eitherCsvRecordsOrFailure.map(</span>
+                    csvLines -&gt; {
+<span class="fc" id="L347">                        LoggedInEHRRequestContext requestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L348">                        team = loggedInUserUtil.getLoggedInUserPrimaryTeam(requestContext);</span>
+<span class="fc" id="L349">                        PKBPerson loggedInPerson = loggedInUserUtil.getLoggedInUser(PKBPerson.Lazy.CONTACTS);</span>
+
+<span class="fc" id="L351">                        taskExecutor.execute(taskFactory.create(</span>
+                                requestContext,
+                                loggedInPerson,
+<span class="fc" id="L354">                                io.vavr.collection.List.ofAll(csvLines),</span>
+                                team,
+                                invitationNationalIdValidator,
+<span class="fc" id="L357">                                generatePatientConsentForTeam(requestContext)));</span>
+
+<span class="fc" id="L359">                        addActionMessage(getText(&quot;bulk.invite.you.will.be.notified.patient.report&quot;));</span>
+<span class="fc" id="L360">                        return SUCCESS;</span>
+
+<span class="fc" id="L362">                    }).mapLeft(</span>
+                    failure -&gt; {
+<span class="nc" id="L364">                        failure.getError().stream()</span>
+<span class="nc" id="L365">                                .map(Error::getDescription)</span>
+<span class="nc" id="L366">                                .forEach(this::addActionError);</span>
+<span class="nc" id="L367">                        return ERROR;</span>
+                    })
+<span class="fc" id="L369">                    .fold(Function.identity(), Function.identity());</span>
+        } else {
+<span class="nc" id="L371">            addActionError(getText(&quot;err.bulk.invite.unable.to.read.file&quot;));</span>
+<span class="nc" id="L372">            return ERROR;</span>
+        }
+    }
+
+    @VisibleForTesting
+    Reader getFileContent() {
+        try {
+<span class="fc" id="L379">            return new FileReader(source);</span>
+<span class="nc" id="L380">        } catch (FileNotFoundException cause) {</span>
+<span class="nc" id="L381">            throw new IllegalStateException(cause);</span>
+        }
+    }
+
+    private PatientConsentUpdateTemplate generatePatientConsentForTeam(EHRRequestContext requestContext) {
+<span class="fc" id="L386">        return ImmutablePatientConsentUpdateTemplate.builder()</span>
+<span class="fc" id="L387">                .generalHealthConsentGranted(team.isDefaultRequestGeneral())</span>
+<span class="fc" id="L388">                .sexualHealthConsentGranted(team.isDefaultRequestSexualHealth())</span>
+<span class="fc" id="L389">                .mentalHealthConsentGranted(team.isDefaultRequestMentalHealth())</span>
+<span class="fc" id="L390">                .socialCareConsentGranted(team.isDefaultRequestSocialCare())</span>
+<span class="fc" id="L391">                .proEditOnlyForChild(false)</span>
+<span class="fc" id="L392">                .discharged(false)</span>
+<span class="fc" id="L393">                .accessingTeamId(team.getId())</span>
+<span class="fc" id="L394">                .consentReason(ConsentReason.CREATED_ACCOUNT)</span>
+<span class="fc" id="L395">                .reasonText(&quot;bulk account creation&quot;)</span>
+<span class="fc" id="L396">                .source(sourceDetailsMapper.mapFromEHRRequestContext(requestContext))</span>
+<span class="fc" id="L397">                .build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TwoFARemovalTemplate.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.phoenix.api.service.task.template.twofaremoval</a> &gt; <span class="el_source">TwoFARemovalTemplate.java</span></div><h1>TwoFARemovalTemplate.java</h1><pre class="source lang-java linenums">package com.pkb.phoenix.api.service.task.template.twofaremoval;
+
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.phoenix.api.service.Meta;
+import com.pkb.phoenix.api.service.freshdesk.FreshDeskService;
+import com.pkb.phoenix.api.service.freshdesk.ImmutableApiKey;
+import com.pkb.phoenix.api.service.task.TaskService;
+import com.pkb.phoenix.api.service.task.template.AbstractPostProcessingTaskTemplate;
+import com.pkb.phoenix.api.service.task.template.AbstractPubSubTaskTemplate;
+import com.pkb.phoenix.repository.task.projection.Task;
+import com.pkb.phoenix.shared.structures.request.TwoFARemovalTaskRequest;
+import com.pkb.phoenix.shared.structures.response.TwoFARemovalTaskResponse;
+import org.apache.camel.ProducerTemplate;
+import org.apache.velocity.VelocityContext;
+import org.apache.velocity.app.VelocityEngine;
+import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import reactor.core.publisher.Mono;
+import reactor.util.context.ContextView;
+
+import java.io.IOException;
+import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.List;
+
+import static com.pkb.phoenix.api.service.task.TaskService.TASK_INSTANCE;
+import static com.pkb.phoenix.api.service.task.template.TaskTemplateCode.TWO_FA_REMOVAL;
+import static com.pkb.phoenix.api.service.tasktype.ValidationUtil.validateEmail;
+import static com.pkb.phoenix.api.service.tasktype.ValidationUtil.validateFreshDeskId;
+import static reactor.core.publisher.Mono.just;
+
+public final class TwoFARemovalTemplate extends AbstractPostProcessingTaskTemplate&lt;TwoFARemovalParameters, TwoFARemovalResult, TwoFARemovalResult.FdTwoFARemovalResult&gt; {
+    public static final String OUTBOUND_REQUEST_TWO_FA_REMOVAL = &quot;direct:outboundRequestTwoFARemoval&quot;;
+
+    private static final class BaseTwoFARemovalTemplate
+            extends AbstractPubSubTaskTemplate&lt;TwoFARemovalParameters, TwoFARemovalTaskRequest, TwoFARemovalTaskResponse, TwoFARemovalResult&gt; {
+        BaseTwoFARemovalTemplate(ReactiveRedisTemplate&lt;String, String&gt; redis,
+                ProducerTemplate producer,
+                DateTimeService dateTimeService,
+                ObjectReader json) {
+<span class="fc" id="L41">            super(TWO_FA_REMOVAL, TwoFARemovalParameters.class, new TwoFARemovalTranslator(dateTimeService), redis, producer, OUTBOUND_REQUEST_TWO_FA_REMOVAL, json);</span>
+<span class="fc" id="L42">        }</span>
+
+        @Override
+        public List&lt;String&gt; validate(TwoFARemovalParameters parameters) {
+<span class="fc" id="L46">            List&lt;String&gt; errors = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L47">            validateEmail(parameters.email()).ifPresent(errors::add);</span>
+<span class="fc" id="L48">            validateFreshDeskId(parameters.fdId()).ifPresent(errors::add);</span>
+<span class="fc" id="L49">            return errors;</span>
+        }
+    }
+
+    private final VelocityEngine templateEngine;
+    private final FreshDeskService freshDeskService;
+
+    public TwoFARemovalTemplate(ReactiveRedisTemplate&lt;String, String&gt; redis,
+            ProducerTemplate producer,
+            VelocityEngine templateEngine,
+            FreshDeskService freshDeskService,
+            DateTimeService dateTimeService,
+            ObjectReader json) {
+<span class="fc" id="L62">        super(new BaseTwoFARemovalTemplate(redis, producer, dateTimeService, json), json);</span>
+<span class="fc" id="L63">        this.templateEngine = templateEngine;</span>
+<span class="fc" id="L64">        this.freshDeskService = freshDeskService;</span>
+<span class="fc" id="L65">    }</span>
+
+    @Override
+    protected Mono&lt;TwoFARemovalResult.FdTwoFARemovalResult&gt; postProcess(TwoFARemovalResult twoFARemovalResult, ContextView context) {
+<span class="fc" id="L69">        var meta = context.&lt;Meta&gt; get(TaskService.META);</span>
+<span class="fc" id="L70">        var parameters = context.&lt;Task&lt;TwoFARemovalParameters&gt;&gt; get(TASK_INSTANCE).getParameters();</span>
+
+<span class="fc" id="L72">        return meta.session().user().fdApiKey()</span>
+<span class="fc" id="L73">                .map(ImmutableApiKey::of)</span>
+<span class="fc" id="L74">                .map(apiKey -&gt; {</span>
+<span class="pc bpc" id="L75" title="1 of 2 branches missed.">                    if (twoFARemovalResult.status().isSuccessful()) {</span>
+<span class="fc" id="L76">                        return freshDeskService.addNote(parameters.fdId(), renderMessage(parameters.email()), apiKey)</span>
+<span class="fc" id="L77">                                .then(freshDeskService.closeTicket(parameters.fdId(), apiKey))</span>
+<span class="fc" id="L78">                                .map($1 -&gt; &quot;Done&quot;);</span>
+                    }
+
+<span class="nc" id="L81">                    return just(&quot;Skipped&quot;);</span>
+                })
+<span class="fc" id="L83">                .orElseGet(() -&gt; just(&quot;Skipped&quot;))</span>
+<span class="pc" id="L84">                .onErrorResume($ -&gt; just(&quot;Failed&quot;))</span>
+<span class="fc" id="L85">                .map(status -&gt; ImmutableFdTwoFARemovalResult.builder()</span>
+<span class="fc" id="L86">                        .outcome(twoFARemovalResult.outcome())</span>
+<span class="fc" id="L87">                        .fdStatus(status)</span>
+<span class="fc" id="L88">                        .status(twoFARemovalResult.status())</span>
+<span class="fc" id="L89">                        .build());</span>
+
+    }
+
+    private String renderMessage(String email) {
+<span class="fc" id="L94">        var template = templateEngine.getTemplate(&quot;twoFARemovalTemplate.vm&quot;);</span>
+
+<span class="fc" id="L96">        try (var writer = new StringWriter()) {</span>
+<span class="fc" id="L97">            var context = new VelocityContext();</span>
+
+<span class="fc" id="L99">            context.put(&quot;email&quot;, email);</span>
+
+<span class="fc" id="L101">            template.merge(context, writer);</span>
+<span class="fc" id="L102">            writer.flush();</span>
+
+<span class="fc" id="L104">            return writer.toString();</span>
+<span class="nc" id="L105">        } catch (IOException e) {</span>
+<span class="nc" id="L106">            throw new IllegalStateException(e);</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

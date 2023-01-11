@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AttachmentManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.document</a> &gt; <span class="el_source">AttachmentManager.java</span></div><h1>AttachmentManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.document;
+
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.document.PlaintextDocument;
+import com.pkb.document.entity.Attachment;
+import com.pkb.document.entity.DocAttach;
+import com.pkb.model.RecordWithId;
+import com.pkb.repository.legacy.LegacyAttachmentRepository;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.Tuple;
+
+import java.util.Collection;
+import java.util.stream.Stream;
+
+import static com.pkb.util.EncryptedDocumentMapperHelper.ACCOUNT_ID_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.AUTHOR_PERSON_ID_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.MEDIA_TYPE_PROVIDER;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+public class AttachmentManager extends TransactionManager {
+
+    private final LegacyAttachmentRepository repository;
+    private final DocumentManager documentManager;
+
+    public AttachmentManager(PhrConfig config,
+                             TolvenBeanFactory beanFactory,
+                             DateTimeService dateTimeService,
+                             UUIDProvider uuidProvider,
+                             LegacyAttachmentRepository repository,
+                             DocumentManager documentManager) {
+<span class="fc" id="L39">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L40">        this.repository = repository;</span>
+<span class="fc" id="L41">        this.documentManager = documentManager;</span>
+<span class="fc" id="L42">    }</span>
+
+    public Attachment getAttachmentContent(LoggedInEHRRequestContext context, Long attachmentId) {
+<span class="pc" id="L45">        var docAttach = repository.findById(attachmentId).orElseThrow(() -&gt; new IllegalStateException(&quot;Could not find attachment with id=&quot; + attachmentId));</span>
+<span class="fc" id="L46">        var document = documentManager.retrieveOrThrow(docAttach.getAttachedDocumentMetadataId());</span>
+        // decryption will fail unless we use the accountId of the document and the logged-in user id
+        // user must also have access to that account
+<span class="fc" id="L49">        var decrypted = beanFactory.getEhrRemote().decryptDoc(document, context);</span>
+<span class="fc" id="L50">        return getAttachment(decrypted, attachmentId, docAttach);</span>
+    }
+
+    public Stream&lt;Attachment&gt; getAttachmentContent(LoggedInEHRRequestContext context, Collection&lt;Long&gt; attachmentIds) {
+<span class="nc bnc" id="L54" title="All 2 branches missed.">        if (isEmpty(attachmentIds)) {</span>
+<span class="nc" id="L55">            return Stream.empty();</span>
+        }
+<span class="nc" id="L57">        var docAttachs = repository.findAllById(attachmentIds)</span>
+<span class="nc" id="L58">                .stream()</span>
+<span class="nc" id="L59">                .collect(toMap(DocAttach::getId, identity()));</span>
+<span class="nc" id="L60">        var docAttachmentMetadataIds = docAttachs.values()</span>
+<span class="nc" id="L61">                .stream()</span>
+<span class="nc" id="L62">                .map(DocAttach::getAttachedDocumentMetadataId)</span>
+<span class="nc" id="L63">                .collect(toSet());</span>
+<span class="nc" id="L64">        var documents = documentManager.retrieve(docAttachmentMetadataIds);</span>
+<span class="nc" id="L65">        var toDectypt = attachmentIds.stream()</span>
+<span class="nc" id="L66">                .map(attachmentId -&gt; {</span>
+<span class="nc" id="L67">                    var docAttach = docAttachs.get(attachmentId);</span>
+<span class="nc bnc" id="L68" title="All 2 branches missed.">                    if (docAttach == null) {</span>
+<span class="nc" id="L69">                        throw new IllegalStateException(&quot;Could not find attachment with id=&quot; + attachmentId);</span>
+                    }
+
+<span class="nc" id="L72">                    var document = documents.get(docAttach.getAttachedDocumentMetadataId());</span>
+<span class="nc bnc" id="L73" title="All 2 branches missed.">                    if (document == null) {</span>
+<span class="nc" id="L74">                        throw new RuntimeException(&quot;Could not find encryptedDocument with id=&quot; + docAttach.getAttachedDocumentMetadataId());</span>
+                    }
+<span class="nc" id="L76">                    return RecordWithId.of(attachmentId, Tuple.of(document, context));</span>
+                })
+<span class="nc" id="L78">                .collect(toList());</span>
+<span class="nc" id="L79">        var decrypted = beanFactory.getEhrRemote().decryptDoc(toDectypt)</span>
+<span class="nc" id="L80">                .stream()</span>
+<span class="nc" id="L81">                .collect(toMap(RecordWithId::id, RecordWithId::record));</span>
+
+<span class="nc" id="L83">        return attachmentIds.stream().map(attachmentId -&gt; getAttachment(decrypted.get(attachmentId), attachmentId, docAttachs.get(attachmentId)));</span>
+    }
+
+    private Attachment getAttachment(PlaintextDocument decrypted, Long attachmentId, DocAttach docAttach) {
+<span class="fc" id="L87">        var attachment = new Attachment();</span>
+<span class="fc" id="L88">        attachment.setAccountId(ACCOUNT_ID_PROVIDER.apply(decrypted));</span>
+<span class="fc" id="L89">        AUTHOR_PERSON_ID_PROVIDER.apply(decrypted).ifPresent(attachment::setUserId);</span>
+<span class="fc" id="L90">        attachment.setId(attachmentId);</span>
+<span class="fc" id="L91">        attachment.setFilename(docAttach.getDescription());</span>
+<span class="fc" id="L92">        attachment.setMediaType(MEDIA_TYPE_PROVIDER.apply(decrypted));</span>
+<span class="fc" id="L93">        attachment.setContent(decrypted.plainText());</span>
+<span class="fc" id="L94">        return attachment;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

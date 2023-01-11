@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DocumentService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.document</a> &gt; <span class="el_source">DocumentService.java</span></div><h1>DocumentService.java</h1><pre class="source lang-java linenums">package com.pkb.domain.document;
+
+import com.pkb.authz.AuthorizationService;
+import com.pkb.datamodel.DocumentMessage;
+import com.pkb.datamodel.ImmutableDocumentMessage;
+import com.pkb.datamodel.Message;
+import com.pkb.datamodel.projections.ReadReceipt;
+import com.pkb.domain.SynchUploadedDataService;
+import com.pkb.domain.SystemUserTypeNotPermittedException;
+import com.pkb.domain.criteria.Constraint;
+import com.pkb.domain.criteria.Restriction;
+import com.pkb.domain.repository.DocumentMessageRepository;
+import com.pkb.domain.repository.ImmutableMessageQuery;
+import com.pkb.domain.repository.MessageQuery;
+import com.pkb.domain.repository.ReadReceiptRepository;
+import io.vavr.Function2;
+import io.vavr.collection.List;
+import io.vavr.control.Either;
+import io.vavr.control.Try;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.time.LocalDate;
+import java.util.UUID;
+
+import static com.pkb.entities.enums.UploadedDataDestination.DOCUMENT;
+import static io.vavr.control.Either.left;
+import static java.lang.String.format;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class DocumentService {
+
+<span class="fc" id="L33">    private static final Logger LOGGER = getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final DocumentMessageRepository messageRepository;
+    private final ReadReceiptRepository readReceiptRepository;
+    private final AuthorizationService authorizationService;
+    private final SynchUploadedDataService synchUploadedDataService;
+
+    public DocumentService(DocumentMessageRepository messageRepository,
+                           ReadReceiptRepository readReceiptRepository,
+                           AuthorizationService authorizationService,
+<span class="fc" id="L43">                           SynchUploadedDataService synchUploadedDataService) {</span>
+<span class="fc" id="L44">        this.messageRepository = messageRepository;</span>
+<span class="fc" id="L45">        this.readReceiptRepository = readReceiptRepository;</span>
+<span class="fc" id="L46">        this.authorizationService = authorizationService;</span>
+<span class="fc" id="L47">        this.synchUploadedDataService = synchUploadedDataService;</span>
+<span class="fc" id="L48">    }</span>
+
+    public @NotNull Either&lt;RuntimeException, List&lt;DocumentMessage&gt;&gt; findDocuments(@NotNull DocumentCriteria criteria) {
+<span class="fc bfc" id="L51" title="All 2 branches covered.">        if (criteria.authData().inputs().authenticatedSystemUser().isDefined()) {</span>
+<span class="fc" id="L52">            return left(new SystemUserTypeNotPermittedException());</span>
+        }
+<span class="fc" id="L54">        return authorizationService.authorize(criteria.authData())</span>
+<span class="fc" id="L55">                .checkSingleResult(() -&gt; {</span>
+<span class="fc" id="L56">                    tryToSynchUploadedData(criteria);</span>
+
+<span class="fc" id="L58">                    MessageQuery query = ImmutableMessageQuery.builder()</span>
+<span class="fc" id="L59">                            .authData(criteria.authData())</span>
+<span class="fc" id="L60">                            .indexed(criteria.getIndexed())</span>
+<span class="fc" id="L61">                            .created(criteria.getCreated())</span>
+<span class="fc" id="L62">                            .sourceOrganisationId(criteria.getSourceOrganisationId())</span>
+<span class="fc" id="L63">                            .capsize(criteria.capsize())</span>
+<span class="fc" id="L64">                            .build();</span>
+
+                    /*
+                      OMNI-70
+                      Because of the reported documents logic we need to remove the document status from the original query and perform the filtering a posteriori
+                      This is needed so that we are able to apply the correct status filter to the messages fetched from the database. We only know it after we
+                      check the database for the presence of reported unreadable documents - see `inferStatusType` below.
+                     */
+<span class="fc" id="L72">                    List&lt;DocumentMessage&gt; documentMessages = messageRepository.findDocumentMessagesByFilters(query);</span>
+<span class="fc" id="L73">                    List&lt;String&gt; externalMessageIds = documentMessages.flatMap(Message::getExternalMessageId);</span>
+<span class="fc" id="L74">                    List&lt;String&gt; unreadableDocumentsExternalMessageIds = readReceiptRepository.getUnreadableDocumentsExternalMessageIds(externalMessageIds);</span>
+
+<span class="fc bfc" id="L76" title="All 2 branches covered.">                    Function2&lt;Message.StatusType, String, Message.StatusType&gt; inferStatusType = (statusType, id) -&gt; unreadableDocumentsExternalMessageIds.contains(id) ?</span>
+<span class="fc" id="L77">                            Message.StatusType.UNREAD :</span>
+<span class="fc" id="L78">                            statusType;</span>
+
+<span class="fc" id="L80">                    List&lt;DocumentMessage&gt; documents = documentMessages.map(message -&gt; message.getExternalMessageId().fold(</span>
+<span class="fc" id="L81">                            () -&gt; message,</span>
+<span class="fc" id="L82">                            id -&gt; ImmutableDocumentMessage.copyOf(message).withStatus(inferStatusType.apply(message.getStatus(), id))));</span>
+
+<span class="fc" id="L84">                    return criteria.getDocumentStatus().fold(</span>
+<span class="fc" id="L85">                            () -&gt; documents,</span>
+<span class="fc" id="L86">                            status -&gt; documents.filter(message -&gt; status.equalsIgnoreCase(message.getStatus().name())));</span>
+                });
+    }
+
+    private void tryToSynchUploadedData(@NotNull DocumentCriteria criteria) {
+        try {
+<span class="fc" id="L92">            synchUploadedDataService.synchUploadedData(criteria.authData(), DOCUMENT);</span>
+<span class="nc" id="L93">        } catch (Exception e) {</span>
+<span class="nc" id="L94">            LOGGER.error(format(&quot;PHR-6299: Failure during synch uploaded data. OrganisationPublicId: [%s] Indexed : [%s]&quot;,</span>
+<span class="nc" id="L95">                    criteria.getSourceOrganisationId().getOrElse((UUID) null),</span>
+<span class="nc" id="L96">                    criteria.getIndexed().getOrElse((Restriction&lt;Constraint, LocalDate&gt;) null)));</span>
+<span class="nc" id="L97">            throw e;</span>
+<span class="fc" id="L98">        }</span>
+<span class="fc" id="L99">    }</span>
+
+    public Either&lt;RuntimeException, List&lt;ReadReceipt&gt;&gt; findReadReceiptsByExternalId(List&lt;String&gt; externalMessageIds, Long orgId) {
+<span class="fc" id="L102">        return Try.of(() -&gt; readReceiptRepository.findReadReceiptByExternalMessageId(externalMessageIds, orgId))</span>
+<span class="fc" id="L103">                .toEither()</span>
+<span class="fc" id="L104">                .mapLeft(RuntimeException.class::cast);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

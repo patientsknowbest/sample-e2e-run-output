@@ -1,0 +1,426 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DatabaseModelBasedDeletionService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.deletion.service</a> &gt; <span class="el_source">DatabaseModelBasedDeletionService.java</span></div><h1>DatabaseModelBasedDeletionService.java</h1><pre class="source lang-java linenums">package com.pkb.deletion.service;
+
+import com.google.common.collect.ImmutableMap;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.deletion.model.ActorId;
+import com.pkb.deletion.model.DeleteOperation;
+import com.pkb.deletion.model.DeleteRequestStatus;
+import com.pkb.deletion.model.DeletionRules;
+import com.pkb.deletion.model.DeletionServiceProperties;
+import com.pkb.deletion.model.DeletionValidator;
+import com.pkb.deletion.model.EntityDeletionRequest;
+import com.pkb.deletion.model.PkColumn;
+import com.pkb.deletion.model.errors.DatabaseError;
+import com.pkb.deletion.model.errors.DeletionServiceError;
+import com.pkb.deletion.model.errors.IllegalOperationError;
+import com.pkb.deletion.model.errors.ImmutableAggregateValidationFailure;
+import com.pkb.deletion.model.errors.ImmutableGeneralValidationFailure;
+import com.pkb.deletion.model.errors.ValidationFailure;
+import com.pkb.deletion.model.handler.DeleteOperationResult;
+import com.pkb.deletion.model.handler.ImmutableDeleteOperationResult;
+import com.pkb.deletion.repository.DeleteOperationRepository;
+import io.micrometer.core.annotation.Timed;
+import io.vavr.Tuple;
+import io.vavr.collection.Traversable;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.jooq.SortOrder;
+import org.slf4j.Logger;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.sql.Date;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.deletion.service.DatabaseModelBasedDeletionService.TreeProcessingDirection.BOTTOM_UP;
+import static com.pkb.deletion.service.DatabaseModelBasedDeletionService.TreeProcessingDirection.TOP_DOWN;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.util.Collections.emptyMap;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * A relatively generic service for deleting records from the PHR database with all their dependents.
+ * &lt;p&gt;
+ * The services operates based on a static model graph created in code that represents the foreign key relationships
+ * (both formal and informal) in the underlying database. To run a deletion, you provide a root table object + a list
+ * of ids to delete from that table. The service then walks through the graph of references modeled starting at the
+ * supplied table object, identifying all rows from all dependent tables that should be deleted as well.
+ * &lt;p&gt;
+ * The first step of this process is producing the set of deletion operations to perform. These are written
+ * into backup_schema.delete_operation/delete_operation_id, where each row in delete_operation represents a delete stage
+ * against a particular table, and delete_operation_id lists the id values to be delete from the table. Because
+ * there may be many routes through the graph to reach a particular table, the same table may appear multiple times
+ * in the graph of deletion operations that is produced.
+ * &lt;p&gt;
+ * This stage is performed - for the moment - non-transactionally so that there is a persistent record of what the system
+ * was attempting to do even if something goes wrong part way through. This seems reasonable enough given that there is
+ * no way to ensure that a proposed deletion operation graph is immune to being corrupted by concurrent modifications
+ * happening without an impractical level of transaction isolation. No modifications to live data are made at this stage.
+ * &lt;p&gt;
+ * Once the graph of deletion operations is written to the database it is traversed and the supplied DeletionRules are
+ * applied to it to check that no business constraints are violated (e.g. don't delete data that has been viewed from
+ * menu_data).
+ * &lt;p&gt;
+ * If validation succeeds, we proceed to deletion. We again walk the delete operation graph, this time starting
+ * from the bottom up. For each operation (set of ids for a particular table) we copy them into a generic backup table
+ * as JSON and then delete the rows from the source table. This step is performed inside a transaction so that it succeeds
+ * or fails atomically. It is up to callers to ensure that they do not request single deletion operations that
+ * are likely to result in unreasonably extended transactions.
+ * &lt;p&gt;
+ * The service also supports rolling back a completed delete operation. In this case, the delete operation graph is
+ * walked from the top down, restoring rows from the generic backup table to the original tables.
+ * &lt;p&gt;
+ * As things stand, the system does not support re-running a deletion that has been rolled back. This is intentional
+ * because the delete operation graph could easily go stale  after the rollback has completed. Re-running without
+ * regenerating is unlikely to produce correct results.
+ */
+@Service
+public class DatabaseModelBasedDeletionService {
+
+<span class="fc" id="L92">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+    private final DeleteOperationRepository repository;
+
+    private final TransactionTemplate transactionTemplate;
+
+    private final DeletionServiceProperties properties;
+    private final DateTimeService dateTimeService;
+
+    /**
+     * Detect all delete_operation_id entries that correspond to a delete_operation that isn't &quot;owned&quot; (we reached this row
+     * by an FK that isn't considered to represent an ownership relationship), where the same row isn't _also_ deleted
+     * by some other FK that _is_ &quot;owned&quot;
+     */
+    private static final String ILLEGAL_UNOWNED_DELETION_DETECTION_SQL_TEMPLATE = &quot;WITH children AS(&quot; +
+            &quot;SELECT * FROM %1$s.delete_operation INNER JOIN %1$s.delete_operation_id doi ON delete_operation.id = doi.operation_id where delete_operation.request_id = :requestId)&quot; +
+            &quot;SELECT DISTINCT children_unowned.table_name || ':' || children_unowned.id_to_delete  FROM children children_unowned LEFT OUTER JOIN children children_owned ON  children_unowned.owned = false AND children_owned.owned = true AND &quot; +
+            &quot;children_unowned.id_to_delete = children_owned.id_to_delete AND children_owned.table_name = children_unowned.table_name WHERE children_unowned.owned = false AND children_owned.id IS NULL ORDER BY 1;&quot;;
+
+    private final String illegalUnownedDeletionDetectionSql;
+
+    private static final String BACKUP_SQL_TEMPLATE = &quot;INSERT INTO %1$s.generic_backup (delete_operation_id, row_data, id_value) SELECT doi.operation_id, row_to_json(primary_table)::jsonb,  doi.id_to_delete &quot; +
+            &quot;FROM %2$s AS primary_table &quot; +
+            &quot;INNER JOIN %1$s.delete_operation_id doi ON primary_table.%3$s = doi.id_to_delete%4$s WHERE doi.operation_id = '%5$s';&quot;;
+    private static final String DELETE_SQL_TEMPLATE = &quot; DELETE FROM %2$s primary_table  WHERE %3$s IN (SELECT id_to_delete%4$s&quot; +
+            &quot; FROM %1$s.delete_operation_id WHERE operation_id = '%5$s');&quot;;
+
+
+
+
+
+    public DatabaseModelBasedDeletionService(
+            DeleteOperationRepository repository,
+            PlatformTransactionManager transactionManager,
+            DeletionServiceProperties properties,
+            DateTimeService dateTimeService
+<span class="fc" id="L128">    ) {</span>
+<span class="fc" id="L129">        this.repository = repository;</span>
+<span class="fc" id="L130">        this.transactionTemplate = new TransactionTemplate(transactionManager);</span>
+<span class="fc" id="L131">        this.properties = properties;</span>
+<span class="fc" id="L132">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L133">        illegalUnownedDeletionDetectionSql = String.format(ILLEGAL_UNOWNED_DELETION_DETECTION_SQL_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L134">    }</span>
+
+
+    @Timed(value = &quot;deletion.service.createOperation&quot;, longTask = true, histogram = true)
+    &lt;T&gt; DeleteOperationResult createAndValidateDeleteOperation(EntityDeletionRequest&lt;T&gt; request, DeletionRules rules) {
+<span class="fc" id="L139">        return wrapWithExceptionHandling(request.getRequestId(), () -&gt;</span>
+<span class="fc" id="L140">                buildAndPersistRootDeleteOperation(request)</span>
+<span class="fc" id="L141">                        .flatMap(rootDeleteOperation -&gt; buildAndValidateDeletionGraph(request, rootDeleteOperation, rules))</span>
+        );
+    }
+
+    @Timed(value = &quot;deletion.service.executeOperation&quot;, longTask = true, histogram = true)
+    DeleteOperationResult executeDeleteOperation(UUID requestId, ActorId requester) {
+<span class="fc" id="L147">        LOGGER.info(&quot;Executing delete operation {}&quot;, requestId);</span>
+<span class="fc" id="L148">        return wrapWithExceptionHandling(requestId, () -&gt;</span>
+<span class="fc" id="L149">                repository.findByRequestId(requestId)</span>
+<span class="fc" id="L150">                        .flatMap(rootDeleteOperation -&gt; checkActor(rootDeleteOperation, requester))</span>
+<span class="fc" id="L151">                        .flatMap(rootDeleteOperation -&gt; checkAndUpdateRequestStatusTransactional(rootDeleteOperation.getRequestId(), Transition.EXECUTE).map($ -&gt; rootDeleteOperation))</span>
+<span class="fc" id="L152">                        .flatMap(this::executeDelete)</span>
+<span class="fc" id="L153">                        .peek(r -&gt; LOGGER.info(&quot;Executing of delete operation {} complete&quot;, requestId))</span>
+        );
+    }
+
+    @Timed(value = &quot;deletion.service.rollbackOperation&quot;, longTask = true, histogram = true)
+    DeleteOperationResult rollbackDeletion(UUID requestId, ActorId requester) {
+<span class="fc" id="L159">        LOGGER.info(&quot;Processing rollback for delete operation {}&quot;, requestId);</span>
+<span class="fc" id="L160">        return wrapWithExceptionHandling(requestId, () -&gt; executeRollback(requestId, requester));</span>
+    }
+
+
+
+
+    private Either&lt;DeletionServiceError, DeleteOperation&gt; checkActor(DeleteOperation rootDeleteOperation, ActorId requester) {
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">        if (!rootDeleteOperation.getRequestingUser().equals(requester)) {</span>
+<span class="nc" id="L168">            return Either.left(ImmutableGeneralValidationFailure.builder().requestId(rootDeleteOperation.getRequestId()).message(&quot;User requesting to perform deletion: &quot; + requester + &quot; differs from user that created delete operation : &quot; + rootDeleteOperation.getRequestingUser()).build());</span>
+        }
+<span class="fc" id="L170">        return Either.right(rootDeleteOperation);</span>
+    }
+
+    private &lt;T&gt; Either&lt;DeletionServiceError, Integer&gt; buildAndValidateDeletionGraph(EntityDeletionRequest&lt;T&gt; request, DeleteOperation rootDeleteOperation, DeletionRules rules) {
+<span class="fc" id="L174">        LOGGER.info(&quot;Creating delete operation for: {} &quot;, request);</span>
+<span class="fc" id="L175">        return request.getRootTable().buildDependentDeletionGraph(rootDeleteOperation, repository)</span>
+<span class="fc" id="L176">                .flatMap(ignored -&gt; executeValidation(rootDeleteOperation, rules))</span>
+<span class="fc" id="L177">                .peek((x) -&gt; LOGGER.info(&quot;Finished creating and validating delete operation {}&quot;, request.getRequestId()));</span>
+    }
+
+    private Either&lt;DeletionServiceError, Integer&gt; executeValidation(DeleteOperation rootDeleteOperation, DeletionRules rules) {
+<span class="fc" id="L181">        return transactional(status -&gt;</span>
+<span class="fc" id="L182">                checkAndUpdateRequestStatus(rootDeleteOperation.getRequestId(), Transition.VALIDATE)</span>
+<span class="fc" id="L183">                        .flatMap(ignored -&gt; {</span>
+<span class="fc" id="L184">                            Stream&lt;Either&lt;ValidationFailure, Integer&gt;&gt; dbStream = buildTreeProcessingStream(rootDeleteOperation, op -&gt; runValidationOperation(op, rules), TOP_DOWN);</span>
+<span class="fc" id="L185">                            var processingStream = Stream.concat(dbStream,</span>
+<span class="fc" id="L186">                                    Stream.of(0).map(a -&gt; validateFkOwnership(rootDeleteOperation)));</span>
+
+                            //This may seem a bit odd but:
+                            //(1) Either.sequence(Right) is super-useful but only operates on iterables (no java streams) and
+                            //(2) Vavr's stream is only semi-lazy (it eagerly calculates the head value)
+                            //I wanted this to execute in the right order so I construct a java stream first and then feed it to the vavr stream to scan through the sequence
+                            //Note that this isn't perfect because the JDK implementation of flatMap is quirky; nested flatMap calls frequently result in eager evaluation, sigh.
+                            //Ordering is still correct, but it sometimes results in additional database queries being executed after a transaction has been marked as rollback-only
+                            //Fixing this is extremely challenging without a total rewrite to use manual recursion without Streams (which I think would be significantly less readable)
+                            //or re-implementing the whole lot in Kotlin (Kotlin Sequences behave more sanely in this regard)
+<span class="fc" id="L196">                            return Either.sequence(io.vavr.collection.Stream.ofAll(processingStream))</span>
+<span class="fc" id="L197">                                    .mapLeft(errs -&gt; ImmutableAggregateValidationFailure.builder().validationFailures(errs).requestId(rootDeleteOperation.getRequestId()).build())</span>
+<span class="fc" id="L198">                                    .mapLeft(it -&gt; it);</span>
+                        })
+<span class="fc" id="L200">                        .map(unused -&gt; {</span>
+<span class="fc" id="L201">                            repository.updateDeleteRequestStatus(rootDeleteOperation.getRequestId(), DeleteRequestStatus.VALID);</span>
+<span class="fc" id="L202">                            return 0;</span>
+                        })
+<span class="fc" id="L204">                        .peekLeft(err -&gt; {</span>
+<span class="fc" id="L205">                            LOGGER.info(&quot;Validation failed for delete operation {}. {}&quot;, rootDeleteOperation.getId(), err.getMessage());</span>
+<span class="fc" id="L206">                            repository.updateDeleteRequestStatus(rootDeleteOperation.getRequestId(), DeleteRequestStatus.INVALID);</span>
+<span class="fc" id="L207">                        })</span>
+        );
+    }
+
+    @NotNull
+    private &lt;T&gt; Either&lt;DeletionServiceError, DeleteOperation&gt; buildAndPersistRootDeleteOperation(EntityDeletionRequest&lt;T&gt; request) {
+<span class="fc" id="L213">        List&lt;String&gt; idStrings = request.getRootEntityIds().stream().map(Object::toString).collect(Collectors.toList());</span>
+<span class="fc" id="L214">        DeleteOperation rootDeleteOperation = new DeleteOperation(UUID.randomUUID(), request.getRequestId(), null, request.getRootTable().getTableName(), request.getActor(), 1, true);</span>
+<span class="fc" id="L215">        repository.insertNewDeletionRequest(request.getRequestId());</span>
+<span class="fc" id="L216">        return repository.persist(rootDeleteOperation, idStrings);</span>
+    }
+
+    @NotNull
+    private Either&lt;DeletionServiceError, Integer&gt; executeDelete(DeleteOperation rootDeleteOperation) {
+<span class="fc" id="L221">        return transactional(txStatus -&gt;</span>
+<span class="fc" id="L222">                repository.setConstraintsDeferred()</span>
+<span class="pc" id="L223">                        .flatMap(ignored -&gt; processDeletionTree(rootDeleteOperation, this::runDeleteOperation, BOTTOM_UP).peekLeft(e -&gt; LOGGER.error(&quot;Error during entity delete {}: {}&quot;, rootDeleteOperation.getId(), e.getMessage())))</span>
+<span class="fc" id="L224">                        .flatMap(count -&gt; checkAndUpdateRequestStatus(rootDeleteOperation.getRequestId(), Transition.COMPLETE_EXECUTION).map(finalStatus -&gt; Tuple.of(finalStatus, count)))</span>
+<span class="fc" id="L225">                        .peek(statusAndCount -&gt; {</span>
+<span class="fc bfc" id="L226" title="All 2 branches covered.">                            if(statusAndCount._1 == DeleteRequestStatus.CANCELED) {</span>
+<span class="fc" id="L227">                                txStatus.setRollbackOnly();</span>
+                            }
+<span class="fc" id="L229">                            LOGGER.debug(&quot;Finishing delete operation {}; transaction is rollback only: {}&quot;, rootDeleteOperation.getId(), txStatus.isRollbackOnly());</span>
+<span class="fc" id="L230">                        })</span>
+<span class="pc" id="L231">                        .peekLeft(it -&gt; txStatus.setRollbackOnly())</span>
+        )
+<span class="fc" id="L233">                .peekLeft(getPostCommitStatusUpdater(rootDeleteOperation.getRequestId(), Transition.FAIL_EXECUTION))</span>
+<span class="fc" id="L234">                .fold(Either::left, statusAndCount -&gt; {</span>
+<span class="fc bfc" id="L235" title="All 2 branches covered.">                    if (statusAndCount._1 == DeleteRequestStatus.CANCELED) {</span>
+<span class="fc" id="L236">                        repository.updateDeleteRequestStatus(rootDeleteOperation.getRequestId(), DeleteRequestStatus.CANCELED); //Transaction was rolled back, we need to re-save status correctly here</span>
+<span class="fc" id="L237">                        return Either.left(DatabaseError.of(String.format(&quot;Deletion request %1$s was rolled back by external request before it could complete.&quot;, rootDeleteOperation.getRequestId())));</span>
+                    }
+<span class="fc" id="L239">                    return Either.right(statusAndCount._2);</span>
+                });
+    }
+
+
+    private Either&lt;DeletionServiceError, Integer&gt; executeRollback(UUID requestId, ActorId requester) {
+<span class="fc" id="L245">        Function&lt;DeleteOperation, Either&lt;DeletionServiceError, Integer&gt;&gt; rollbackFunction = (op) -&gt; runRollbackOperation(op, requester);</span>
+
+<span class="fc" id="L247">        return transactional(status -&gt;</span>
+<span class="fc" id="L248">                checkAndUpdateRequestStatus(requestId, Transition.ROLLBACK)</span>
+<span class="fc" id="L249">                        .flatMap(requestStatus -&gt; {</span>
+<span class="fc bfc" id="L250" title="All 2 branches covered.">                            if (requestStatus != DeleteRequestStatus.ROLLING_BACK) {</span>
+<span class="fc" id="L251">                                return Either.right(0);</span>
+                            }
+<span class="fc" id="L253">                            return repository.setConstraintsDeferred()</span>
+<span class="fc" id="L254">                                    .flatMap(ignored -&gt; repository.findByRequestId(requestId))</span>
+<span class="fc" id="L255">                                    .flatMap(rootOperation -&gt; processDeletionTree(rootOperation, rollbackFunction, TOP_DOWN))</span>
+<span class="fc" id="L256">                                    .peek(r -&gt; {</span>
+<span class="fc" id="L257">                                        LOGGER.info(&quot;Rollback complete for delete operation {}&quot;, requestId);</span>
+<span class="fc" id="L258">                                        repository.updateDeleteRequestStatus(requestId, DeleteRequestStatus.ROLLED_BACK);</span>
+<span class="fc" id="L259">                                    });</span>
+                        })
+<span class="fc" id="L261">                        .peekLeft(e -&gt; {</span>
+<span class="nc" id="L262">                            status.setRollbackOnly();</span>
+<span class="nc" id="L263">                            LOGGER.error(&quot;Error during rollback of operation {}: {}&quot;, requestId, e);</span>
+<span class="nc" id="L264">                        })</span>
+        )
+<span class="fc" id="L266">                .peekLeft(getPostCommitStatusUpdater(requestId, Transition.FAIL_ROLLBACK));</span>
+    }
+
+    private Consumer&lt;DeletionServiceError&gt; getPostCommitStatusUpdater(UUID requestId, Transition transition) {
+<span class="fc" id="L270">        return e -&gt; {</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">            if (!(e instanceof IllegalOperationError)) {</span>
+<span class="nc" id="L272">               checkAndUpdateRequestStatusTransactional(requestId, transition);</span>
+            }
+<span class="nc" id="L274">        };</span>
+    }
+
+    private Either&lt;ValidationFailure, Integer&gt; validateFkOwnership(DeleteOperation rootDeleteOperation) {
+<span class="fc" id="L278">        return DeletionValidator.convertErrorList(rootDeleteOperation.getRequestId(), &quot;Attempted to delete unowned foreign key references that wouldn't otherwise have been removed&quot;,</span>
+<span class="fc" id="L279">                        repository.selectList(illegalUnownedDeletionDetectionSql, Map.of(&quot;requestId&quot;, rootDeleteOperation.getRequestId()), String.class))</span>
+<span class="pc" id="L280">                .mapLeft(it -&gt; it);</span>
+    }
+
+    private &lt;T&gt; Either&lt;ValidationFailure, Integer&gt; runValidationOperation(DeleteOperation deleteOperation, DeletionRules rules) {
+<span class="fc bfc" id="L284" title="All 2 branches covered.">        if (deleteOperation.getTableDefinition().isVirtual()) {</span>
+<span class="fc" id="L285">            return Either.right(0);</span>
+        }
+<span class="fc" id="L287">        DeletionValidator&lt;T&gt; validator = rules.getValidator(deleteOperation.getTableDefinition());</span>
+<span class="fc" id="L288">        return validator.validate(deleteOperation.getRequestId(), deleteOperation.getId(), repository).mapLeft(it -&gt; it);</span>
+    }
+
+    private Either&lt;DeletionServiceError, Integer&gt; runDeleteOperation(DeleteOperation deleteOperation) {
+<span class="fc bfc" id="L292" title="All 2 branches covered.">        if (deleteOperation.getTableDefinition().isVirtual()) {</span>
+<span class="fc" id="L293">            return Either.right(0);</span>
+        }
+<span class="fc" id="L295">        PkColumn&lt;Object&gt; pkColumn = deleteOperation.getTableDefinition().getPkColumn();</span>
+<span class="fc" id="L296">        return Either.sequenceRight(io.vavr.collection.Stream.of(BACKUP_SQL_TEMPLATE, DELETE_SQL_TEMPLATE)</span>
+<span class="fc" id="L297">                        .map(template -&gt; String.format(template, properties.getBackupSchema(), deleteOperation.getTableName(), pkColumn.getName(), pkColumn.getColumnCast(), deleteOperation.getId()))</span>
+<span class="fc" id="L298">                        .map(sql -&gt; repository.runUpdateDeleteQuery(sql, emptyMap())))</span>
+<span class="fc" id="L299">                .map(Traversable::last);</span>
+    }
+
+
+
+
+    private Either&lt;DeletionServiceError, Integer&gt; runRollbackOperation(DeleteOperation deleteOperation, ActorId requester) {
+<span class="fc bfc" id="L306" title="All 2 branches covered.">        if (deleteOperation.getTableDefinition().isVirtual()) {</span>
+<span class="fc" id="L307">            return Either.right(0);</span>
+        }
+
+<span class="fc" id="L310">        String schema = properties.getBackupSchema();</span>
+<span class="fc" id="L311">        String rollbackSql = &quot;INSERT INTO &quot; + deleteOperation.getTableName() +</span>
+                &quot; SELECT backup.* FROM &quot; + schema + &quot;.generic_backup &quot; +
+<span class="fc" id="L313">                &quot;CROSS JOIN LATERAL jsonb_populate_record(null::&quot; + deleteOperation.getTableName() + &quot;, row_data) as backup &quot; +</span>
+<span class="fc" id="L314">                &quot;WHERE delete_operation_id = '&quot; + deleteOperation.getId() + &quot;'&quot;;</span>
+
+<span class="fc" id="L316">        String archiveBackupSql = &quot;INSERT INTO &quot; + schema + &quot;.generic_backup_restored SELECT b.*, :requesterId, :requesterIdType, :created&quot; +</span>
+<span class="fc" id="L317">                &quot;  FROM &quot; + schema + &quot;.generic_backup b WHERE delete_operation_id = '&quot; + deleteOperation.getId() + &quot;';&quot;;</span>
+<span class="fc" id="L318">        String removeBackupSql = &quot;DELETE FROM &quot; + schema + &quot;.generic_backup where delete_operation_id = '&quot; + deleteOperation.getId() + &quot;';&quot;;</span>
+
+<span class="fc" id="L320">        return repository.runUpdateDeleteQuery(rollbackSql, emptyMap())</span>
+<span class="fc" id="L321">                .flatMap(rollbackCount -&gt;</span>
+<span class="fc" id="L322">                        repository.runUpdateDeleteQuery(archiveBackupSql, Map.of(&quot;requesterId&quot;, requester.getId(), &quot;requesterIdType&quot;, requester.getType().toString(), &quot;created&quot;, new Date(dateTimeService.now().toEpochMilli())))</span>
+<span class="fc" id="L323">                                .flatMap(unused -&gt; repository.runUpdateDeleteQuery(removeBackupSql, emptyMap()))</span>
+<span class="fc" id="L324">                                .map(unused -&gt; rollbackCount));</span>
+    }
+
+    private Either&lt;DeletionServiceError, Integer&gt; processDeletionTree(DeleteOperation rootDeleteOperation, Function&lt;DeleteOperation, Either&lt;DeletionServiceError, Integer&gt;&gt; terminalOp, TreeProcessingDirection direction) {
+<span class="fc" id="L328">        return Either.sequenceRight(io.vavr.collection.Stream.ofAll(buildTreeProcessingStream(rootDeleteOperation, terminalOp, direction)))</span>
+<span class="fc" id="L329">                .map(resultList -&gt; resultList.fold(0, Integer::sum));</span>
+    }
+
+    private &lt;E extends DeletionServiceError&gt; Stream&lt;Either&lt;E, Integer&gt;&gt; buildTreeProcessingStream(DeleteOperation deleteOperation, Function&lt;DeleteOperation, Either&lt;E, Integer&gt;&gt; terminalOp, TreeProcessingDirection direction) {
+<span class="fc" id="L333">        var children = repository.findByParentOperationId(deleteOperation.getId(), direction.dbSort)</span>
+<span class="fc" id="L334">                .flatMap(childOperation -&gt; buildTreeProcessingStream(childOperation, terminalOp, direction));</span>
+
+<span class="fc bfc" id="L336" title="All 2 branches covered.">        if (direction == TOP_DOWN) {</span>
+<span class="fc" id="L337">            return Stream.concat(Stream.of(deleteOperation).map(terminalOp), children);</span>
+        }
+
+<span class="fc" id="L340">        return Stream.concat(children, Stream.of(deleteOperation).map(terminalOp));</span>
+    }
+
+    /**
+     * Despite my best efforts, there are still circumstances in which we can get unexpected exceptions thrown
+     * from hibernate - generally when moving forward on a Stream backed by a hibernate query - so in order
+     * to make sure that we always returns a useful result on the pubsub response topic, I wrap everything
+     * in a try-catch at the top level.
+     */
+    private DeleteOperationResult wrapWithExceptionHandling(UUID requestId, Supplier&lt;Either&lt;DeletionServiceError, Integer&gt;&gt; operation) {
+        try {
+<span class="fc" id="L351">            var builder = ImmutableDeleteOperationResult.builder();</span>
+<span class="fc" id="L352">            operation.get().peekLeft(builder::error);</span>
+<span class="fc" id="L353">            return builder.status(repository.getRequestStatus(requestId)).build();</span>
+
+<span class="nc" id="L355">        } catch (Exception e) {</span>
+<span class="nc" id="L356">            LOGGER.error(&quot;Unexpected exception during deletion service operation&quot;, e);</span>
+<span class="nc" id="L357">            return ImmutableDeleteOperationResult.builder().status(DeleteRequestStatus.FAILED).error(DatabaseError.of(Objects.requireNonNull(e.getMessage()))).build();</span>
+        }
+    }
+
+    private Either&lt;DeletionServiceError, DeleteRequestStatus&gt; checkAndUpdateRequestStatusTransactional(UUID requestId, Transition transition) {
+<span class="fc" id="L362">        return transactional(status -&gt; checkAndUpdateRequestStatus(requestId, transition));</span>
+    }
+
+    private Either&lt;DeletionServiceError, DeleteRequestStatus&gt; checkAndUpdateRequestStatus(UUID requestId, Transition transition) {
+<span class="fc" id="L366">        var requestStatus = repository.queryAndLockDeleteRequestStatus(requestId);</span>
+<span class="fc" id="L367">        return transition.attemptTransition(requestStatus)</span>
+<span class="fc" id="L368">                .peek(nextState -&gt; {</span>
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">                    if (nextState != requestStatus) {</span>
+<span class="fc" id="L370">                        repository.updateDeleteRequestStatus(requestId, nextState);</span>
+                    }
+<span class="fc" id="L372">                })</span>
+<span class="pc" id="L373">                .mapLeft(it -&gt; it);</span>
+    }
+
+    private &lt;T&gt; T transactional(TransactionCallback&lt;T&gt; action) {
+<span class="fc" id="L377">        return Objects.requireNonNull(transactionTemplate.execute(action));</span>
+    }
+
+<span class="fc" id="L380">    enum TreeProcessingDirection {</span>
+<span class="fc" id="L381">        TOP_DOWN(SortOrder.DESC),</span>
+<span class="fc" id="L382">        BOTTOM_UP(SortOrder.ASC);</span>
+
+        private SortOrder dbSort;
+
+<span class="fc" id="L386">        TreeProcessingDirection(SortOrder dbSort) {</span>
+<span class="fc" id="L387">            this.dbSort = dbSort;</span>
+<span class="fc" id="L388">        }</span>
+
+    }
+
+<span class="fc" id="L392">    private enum Transition {</span>
+
+<span class="fc" id="L394">        VALIDATE(new EnumMap&lt;&gt;(ImmutableMap.of(DeleteRequestStatus.CREATING, DeleteRequestStatus.VALIDATING))),</span>
+<span class="fc" id="L395">        EXECUTE(new EnumMap&lt;&gt;(ImmutableMap.of(DeleteRequestStatus.VALID, DeleteRequestStatus.EXECUTING))),</span>
+<span class="fc" id="L396">        COMPLETE_EXECUTION(new EnumMap&lt;&gt;(ImmutableMap.of(</span>
+                DeleteRequestStatus.TO_CANCEL, DeleteRequestStatus.CANCELED,
+                DeleteRequestStatus.EXECUTING, DeleteRequestStatus.SUCCEEDED
+        ))),
+<span class="fc" id="L400">        FAIL_EXECUTION(new EnumMap&lt;&gt;(ImmutableMap.of(</span>
+                DeleteRequestStatus.TO_CANCEL, DeleteRequestStatus.FAILED,
+                DeleteRequestStatus.EXECUTING, DeleteRequestStatus.FAILED
+        ))),
+<span class="fc" id="L404">        ROLLBACK( new EnumMap&lt;&gt;(ImmutableMap.of(</span>
+                DeleteRequestStatus.TO_CANCEL, DeleteRequestStatus.TO_CANCEL,
+                DeleteRequestStatus.EXECUTING, DeleteRequestStatus.TO_CANCEL,
+                DeleteRequestStatus.FAILED, DeleteRequestStatus.FAILED,
+                DeleteRequestStatus.SUCCEEDED, DeleteRequestStatus.ROLLING_BACK
+        ))),
+<span class="fc" id="L410">        FAIL_ROLLBACK(new EnumMap&lt;&gt;(ImmutableMap.of(</span>
+                DeleteRequestStatus.ROLLING_BACK, DeleteRequestStatus.FAILED_TO_ROLL_BACK
+        )));
+
+        private Map&lt;DeleteRequestStatus, DeleteRequestStatus&gt; validTransitions;
+<span class="fc" id="L415">        private Transition(Map&lt;DeleteRequestStatus, DeleteRequestStatus&gt; validTransitions) {</span>
+<span class="fc" id="L416">            this.validTransitions = validTransitions;</span>
+<span class="fc" id="L417">        }</span>
+
+        Either&lt;IllegalOperationError, DeleteRequestStatus&gt; attemptTransition(DeleteRequestStatus currentState) {
+<span class="fc" id="L420">            return Option.of(validTransitions.get(currentState))</span>
+<span class="pc" id="L421">                    .toEither(() -&gt; IllegalOperationError.of(name(), currentState, validTransitions))</span>
+<span class="pc" id="L422">                    .peekLeft(e -&gt; LOGGER.error(&quot;Illegal state transition {}&quot;, e));</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

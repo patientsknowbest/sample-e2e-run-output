@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TaskController.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.phoenix.api</a> &gt; <span class="el_source">TaskController.java</span></div><h1>TaskController.java</h1><pre class="source lang-java linenums">package com.pkb.phoenix.api;
+
+import com.pkb.phoenix.api.model.CreateTask;
+import com.pkb.phoenix.api.model.ExecutedTask;
+import com.pkb.phoenix.api.model.ImmutableExecutedTask;
+import com.pkb.phoenix.api.model.ImmutablePersistedTask;
+import com.pkb.phoenix.api.model.ImmutableUser;
+import com.pkb.phoenix.api.model.PersistedTask;
+import com.pkb.phoenix.api.model.PersistedTask.TaskBuilder;
+import com.pkb.phoenix.api.service.Meta;
+import com.pkb.phoenix.api.service.Parameter;
+import com.pkb.phoenix.api.service.task.CompletedTask;
+import com.pkb.phoenix.api.service.task.FailedTask;
+import com.pkb.phoenix.api.service.task.Status;
+import com.pkb.phoenix.api.service.task.TaskInstance;
+import com.pkb.phoenix.api.service.task.TaskService;
+import com.pkb.phoenix.api.service.task.action.ImmutableInstantiateTask;
+import com.pkb.phoenix.api.service.task.action.ImmutableSearchTasks;
+import com.pkb.phoenix.api.service.task.action.SearchTasks;
+import com.pkb.phoenix.api.service.task.template.TaskTemplateCode;
+import com.pkb.phoenix.enums.TaskEvent;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.Seq;
+import io.vavr.control.Validation;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import javax.validation.Valid;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Stream;
+
+import static com.google.common.base.Predicates.instanceOf;
+import static com.pkb.phoenix.api.service.phoenixexception.PhoenixValidationException.InvalidTaskParameters.invalidTaskParameters;
+import static com.pkb.phoenix.api.service.task.action.AssessTask.Decision.APPROVE;
+import static com.pkb.phoenix.api.service.task.action.AssessTask.Decision.REJECT;
+import static com.pkb.phoenix.api.service.task.action.ImmutableAssessTask.assess;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.List;
+import static io.vavr.API.Match;
+import static io.vavr.control.Validation.invalid;
+import static io.vavr.control.Validation.valid;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toUnmodifiableList;
+import static java.util.stream.Collectors.toUnmodifiableSet;
+import static org.slf4j.LoggerFactory.getLogger;
+
+@RestController
+@RequestMapping(value = &quot;/phoenix/task&quot;, consumes = &quot;application/json&quot;, produces = &quot;application/json&quot;)
+public class TaskController {
+<span class="fc" id="L61">    private static final Logger LOG = getLogger(lookup().lookupClass());</span>
+
+<span class="fc" id="L63">    private static final Set&lt;String&gt; VALID_STATUSES = Stream.of(Status.values()).map(Status::name).collect(toUnmodifiableSet());</span>
+    private final TaskService taskService;
+
+<span class="fc" id="L66">    public TaskController(TaskService taskService) {</span>
+<span class="fc" id="L67">        this.taskService = taskService;</span>
+<span class="fc" id="L68">    }</span>
+
+    @GetMapping
+    public &lt;P extends Parameter&gt; List&lt;PersistedTask&lt;P&gt;&gt; searchTasks(@Valid SearchParameters parameters) {
+<span class="fc" id="L72">        return validateRequest(parameters)</span>
+<span class="fc" id="L73">                .map(taskService::&lt;P&gt;findTasks)</span>
+<span class="fc" id="L74">                .fold(errors -&gt; {</span>
+<span class="nc" id="L75">                    LOG.warn(&quot;Bad request. Failure reasons: {}&quot;, errors);</span>
+<span class="nc" id="L76">                    throw invalidTaskParameters(errors.toJavaList());</span>
+<span class="fc" id="L77">                }, tasks -&gt; tasks.stream()</span>
+<span class="fc" id="L78">                        .map(this::toModel)</span>
+<span class="fc" id="L79">                        .collect(toUnmodifiableList()));</span>
+    }
+
+    @PostMapping
+    public &lt;P extends Parameter&gt; PersistedTask&lt;P&gt; createTask(@Valid @RequestBody CreateTask&lt;P&gt; payload, Meta meta) {
+<span class="fc" id="L84">            var task = taskService.createTask(ImmutableInstantiateTask.&lt;P&gt;builder()</span>
+<span class="fc" id="L85">                    .meta(meta)</span>
+<span class="fc" id="L86">                    .code(payload.code())</span>
+<span class="fc" id="L87">                    .parameters(payload.parameters())</span>
+<span class="fc" id="L88">                    .build());</span>
+
+<span class="fc" id="L90">            return toModel(task);</span>
+    }
+
+    /**
+     * This cannot be idempotent as we are not allowed to store the results.
+     */
+    @PostMapping(&quot;/{taskId}/execute&quot;)
+    public PersistedTask&lt;?&gt; execute(@PathVariable int taskId, Meta meta) {
+<span class="fc" id="L98">        return toModel(taskService.executeTask(taskId, meta));</span>
+    }
+
+    @PostMapping(&quot;/{taskId}/approve&quot;)
+    public PersistedTask&lt;?&gt; approve(@PathVariable int taskId, Meta meta) {
+<span class="fc" id="L103">        return toModel(taskService.assess(assess().meta(meta).taskId(taskId).decision(APPROVE).build()));</span>
+    }
+
+    @PostMapping(&quot;/{taskId}/reject&quot;)
+    public PersistedTask&lt;?&gt; reject(@PathVariable int taskId, Meta meta) {
+<span class="nc" id="L108">        return toModel(taskService.assess(assess().meta(meta).taskId(taskId).decision(REJECT).build()));</span>
+    }
+
+    private &lt;P extends Parameter, R&gt; PersistedTask&lt;P&gt; toModel(TaskInstance&lt;P&gt; task) {
+<span class="fc" id="L112">        return Match(task).of(</span>
+<span class="fc" id="L113">                Case($(instanceOf(FailedTask.class)), (FailedTask&lt;P&gt; failed) -&gt; addExecutionBits(build(ImmutableExecutedTask.&lt;P, R&gt;builder(), failed), failed.mostRecentEvent(), null)),</span>
+<span class="fc" id="L114">                Case($(instanceOf(CompletedTask.class)), (CompletedTask&lt;P, R&gt; executed) -&gt; addExecutionBits(build(ImmutableExecutedTask.builder(), executed), executed.mostRecentEvent(), executed.result())),</span>
+<span class="fc" id="L115">                Case($(), (TaskInstance&lt;P&gt; instance) -&gt; build(ImmutablePersistedTask.builder(), instance)))</span>
+<span class="fc" id="L116">                .build();</span>
+    }
+
+    private &lt;P extends Parameter, R&gt; ExecutedTask.Builder&lt;P, R&gt; addExecutionBits(ExecutedTask.Builder&lt;P, R&gt; builder, TaskInstance.Event event, R result) {
+<span class="fc" id="L120">        return builder</span>
+<span class="fc" id="L121">                .result(Optional.ofNullable(result))</span>
+<span class="fc" id="L122">                .executedat(event.at().toString())</span>
+<span class="fc" id="L123">                .executedby(ImmutableUser.builder()</span>
+<span class="fc" id="L124">                        .id(event.actor().id())</span>
+<span class="fc" id="L125">                        .name(event.actor().name())</span>
+<span class="fc" id="L126">                        .isIg(event.actor().isIg())</span>
+<span class="fc" id="L127">                        .build());</span>
+    }
+
+    private &lt;P extends Parameter, T extends TaskBuilder&lt;P, T&gt;&gt; T build(T builder, TaskInstance&lt;P&gt; task) {
+<span class="fc" id="L131">        var first = task.events().stream()</span>
+<span class="fc" id="L132">                .filter(event -&gt; event.event().equals(TaskEvent.instantiated.name()))</span>
+<span class="fc" id="L133">                .findFirst()</span>
+<span class="fc" id="L134">                .orElseThrow();</span>
+
+<span class="fc" id="L136">        var actor = first.actor();</span>
+<span class="fc" id="L137">        return builder</span>
+<span class="fc" id="L138">                .id(task.id())</span>
+<span class="fc" id="L139">                .parameters(task.parameters())</span>
+<span class="fc" id="L140">                .code(TaskTemplateCode.valueOf(task.type().code()))</span>
+<span class="fc" id="L141">                .status(task.status().name())</span>
+<span class="fc" id="L142">                .createdby(ImmutableUser.builder().id(actor.id()).name(actor.name()).isIg(actor.isIg()).build())</span>
+<span class="fc" id="L143">                .createdat(first.at().toString());</span>
+    }
+
+    private Validation&lt;Seq&lt;String&gt;, SearchTasks&gt; validateRequest(SearchParameters parameters) {
+<span class="fc" id="L147">        return validatedStatuses(parameters.status)</span>
+<span class="fc" id="L148">                .map(statuses -&gt; ImmutableSearchTasks.builder()</span>
+<span class="fc" id="L149">                        .statuses(HashSet.ofAll(statuses).map(Status::valueOf))</span>
+<span class="fc" id="L150">                        .type(Optional.ofNullable(parameters.type))</span>
+<span class="fc" id="L151">                        .build());</span>
+    }
+
+    private Validation&lt;Seq&lt;String&gt;, Set&lt;String&gt;&gt; validatedStatuses(Set&lt;String&gt; status) {
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">        if (status == null) {</span>
+<span class="nc" id="L156">            return valid(Set.of());</span>
+        }
+
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">        if (VALID_STATUSES.containsAll(status)) {</span>
+<span class="fc" id="L160">            return valid(status);</span>
+        }
+
+<span class="nc" id="L163">        return invalid(List(format(&quot;Invalid status values: [%s]&quot;, status.stream()</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">                .filter($ -&gt; !VALID_STATUSES.contains($))</span>
+<span class="nc" id="L165">                .collect(joining(&quot;,&quot;)))));</span>
+    }
+
+<span class="fc" id="L168">    static class SearchParameters {</span>
+        Set&lt;String&gt; status;
+        @Nullable
+        String type;
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,446 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RevokeAccessAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.invitation</a> &gt; <span class="el_source">RevokeAccessAction.java</span></div><h1>RevokeAccessAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id:  ActivateUserAction.java May 25, 2009 3:05:05 PM mahendera$
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action.invitation;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.consent.entity.PatientConsent;
+import com.pkb.consent.entity.PatientConsentReason;
+import com.pkb.datamodel.Email;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.ConsentReason;
+import com.pkb.entities.enums.ContactType;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PKBException;
+import com.pkb.service.invitation.impl.InvitationManager;
+import com.pkb.service.patientconsent.DeprecatedPatientConsentManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.InvitationStatus.ACCEPTED;
+import static com.pkb.entities.enums.InvitationStatus.EXPIRED;
+import static com.pkb.entities.enums.InvitationStatus.NEW;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+/**
+ * used for both revoking access and canceling invitations (and revoking access does both)
+ * invitationId is optional
+ * &lt;p&gt;
+ * Making PatientConsent-aware: here we're removing INDIVIDUAL links only (not team links)
+ * and thus should remove the individual consent (unchecking all boxes) as part of dropping consent.
+ *
+ * @author robw
+ * @author pravinam Modification to revoke access for multiple users
+ */
+<span class="fc" id="L58">public class RevokeAccessAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 9056523825151177553L;
+
+    private UserAccessManager userAccessManager;
+
+    private TeamUserManager teamUserManager;
+
+    private InvitationManager invitationManager;
+
+    private PersonContactManager personContactManager;
+
+    private DeprecatedPatientConsentManager patientConsentManager;
+
+    private Long sharedWithUserId;
+
+    private String invitationId;
+
+<span class="fc" id="L76">    private final String tab = &quot;invitations&quot;; // this is the team tab...</span>
+
+    private String subTab; // either dependents or myClinicians (alt flow: invitationList)
+
+    private List&lt;String&gt; recipientId;
+    private List&lt;String&gt; carerId;
+
+<span class="fc" id="L83">    List&lt;PKBPerson&gt; revokeFailedUsers = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L85">    List&lt;PKBPerson&gt; accessRevokedUsers = new ArrayList&lt;&gt;();</span>
+
+    List&lt;PKBPerson&gt; sharedWithUsers;
+
+    public String cancelInvitation() {
+        // for now, same handling as revokeAccess (that's based on invitation status)
+        // safer also in case this is called and the clinician has just now accepted the invitation
+<span class="nc" id="L92">        sharedWithUsers = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L93" title="All 2 branches missed.">        if (sharedWithUserId != null) {</span>
+<span class="nc" id="L94">            PKBPerson person = userManager.getPKBPerson(sharedWithUserId, PKBPerson.Lazy.CONTACTS);</span>
+<span class="nc" id="L95">            sharedWithUsers.add(person);</span>
+        }
+<span class="nc" id="L97">        revokeAccess();</span>
+<span class="nc" id="L98">        return SUCCESS; // same landing page even if this failed (and created error messages)</span>
+    }
+
+    public String noCancel() {
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">        if (&quot;myClinicians&quot;.equals(subTab)) {</span>
+<span class="nc" id="L103">            return &quot;team&quot;;</span>
+        } else {
+<span class="fc" id="L105">            return &quot;family&quot;;</span>
+        }
+    }
+
+    public String revokeAccess() {
+        try {
+<span class="fc" id="L111">            PKBPerson currentUser = loggedInUserUtil.getLoggedInPerson();</span>
+<span class="fc" id="L112">            PKBPerson contextUser = contextUserUtil.getContextUser();</span>
+<span class="pc bpc" id="L113" title="1 of 2 branches missed.">            PKBPerson patient = contextUser == null ? currentUser : contextUser;</span>
+<span class="fc" id="L114">            long patientId = patient.getId();</span>
+
+<span class="fc" id="L116">            Long patientAccountId = userManager.getDefaultAccountId(patientId);</span>
+
+            // for supporting locked child sharing: check if the current user is an active team pro, and if patient is under 18
+<span class="fc bfc" id="L119" title="All 2 branches covered.">            for (PKBPerson sharedUser : sharedWithUsers) {</span>
+
+<span class="fc" id="L121">                List&lt;PKBInvitation&gt; invitations = null;</span>
+<span class="pc bpc" id="L122" title="3 of 4 branches missed.">                if (isBlank(invitationId) || &quot;0&quot;.equals(invitationId)) {</span>
+
+                    // TODO: problem...
+                    // we're filtering here to get only ACCEPTED invitations
+                    // do we need to clear up &quot;NEW&quot; ones as well?
+                    // maybe not, since there won't be both in place
+<span class="fc" id="L128">                    invitations = invitationManager.getInvitationsByUserAndAccountId(patientId, patientAccountId, sharedUser.getId(), ACCEPTED);</span>
+                } else {
+<span class="nc" id="L130">                    invitations = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L131">                    UUID invitationPublicId = invitationManager.getInvitationIdByString(invitationId);</span>
+<span class="nc" id="L132">                    PKBInvitation invitation = invitationManager</span>
+<span class="nc" id="L133">                            .getInvitation(getLoggedInEHRRequestContext(), invitationPublicId);</span>
+<span class="nc" id="L134">                    invitations.add(invitation);</span>
+                }
+
+<span class="fc" id="L137">                boolean successful = revokeAccessForUser(patient, sharedUser, invitations);</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">                if (!successful) {</span>
+<span class="nc" id="L139">                    revokeFailedUsers.add(sharedUser);</span>
+                }
+<span class="fc" id="L141">            }</span>
+<span class="fc" id="L142">            reportSuccess();</span>
+<span class="fc" id="L143">            reportErrors();</span>
+<span class="nc" id="L144">        } catch (Exception e) {</span>
+<span class="nc" id="L145">            throw new PKBException(&quot;Error while revoking access for &quot; + recipientId, e);</span>
+<span class="fc" id="L146">        }</span>
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">        if (&quot;myClinicians&quot;.equals(subTab)) {</span>
+<span class="nc" id="L148">            return &quot;team&quot;;</span>
+        } else {
+<span class="fc" id="L150">            return &quot;family&quot;;</span>
+        }
+    }
+
+    private void reportErrors() {
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">        if (!revokeFailedUsers.isEmpty()) {</span>
+<span class="nc" id="L156">            String userList = &quot;&quot;;</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            for (PKBPerson person : revokeFailedUsers) {</span>
+<span class="nc" id="L158">                userList = userList + person.getTitle() + &quot; &quot; + person.getLastName() + &quot;,&quot;;</span>
+<span class="nc" id="L159">            }</span>
+<span class="nc" id="L160">            userList = userList.substring(0, userList.length() - 1);</span>
+<span class="nc" id="L161">            addActionMessage(getText(&quot;revokeAccessAction.msg.revoke_failed&quot;, new String[]{userList}));</span>
+        }
+<span class="fc" id="L163">    }</span>
+
+    private void reportSuccess() {
+<span class="pc bpc" id="L166" title="1 of 2 branches missed.">        if (!accessRevokedUsers.isEmpty()) {</span>
+<span class="fc" id="L167">            String userList = &quot;&quot;;</span>
+<span class="fc bfc" id="L168" title="All 2 branches covered.">            for (PKBPerson person : accessRevokedUsers) {</span>
+<span class="fc" id="L169">                userList = userList + person.getTitle() + &quot; &quot; + person.getLastName() + &quot;,&quot;;</span>
+<span class="fc" id="L170">            }</span>
+<span class="fc" id="L171">            userList = userList.substring(0, userList.length() - 1);</span>
+<span class="pc bpc" id="L172" title="1 of 2 branches missed.">            if (accessRevokedUsers.size() == 1) {</span>
+<span class="fc" id="L173">                addActionMessage(getText(&quot;revokeAccessAction.msg.revoked_access_single&quot;, new String[]{userList}));</span>
+            } else {
+<span class="nc" id="L175">                addActionMessage(getText(&quot;revokeAccessAction.msg.revoked_access_multiple&quot;, new String[]{userList}));</span>
+            }
+        }
+<span class="fc" id="L178">    }</span>
+
+    private boolean revokeAccessForUser(PKBPerson patient, PKBPerson sharedUser,
+                                        List&lt;PKBInvitation&gt; invitations) throws MailException {
+<span class="fc" id="L182">        boolean revoked = false;</span>
+<span class="fc" id="L183">        boolean patientUnder18 = personHelper.isUnderAge(18, patient).orElse(true);</span>
+
+<span class="fc" id="L185">        EHRRequestContext requestContext = getEHRRequestContext();</span>
+
+        try {
+
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">            AccessingEntityType entityType = sharedUser.isPro() ? AccessingEntityType.INDIVIDUAL : AccessingEntityType.CARER;</span>
+<span class="fc" id="L190">            Optional&lt;PatientConsent&gt; maybePatientConsent = patientConsentManager.findPatientConsentWithoutReasons(patient.getId(), sharedUser.getId(), entityType);</span>
+
+<span class="pc bpc" id="L192" title="3 of 4 branches missed.">            if (maybePatientConsent.map(PatientConsent::isProEditOnlyForChild).orElse(false) &amp;&amp; patientUnder18) {</span>
+<span class="nc" id="L193">                addActionError(getText(&quot;revokeAccessAction.err.under18_locked_share&quot;,</span>
+<span class="nc" id="L194">                        new String[]{sharedUser.getTitle(), sharedUser.getFirstName(), sharedUser.getLastName()}));</span>
+            } else {
+                // removing access
+
+<span class="fc" id="L198">                invitationManager.beginTransaction();</span>
+
+                // remove consent first
+<span class="fc" id="L201">                maybePatientConsent.ifPresent(patientConsent -&gt; {</span>
+<span class="fc" id="L202">                    patientConsent.setGeneralHealthConsentGranted(false);</span>
+<span class="fc" id="L203">                    patientConsent.setMentalHealthConsentGranted(false);</span>
+<span class="fc" id="L204">                    patientConsent.setSexualHealthConsentGranted(false);</span>
+<span class="fc" id="L205">                    patientConsent.setSocialCareConsentGranted(false);</span>
+
+                    // TODO: Discharge?
+
+<span class="fc" id="L209">                    PatientConsentReason reasons = new PatientConsentReason(new SourceDetails(requestContext));</span>
+
+                    // TODO need to collect this from the person revoking access, I think, on the confirm page
+<span class="fc" id="L212">                    reasons.setAllReasons(ConsentReason.EXPLICIT_CONSENT, &quot;&quot;);</span>
+<span class="fc" id="L213">                    reasons.setEventText(&quot;updated by &quot; + loggedInUserUtil.getLoggedInUserId());</span>
+<span class="fc" id="L214">                    reasons.trackConsentCategories(patientConsent);</span>
+<span class="fc" id="L215">                    patientConsent.setReasons(reasons);</span>
+
+<span class="fc" id="L217">                    patientConsentManager.ensureTeamLinkAndUpdatePatientConsentLegacy(requestContext, patientConsent);</span>
+<span class="fc" id="L218">                });</span>
+
+<span class="pc bpc" id="L220" title="2 of 4 branches missed.">                if ((invitations != null) &amp;&amp; !invitations.isEmpty()) {</span>
+                    // Ideally we will have just 1 invitation, but if there are &gt; 1
+                    // active invitations
+                    // it will take care of that too
+
+<span class="nc bnc" id="L225" title="All 2 branches missed.">                    for (PKBInvitation invitation : invitations) {</span>
+<span class="nc" id="L226">                        updateInvitationToRevokeAccess(patient.getId(), sharedUser, invitation);</span>
+<span class="nc" id="L227">                    }</span>
+                } else {
+                    // no invitation found; this is a simple revoke access request
+<span class="fc" id="L230">                    userAccessManager.sendAccessRevocationNotification(getLoggedInEHRRequestContext(), sharedUser.getId(),</span>
+<span class="fc" id="L231">                            patient.getId());</span>
+                }
+
+<span class="fc" id="L234">                PKBPerson patientWithContacts = userManager.getPKBPerson(patient.getId(), PKBPerson.Lazy.CONTACTS_DEEP);</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">                for (PersonContact personContact : patientWithContacts.getContacts()) {</span>
+
+<span class="fc" id="L237">                    if (personContact.findAlsoContactPerson().filter(refPerson -&gt;</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">                            refPerson.getId().equals(sharedUser.getId())).isDefined()) {</span>
+<span class="fc" id="L239">                        patientWithContacts.getContacts().remove(personContact);</span>
+<span class="fc" id="L240">                        userManager.updateUser(getEHRRequestContext(), patientWithContacts);</span>
+<span class="fc" id="L241">                        personContactManager.deleteContact(patient.getId(), sharedUser.getId(),</span>
+                                ContactType.ALSO_CONTACT);
+
+<span class="fc" id="L244">                        break;</span>
+                    }
+<span class="fc" id="L246">                }</span>
+
+<span class="fc" id="L248">                invitationManager.commitTransaction();</span>
+<span class="fc" id="L249">                accessRevokedUsers.add(sharedUser);</span>
+<span class="fc" id="L250">                revoked = true;</span>
+            }
+        } finally {
+<span class="fc" id="L253">            invitationManager.rollbackIfNotCommitted();</span>
+        }
+<span class="fc" id="L255">        return revoked;</span>
+    }
+
+    private void updateInvitationToRevokeAccess(long patientId, PKBPerson sharedUser,
+                                                PKBInvitation invitation) throws MailException {
+        // validate: invitation is actually from this user?
+<span class="nc bnc" id="L261" title="All 2 branches missed.">        if (!invitation.getAuthorUserId().equals(patientId)) {</span>
+<span class="nc" id="L262">            throw new IllegalArgumentException(&quot;current user is not the author of invitation &quot; + invitation.getId());</span>
+        }
+
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        if (invitation.getInvitationStatus() == NEW) {</span>
+            // cancel invitation
+<span class="nc" id="L267">            invitationManager.updateInvitationStatus(invitation.getPublicId(), EXPIRED);</span>
+
+<span class="nc" id="L269">            addActionMessage(getText(&quot;revokeAccessAction.msg.cancelled_invitation&quot;,</span>
+<span class="nc" id="L270">                    new String[] { sharedUser.findEmail().map(Email::address).getOrNull(), sharedUser.getTitle(), sharedUser.getLastName() }));</span>
+        }
+
+<span class="nc" id="L273">        personContactManager.deleteContact(patientId, sharedUser.getId(), ContactType.ALSO_CONTACT);</span>
+<span class="nc" id="L274">    }</span>
+
+    @Override
+    public String input() {
+        // carerId comes from the family sharing page
+<span class="fc" id="L279">        PKBPerson contextUser = contextUserUtil.getContextUser();</span>
+<span class="pc bpc" id="L280" title="3 of 4 branches missed.">        if (loggedInUserUtil.getOptionalLoggedInUserPrimaryTeam().isEmpty() &amp;&amp; !loggedInUserUtil.isIdentityVerifiedPatientOrOnBehalfOfOne(contextUser)) {</span>
+<span class="nc" id="L281">            return Action.ERROR;</span>
+        }
+
+<span class="pc bpc" id="L284" title="1 of 4 branches missed.">        if ((recipientId == null) &amp;&amp; (carerId == null)) {</span>
+<span class="fc" id="L285">            addActionError(getText(&quot;revokeAccessAction.err.select_user&quot;));</span>
+        } else {
+<span class="fc" id="L287">            sharedWithUsers = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">            if (isNotEmpty(recipientId)) {</span>
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">                if (isEmptyStrutsInput(recipientId)) {</span>
+<span class="nc" id="L290">                    addActionError(getText(&quot;revokeAccessAction.err.select_user&quot;));</span>
+                    // will return to input below
+                } else {
+<span class="fc" id="L293">                    sharedWithUsers.addAll(userManager.getPKBPersonList(recipientId.stream().map(Long::valueOf).collect(Collectors.toList())));</span>
+                }
+            }
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">            if (isNotEmpty(carerId)) {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">                if (isEmptyStrutsInput(carerId)) {</span>
+<span class="nc" id="L298">                    addActionError(getText(&quot;revokeAccessAction.err.select_user&quot;));</span>
+                } else {
+<span class="nc" id="L300">                    sharedWithUsers.addAll(userManager.getPKBPersonList(carerId.stream().map(Long::valueOf).collect(Collectors.toList())));</span>
+                }
+            }
+        }
+
+        // more expensive checks...
+<span class="fc bfc" id="L306" title="All 2 branches covered.">        if (!hasActionErrors()) {</span>
+            // consent support -- if it's a child-locked sharing then only a team professional can remove access
+<span class="fc" id="L308">            PKBPerson currentPP = loggedInUserUtil.getLoggedInPerson();</span>
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">            PKBPerson patient = contextUser == null ? currentPP : contextUser;</span>
+
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">            boolean activeTeamPro = getLoggedInEHRRequestContext().isPro() ||</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">                                    getLoggedInEHRRequestContext().isTeamCoordinator();</span>
+
+            // if no team pro, and patient is under 18: must check consents for child-locks
+<span class="pc bpc" id="L315" title="2 of 4 branches missed.">            if (!activeTeamPro &amp;&amp; personHelper.isUnderAge(18, patient).orElse(true)) {</span>
+                // YES, need to check each consent and block if needed
+<span class="nc" id="L317">                EHRRequestContext requestContext = getEHRRequestContext();</span>
+                // check consent with each share
+<span class="nc bnc" id="L319" title="All 2 branches missed.">                for (PKBPerson sharedUser : sharedWithUsers) {</span>
+
+<span class="nc" id="L321">                    AccessingEntityType entityType = Match(subTab).of(</span>
+<span class="nc" id="L322">                            Case($(&quot;myClinicians&quot;), AccessingEntityType.INDIVIDUAL),</span>
+<span class="nc" id="L323">                            Case($(&quot;dependents&quot;), AccessingEntityType.CARER)</span>
+                    );
+
+<span class="nc bnc" id="L326" title="All 2 branches missed.">                    if (patientConsentManager.findPatientConsentWithoutReasons(patient.getId(), sharedUser.getId(), entityType)</span>
+<span class="nc" id="L327">                            .map(PatientConsent::isProEditOnlyForChild).orElse(false)) {</span>
+<span class="nc" id="L328">                        addActionError(getText(&quot;revokeAccessAction.err.under18_locked_share&quot;,</span>
+<span class="nc" id="L329">                                new String[]{sharedUser.getTitle(), sharedUser.getFirstName(), sharedUser.getLastName()}));</span>
+                    }
+<span class="nc" id="L331">                }</span>
+            }
+        }
+
+<span class="fc bfc" id="L335" title="All 2 branches covered.">        if (hasActionErrors()) {</span>
+<span class="pc bpc" id="L336" title="1 of 2 branches missed.">            if (&quot;myClinicians&quot;.equals(subTab)) {</span>
+<span class="nc" id="L337">                return &quot;team&quot;;</span>
+            } else {
+<span class="fc" id="L339">                return &quot;family&quot;;</span>
+            }
+        } else {
+<span class="fc" id="L342">            return SUCCESS;</span>
+        }
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L347">        this.userManager = userManager;</span>
+<span class="fc" id="L348">    }</span>
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L351">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L352">    }</span>
+
+    public Long getSharedWithUserId() {
+<span class="nc" id="L355">        return sharedWithUserId;</span>
+    }
+
+    public void setSharedWithUserId(Long sharedWithUserId) {
+<span class="nc" id="L359">        this.sharedWithUserId = sharedWithUserId;</span>
+<span class="nc" id="L360">    }</span>
+
+    public String getInvitationId() {
+<span class="nc" id="L363">        return invitationId;</span>
+    }
+
+    public void setInvitationId(String invitationId) {
+<span class="nc" id="L367">        this.invitationId = invitationId;</span>
+<span class="nc" id="L368">    }</span>
+
+    public void setInvitationManager(InvitationManager invitationManager) {
+<span class="fc" id="L371">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L372">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L375">        return tab;</span>
+    }
+
+    public String getSubTab() {
+<span class="fc" id="L379">        return subTab;</span>
+    }
+
+    public List&lt;String&gt; getRecipientId() {
+<span class="nc" id="L383">        return recipientId;</span>
+    }
+
+    public void setRecipientId(List&lt;String&gt; recipientId) {
+<span class="fc" id="L387">        this.recipientId = recipientId;</span>
+<span class="fc" id="L388">    }</span>
+
+    public List&lt;PKBPerson&gt; getRevokeFailedUsers() {
+<span class="nc" id="L391">        return revokeFailedUsers;</span>
+    }
+
+    public void setRevokeFailedUsers(List&lt;PKBPerson&gt; revokeFailedUsers) {
+<span class="nc" id="L395">        this.revokeFailedUsers = revokeFailedUsers;</span>
+<span class="nc" id="L396">    }</span>
+
+    public List&lt;PKBPerson&gt; getSharedWithUsers() {
+<span class="fc" id="L399">        return sharedWithUsers;</span>
+    }
+
+    public void setSharedWithUsers(List&lt;PKBPerson&gt; sharedWithUsers) {
+<span class="fc" id="L403">        this.sharedWithUsers = sharedWithUsers;</span>
+<span class="fc" id="L404">    }</span>
+
+    public List&lt;PKBPerson&gt; getAccessRevokedUsers() {
+<span class="nc" id="L407">        return accessRevokedUsers;</span>
+    }
+
+    public void setAccessRevokedUsers(List&lt;PKBPerson&gt; accessRevokedUsers) {
+<span class="nc" id="L411">        this.accessRevokedUsers = accessRevokedUsers;</span>
+<span class="nc" id="L412">    }</span>
+
+    public PersonContactManager getPersonContactManager() {
+<span class="nc" id="L415">        return personContactManager;</span>
+    }
+
+    public void setPersonContactManager(PersonContactManager personContactManager) {
+<span class="fc" id="L419">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L420">    }</span>
+
+    public DeprecatedPatientConsentManager getDeprecatedPatientConsentManager() {
+<span class="nc" id="L423">        return patientConsentManager;</span>
+    }
+
+    public void setDeprecatedPatientConsentManager(DeprecatedPatientConsentManager patientConsentManager) {
+<span class="fc" id="L427">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L428">    }</span>
+
+    public List&lt;String&gt; getCarerId() {
+<span class="nc" id="L431">        return carerId;</span>
+    }
+
+    public void setCarerId(List&lt;String&gt; carerId) {
+<span class="nc" id="L435">        this.carerId = carerId;</span>
+<span class="nc" id="L436">    }</span>
+
+    public void setSubTab(String subTab) {
+<span class="fc" id="L439">        this.subTab = subTab;</span>
+<span class="fc" id="L440">    }</span>
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L443">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L444">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

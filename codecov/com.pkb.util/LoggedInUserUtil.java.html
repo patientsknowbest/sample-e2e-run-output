@@ -1,0 +1,504 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LoggedInUserUtil.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.util</a> &gt; <span class="el_source">LoggedInUserUtil.java</span></div><h1>LoggedInUserUtil.java</h1><pre class="source lang-java linenums">package com.pkb.util;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Maps;
+import com.opensymphony.xwork2.ActionContext;
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRRequestContext.AccountLinkType;
+import com.pkb.app.entity.ImmutableLoggedOutEHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.institute.entity.TeamWithPKBPerson;
+import com.pkb.security.BaseAuthenticationProvider.TypedAuthentication;
+import com.pkb.security.NhsLoginAuthenticationDetails;
+import com.pkb.security.PKBAuthenticationDetails;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.context.SecurityContextImpl;
+
+import java.time.ZoneId;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.consent.model.AbstractConsentStatus.noConsentRequired;
+import static com.pkb.user.entity.PKBPerson.Lazy.CONTACTS;
+import static com.pkb.user.entity.PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS;
+import static com.pkb.util.PKBConstants.VALID_MULTI_TEAM_USERTYPES;
+import static org.apache.commons.lang3.StringUtils.equalsIgnoreCase;
+
+/**
+ * Focussed wrapper class around the logged-in user functionality of
+ * {@link PKBWebUtil}. Use this in preference to calling the static methods in
+ * {@link PKBWebUtil} directly (using this class makes your code easier to
+ * test).
+ *
+ * @author Russ Gray
+ * @deprecated Do not add anything to this class anymore! Use {@link EHRRequestContext} and its subclasses and the utility methods on them.
+ * For some of the functionality in here methods were added to {@link com.pkb.action.BaseAction} already or should be added, anything related to logged in user and context user should be in {@link EHRRequestContext}
+ * This class only  works in web layer, doesn't work in service or lower so the moment logic is pulled out of JPSs and action classes an alternative must be used, which is {@link EHRRequestContext}
+ */
+@Deprecated
+public class LoggedInUserUtil {
+
+<span class="fc" id="L66">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private final static Map&lt;UserType, Optional&lt;String&gt;&gt; HOME_MAPPINGS;
+    private final static String PATIENT_ROLE = &quot;ROLE_PATIENT&quot;;
+    public static final String SPRING_SECURITY_CONTEXT = &quot;SPRING_SECURITY_CONTEXT&quot;;
+    private static final String SELECTED_TEAM = &quot;selectedTeam&quot;;
+
+    static {
+<span class="fc" id="L73">        Map&lt;UserType, Optional&lt;String&gt;&gt; map = new EnumMap&lt;&gt;(UserType.class);</span>
+<span class="fc" id="L74">        map.put(UserType.PATIENT, Optional.of(&quot;homePatient&quot;));</span>
+<span class="fc" id="L75">        map.put(UserType.REG_CLINICIAN, Optional.of(&quot;homeClinician&quot;));</span>
+<span class="fc" id="L76">        map.put(UserType.INSTITUTE_ADMIN, Optional.of(&quot;homeInstituteAdmin&quot;));</span>
+<span class="fc" id="L77">        map.put(UserType.ORG_COORD, Optional.of(&quot;homeOrgCoord&quot;));</span>
+<span class="fc" id="L78">        map.put(UserType.SUPER_ADMIN, Optional.of(&quot;homeSuperAdmin&quot;));</span>
+<span class="fc" id="L79">        map.put(UserType.EMPLOYEE, Optional.of(&quot;homeEmployee&quot;));</span>
+<span class="fc" id="L80">        map.put(UserType.TECH_SUPPORT, Optional.of(&quot;homeTechSupport&quot;));</span>
+<span class="fc" id="L81">        map.put(UserType.PRIVACY_OFFICER, Optional.of(&quot;homePrivacyOfficer&quot;));</span>
+<span class="fc" id="L82">        HOME_MAPPINGS = Maps.immutableEnumMap(map);</span>
+<span class="fc" id="L83">    }</span>
+
+    private final TeamUserManager teamUserManager;
+    private UserManager userManager;
+    private RequestCache requestCache;
+    private final PersonContactManager personContactManager;
+
+<span class="fc" id="L90">    public LoggedInUserUtil(TeamUserManager teamUserManager, UserManager userManager, RequestCache requestCache, PersonContactManager personContactManager) {</span>
+<span class="fc" id="L91">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L92">        this.userManager = userManager;</span>
+<span class="fc" id="L93">        this.requestCache = requestCache;</span>
+<span class="fc" id="L94">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L95">    }</span>
+
+    /**
+     * Get the {@link PKBPerson} of the logged-in user
+     *
+     * @deprecated Use {@link LoggedInEHRRequestContext} and {@link com.pkb.action.BaseAction#getContextAndLoggedInUsers(PKBPerson.Lazy...)}
+     */
+    @Deprecated
+    @NotNull
+    public PKBPerson getLoggedInUser(PKBPerson.Lazy... lazies) {
+<span class="fc" id="L105">        return requestCache.getNotNull(&quot;LOGGED_IN_USER&quot;, () -&gt; userManager.getPKBPerson(getLoggedInUserId(), lazies));</span>
+    }
+
+    /**
+     * @return
+     * @deprecated Use {@link EHRRequestContext#isUserLoggedIn()}
+     */
+    @Deprecated
+    public boolean isUserLoggedIn() {
+<span class="fc" id="L114">        return getPrincipal().isPresent();</span>
+    }
+
+    /**
+     * @return
+     * @deprecated Use {@link LoggedInEHRRequestContext#getAccessingUserId()} and {@link BaseAction#getLoggedInEHRRequestContext()}
+     */
+    @Deprecated
+    public long getLoggedInUserId() {
+<span class="fc" id="L123">        return getPrincipal()</span>
+<span class="fc" id="L124">                .map(PersonAuthInfo::getId)</span>
+<span class="fc" id="L125">                .orElseThrow(() -&gt; new IllegalStateException(&quot;No user logged in&quot;));</span>
+    }
+
+    /**
+     * Get the {@link UserType} ID of the logged-in user
+     *
+     * @deprecated Use {@link LoggedInEHRRequestContext#getAccessingUser()} and {@link BaseAction#getLoggedInEHRRequestContext()},
+     * most of what {@link UserType} is used for should be handled by methods on {@link com.pkb.app.entity.PersonRoles} and the classes implementing it.
+     */
+    @Deprecated
+    public UserType getLoggedInUserType() {
+<span class="fc" id="L136">        return getPrincipal().map(PersonAuthInfo::getUserType).orElseThrow(() -&gt; new RuntimeException(&quot;No Logged in User&quot;));</span>
+    }
+
+    @Deprecated
+    public UUID getLoggedInUserPublicId() {
+<span class="pc" id="L141">        return getPrincipal().map(PersonAuthInfo::getPublicId).orElseThrow(() -&gt; new RuntimeException(&quot;No Logged in User&quot;));</span>
+    }
+
+    /**
+     * @return
+     * @deprecated Use {@link EHRRequestContext#isPatient()}
+     * most of what {@link UserType} is used for should be handled by methods on {@link com.pkb.app.entity.PersonRoles} and the classes implementing it.
+     */
+    @Deprecated
+    public boolean isLoggedInUserPatient() {
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        return getLoggedInUserType() == UserType.PATIENT;</span>
+    }
+
+    /**
+     * @return
+     * @deprecated Use {@link EHRRequestContext#isPro()}
+     * most of what {@link UserType} is used for should be handled by methods on {@link com.pkb.app.entity.PersonRoles} and the classes implementing it.
+     */
+    @Deprecated
+    public boolean isLoggedInUserProfessional() {
+<span class="fc bfc" id="L161" title="All 2 branches covered.">        return getLoggedInUserType() == UserType.REG_CLINICIAN;</span>
+    }
+
+    public boolean isLoggedInUserTeamProfessional() {
+<span class="fc bfc" id="L165" title="All 4 branches covered.">        return isLoggedInUserProfessional() &amp;&amp; getOptionalLoggedInUserPrimaryTeam().isPresent();</span>
+    }
+
+    public boolean isLoggedInUserIndividualProfessional() {
+<span class="fc bfc" id="L169" title="All 4 branches covered.">        return isLoggedInUserProfessional() &amp;&amp; !isLoggedInUserTeamProfessional();</span>
+    }
+
+    public boolean isLoggedInUserMultiteamProfessional() {
+<span class="fc bfc" id="L173" title="All 2 branches covered.">        return getLoggedInUserTeams().size() &gt; 1;</span>
+    }
+
+    @NotNull
+    public List&lt;TeamWithPKBPerson&gt; getLoggedInUserTeams() {
+<span class="fc bfc" id="L178" title="All 2 branches covered.">        if (isUserLoggedIn()) {</span>
+<span class="fc" id="L179">            PKBPerson loggedInPerson = getLoggedInPerson();</span>
+<span class="fc bfc" id="L180" title="All 4 branches covered.">            if (VALID_MULTI_TEAM_USERTYPES.contains(loggedInPerson.getUserType()) &amp;&amp; StringUtils.isNotBlank(loggedInPerson.getHumanUUID())) {</span>
+<span class="fc" id="L181">                return teamUserManager.getAllActiveTeamsForClinicianWithHumanUUID(loggedInPerson.getHumanUUID());</span>
+            }
+        }
+<span class="fc" id="L184">        return Collections.emptyList();</span>
+    }
+
+
+    /**
+     * Get the homepage action response string of the logged-in user
+     */
+    public Optional&lt;String&gt; getLoggedInUserHomeResult() {
+<span class="fc bfc" id="L192" title="All 2 branches covered.">        if (!isUserLoggedIn()) {</span>
+<span class="fc" id="L193">            return Optional.empty();</span>
+        }
+<span class="fc" id="L195">        return HOME_MAPPINGS.get(getLoggedInUserType());</span>
+    }
+
+    public @Nullable Team getLoggedInUserPrimaryTeam() {
+<span class="fc" id="L199">        return getOptionalLoggedInUserPrimaryTeam().orElse(null);</span>
+    }
+
+    public Optional&lt;Team&gt; getOptionalLoggedInUserPrimaryTeam() {
+<span class="fc" id="L203">        return getOptionalLoggedInUserPrimaryTeam(ImmutableLoggedOutEHRRequestContext.of(AccountLinkType.NO_LINK, Route.NOT_CAPTURED, noConsentRequired(), UUID.randomUUID()));</span>
+    }
+
+    /**
+     * Get the associated team of the logged-in user
+     */
+    public @Nullable Team getLoggedInUserPrimaryTeam(EHRRequestContext requestContext) {
+<span class="fc" id="L210">        return getOptionalLoggedInUserPrimaryTeam(requestContext).orElse(null);</span>
+    }
+
+    private Optional&lt;Team&gt; getOptionalLoggedInUserPrimaryTeam(EHRRequestContext requestContext) {
+<span class="fc" id="L214">        return requestCache.get(&quot;PRIMARY_TEAM&quot;, () -&gt; {</span>
+<span class="fc" id="L215">            long userId = getLoggedInUserId();</span>
+<span class="fc" id="L216">            return teamUserManager.findPrimaryTeam(requestContext.withConsentNotRequired(), userId);</span>
+        });
+    }
+
+
+    /**
+     * Get the org of the associated team of the logged-in user
+     */
+    @Nullable
+    public Org getLoggedInUserOrg(Org.Lazy... fields) {
+        try {
+<span class="fc" id="L227">            long userId = getLoggedInUserId();</span>
+<span class="fc" id="L228">            List&lt;Org&gt; userOrgs = userManager.findOrgsForPatient(userId, fields);</span>
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">            if (!userOrgs.isEmpty()) {</span>
+<span class="fc" id="L230">                return userOrgs.get(0);</span>
+            }
+<span class="nc" id="L232">        } catch (Exception e) {</span>
+<span class="nc" id="L233">            LOGGER.error(&quot;Exception while fetching the org for loggedinuser&quot;, e);</span>
+<span class="nc" id="L234">        }</span>
+<span class="nc" id="L235">        return null;</span>
+    }
+
+    public Optional&lt;Org&gt; getOptionalLoggedInUserOrg() {
+<span class="fc" id="L239">        return getOptionalLoggedInUserPrimaryTeam().map(Team::getOrg);</span>
+    }
+
+    public Org getLoggedInUserOrg() {
+<span class="pc" id="L243">        return getOptionalLoggedInUserOrg().orElseThrow(() -&gt; new IllegalStateException(&quot;No Organization set!&quot;));</span>
+    }
+
+
+    /**
+     * @return
+     * @deprecated Use {@link EHRRequestContext#getMaybeAccessingUser()}
+     * for uses where {@link EHRRequestContext is being built, move this logic there,it isn't something which should be available everywhere}
+     */
+    @Deprecated
+    public Optional&lt;PersonAuthInfo&gt; getPrincipal() {
+<span class="fc" id="L254">        LOGGER.debug(&quot;Entering getPrincipal &quot;);</span>
+<span class="fc" id="L255">        PersonAuthInfo user = null;</span>
+        try {
+<span class="fc" id="L257">            Map&lt;String, Object&gt; session = ActionContext.getContext().getSession();</span>
+<span class="fc" id="L258">            SecurityContextImpl userSession = null;</span>
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">            if (session != null) {</span>
+<span class="fc" id="L260">                userSession = (SecurityContextImpl) session</span>
+<span class="fc" id="L261">                        .get(SPRING_SECURITY_CONTEXT);</span>
+<span class="fc bfc" id="L262" title="All 2 branches covered.">                if (userSession != null) {</span>
+<span class="fc" id="L263">                    Authentication auth = userSession.getAuthentication();</span>
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">                    if (auth != null) {</span>
+<span class="fc" id="L265">                        user = (PersonAuthInfo) auth.getPrincipal();</span>
+                    }
+                }
+            }
+            // TODO: Check slowly, might there be anything sensitive in the session?
+<span class="fc" id="L270">            LOGGER.debug(&quot;getPrincipal: ActionContext session {}&quot;, session);</span>
+            // TODO: Check slowly, might there be anything sensitive in the session?
+<span class="fc" id="L272">            LOGGER.debug(&quot;gerPrincipal: Spring security context: {}&quot;, userSession);</span>
+<span class="nc" id="L273">        } catch (Exception e) {</span>
+<span class="nc" id="L274">            throw new RuntimeException(&quot;failed getting Principal&quot;, e);</span>
+<span class="fc" id="L275">        }</span>
+<span class="fc" id="L276">        return Optional.ofNullable(user);</span>
+    }
+
+    /**
+     * Checks that the logged in user currently has the given role.
+     *
+     * @param role The role to check.
+     * @return &lt;code&gt;true&lt;/code&gt; if the user currently has the given role, &lt;code&gt;false&lt;/code&gt; otherwise.
+     */
+    public boolean hasActiveRole(String role) {
+<span class="fc" id="L286">        boolean result = false;</span>
+<span class="fc" id="L287">        SecurityContext securityContext = getSecurityContext();</span>
+<span class="fc" id="L288">        Authentication authentication = securityContext.getAuthentication();</span>
+<span class="fc bfc" id="L289" title="All 2 branches covered.">        if (authentication != null) {</span>
+<span class="fc" id="L290">            result = containsRole(authentication.getAuthorities(), role);</span>
+        }
+<span class="fc" id="L292">        return result;</span>
+    }
+
+    /**
+     * Returns {@link AuthenticationDetails} for the logged in user.
+     *
+     * @return {@link AuthenticationDetails} if exists, null otherwise.
+     */
+    public Object getAuthenticationDetails() {
+<span class="fc" id="L301">        Object result = null;</span>
+<span class="fc" id="L302">        Authentication authentication = getSecurityContext().getAuthentication();</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">        if (authentication != null) {</span>
+<span class="fc" id="L304">            result = authentication.getDetails();</span>
+        }
+<span class="fc" id="L306">        return result;</span>
+    }
+
+    /**
+     * Returns {@link NhsLoginAuthenticationDetails} for the logged in user.
+     *
+     * @return a populated {@link NhsLoginAuthenticationDetails} object if exists, empty Optional otherwise.
+     */
+    public Optional&lt;NhsLoginAuthenticationDetails&gt; getNhsLoginAuthenticationDetails() {
+<span class="fc" id="L315">        Optional&lt;Object&gt; authenticationDetails = Optional.ofNullable(getAuthenticationDetails());</span>
+<span class="fc" id="L316">        return authenticationDetails</span>
+<span class="fc" id="L317">                .filter(NhsLoginAuthenticationDetails.class::isInstance)</span>
+<span class="fc" id="L318">                .map(NhsLoginAuthenticationDetails.class::cast)</span>
+<span class="fc" id="L319">                .or(() -&gt; getNhsLoginAuthenticationDetailsFromPkbAuthenticationDetails(authenticationDetails));</span>
+    }
+
+    /**
+     * Extracts {@link NhsLoginAuthenticationDetails} object from {@link PKBAuthenticationDetails} for the logged in
+     * user. It only exists if the user has been authenticated with NHS Login.
+     *
+     * @return a populated {@link NhsLoginAuthenticationDetails} object if exists , empty Optional otherwise.
+     */
+    @SuppressWarnings(&quot;OptionalUsedAsFieldOrParameterType&quot;)
+    public Optional&lt;NhsLoginAuthenticationDetails&gt; getNhsLoginAuthenticationDetailsFromPkbAuthenticationDetails(Optional&lt;Object&gt; authDetails) {
+<span class="fc" id="L330">        return authDetails</span>
+<span class="fc" id="L331">                .filter(PKBAuthenticationDetails.class::isInstance)</span>
+<span class="fc" id="L332">                .map(PKBAuthenticationDetails.class::cast)</span>
+<span class="fc" id="L333">                .flatMap(PKBAuthenticationDetails::originalAuthentication)</span>
+<span class="fc" id="L334">                .map(TypedAuthentication::getDetails)</span>
+<span class="fc" id="L335">                .filter(NhsLoginAuthenticationDetails.class::isInstance)</span>
+<span class="fc" id="L336">                .map(NhsLoginAuthenticationDetails.class::cast);</span>
+    }
+
+    /**
+     * Updates {@link Authentication} for logged in user.
+     *
+     * @param authenticationDetails New {@link AuthenticationDetails} for auth token.
+     * @param roles                 New roles for auth token.
+     */
+    public void updateAuthentication(Object authenticationDetails, Collection&lt;GrantedAuthority&gt; roles) {
+<span class="fc" id="L346">        SecurityContext securityContext = getSecurityContext();</span>
+<span class="fc" id="L347">        Authentication authentication = securityContext.getAuthentication();</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">        if (authentication != null) {</span>
+<span class="fc" id="L349">            UsernamePasswordAuthenticationToken token = getNewAuthToken(authentication, authenticationDetails, roles);</span>
+<span class="fc" id="L350">            securityContext.setAuthentication(token);</span>
+<span class="fc" id="L351">        } else {</span>
+<span class="nc" id="L352">            throw new PKBException(&quot;Cannot update authentication as it does not exist!&quot;);</span>
+        }
+<span class="fc" id="L354">    }</span>
+
+    /**
+     * Updates {@link Authentication} for logged in user.
+     * Keeps the existing {@link GrantedAuthority}s (roles).
+     *
+     * @param authenticationDetails New {@link AuthenticationDetails} for auth token.
+     */
+    public void updateAuthentication(Object authenticationDetails) {
+<span class="fc" id="L363">        SecurityContext securityContext = getSecurityContext();</span>
+<span class="fc" id="L364">        Authentication authentication = securityContext.getAuthentication();</span>
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">        if (authentication != null) {</span>
+<span class="fc" id="L366">            UsernamePasswordAuthenticationToken token = getNewAuthToken(authentication, authenticationDetails,</span>
+<span class="fc" id="L367">                    authentication.getAuthorities());</span>
+<span class="fc" id="L368">            securityContext.setAuthentication(token);</span>
+<span class="fc" id="L369">        } else {</span>
+<span class="nc" id="L370">            throw new PKBException(&quot;Cannot update authentication as it does not exist!&quot;);</span>
+        }
+<span class="fc" id="L372">    }</span>
+
+    @VisibleForTesting
+    SecurityContext getSecurityContext() {
+<span class="fc" id="L376">        return SecurityContextHolder.getContext();</span>
+    }
+
+    private boolean containsRole(Collection&lt;? extends GrantedAuthority&gt; grantedAuthorities, String role) {
+<span class="fc" id="L380">        boolean result = false;</span>
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">        if (grantedAuthorities != null) {</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">            for (GrantedAuthority current : grantedAuthorities) {</span>
+<span class="fc bfc" id="L383" title="All 2 branches covered.">                if (equalsIgnoreCase(current.getAuthority(), role)) {</span>
+<span class="fc" id="L384">                    result = true;</span>
+<span class="fc" id="L385">                    break;</span>
+                }
+<span class="fc" id="L387">            }</span>
+        }
+<span class="fc" id="L389">        return result;</span>
+    }
+
+    private UsernamePasswordAuthenticationToken getNewAuthToken(Authentication authentication, Object authenticationDetails,
+                                                                Collection&lt;? extends GrantedAuthority&gt; roles) {
+<span class="fc" id="L394">        UsernamePasswordAuthenticationToken result = new UsernamePasswordAuthenticationToken(authentication.getPrincipal(),</span>
+<span class="fc" id="L395">                authentication.getCredentials(), roles);</span>
+<span class="fc" id="L396">        result.setDetails(authenticationDetails);</span>
+<span class="fc" id="L397">        return result;</span>
+    }
+
+    //is this the right place to put this?
+    public void markTeamSelected() {
+<span class="fc" id="L402">        ActionContext.getContext().getSession().put(SELECTED_TEAM, true);</span>
+<span class="fc" id="L403">    }</span>
+
+    //is this the right place to put this?
+    public boolean hasSelectedTeam() {
+
+<span class="fc" id="L408">        Map&lt;String, Object&gt; contextSession = ActionContext.getContext().getSession();</span>
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">        if (contextSession != null) {</span>
+<span class="fc" id="L410">            return contextSession.containsKey(SELECTED_TEAM);</span>
+        }
+
+<span class="nc" id="L413">        return false;</span>
+    }
+
+    public ZoneId getLoggedInUserZoneId() {
+<span class="fc" id="L417">        return getLoggedInPerson().getZoneId();</span>
+    }
+
+
+    /**
+     * @return
+     * @deprecated Use {@link LoggedInEHRRequestContext#getAccessingUserId()} and {@link BaseAction#getContextAndLoggedInUsers(PKBPerson.Lazy...)}
+     */
+    @Deprecated
+    public PKBPerson getLoggedInPerson() {
+<span class="fc" id="L427">        return getLoggedInUser(</span>
+                PKBPerson.Lazy.CONTACTS_DEEP,
+                PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS,
+                PKBPerson.Lazy.PROPERTIES);
+    }
+
+    /**
+     * @return
+     * @deprecated Use {@link LoggedInEHRRequestContext#getAccessingUserId()} to get the user id,
+     * then either get the account it through {@link UserManager#getDefaultAccountId(long)}
+     * or {@link BaseAction#getContextAndLoggedInUsers(PKBPerson.Lazy...)} and {@link PKBPerson#getDefaultAccountId()}
+     * either of these usually required anyway.
+     */
+    @Deprecated
+    public Long getLoggedInUserAccountId() {
+<span class="fc" id="L442">        return userManager.getDefaultAccountId(getLoggedInUserId());</span>
+    }
+
+    public boolean isIdentityVerifiedPatientOrOnBehalfOfOne(PKBPerson contextUser) {
+<span class="fc bfc" id="L446" title="All 2 branches covered.">        return (contextUser == null) ? isIdentityVerifiedPatient() : isIdentityVerifiedPatient(contextUser.getId());</span>
+    }
+
+    @SuppressWarnings(&quot;WeakerAccess&quot;)
+    public boolean isIdentityVerifiedPatient() {
+<span class="fc" id="L451">        return isIdentityVerifiedPatient(getLoggedInUserId());</span>
+    }
+
+    @SuppressWarnings(&quot;WeakerAccess&quot;)
+    public boolean isIdentityVerifiedPatient(long personId) {
+<span class="fc bfc" id="L456" title="All 4 branches covered.">        return requestCache.getNotNull(&quot;PATIENT_IS_ID_VERIFIED_&quot; + personId, () -&gt; isLoggedInUserPatient() &amp;&amp; userManager.findIdentityVerification(personId).isPresent());</span>
+    }
+
+    public boolean isLoggedInUserActiveTeamMember() {
+<span class="fc bfc" id="L460" title="All 4 branches covered.">        return getLoggedInUserType() == UserType.INSTITUTE_ADMIN || isLoggedInUserTeamProfessional();</span>
+    }
+
+    public boolean isLoggedInUserTeamProOrVerifiedPatient() {
+<span class="fc bfc" id="L464" title="All 4 branches covered.">        return getOptionalLoggedInUserPrimaryTeam().isPresent() || isIdentityVerifiedPatient();</span>
+    }
+
+    /**
+     * @return
+     * @deprecated Use {@link LoggedInEHRRequestContext#isPatient()} instead
+     */
+    @SuppressWarnings(&quot;unused&quot;) // Used in listAppointments.jsp
+    @Deprecated
+    public boolean hasPatientRole() {
+<span class="nc" id="L474">        return hasActiveRole(PATIENT_ROLE);</span>
+    }
+
+    /**
+     * @param requestContext
+     * @return
+     * @deprecated Use {@link LoggedInEHRRequestContext#getAccessingUserId()} and do not read {@link PKBPerson} and put it into {@link RequestCache}
+     * so a few method calls later do {@link PKBPerson#getId()} the whole thing can be avoided.
+     * If for any reason actually need {@link PKBPerson} use refactor the code and use {@link BaseAction#getContextAndLoggedInUsers(PKBPerson.Lazy...)} once.
+     */
+    @Deprecated
+    public PKBPerson getContextOrAccessingUser(LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L486">        return requestCache.getNotNull(&quot;CONTEXT_OR_ACCESSING_USER&quot;, () -&gt; {</span>
+<span class="fc" id="L487">            long patientId = requestContext.getContextOrAccessingUserId();</span>
+<span class="fc" id="L488">            return userManager.getPKBPerson(patientId, CONTACTS, NATIONAL_AND_LOCAL_IDS);</span>
+        });
+    }
+
+    public boolean isLoggedInUserCarerAndIdentityNotVerified() {
+<span class="fc bfc" id="L493" title="All 2 branches covered.">        if (isIdentityVerifiedPatient()) {</span>
+<span class="fc" id="L494">            return false;</span>
+        }
+<span class="fc" id="L496">        return isLoggedInUserACarer();</span>
+    }
+
+    boolean isLoggedInUserACarer() {
+<span class="fc" id="L500">        return personContactManager.findContactsThatHaveTheRefPerson(getLoggedInUserId()).stream()</span>
+<span class="fc" id="L501">                .anyMatch(contact -&gt; contact.findAlsoContactPerson().isDefined());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

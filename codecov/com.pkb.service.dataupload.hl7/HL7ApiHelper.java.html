@@ -1,0 +1,1001 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HL7ApiHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.hl7</a> &gt; <span class="el_source">HL7ApiHelper.java</span></div><h1>HL7ApiHelper.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.hl7;
+
+import com.google.common.collect.ImmutableSet;
+import com.pkb.VersionDetails;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.util.RandomUtil;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.consent.RequiresConsent;
+import com.pkb.dataupload.entity.FieldMismatch;
+import com.pkb.domain.OrgNetworkService;
+import com.pkb.entities.enums.Gender;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.exception.ConflictingPatientIdentifiersException;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PatientNotFoundException;
+import com.pkb.institute.entity.Team;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.notification.entity.Activity;
+import com.pkb.notification.entity.Activity.Action;
+import com.pkb.service.dataupload.hl7.segment.HL7Patient;
+import com.pkb.service.dataupload.hl7.value.HL7String;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.invitation.impl.InvitationManager;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import com.pkb.service.notification.nhs.NhsAppNotificationManager;
+import com.pkb.service.notification.nhs.pubsub.payload.NhsApiNotificationTriggerType;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.OrgLevelIdType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PKBPersonHelper;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.user.entity.TeamLevelIdType;
+import com.pkb.util.PKBServiceUtil;
+import com.pkb.util.PatientIdentifiers;
+import com.pkb.util.PersonAmbiguityHandler;
+import com.pkb.util.StringUtil;
+import io.prometheus.client.Counter;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.sql.Date;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.MissingResourceException;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Stream;
+
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public class HL7ApiHelper {
+
+<span class="fc" id="L74">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    /**
+     * These are the only match rules which the GUI should allow to be configured.
+     */
+<span class="fc" id="L79">    static final Set&lt;String&gt; VALID_MATCH_RULES = ImmutableSet.of(&quot;firstName&quot;, &quot;firstNameShort&quot;, &quot;firstNameInitial&quot;, &quot;lastName&quot;,</span>
+            &quot;dateOfBirth&quot;, &quot;postalCode&quot;, &quot;gender&quot;);
+
+<span class="fc" id="L82">    private static final Counter HL7_DEMOGRAPHICS_UPDATE_COUNTER = Counter.build()</span>
+<span class="fc" id="L83">            .name(&quot;phr_hl7_messages_updating_demographics&quot;)</span>
+<span class="fc" id="L84">            .labelNames(&quot;updateType&quot;, &quot;team&quot;, &quot;org&quot;, &quot;partner&quot;) // total, noSignificantChange, noChange, nonDobDemographicsChange as reportBuilder</span>
+<span class="fc" id="L85">            .help(&quot;PHR-4244 and PHR-10039: Number of hl7 messages updating patient demographics&quot;)</span>
+<span class="fc" id="L86">            .register();</span>
+
+<span class="fc" id="L88">    private static final Counter HL7_NOTIFICATION_USAGE_BY_TYPE = Counter.build()</span>
+<span class="fc" id="L89">            .name(&quot;hl7_notification_usage_by_type&quot;)</span>
+<span class="fc" id="L90">            .labelNames(&quot;messageType&quot;, &quot;actionType&quot;, &quot;team&quot;, &quot;org&quot;, &quot;partner&quot;)</span>
+<span class="fc" id="L91">            .help(&quot;Number of hl7 notifications sent out by message and action type&quot;)</span>
+<span class="fc" id="L92">            .register();</span>
+
+    private static final String EMPTY_LABEL = &quot;-&quot;;
+
+    private final UserManager userManager;
+    private final PersonContactManager personContactManager;
+    private final PKBEmailMessageManager pkbEmailMessageManager;
+    private final INotificationManager notificationManager;
+    private final DateTimeService dateTimeService;
+    private final PKBPersonHelper pkbPersonHelper;
+    private final PKBServiceUtil pkbServiceUtil;
+    private final OrgNetworkService orgNetworkService;
+    private final InvitationManager invitationManager;
+    private final HL7TeamService hl7TeamService;
+    private final HL7PatientService hl7PatientService;
+    private final NhsAppNotificationManager nhsAppNotificationManager;
+
+    public HL7ApiHelper(UserManager userManager,
+                        PersonContactManager personContactManager,
+                        PKBEmailMessageManager pkbEmailMessageManager,
+                        OrgNetworkService orgNetworkService,
+                        INotificationManager notificationManager,
+                        @NotNull DateTimeService dateTimeService,
+                        PKBPersonHelper pkbPersonHelper,
+                        PKBServiceUtil pkbServiceUtil,
+                        InvitationManager invitationManager,
+                        HL7TeamService hl7TeamService,
+                        HL7PatientService hl7PatientService,
+<span class="fc" id="L120">                        NhsAppNotificationManager nhsAppNotificationManager) {</span>
+<span class="fc" id="L121">        this.userManager = userManager;</span>
+<span class="fc" id="L122">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L123">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L124">        this.orgNetworkService = orgNetworkService;</span>
+<span class="fc" id="L125">        this.notificationManager = notificationManager;</span>
+<span class="fc" id="L126">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L127">        this.pkbPersonHelper = pkbPersonHelper;</span>
+<span class="fc" id="L128">        this.pkbServiceUtil = pkbServiceUtil;</span>
+<span class="fc" id="L129">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L130">        this.hl7TeamService = hl7TeamService;</span>
+<span class="fc" id="L131">        this.hl7PatientService = hl7PatientService;</span>
+<span class="fc" id="L132">        this.nhsAppNotificationManager = nhsAppNotificationManager;</span>
+<span class="fc" id="L133">    }</span>
+
+    /**
+     * Attempts to retrieve a PKBPerson by performing a hard match. That is, at least one National ID, Org Level ID, or Team Level ID must
+     * match. An ApiCallMalformedException will be thrown if more than one PKBPerson matches the IDs provided.
+     * &lt;p&gt;
+     * Note that all local ID types within an Organisation are in scope, regardless of whether this is an org-level or team-level HL7
+     * connection. See {@link http://dev.patientsknowbest.com/home/hl7-api/identifiers} for more info.
+     *
+     * @param hl7ConnContext Details of who is sending the message
+     * @param hl7Person      The HL7Patient parsed from the PID segment
+     * @return The single matched patient if found, else null
+     * @throws ApiCallMalformedException If more than one medical record is matched
+     */
+    public PKBPerson getHardMatchPKBPerson(@NotNull HL7ConnContext hl7ConnContext, @NotNull HL7Patient hl7Person) {
+<span class="fc" id="L148">        PKBPerson matchedPerson = null;</span>
+        try {
+            // Even though we might have an email address for a patient, we should not include it in the list of identifiers.
+            // This is because an email address is not considered reliable enough for patient matching in a data feed.
+<span class="fc" id="L152">            PatientIdentifiers.Builder builder = new PatientIdentifiers.Builder()</span>
+<span class="fc" id="L153">                    .withNationalIds(new HashSet&lt;&gt;(hl7Person.getNationalIds()))</span>
+<span class="fc" id="L154">                    .withOrgLevelIds(hl7Person.getOrgLevelIds())</span>
+<span class="fc" id="L155">                    .withTeamLevelIds(hl7Person.getTeamLevelIds());</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">            if (hl7Person.getPublicId() != null) {</span>
+<span class="fc" id="L157">                builder.withPublicId(hl7Person.getPublicId());</span>
+            }
+
+<span class="fc" id="L160">            PatientIdentifiers idents = builder.build();</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">            if (idents.isEmpty()) {</span>
+<span class="fc" id="L162">                throw new ApiCallMalformedException(&quot;Lookup single patient must be provided with at least one identifier&quot;);</span>
+            }
+<span class="fc" id="L164">            matchedPerson = userManager.lookupSinglePatient(idents).orElse(null);</span>
+<span class="fc bfc" id="L165" title="All 2 branches covered.">            if (matchedPerson != null) {</span>
+<span class="fc" id="L166">                logAbsentIDs(hl7ConnContext, hl7Person, matchedPerson);</span>
+            }
+<span class="fc" id="L168">        } catch (ConflictingPatientIdentifiersException | PatientNotFoundException e) {</span>
+<span class="fc" id="L169">            throw new ApiCallMalformedException(&quot;Ambiguous patient IDs provided&quot;, e);</span>
+<span class="fc" id="L170">        }</span>
+<span class="fc" id="L171">        return matchedPerson;</span>
+    }
+
+    /**
+     * Performs demographic soft matching. For each field that has been configured, the supplied value will be compared against the
+     * retrieved value. Any mismatches will be added to the pidMismatches list.
+     *
+     * @param validatePidFieldList
+     * @param pidPatient
+     * @param patient
+     * @param pidMismatches
+     * @throws ApiCallMalformedException
+     */
+    public void softMatch(Set&lt;String&gt; validatePidFieldList, HL7Patient pidPatient, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches)
+            throws ApiCallMalformedException {
+
+<span class="fc bfc" id="L187" title="All 2 branches covered.">        for (String field : validatePidFieldList) {</span>
+
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">            if (!VALID_MATCH_RULES.contains(field)) {</span>
+<span class="nc" id="L190">                throw new ApiCallMalformedException(&quot;Connection misconfigured: cannot validate on PID field &quot; + field +</span>
+<span class="nc" id="L191">                        &quot;; valid field names are &quot; + ArrayUtils.toString(VALID_MATCH_RULES));</span>
+            }
+
+<span class="pc bpc" id="L194" title="5 of 8 branches missed.">            switch (field) {</span>
+                case &quot;firstName&quot;:
+<span class="fc bfc" id="L196" title="All 2 branches covered.">                    if (!StringUtil.equalsApproximate(patient.getFirstName(), pidPatient.getFirstName().getString())) {</span>
+<span class="fc" id="L197">                        pidMismatches.add(new FieldMismatch(field, patient.getFirstName(), pidPatient.getFirstName().getString()));</span>
+                    }
+                    break;
+                case &quot;firstNameShort&quot;:
+<span class="nc bnc" id="L201" title="All 2 branches missed.">                    if (!StringUtil.equalsApproximateShort(patient.getFirstName(), pidPatient.getFirstName().getString())) {</span>
+<span class="nc" id="L202">                        pidMismatches.add(new FieldMismatch(field, patient.getFirstName(), pidPatient.getFirstName().getString()));</span>
+                    }
+                    break;
+                case &quot;firstNameInitial&quot;:
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                    if (!StringUtil.equalsApproximateInitial(patient.getFirstName(), pidPatient.getFirstName().getString())) {</span>
+<span class="nc" id="L207">                        pidMismatches.add(new FieldMismatch(field, patient.getFirstName(), pidPatient.getFirstName().getString()));</span>
+                    }
+                    break;
+                case &quot;lastName&quot;:
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">                    if (!StringUtil.equalsApproximate(patient.getLastName(), pidPatient.getLastName().getString())) {</span>
+<span class="fc" id="L212">                        pidMismatches.add(new FieldMismatch(field, patient.getLastName(), pidPatient.getLastName().getString()));</span>
+                    }
+                    break;
+                case &quot;dateOfBirth&quot;:
+<span class="fc" id="L216">                    String pidDoB = &quot;&quot;;</span>
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">                    if (pidPatient.getDob().getInstant() != null) {</span>
+<span class="fc" id="L218">                        pidDoB = HL7Util.getHL7DateAsString(pidPatient.getDob().getRawValue());</span>
+                    }
+<span class="fc" id="L220">                    String pkbDoB = patient.getDateOfBirthString();</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">                    if (!pkbDoB.equals(pidDoB)) {</span>
+<span class="fc" id="L222">                        pidMismatches.add(new FieldMismatch(field, pkbDoB, pidDoB));</span>
+                    }
+                    break;
+                case &quot;postalCode&quot;:
+<span class="nc bnc" id="L226" title="All 2 branches missed.">                    if (!StringUtil.equalsApproximate(patient.getPostalCode(), pidPatient.getZip().getString())) {</span>
+<span class="nc" id="L227">                        pidMismatches.add(new FieldMismatch(field, patient.getPostalCode(), pidPatient.getZip().getString()));</span>
+                    }
+                    break;
+                case &quot;gender&quot;:
+<span class="nc" id="L231">                    Gender pkbGender = Gender.getById(patient.getGender());</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">                    if (pidPatient.getGender().isNotBlank()) {</span>
+<span class="nc" id="L233">                        Gender pidGender = getGenderFromHL7Code(pidPatient.getGender().getString());</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                        if (pkbGender != pidGender) {</span>
+<span class="nc" id="L235">                            pidMismatches.add(new FieldMismatch(field, pkbGender.name(), pidPatient.getGender().getString()));</span>
+                        }
+<span class="nc" id="L237">                    } else {</span>
+                        // PKB always has _some_ gender, since we default to UNKNOWN. It is therefore a soft-match failure to not provide a
+                        // gender value.
+<span class="nc" id="L240">                        pidMismatches.add(new FieldMismatch(field, pkbGender.name(), pidPatient.getGender().getString()));</span>
+                    }
+                    break;
+            }
+<span class="fc" id="L244">        }</span>
+<span class="fc" id="L245">    }</span>
+
+    /**
+     * 2016-07-26 tom
+     * &lt;p&gt;
+     * Before we return the match, check to see if fewer IDs were provided than we might reasonably expect the caller to know about.
+     * &lt;p&gt;
+     * In light of recent IG issues I am trying to figure out whether this exclusively represents an error workflow. For example, it might
+     * indicate 2 patients have been unmerged on the sender's side, but where this is still only 1 record in PKB. In addition, we _already_
+     * block a demographic update if the record has an NHS number but where the caller did not provide it, which is a specific example of
+     * the more general category of mismatches this check is looking for.
+     * &lt;p&gt;
+     * For now, let's see how often is is happening. Also only checking org/team level IDs if connecting as an org/team respectively, simply
+     * because my initial thoughts are to do otherwise would lead to too many false positives.
+     * &lt;p&gt;
+     * Thoughts welcome, this is just an idea. Possibly a bad one.
+     *
+     * @param hl7ConnContext Who is connecting
+     * @param hl7Person      Who did they ask for
+     * @param matchedPerson  Who did they get
+     */
+    private void logAbsentIDs(HL7ConnContext hl7ConnContext, HL7Patient hl7Person, PKBPerson matchedPerson) {
+        try {
+<span class="fc" id="L268">            Set&lt;NationalId&gt; existing_nids = matchedPerson.getNationalIds();</span>
+<span class="fc" id="L269">            List&lt;NationalId&gt; provided_nids = hl7Person.getNationalIds();</span>
+            // TODO: Strictly speaking, we should only expect the caller to know about National ID Types associated with their country
+<span class="fc" id="L271">            existing_nids.stream().filter(nationalId -&gt; isNotBlank(nationalId.getValue()))</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">                    .filter(existing_nid -&gt; !provided_nids.contains(existing_nid))</span>
+<span class="fc" id="L273">                    .forEach(existing_nid -&gt; {</span>
+                        // TODO: Strictly speaking, we should only expect the caller to know about National ID Types associated with their country
+<span class="fc" id="L275">                        LOGGER.warn(&quot;Incomplete hard match: national: {}: {} exists on record but was not provided&quot;,</span>
+<span class="fc" id="L276">                                hl7ConnContext.toString(), existing_nid.getType().getName());</span>
+<span class="fc" id="L277">                    });</span>
+
+            // If connecting an org, check OLIDs
+<span class="fc bfc" id="L280" title="All 2 branches covered.">            if (!hl7ConnContext.hasSourceTeam()) {</span>
+<span class="fc" id="L281">                Set&lt;OrgLevelId&gt; existing_olids = matchedPerson.getOrgLevelIds();</span>
+<span class="fc" id="L282">                Set&lt;OrgLevelId&gt; provided_olids = hl7Person.getOrgLevelIds();</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">                for (OrgLevelId existing_olid : existing_olids) {</span>
+                    // If not provided...
+<span class="fc bfc" id="L285" title="All 2 branches covered.">                    if (!provided_olids.contains(existing_olid)) {</span>
+                        // ... but is of a type associated with the caller
+<span class="fc bfc" id="L287" title="All 2 branches covered.">                        for (OrgLevelIdType olidt : hl7ConnContext.getSourceOrg().getOrgLevelIdTypes()) {</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">                            if (olidt.equals(existing_olid.getType())) {</span>
+                                //... then maybe we should consider this suspicious?
+<span class="fc" id="L290">                                LOGGER.warn(&quot;Incomplete hard match: org: {}: {} exists on record but was not provided&quot;,</span>
+<span class="fc" id="L291">                                        hl7ConnContext.toString(), existing_olid.getType().getName());</span>
+<span class="fc" id="L292">                                break;</span>
+                            }
+<span class="fc" id="L294">                        }</span>
+                    }
+<span class="fc" id="L296">                }</span>
+            }
+
+            // If conecting as a team, check TLIDs
+<span class="fc bfc" id="L300" title="All 2 branches covered.">            if (hl7ConnContext.hasSourceTeam()) {</span>
+<span class="fc" id="L301">                Set&lt;TeamLevelId&gt; existing_tlids = matchedPerson.getTeamLevelIds();</span>
+<span class="fc" id="L302">                Set&lt;TeamLevelId&gt; provided_tlids = hl7Person.getTeamLevelIds();</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">                for (TeamLevelId existing_tlid : existing_tlids) {</span>
+                    // If not provided...
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">                    if (!provided_tlids.contains(existing_tlid)) {</span>
+                        // ... but is of a type associated with the caller
+<span class="fc bfc" id="L307" title="All 2 branches covered.">                        for (TeamLevelIdType tlidt : hl7ConnContext.getSourceTeam().orElseThrow().getTeamLevelIdTypes()) {</span>
+<span class="fc bfc" id="L308" title="All 2 branches covered.">                            if (tlidt.equals(existing_tlid.getType())) {</span>
+                                //... then maybe we should consider this suspicious?
+<span class="fc" id="L310">                                LOGGER.warn(&quot;Incomplete hard match: team: {}: {} exists on record but was not provided&quot;,</span>
+<span class="fc" id="L311">                                        hl7ConnContext.toString(), existing_tlid.getType().getName());</span>
+<span class="fc" id="L312">                                break;</span>
+                            }
+<span class="fc" id="L314">                        }</span>
+                    }
+<span class="fc" id="L316">                }</span>
+            }
+<span class="fc" id="L318">        } catch (Exception e) {</span>
+            // Nothing in the above should cause an error - but if there are any e.g. hibernate lazy loading problems let's not derail
+            // the actual processing, and also let's not log the full stack trace
+<span class="fc" id="L321">            LOGGER.warn(&quot;!!! logAbsentIDs went wrong: {}&quot;, e.getMessage());</span>
+<span class="fc" id="L322">        }</span>
+<span class="fc" id="L323">    }</span>
+
+    public boolean updatePatientDemographics(EHRRequestContext requestContext, @NotNull Instant messageDate, HL7ConnContext hl7ConnContext,
+                                             PKBPerson patient, HL7Patient hl7Patient) {
+<span class="fc" id="L327">        return updatePatientDemographics(requestContext, messageDate, hl7ConnContext, patient, hl7Patient, true);</span>
+    }
+
+    /**
+     * @param requestContext
+     * @param hl7
+     * @param hl7ConnContext
+     * @param patient
+     * @param hl7Patient
+     * @param sendEmail
+     */
+    public boolean updatePatientDemographics(EHRRequestContext requestContext, @NotNull Instant instantUpdated, HL7ConnContext hl7ConnContext,
+                                             PKBPerson patient, HL7Patient hl7Patient, boolean sendEmail) {
+
+        // Sync org network if national id is added
+<span class="fc" id="L342">        boolean syncRequired = false;</span>
+<span class="fc" id="L343">        boolean orgLevelIdsAdded = false;</span>
+<span class="fc" id="L344">        boolean teamLevelIdsAdded = false;</span>
+
+        // national ID found in the HL7 that we don't have set yet?
+<span class="fc bfc" id="L347" title="All 2 branches covered.">        if (!hl7Patient.getNationalIds().isEmpty()) {</span>
+<span class="fc bfc" id="L348" title="All 2 branches covered.">            for (NationalId hl7Ni : hl7Patient.getNationalIds()) {</span>
+                // addOrUpdateNationalId takes care of checking for any other
+                // NationalId of this type and overwriting the value if it
+                // exists.
+<span class="fc" id="L352">                syncRequired |= patient.addOrUpdateNationalId(requestContext, hl7Ni, instantUpdated);</span>
+<span class="fc" id="L353">            }</span>
+        }
+
+        // Update any Org Level IDs that we don't yet know about
+<span class="fc bfc" id="L357" title="All 2 branches covered.">        for (OrgLevelId olid : hl7Patient.getOrgLevelIds()) {</span>
+<span class="fc" id="L358">            boolean known = false;</span>
+<span class="fc bfc" id="L359" title="All 2 branches covered.">            for (OrgLevelId existingOlid : patient.getOrgLevelIds()) {</span>
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">                if (existingOlid.equals(olid)) {</span>
+<span class="fc" id="L361">                    known = true;</span>
+<span class="fc" id="L362">                    break;</span>
+                }
+<span class="nc" id="L364">            }</span>
+
+<span class="fc bfc" id="L366" title="All 2 branches covered.">            if (!known) {</span>
+                // We have a new one. Is it assigned to someone else?
+<span class="fc" id="L368">                Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; sameIdPerson = userManager.getPKBPersonByOrgLevelId(olid);</span>
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">                if (PersonAmbiguityHandler.personWithIdExists(sameIdPerson)) {</span>
+<span class="nc" id="L370">                    throw new ApiCallMalformedException(&quot;Org Level ID &quot; + olid.getValue() + &quot; already assigned to another patient&quot;);</span>
+                }
+<span class="fc" id="L372">                orgLevelIdsAdded = true;</span>
+<span class="fc" id="L373">                patient.addOrgLevelId(requestContext, olid, instantUpdated);</span>
+            }
+
+<span class="fc" id="L376">        }</span>
+
+        // Update any Team Level IDs that we don't yet know about
+<span class="pc bpc" id="L379" title="1 of 2 branches missed.">        for (TeamLevelId tlid : hl7Patient.getTeamLevelIds()) {</span>
+<span class="nc" id="L380">            boolean known = false;</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">            for (TeamLevelId existingTlid : patient.getTeamLevelIds()) {</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">                if (existingTlid.equals(tlid)) {</span>
+<span class="nc" id="L383">                    known = true;</span>
+<span class="nc" id="L384">                    break;</span>
+                }
+<span class="nc" id="L386">            }</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">            if (!known) {</span>
+                // We have a new one. Is it assigned to someone else?
+<span class="nc" id="L389">                Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; sameIdPerson = userManager.getPKBPersonByTeamLevelId(tlid);</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">                if (PersonAmbiguityHandler.personWithIdExists(sameIdPerson)) {</span>
+<span class="nc" id="L391">                    throw new ApiCallMalformedException(&quot;Team Level ID &quot; + tlid.getValue() + &quot; already assigned to another patient&quot;);</span>
+                }
+<span class="nc" id="L393">                teamLevelIdsAdded = true;</span>
+<span class="nc" id="L394">                patient.addTeamLevelId(requestContext, tlid, instantUpdated);</span>
+            }
+<span class="nc" id="L396">        }</span>
+
+<span class="fc" id="L398">        StringBuilder reportBuilder = new StringBuilder();</span>
+<span class="fc" id="L399">        boolean nonDobDemographicsChangedSignificantly = updateNonDobDemographicsFields(hl7Patient, patient, reportBuilder, hl7ConnContext);</span>
+
+<span class="fc" id="L401">        boolean dobChanged = isDOBChanged(hl7Patient, patient);</span>
+
+        // Exploratory logging. Considering queueing HL7 messages that try to do this, as it might be an indication that entirely the wrong
+        // patient has been matched. To test the waters, let's see how often it occurs. Note: The fields checked are the same as those that
+        // are used by soft-demographics checking.
+<span class="pc bpc" id="L406" title="1 of 4 branches missed.">        if (dobChanged &amp;&amp; reportBuilder.length() &gt; 0) {</span>
+<span class="fc" id="L407">            LOGGER.warn(&quot;DOB and other demographics changed for {} [{}]&quot;, hl7ConnContext.toString(), reportBuilder.toString());</span>
+        }
+
+        // We need to expand our structure!  Currently PKB only supports 1 phone number
+        // For now: run these so that the most important (mobile) will win if found; else home, or work.
+<span class="fc" id="L412">        boolean phoneChanged = isPhoneChanged(hl7Patient, patient);</span>
+
+        // Get the message timestamp to use as 'enteredDate'
+<span class="fc" id="L415">        var versionDetails = VersionDetails.of(requestContext, instantUpdated);</span>
+
+        // Add any new email addresses that we didn't know about
+<span class="fc" id="L418">        List&lt;Email&gt; emailAddresses = getNormalisedEmailAddresses(patient.getId(), hl7Patient.getHomeEmail(), hl7Patient.getWorkEmail());</span>
+<span class="fc" id="L419">        var addEmailContext = new HL7PatientService.AddEmailContext(requestContext, hl7ConnContext, patient, hl7Patient, versionDetails);</span>
+<span class="fc" id="L420">        List&lt;PersonContact&gt; emailsAdded = hl7PatientService.addEmails(emailAddresses, addEmailContext);</span>
+        // Send email to confirm new non-primary contact
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">        if (sendEmail) {</span>
+<span class="fc" id="L423">            emailsAdded.stream()</span>
+<span class="fc bfc" id="L424" title="All 2 branches covered.">                    .filter(contact -&gt; !contact.getIsPrimary())</span>
+<span class="fc" id="L425">                    .forEach(contact -&gt; {</span>
+                        try {
+                            // The patient might have an updated name that has not been persisted yet.
+                            // Re-set the object here to ensure the new name is included in the email.
+<span class="fc" id="L429">                            contact.setPerson(patient);</span>
+<span class="fc" id="L430">                            pkbEmailMessageManager.sendEmailToConfirmNewContact(contact);</span>
+<span class="nc" id="L431">                        } catch (MailException me) {</span>
+                            // just log &amp; continue... this shouldn't derail the whole update
+<span class="nc" id="L433">                            LOGGER.error(&quot;failed notifying patient of newly-added email address&quot;, me);</span>
+<span class="fc" id="L434">                        }</span>
+<span class="fc" id="L435">                    });</span>
+        }
+
+<span class="fc bfc" id="L438" title="All 2 branches covered.">        if (hl7Patient.getLanguageCode().getId().isProvided()) {</span>
+<span class="fc" id="L439">            patient.setLanguageCode(hl7Patient.getLanguageCode().getId().getString());</span>
+<span class="pc bpc" id="L440" title="1 of 2 branches missed.">        } else if (hl7Patient.getLanguageCode().getAltId().isProvided()) {</span>
+<span class="nc" id="L441">            patient.setLanguageCode(hl7Patient.getLanguageCode().getAltId().getString());</span>
+<span class="nc" id="L442">            LOGGER.warn(&quot;HL7 Code Confusion: {}: Reading alt id for updatePatientDemographics languageCode: {}&quot;,</span>
+<span class="nc" id="L443">                    hl7ConnContext.toString(), hl7Patient.getLanguageCode().getAltId().isBlank());</span>
+        }
+
+<span class="fc bfc" id="L446" title="All 2 branches covered.">        if (hl7Patient.getDeathTimestamp().getInstant() != null) {</span>
+<span class="fc" id="L447">            pkbPersonHelper.validateDeathTimestamp(hl7Patient.getDeathTimestamp().getInstant());</span>
+<span class="fc" id="L448">            patient.setDeathTimestamp(Date.from(hl7Patient.getDeathTimestamp().getInstant()));</span>
+        }
+<span class="fc bfc" id="L450" title="All 2 branches covered.">        if (hl7Patient.isDeathTimestampProvided()) {</span>
+<span class="fc" id="L451">            patient.setStatus(UserStatus.DEAD, instantUpdated);</span>
+<span class="fc bfc" id="L452" title="All 2 branches covered.">        } else if (hl7Patient.getDeathIndicatorYN().isProvided()) {</span>
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">            if (hl7Patient.getDeathIndicatorYN().isNotHL7Null()) {</span>
+
+<span class="fc" id="L455">                String deathYN = hl7Patient.getDeathIndicatorYN().getString().toUpperCase();</span>
+
+<span class="fc bfc" id="L457" title="All 2 branches covered.">                if (deathYN.equals(&quot;Y&quot;)) {</span>
+<span class="fc" id="L458">                    patient.setStatus(UserStatus.DEAD, instantUpdated);</span>
+<span class="pc bpc" id="L459" title="2 of 4 branches missed.">                } else if (deathYN.equals(&quot;N&quot;) &amp;&amp; patient.getStatus() == UserStatus.DEAD) {</span>
+                    // reports of this death were greatly exaggerated
+                    // potential security problem: how do we know their status from BEFORE, so we can restore it?
+                    // For now: check email status and choose from CREATED, NOCONTACT, or EMAIL_CONFIRMED
+<span class="nc" id="L463">                    patient.setDeathTimestamp(null);</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">                    if (patient.getPrimaryContact() == null) {</span>
+<span class="nc" id="L465">                        patient.setStatus(UserStatus.NOCONTACT, instantUpdated);</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">                    } else if (patient.getPrimaryContact().isConfirmed()) {</span>
+<span class="nc" id="L467">                        patient.setStatus(UserStatus.EMAIL_CONFIRMED, instantUpdated);</span>
+                    } else {
+<span class="nc" id="L469">                        patient.setStatus(UserStatus.CREATED, instantUpdated);</span>
+                    }
+                }
+<span class="fc" id="L472">            } else {</span>
+<span class="nc" id="L473">                throw new ApiCallMalformedException(&quot;Although death indicator is optional, it cannot be nulled&quot;);</span>
+            }
+        }
+
+        // persist changes
+<span class="fc" id="L478">        userManager.updateUser(patient, versionDetails);</span>
+<span class="fc" id="L479">        HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;total&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L480">                getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+
+        // This assumes that status change in not a demographic change ; or is it ??
+<span class="pc bpc" id="L483" title="1 of 6 branches missed.">        boolean demographicsChanged = syncRequired || nonDobDemographicsChangedSignificantly || dobChanged</span>
+<span class="pc bpc" id="L484" title="2 of 8 branches missed.">                || !emailsAdded.isEmpty() || phoneChanged || orgLevelIdsAdded || teamLevelIdsAdded;</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">        if (!demographicsChanged) {</span>
+<span class="fc" id="L486">            HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;noSignificantChange&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L487">                    getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+        }
+
+<span class="fc bfc" id="L490" title="All 2 branches covered.">        if (nonDobDemographicsChangedSignificantly) {</span>
+<span class="fc" id="L491">            HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;nonDobDemographicsChangedSignificantly&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L492">                    getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+        }
+<span class="fc bfc" id="L494" title="All 2 branches covered.">        if (dobChanged) {</span>
+<span class="fc" id="L495">            HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;dobChanged&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L496">                    getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+        }
+<span class="fc bfc" id="L498" title="All 2 branches covered.">        if (!emailsAdded.isEmpty()) {</span>
+<span class="fc" id="L499">            HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;emailsAdded&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L500">                    getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+        }
+<span class="fc bfc" id="L502" title="All 2 branches covered.">        if (phoneChanged) {</span>
+<span class="fc" id="L503">            HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;phoneChanged&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L504">                    getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+        }
+<span class="fc bfc" id="L506" title="All 2 branches covered.">        if (orgLevelIdsAdded) {</span>
+<span class="fc" id="L507">            HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;orgLevelIdsAdded&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L508">                    getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+        }
+<span class="pc bpc" id="L510" title="1 of 2 branches missed.">        if (teamLevelIdsAdded) {</span>
+<span class="nc" id="L511">            HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;teamLevelIdsAdded&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="nc" id="L512">                    getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+        }
+
+
+<span class="fc bfc" id="L516" title="All 2 branches covered.">        if (syncRequired) {</span>
+<span class="fc" id="L517">            HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(&quot;syncRequired&quot;, getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L518">                    getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+<span class="fc" id="L519">            Long defaultAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+            try {
+<span class="fc" id="L521">                orgNetworkService.syncVerifiedPatientToOrgNetwork(patient.getId());</span>
+<span class="nc" id="L522">            } catch (Exception ex) {</span>
+<span class="nc" id="L523">                LOGGER.warn(&quot;Unable to sync patient account {} from org {} to any applicable org network&quot;,</span>
+<span class="nc" id="L524">                        defaultAccountId, hl7ConnContext.getSourceOrg(), ex);</span>
+<span class="fc" id="L525">            }</span>
+        }
+
+        // Send invitation if a primary email address has been added to the patient
+<span class="fc" id="L529">        emailsAdded.stream()</span>
+<span class="fc" id="L530">                .filter(PersonContact::isPrimary)</span>
+<span class="fc" id="L531">                .forEach(email -&gt; {</span>
+                    try {
+<span class="fc" id="L533">                        Team team = hl7TeamService.getCreatingTeam(hl7ConnContext);</span>
+                        // this sendInvitation recreates credentials for patient
+                        // so it needs new account_user entry with proper key
+<span class="fc" id="L536">                        invitationManager.sendInvitation(team, patient.getId());</span>
+<span class="fc" id="L537">                        userManager</span>
+<span class="fc" id="L538">                                .recreateOwnerAccessToAccount(requestContext.getCorrelationId().toString(),</span>
+<span class="fc" id="L539">                                        userManager.getDefaultAccountWithActiveAccountUser(patient.getId()).getPublicId(), patient.getPublicId())</span>
+<span class="fc" id="L540">                                .throwIfFailed();</span>
+<span class="nc" id="L541">                    } catch (Exception exception) {</span>
+<span class="nc" id="L542">                        LOGGER.error(&quot;Failed to invite patient {} by email {}!&quot;, patient.getId(), email, exception);</span>
+<span class="fc" id="L543">                    }</span>
+<span class="fc" id="L544">                });</span>
+
+<span class="fc" id="L546">        return demographicsChanged;</span>
+    }
+
+    public boolean isPhoneChanged(HL7Patient hl7Patient, PKBPerson patient) {
+<span class="fc" id="L550">        boolean phoneChanged = false;</span>
+<span class="fc" id="L551">        String phoneBefore = patient.getPhone();</span>
+<span class="fc bfc" id="L552" title="All 2 branches covered.">        if(hl7Patient.isAnyPhoneNumberProvided()) {</span>
+<span class="fc" id="L553">            patient.setPhone(hl7Patient.getMostSignificantPhoneNumber());</span>
+        }
+<span class="fc" id="L555">        String phoneAfter = patient.getPhone();</span>
+<span class="fc" id="L556">        phoneChanged = areDifferent(phoneBefore, phoneAfter);</span>
+<span class="fc" id="L557">        return phoneChanged;</span>
+    }
+
+    /**
+     * @param hl7Patient
+     * @param patient
+     * @param nonDobDemographicsChanged - used to return list of changed fields
+     * @return whether there are significant demographics changes - changes other than capitalization
+     */
+    public boolean updateNonDobDemographicsFields(HL7Patient hl7Patient, PKBPerson patient, StringBuilder nonDobDemographicsChanged,
+                                                  HL7ConnContext hl7ConnContext) {
+
+<span class="fc" id="L569">        boolean changesAreSignificant = false;</span>
+
+<span class="fc" id="L571">        String genderBefore = String.valueOf(patient.getGender());</span>
+<span class="fc bfc" id="L572" title="All 2 branches covered.">        if (hl7Patient.getGender().isNotBlank()) {</span>
+<span class="fc" id="L573">            patient.setGender(getGenderFromHL7Code(hl7Patient.getGender().getString()).getId());</span>
+<span class="pc bpc" id="L574" title="1 of 2 branches missed.">        } else if (hl7Patient.getGender().isHL7Null()) {</span>
+<span class="nc" id="L575">            patient.setGender(Gender.UNKNOWN.getId());</span>
+        }
+
+<span class="fc" id="L578">        String genderAfter = String.valueOf(patient.getGender());</span>
+<span class="fc bfc" id="L579" title="All 2 branches covered.">        if (areDifferent(genderBefore, genderAfter)) {</span>
+<span class="fc" id="L580">            changesAreSignificant = true;</span>
+<span class="fc" id="L581">            nonDobDemographicsChanged.append(&quot; gender&quot;);</span>
+        }
+
+<span class="pc bpc" id="L584" title="1 of 4 branches missed.">        if (hl7Patient.getTitle().isProvided() &amp;&amp; areDifferent(hl7Patient.getTitle().getString(), patient.getTitle())) {</span>
+<span class="fc" id="L585">            nonDobDemographicsChanged.append(&quot; title&quot;);</span>
+<span class="fc bfc" id="L586" title="All 2 branches covered.">            if (areSignificantlyDifferent(hl7Patient.getTitle(), patient.getTitle())) {</span>
+<span class="fc" id="L587">                changesAreSignificant = true;</span>
+            } else {
+<span class="fc" id="L589">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L591">            patient.setTitle(hl7Patient.getTitle().getString());</span>
+        }
+
+<span class="pc bpc" id="L594" title="1 of 4 branches missed.">        if (hl7Patient.getLastName().isProvided() &amp;&amp; areDifferent(hl7Patient.getLastName().getString(), patient.getLastName())) {</span>
+<span class="fc" id="L595">            nonDobDemographicsChanged.append(&quot; lastName&quot;);</span>
+<span class="pc bpc" id="L596" title="1 of 2 branches missed.">            if (areSignificantlyDifferent(hl7Patient.getLastName(), patient.getLastName())) {</span>
+<span class="fc" id="L597">                changesAreSignificant = true;</span>
+            } else {
+<span class="nc" id="L599">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L601">            patient.setLastName(hl7Patient.getLastName().getString());</span>
+        }
+
+<span class="pc bpc" id="L604" title="1 of 4 branches missed.">        if (hl7Patient.getFirstName().isProvided() &amp;&amp; areDifferent(hl7Patient.getFirstName().getString(), patient.getFirstName())) {</span>
+<span class="fc" id="L605">            nonDobDemographicsChanged.append(&quot; firstName&quot;);</span>
+<span class="pc bpc" id="L606" title="1 of 2 branches missed.">            if (areSignificantlyDifferent(hl7Patient.getFirstName(), patient.getFirstName())) {</span>
+<span class="fc" id="L607">                changesAreSignificant = true;</span>
+            } else {
+<span class="nc" id="L609">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L611">            patient.setFirstName(hl7Patient.getFirstName().getString());</span>
+        }
+
+        // 2015-10: not yet supported in the webapp, but we can capture here
+<span class="fc bfc" id="L615" title="All 4 branches covered.">        if (hl7Patient.getMiddleName().isProvided() &amp;&amp; areDifferent(hl7Patient.getMiddleName().getString(), patient.getMiddleName())) {</span>
+<span class="fc" id="L616">            nonDobDemographicsChanged.append(&quot; middleName&quot;);</span>
+<span class="pc bpc" id="L617" title="1 of 2 branches missed.">            if (areSignificantlyDifferent(hl7Patient.getMiddleName(), patient.getMiddleName())) {</span>
+<span class="fc" id="L618">                changesAreSignificant = true;</span>
+            } else {
+<span class="nc" id="L620">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L622">            patient.setMiddleName(hl7Patient.getMiddleName().getString());</span>
+        }
+
+        // TODO: Not all the data types enforce mandatory values in quite the
+        // same way, we should fix that.
+<span class="fc" id="L627">        List&lt;String&gt; missingNames = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L628" title="1 of 2 branches missed.">        if (StringUtils.isBlank(patient.getLastName())) {</span>
+<span class="nc" id="L629">            missingNames.add(&quot;surname&quot;);</span>
+        }
+<span class="pc bpc" id="L631" title="1 of 2 branches missed.">        if (StringUtils.isBlank(patient.getFirstName())) {</span>
+<span class="nc" id="L632">            missingNames.add(&quot;givenName&quot;);</span>
+        }
+<span class="pc bpc" id="L634" title="1 of 2 branches missed.">        if (!missingNames.isEmpty()) {</span>
+<span class="nc" id="L635">            throw new ApiCallMalformedException(&quot;PID: missing required name field(s) &quot; + StringUtils.join(missingNames, &quot;, &quot;));</span>
+        }
+
+<span class="fc bfc" id="L638" title="All 4 branches covered.">        if (hl7Patient.getAddress1().isProvided() &amp;&amp; areDifferent(hl7Patient.getAddress1().getString(), patient.getAddress1())) {</span>
+<span class="fc" id="L639">            nonDobDemographicsChanged.append(&quot; address1&quot;);</span>
+<span class="fc bfc" id="L640" title="All 2 branches covered.">            if (areSignificantlyDifferent(hl7Patient.getAddress1(), patient.getAddress1())) {</span>
+<span class="fc" id="L641">                changesAreSignificant = true;</span>
+            } else {
+<span class="fc" id="L643">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L645">            patient.setAddress1(hl7Patient.getAddress1().getString());</span>
+        }
+
+<span class="fc bfc" id="L648" title="All 4 branches covered.">        if (hl7Patient.getAddress2().isProvided() &amp;&amp; areDifferent(hl7Patient.getAddress2().getString(), patient.getAddress2())) {</span>
+<span class="fc" id="L649">            nonDobDemographicsChanged.append(&quot; address2&quot;);</span>
+<span class="fc bfc" id="L650" title="All 2 branches covered.">            if (areSignificantlyDifferent(hl7Patient.getAddress2(), patient.getAddress2())) {</span>
+<span class="fc" id="L651">                changesAreSignificant = true;</span>
+            } else {
+<span class="fc" id="L653">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L655">            patient.setAddress2(hl7Patient.getAddress2().getString());</span>
+        }
+
+<span class="fc bfc" id="L658" title="All 4 branches covered.">        if (hl7Patient.getCity().isProvided() &amp;&amp; areDifferent(hl7Patient.getCity().getString(), patient.getCity())) {</span>
+<span class="fc" id="L659">            nonDobDemographicsChanged.append(&quot; city&quot;);</span>
+<span class="fc bfc" id="L660" title="All 2 branches covered.">            if (areSignificantlyDifferent(hl7Patient.getCity(), patient.getCity())) {</span>
+<span class="fc" id="L661">                changesAreSignificant = true;</span>
+            } else {
+<span class="fc" id="L663">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L665">            patient.setCity(hl7Patient.getCity().getString());</span>
+        }
+
+<span class="fc bfc" id="L668" title="All 4 branches covered.">        if (hl7Patient.getState().isProvided() &amp;&amp; areDifferent(hl7Patient.getState().getString(), patient.getState())) {</span>
+<span class="fc" id="L669">            nonDobDemographicsChanged.append(&quot; state&quot;);</span>
+<span class="fc bfc" id="L670" title="All 2 branches covered.">            if (areSignificantlyDifferent(hl7Patient.getState(), patient.getState())) {</span>
+<span class="fc" id="L671">                changesAreSignificant = true;</span>
+            } else {
+<span class="fc" id="L673">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L675">            patient.setState(hl7Patient.getState().getString());</span>
+        }
+
+<span class="fc bfc" id="L678" title="All 4 branches covered.">        if (hl7Patient.getZip().isProvided() &amp;&amp; areDifferent(hl7Patient.getZip().getString(), patient.getPostalCode())) {</span>
+<span class="fc" id="L679">            nonDobDemographicsChanged.append(&quot; postalCode&quot;);</span>
+<span class="fc bfc" id="L680" title="All 2 branches covered.">            if (areSignificantlyDifferent(hl7Patient.getZip(), patient.getPostalCode())) {</span>
+<span class="fc" id="L681">                changesAreSignificant = true;</span>
+            } else {
+<span class="fc" id="L683">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L685">            patient.setPostalCode(hl7Patient.getZip().getString());</span>
+        }
+
+<span class="fc bfc" id="L688" title="All 4 branches covered.">        if (hl7Patient.getCountry3char().isProvided() &amp;&amp; areDifferent(hl7Patient.getCountry3char().getString(), patient.getCountry())) {</span>
+<span class="fc" id="L689">            nonDobDemographicsChanged.append(&quot; country&quot;);</span>
+<span class="pc bpc" id="L690" title="1 of 2 branches missed.">            if (areSignificantlyDifferent(hl7Patient.getCountry3char(), patient.getCountry())) {</span>
+<span class="fc" id="L691">                changesAreSignificant = true;</span>
+            } else {
+<span class="nc" id="L693">                nonDobDemographicsChanged.append(&quot;(capitalization)&quot;);</span>
+            }
+<span class="fc" id="L695">            patient.setCountry(hl7Patient.getCountry3char().getString());</span>
+        }
+<span class="fc" id="L697">        HL7_DEMOGRAPHICS_UPDATE_COUNTER.labels(nonDobDemographicsChanged.toString(), getTeamLabel(hl7ConnContext),</span>
+<span class="fc" id="L698">                getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+
+<span class="fc" id="L700">        return changesAreSignificant;</span>
+    }
+
+    private boolean areSignificantlyDifferent(HL7String hl7, String existing) {
+<span class="fc bfc" id="L704" title="All 4 branches covered.">        return !hl7.isBlank() &amp;&amp; !hl7.getString().equalsIgnoreCase(existing);</span>
+    }
+
+    /**
+     * Gender throws an IllegalArgumentException if an invalid value is provided. It is up to the specific APIs to decide what
+     * that means for them.
+     * &lt;p&gt;
+     * For HL7, we will convert the IllegalArgumentException to an ApiCallMalformedException and return to sender.
+     *
+     * @param hl7Code The HL7 gender value to be matched
+     * @return The matching {@link Gender}
+     */
+    static Gender getGenderFromHL7Code(String hl7Code) {
+        try {
+<span class="fc" id="L718">            return Gender.getByHL7(hl7Code);</span>
+<span class="nc" id="L719">        } catch (IllegalArgumentException iae) {</span>
+            //noinspection ThrowInsideCatchBlockWhichIgnoresCaughtException
+<span class="nc" id="L721">            throw new ApiCallMalformedException(iae.getMessage());</span>
+        }
+    }
+
+    boolean isDOBChanged(HL7Patient hl7Patient, PKBPerson patient) {
+<span class="fc" id="L726">        boolean dobChanged = false;</span>
+<span class="fc" id="L727">        String dobBefore = patient.getDateOfBirthString();</span>
+<span class="pc bpc" id="L728" title="1 of 2 branches missed.">        if (hl7Patient.getDob().getInstant() != null) {</span>
+<span class="fc" id="L729">            String dobString = HL7Util.getHL7DateAsString(hl7Patient.getDob().getRawValue());</span>
+<span class="fc" id="L730">            patient.setDateOfBirthString(dobString);</span>
+        }
+<span class="fc" id="L732">        String dobAfter = patient.getDateOfBirthString();</span>
+<span class="fc" id="L733">        dobChanged = areDifferent(dobBefore, dobAfter);</span>
+<span class="fc" id="L734">        return dobChanged;</span>
+    }
+
+    private boolean areDifferent(String oldVal, String newVal) {
+        // If both null, they are not different
+<span class="pc bpc" id="L739" title="3 of 4 branches missed.">        if ((oldVal == null) &amp;&amp; (newVal == null)) {</span>
+<span class="nc" id="L740">            return false;</span>
+        }
+        // If not both null, but one is null, they are different
+<span class="pc bpc" id="L743" title="1 of 4 branches missed.">        if ((oldVal == null) || (newVal == null)) {</span>
+<span class="fc" id="L744">            return true;</span>
+        }
+        // If both non-null, safe to perform equals
+<span class="fc bfc" id="L747" title="All 2 branches covered.">        return !oldVal.equals(newVal);</span>
+    }
+
+    /**
+     * When creating or updating patient demographics, a single home and a
+     * single work email address might be supplied. This method takes those
+     * values and returns a normalized list of email addresses to use. It
+     * ignores blank and empty values. It will ignore any duplicates,
+     * and it ensures all email addresses are in lower case. In addition, it
+     * will throw an exception if an email address is provided which is
+     * already associated with a different PKB account.
+     *
+     * @param homeEmail
+     * @param workEmail
+     * @return
+     */
+    public List&lt;Email&gt; getNormalisedEmailAddresses(Long patientId, Email homeEmail, Email workEmail) {
+
+<span class="fc" id="L765">        List&lt;Email&gt; emails = Stream.of(homeEmail, workEmail)</span>
+<span class="fc" id="L766">                .flatMap(em -&gt; Option.of(em).toJavaStream())</span>
+<span class="fc" id="L767">                .distinct()</span>
+<span class="fc" id="L768">                .collect(toList());</span>
+
+<span class="fc bfc" id="L770" title="All 2 branches covered.">        for (Email email : emails) {</span>
+            // MULTIPLE-TEAMS: This only runs for patients, see
+            // https://sites.google.com/a/patientsknowbest.com/specs/dev-projects/clinicians-on-2-teams/resolving-multiple-results-from-email-search
+<span class="fc" id="L773">            Option.of(userManager.getSinglePersonByEmail(email))</span>
+<span class="fc" id="L774">                    .peek(p -&gt;</span>
+                    {
+<span class="pc bpc" id="L776" title="1 of 2 branches missed.">                        if (patientId == null) {</span>
+                            // We are creating a new account, so finding an existing
+                            // PKBPerson entry is enough to know there's an error
+<span class="nc" id="L779">                            throw new ApiCallMalformedException(&quot;patient email address &quot; + email.address() + &quot; already active in PKB&quot;);</span>
+<span class="pc bpc" id="L780" title="1 of 2 branches missed.">                        } else if (!p.getId().equals(patientId)) {</span>
+                            // Otherwise, we had to check that we had a _different_
+                            // person before throwing the error
+<span class="nc" id="L783">                            throw new ApiCallMalformedException(&quot;patient email address &quot; + email.address() + &quot; already active in PKB&quot;);</span>
+                        }
+<span class="fc" id="L785">                    });</span>
+<span class="fc" id="L786">        }</span>
+
+<span class="fc" id="L788">        return emails;</span>
+    }
+
+    public String convert3CharCountryCode(String code3char, String fallback) {
+<span class="fc bfc" id="L792" title="All 2 branches covered.">        if (StringUtils.isBlank(code3char)) {</span>
+<span class="fc" id="L793">            return fallback;</span>
+        }
+
+<span class="fc" id="L796">        Map&lt;String, String&gt; pkbValidCountries = pkbServiceUtil.getCountriesMap(Locale.getDefault());</span>
+
+        // check if we actually got a value that's okay
+<span class="fc bfc" id="L799" title="All 2 branches covered.">        if (pkbValidCountries.containsKey(code3char)) {</span>
+<span class="fc" id="L800">            return code3char;</span>
+        }
+
+<span class="fc" id="L803">        String found2Char = null;</span>
+<span class="pc bpc" id="L804" title="1 of 2 branches missed.">        for (Locale locale : Locale.getAvailableLocales()) {</span>
+            try {
+<span class="fc bfc" id="L806" title="All 2 branches covered.">                if (code3char.equalsIgnoreCase(locale.getISO3Country())) {</span>
+<span class="fc" id="L807">                    found2Char = locale.getCountry();</span>
+<span class="pc bpc" id="L808" title="1 of 2 branches missed.">                    if (&quot;GB&quot;.equals(found2Char)) {</span>
+<span class="pc bpc" id="L809" title="1 of 2 branches missed.">                        if (fallback.startsWith(&quot;GB&quot;)) {</span>
+<span class="fc" id="L810">                            return fallback;</span>
+                        } else {
+<span class="nc" id="L812">                            return &quot;GB-ENG&quot;; // we have to default to something more specific than GB...</span>
+                        }
+                    }
+<span class="nc bnc" id="L815" title="All 2 branches missed.">                    if (pkbValidCountries.containsKey(found2Char)) {</span>
+<span class="nc" id="L816">                        return found2Char;</span>
+                    } else {
+<span class="nc" id="L818">                        return fallback; // the real 2char is empty, or invalid somehow</span>
+                    }
+                }
+<span class="fc" id="L821">            } catch (MissingResourceException ignored) {</span>
+                // Thrown if the locale does not have an ISO3 country code.
+                // Nothing to do; will continue to next locale.
+<span class="fc" id="L824">            }</span>
+        }
+<span class="nc" id="L826">        return fallback; // no match found for the 3 char value</span>
+    }
+
+    public void logActivityAndNotifyPatient(HL7ConnContext hl7ConnContext, Action action, PKBPerson patient,
+                                            RequiresConsent consentRequired, Instant timestampOfActivity, Object... queryParams) {
+<span class="fc" id="L831">        logActivityAndNotifyPatient(hl7ConnContext, action, patient, consentRequired, timestampOfActivity, null, queryParams);</span>
+<span class="fc" id="L832">    }</span>
+
+    public void logActivityAndNotifyPatient(HL7ConnContext hl7ConnContext, Action action, PKBPerson patient,
+                                            RequiresConsent consentRequired, Instant timestampOfActivity, HL7MessageType hl7MessageType, Object... queryParams) {
+<span class="fc" id="L836">        EHRRequestContext requestContext = hl7ConnContext.getEHRRequestContext();</span>
+<span class="fc" id="L837">        Activity activity = new Activity(timestampOfActivity, action, requestContext.getOrgId().orElse(null));</span>
+<span class="fc" id="L838">        activity.setTargetId(patient.getId());</span>
+<span class="fc" id="L839">        activity.setActorId(null);</span>
+<span class="fc" id="L840">        activity.populateUserQueryParams(queryParams);</span>
+<span class="fc bfc" id="L841" title="All 2 branches covered.">        if (activity.sendHistorical(dateTimeService.now())) {</span>
+<span class="fc" id="L842">            notificationManager.notifyUserAboutActivityByOtherUser(requestContext, activity, true/*sendAsync*/, consentRequired);</span>
+
+<span class="fc" id="L844">            NhsAppNotificationManager.ACTIVITY_MAP.get(action)</span>
+<span class="fc" id="L845">                    .peek(trigger -&gt; nhsAppNotificationManager.sendNotification(requestContext, patient, trigger));</span>
+<span class="fc bfc" id="L846" title="All 2 branches covered.">            if (hl7MessageType != null) {</span>
+<span class="fc" id="L847">                HL7_NOTIFICATION_USAGE_BY_TYPE.labels(hl7MessageType.getCode(), action.name(),</span>
+<span class="fc" id="L848">                        getTeamLabel(hl7ConnContext), getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+            }
+
+        }
+<span class="fc" id="L852">        LOGGER.info(&quot;logged activity for patient {}&quot;, patient.getId());</span>
+<span class="fc" id="L853">    }</span>
+
+    public void logDocumentReceivedAndNotifyPatient(HL7ConnContext hl7ConnContext, PKBPerson patient, UUID conversationId,
+                                                    RequiresConsent consent, @Nullable Instant timestampOfActivity, HL7MessageType hl7MessageType) {
+<span class="fc" id="L857">        EHRRequestContext context = hl7ConnContext.getEHRRequestContext();</span>
+<span class="fc" id="L858">        Activity activity = new Activity(Optional.ofNullable(timestampOfActivity).orElse(dateTimeService.now()),</span>
+                Action.DOCUMENT_RECEIVED,
+<span class="fc" id="L860">                context.getOrgId().orElse(null));</span>
+<span class="fc" id="L861">        activity.setTargetId(patient.getId());</span>
+<span class="fc" id="L862">        activity.setActorId(null);</span>
+<span class="fc bfc" id="L863" title="All 2 branches covered.">        if (activity.sendHistorical(dateTimeService.now())) {</span>
+<span class="fc" id="L864">            notificationManager.notifyPatientOfDocumentReceived(activity, conversationId, consent);</span>
+<span class="fc" id="L865">            nhsAppNotificationManager.sendNotification(context, patient, NhsApiNotificationTriggerType.NEW_ENCOUNTER);</span>
+<span class="fc" id="L866">            HL7_NOTIFICATION_USAGE_BY_TYPE.labels(hl7MessageType.getCode(), Action.DOCUMENT_RECEIVED.name(),</span>
+<span class="fc" id="L867">                    getTeamLabel(hl7ConnContext), getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+        }
+<span class="fc" id="L869">        LOGGER.info(&quot;logged document received for patient {}&quot;, patient.getId());</span>
+<span class="fc" id="L870">    }</span>
+
+    public void logDocumentDeletionReceivedAndNotifyPatient(@NotNull HL7ConnContext hl7ConnContext, @NotNull PKBPerson patient,
+                                                            @NotNull RequiresConsent consent, HL7MessageType hl7MessageType) {
+<span class="fc" id="L874">        EHRRequestContext context = hl7ConnContext.getEHRRequestContext();</span>
+<span class="fc" id="L875">        Activity activity = new Activity(dateTimeService.now(), Action.DOCUMENT_WITHDRAWN, context.getOrgId().orElse(null));</span>
+<span class="fc" id="L876">        activity.setTargetId(patient.getId());</span>
+<span class="fc" id="L877">        activity.setActorId(null);</span>
+<span class="fc" id="L878">        notificationManager.notifyUserAboutActivityByOtherUser(context, activity, true, consent);</span>
+<span class="fc" id="L879">        HL7_NOTIFICATION_USAGE_BY_TYPE.labels(hl7MessageType.getCode(), Action.DOCUMENT_WITHDRAWN.name(),</span>
+<span class="fc" id="L880">                getTeamLabel(hl7ConnContext), getOrgLabel(hl7ConnContext), getPartnerLabel(hl7ConnContext)).inc();</span>
+<span class="fc" id="L881">        LOGGER.info(&quot;logged document deletion received for patient {}&quot;, patient.getId());</span>
+<span class="fc" id="L882">    }</span>
+
+    @NotNull
+    public String getTeamLabel(HL7ConnContext hl7ConnContext) {
+<span class="fc bfc" id="L886" title="All 2 branches covered.">        return hl7ConnContext == null ? &quot;?&quot; : hl7ConnContext.getSourceTeam()</span>
+<span class="fc" id="L887">                .map(team -&gt; formatHl7Source(team.getName(), team.getCode()))</span>
+<span class="fc" id="L888">                .orElse(EMPTY_LABEL);</span>
+    }
+
+    @NotNull
+    public String getOrgLabel(HL7ConnContext hl7ConnContext) {
+<span class="fc bfc" id="L893" title="All 2 branches covered.">        if (hl7ConnContext == null) {</span>
+<span class="fc" id="L894">            return &quot;?&quot;;</span>
+<span class="pc bpc" id="L895" title="1 of 2 branches missed.">        } else if (hl7ConnContext.getSourceOrg() == null) {</span>
+<span class="nc" id="L896">            return(EMPTY_LABEL);</span>
+        } else {
+<span class="fc" id="L898">            return formatHl7Source(hl7ConnContext.getSourceOrg().getName(), hl7ConnContext.getSourceOrg().getCode());</span>
+        }
+    }
+
+    @NotNull
+    public String getPartnerLabel(HL7ConnContext hl7ConnContext) {
+<span class="fc bfc" id="L904" title="All 2 branches covered.">        return hl7ConnContext == null ? &quot;?&quot; : hl7ConnContext.getHl7Partner()</span>
+<span class="fc" id="L905">                .map(partner -&gt; formatHl7Source(partner.getName(), partner.getCode()))</span>
+<span class="fc" id="L906">                .orElse(EMPTY_LABEL);</span>
+    }
+
+    private String formatHl7Source(String name, String code) {
+<span class="fc" id="L910">        return String.format(&quot;%s [%s]&quot;, name, code);</span>
+    }
+
+    @NotNull
+    public Either&lt;ApiCallMalformedException, PKBPersonDTO&gt; populatePKBPersonDTOForNewPatient(HL7ConnContext hl7ConnContext, HL7Patient hl7Patient) {
+<span class="fc" id="L915">        PKBPersonDTO patientDto = new PKBPersonDTO();</span>
+<span class="fc" id="L916">        patientDto.setGender(Gender.UNKNOWN.getId());</span>
+<span class="fc bfc" id="L917" title="All 2 branches covered.">        if (hl7Patient.getGender().isNotBlank()) {</span>
+<span class="fc" id="L918">            patientDto.setGender(getGenderFromHL7Code(hl7Patient.getGender().getString()).getId());</span>
+        }
+
+<span class="fc" id="L921">        patientDto.setTitle(hl7Patient.getTitle().getString());</span>
+<span class="fc" id="L922">        patientDto.setLastName(hl7Patient.getLastName().getString());</span>
+<span class="fc" id="L923">        patientDto.setFirstName(hl7Patient.getFirstName().getString());</span>
+        // 2015-10: not yet supported in the webapp, but we can capture here
+<span class="fc" id="L925">        patientDto.setMiddleName(hl7Patient.getMiddleName().getString());</span>
+
+<span class="fc" id="L927">        patientDto.setDateOfBirthString(HL7Util.getHL7DateAsString(hl7Patient.getDob().getRawValue()));</span>
+
+<span class="fc" id="L929">        patientDto.setAddress1(hl7Patient.getAddress1().getString());</span>
+<span class="fc" id="L930">        patientDto.setAddress2(hl7Patient.getAddress2().getString());</span>
+<span class="fc" id="L931">        patientDto.setCity(hl7Patient.getCity().getString());</span>
+<span class="fc" id="L932">        patientDto.setState(hl7Patient.getState().getString());</span>
+<span class="fc" id="L933">        patientDto.setPostalCode(hl7Patient.getZip().getString());</span>
+<span class="fc" id="L934">        patientDto.setCountry(convert3CharCountryCode(hl7Patient.getCountry3char().getString(), hl7ConnContext.getCountry()));</span>
+
+        // We need to expand our structure!  Currently PKB only supports 1 phone number
+        // For now: run these so that the most important (mobile) will win if found; else home, or work.
+<span class="fc" id="L938">        patientDto.setPhone(hl7Patient.getMostSignificantPhoneNumber());</span>
+
+        // Add any new email addresses that we didn't know about
+<span class="fc" id="L941">        List&lt;Email&gt; emailAddresses = getNormalisedEmailAddresses(null,</span>
+<span class="fc" id="L942">                hl7Patient.getHomeEmail(), hl7Patient.getWorkEmail());</span>
+<span class="fc bfc" id="L943" title="All 2 branches covered.">        boolean emailProvided = !emailAddresses.isEmpty();</span>
+
+<span class="fc bfc" id="L945" title="All 2 branches covered.">        if (emailProvided) {</span>
+            // don't handle here (yet) if patient is dead
+<span class="pc bpc" id="L947" title="1 of 2 branches missed.">            if (!hl7Patient.isMarkedAsDeceased()) {</span>
+<span class="fc" id="L948">                patientDto.setEmailId(emailAddresses.remove(0));</span>
+<span class="fc" id="L949">                patientDto.setAdditionalEmails(emailAddresses);</span>
+            }
+        }
+
+<span class="fc" id="L953">        String languageCode = &quot;&quot;;</span>
+<span class="fc bfc" id="L954" title="All 2 branches covered.">        if (hl7Patient.getLanguageCode().getId().isNotBlank()) {</span>
+<span class="fc" id="L955">            languageCode = hl7Patient.getLanguageCode().getId().getString();</span>
+        } else {
+<span class="fc" id="L957">            languageCode = hl7Patient.getLanguageCode().getAltId().getString();</span>
+<span class="fc" id="L958">            LOGGER.warn(&quot;HL7 Code Confusion: {}: Reading alt id for addNewPatient languageCode: {}&quot;,</span>
+<span class="fc" id="L959">                    hl7ConnContext.toString(), hl7Patient.getLanguageCode().getAltId().isBlank());</span>
+        }
+
+<span class="fc bfc" id="L962" title="All 2 branches covered.">        if (isNotBlank(languageCode)) {</span>
+<span class="fc" id="L963">            patientDto.setLanguageCode(languageCode);</span>
+        }
+
+<span class="fc bfc" id="L966" title="All 2 branches covered.">        if (hl7Patient.getDeathTimestamp().getInstant() != null) {</span>
+<span class="fc" id="L967">            patientDto.setDeathTimestamp(Date.from(hl7Patient.getDeathTimestamp().getInstant()));</span>
+<span class="fc" id="L968">            patientDto.setStatus(UserStatus.DEAD); // no need to check Y/N indicator, if they have a death timestamp</span>
+<span class="pc bpc" id="L969" title="1 of 2 branches missed.">        } else if (hl7Patient.isMarkedAsDeceased()) {</span>
+<span class="nc" id="L970">            patientDto.setStatus(UserStatus.DEAD);</span>
+<span class="fc bfc" id="L971" title="All 2 branches covered.">        } else if (!emailProvided) {</span>
+<span class="fc" id="L972">            patientDto.setStatus(UserStatus.NOCONTACT);</span>
+        } else {
+<span class="fc" id="L974">            patientDto.setStatus(UserStatus.CREATED);</span>
+        }
+
+<span class="fc" id="L977">        patientDto.setUserType(UserType.PATIENT);</span>
+
+<span class="fc" id="L979">        patientDto.setPassword(RandomUtil.randomPassword(10));</span>
+
+        // what fields are REQUIRED?
+<span class="fc" id="L982">        List&lt;String&gt; missingFields = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L983" title="1 of 2 branches missed.">        if (StringUtils.isBlank(patientDto.getFirstName())) {</span>
+<span class="nc" id="L984">            missingFields.add(&quot;givenName&quot;);</span>
+        }
+<span class="pc bpc" id="L986" title="1 of 2 branches missed.">        if (StringUtils.isBlank(patientDto.getLastName())) {</span>
+<span class="nc" id="L987">            missingFields.add(&quot;surname&quot;);</span>
+        }
+<span class="pc bpc" id="L989" title="1 of 2 branches missed.">        if (!missingFields.isEmpty()) {</span>
+<span class="nc" id="L990">            return left(new ApiCallMalformedException(&quot;Cannot create patient missing these fields: &quot; + StringUtils.join(missingFields, &quot;, &quot;)));</span>
+        }
+
+        // what defaults do we need to set?  language code, for example...  Country is properly set above
+<span class="fc bfc" id="L994" title="All 2 branches covered.">        if (StringUtils.isBlank(patientDto.getLanguageCode())) {</span>
+<span class="fc" id="L995">            patientDto.setLanguageCode(&quot;en_UK&quot;);</span>
+        }
+<span class="fc" id="L997">        return right(patientDto);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

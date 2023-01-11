@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FhirController.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhirwall.service.controller</a> &gt; <span class="el_source">FhirController.java</span></div><h1>FhirController.java</h1><pre class="source lang-java linenums">package com.pkb.fhirwall.service.controller;
+
+import ca.uhn.fhir.rest.client.api.IGenericClient;
+import com.pkb.fhirwall.metric.FhirMetrics;
+import com.pkb.fhirwall.service.auth.AccessLogger;
+import com.pkb.fhirwall.service.auth.AccessRequestParser;
+import com.pkb.fhirwall.service.auth.AuthorizationService;
+import com.pkb.fhirwall.service.auth.ImmutableResponse;
+import com.pkb.fhirwall.service.auth.PolicyInformationFailure;
+import com.pkb.fhirwall.service.auth.PolicyInformationPoint;
+import com.pkb.fhirwall.service.auth.RequestForwarder;
+import com.pkb.fhirwall.service.auth.RequestTransformer;
+import com.pkb.fhirwall.service.auth.ResponseTransformer;
+import com.pkb.fhirwall.service.auth.SearchPolicyInformation;
+import io.micrometer.core.annotation.Timed;
+import org.hl7.fhir.r4.model.CapabilityStatement;
+import org.hl7.fhir.r4.model.OperationOutcome;
+import org.slf4j.Logger;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.util.Objects;
+
+import static com.pkb.fhirwall.filter.WayfinderRequestFilter.WAYFINDER_REQUEST;
+import static com.pkb.fhirwall.service.auth.AuthzResult.AuthzDecision.ALLOWED_WITH_RESTRICTION;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * Main entry point of the application.
+ * It handles all requests, parses them and forwards them to the underlying FHIR store
+ */
+@RestController
+@Timed(histogram = true, percentiles = {0.5, 0.75, 0.9, 0.95, 0.99, 0.999})
+public class FhirController {
+
+<span class="fc" id="L40">    private static final Logger LOG = getLogger(lookup().lookupClass());</span>
+
+    private final PolicyInformationPoint policyInformationPoint;
+    private final AuthorizationService authorizationService;
+    private final RequestTransformer requestTransformer;
+    private final RequestForwarder requestForwarder;
+    private final ResponseTransformer responseTransformer;
+    private final AccessLogger accessLogger;
+    private final RequestValidator requestValidator;
+    private final TokenValidator tokenValidator;
+    private final IGenericClient fhirStoreClient;
+    private final FhirMetrics fhirMetrics;
+    private final AccessRequestParser accessRequestParser;
+
+    public FhirController(PolicyInformationPoint policyInformationPoint,
+                          AuthorizationService authorizationService,
+                          RequestTransformer requestTransformer,
+                          RequestForwarder requestForwarder,
+                          ResponseTransformer responseTransformer,
+                          AccessLogger accessLogger,
+                          RequestValidator requestValidator,
+                          TokenValidator tokenValidator,
+                          IGenericClient fhirStoreClient,
+<span class="fc" id="L63">                          FhirMetrics fhirMetrics, AccessRequestParser accessRequestParser) {</span>
+<span class="fc" id="L64">        this.policyInformationPoint = policyInformationPoint;</span>
+<span class="fc" id="L65">        this.authorizationService = authorizationService;</span>
+<span class="fc" id="L66">        this.requestTransformer = requestTransformer;</span>
+<span class="fc" id="L67">        this.requestForwarder = requestForwarder;</span>
+<span class="fc" id="L68">        this.responseTransformer = responseTransformer;</span>
+<span class="fc" id="L69">        this.accessLogger = accessLogger;</span>
+<span class="fc" id="L70">        this.requestValidator = requestValidator;</span>
+<span class="fc" id="L71">        this.tokenValidator = tokenValidator;</span>
+<span class="fc" id="L72">        this.fhirStoreClient = fhirStoreClient;</span>
+<span class="fc" id="L73">        this.fhirMetrics = fhirMetrics;</span>
+<span class="fc" id="L74">        this.accessRequestParser = accessRequestParser;</span>
+<span class="fc" id="L75">    }</span>
+
+    @GetMapping(&quot;/fhir/metadata&quot;)
+    public void handleMetadata(HttpServletResponse response) {
+<span class="fc" id="L79">        fhirMetrics.incrementMetadataCounter();</span>
+<span class="fc" id="L80">        var capabilityStatement = fhirStoreClient.capabilities().ofType(CapabilityStatement.class).execute();</span>
+<span class="fc" id="L81">        var fhirResponse = ImmutableResponse.builder().resource(capabilityStatement).build();</span>
+<span class="fc" id="L82">        responseTransformer.transform(fhirResponse, response, HttpServletResponse.SC_OK);</span>
+<span class="fc" id="L83">    }</span>
+
+    @GetMapping(value = &quot;/fhir/**&quot;)
+    public void handleRequest(HttpServletRequest request,
+                              HttpServletResponse response) {
+        //PHR-11330
+        //This is obviously temporary. When we've implemented oauth2 for non-wayfinder requests, we can get rid of this
+        //and the two paths will be (nearly) identical
+<span class="fc bfc" id="L91" title="All 2 branches covered.">        if (!Objects.equals(request.getAttribute(WAYFINDER_REQUEST), Boolean.TRUE)) {</span>
+<span class="fc" id="L92">            handleNotImplemented(response);</span>
+<span class="fc" id="L93">            return;</span>
+        }
+<span class="fc" id="L95">        fhirMetrics.incrementReadResourceCounter();</span>
+
+<span class="fc bfc" id="L97" title="All 2 branches covered.">        if (!requestValidator.isResourceSupported(request.getRequestURI())) {</span>
+<span class="fc" id="L98">            handleBadRequest(response, &quot;Requested resource type is not supported.&quot;);</span>
+<span class="fc" id="L99">            return;</span>
+        }
+
+<span class="fc" id="L102">        tokenValidator.validate(request)</span>
+<span class="fc" id="L103">                .peek(nhsNumber -&gt; {</span>
+<span class="pc bpc" id="L104" title="1 of 2 branches missed.">                    if (requestValidator.isRead(request.getRequestURI())) {</span>
+<span class="nc" id="L105">                        handleBadRequest(response, &quot;Only search operation is supported.&quot;);</span>
+<span class="fc bfc" id="L106" title="All 2 branches covered.">                    } else if (requestValidator.isSupportedSearchQuery(request.getParameterMap().keySet())) {</span>
+<span class="fc" id="L107">                        handleSearch(request, response);</span>
+                    } else {
+<span class="fc" id="L109">                        handleBadRequest(response, &quot;Requested search parameters are not supported.&quot;);</span>
+                    }
+<span class="fc" id="L111">                })</span>
+<span class="fc" id="L112">                .peekLeft(errorMessage -&gt; handleUnauthorized(response, errorMessage));</span>
+<span class="fc" id="L113">    }</span>
+
+    /**
+     * Loads all data for authorization without the target FHIR resources.
+     * If authorization is successful it forwards the request with additional filters to the underlying FHIR store
+     * and returns the returned resources to the calling client.
+     */
+    private void handleSearch(HttpServletRequest request, HttpServletResponse response) {
+<span class="fc" id="L121">        var accessRequest = accessRequestParser.parse(request);</span>
+
+<span class="fc" id="L123">        policyInformationPoint.fetchPolicyInformation(accessRequest)</span>
+<span class="fc" id="L124">                .peek(authzData -&gt; {</span>
+<span class="fc" id="L125">                    var authzResult = authorizationService.authorize((SearchPolicyInformation) authzData);</span>
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">                    if (ALLOWED_WITH_RESTRICTION == authzResult.decision()) {</span>
+<span class="fc" id="L127">                        var requestDetails = requestTransformer.transform(request, authzResult);</span>
+<span class="fc" id="L128">                        var fhirResponse = requestForwarder.forward(requestDetails);</span>
+<span class="fc" id="L129">                        responseTransformer.transform(fhirResponse, response,HttpServletResponse.SC_OK);</span>
+<span class="fc" id="L130">                        accessLogger.logRequest(request);</span>
+<span class="fc" id="L131">                    } else {</span>
+<span class="nc" id="L132">                        handleUnauthorized(response, &quot;Access denied by authorization rules&quot;);</span>
+                    }
+<span class="fc" id="L134">                })</span>
+<span class="fc" id="L135">                .peekLeft(authzDataFailure -&gt; handlePolicyInformationFailure(authzDataFailure, response));</span>
+<span class="fc" id="L136">    }</span>
+
+    private void handleBadRequest(HttpServletResponse response, String errorMessage) {
+<span class="fc" id="L139">        accessLogger.logError(errorMessage);</span>
+<span class="fc" id="L140">        fhirMetrics.incrementBadRequestCounter();</span>
+<span class="fc" id="L141">        writeOperationOutcomeError(response,HttpServletResponse.SC_BAD_REQUEST,errorMessage,</span>
+                OperationOutcome.IssueSeverity.ERROR,
+                OperationOutcome.IssueType.INVALID);
+<span class="fc" id="L144">    }</span>
+
+    private void handlePolicyInformationFailure(PolicyInformationFailure policyInformationFailure, HttpServletResponse response) {
+<span class="fc" id="L147">        handleUnauthorized(response, format(&quot;Authorization error: %s&quot;, policyInformationFailure.name()));</span>
+<span class="fc" id="L148">    }</span>
+
+    private void handleUnauthorized(HttpServletResponse response, String errorMessage) {
+<span class="fc" id="L151">        accessLogger.logWarn(errorMessage);</span>
+<span class="fc" id="L152">        fhirMetrics.incrementUnauthorizedCounter();</span>
+<span class="fc" id="L153">        writeOperationOutcomeError(response,HttpServletResponse.SC_UNAUTHORIZED,errorMessage,</span>
+                OperationOutcome.IssueSeverity.ERROR,
+                OperationOutcome.IssueType.SECURITY);
+<span class="fc" id="L156">    }</span>
+
+    private void handleNotImplemented(HttpServletResponse response) {
+<span class="fc" id="L159">        writeOperationOutcomeError(response,HttpServletResponse.SC_NOT_IMPLEMENTED, &quot;This endpoint is unimplemented&quot;,</span>
+                OperationOutcome.IssueSeverity.ERROR,
+                OperationOutcome.IssueType.NOTSUPPORTED);
+<span class="fc" id="L162">    }</span>
+
+    private void writeOperationOutcomeError(HttpServletResponse response,
+                                   int status,
+                                   String errorMessage,
+                                   OperationOutcome.IssueSeverity severity,
+                                   OperationOutcome.IssueType code) {
+
+<span class="fc" id="L170">        var opOutcome = new OperationOutcome().addIssue(new OperationOutcome.OperationOutcomeIssueComponent()</span>
+<span class="fc" id="L171">                .setSeverity(severity)</span>
+<span class="fc" id="L172">                .setCode(code)</span>
+<span class="fc" id="L173">                .setDiagnostics(errorMessage));</span>
+
+<span class="fc" id="L175">        var fhirResponse = ImmutableResponse.builder().resource(opOutcome).build();</span>
+<span class="fc" id="L176">        responseTransformer.transform(fhirResponse, response, status);</span>
+<span class="fc" id="L177">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

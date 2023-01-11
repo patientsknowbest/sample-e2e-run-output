@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DplKeyService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.kms.service</a> &gt; <span class="el_source">DplKeyService.kt</span></div><h1>DplKeyService.kt</h1><pre class="source lang-java linenums">package com.pkb.kms.service
+
+import com.pkb.crypto.SymmetricKey
+import com.pkb.crypto.dto.DplKeyDTO
+import com.pkb.kms.service.cache.AccountCacheService
+import com.pkb.kms.service.cache.BatchDplKeyCacheService
+import com.pkb.kms.service.cache.OrgCacheService
+import com.pkb.kms.service.cache.PathCacheService
+import com.pkb.kms.service.cache.TeamCacheService
+import com.pkb.kms.service.cache.UserPrivateKeyCacheService
+import com.pkb.kms.service.projection.TeamIds
+import com.pkb.kms.shared.representation.AccountIds
+import com.pkb.kms.shared.representation.AccountPublicId
+import com.pkb.kms.shared.representation.DplKeyId
+import com.pkb.kms.shared.representation.KmsError
+import com.pkb.kms.shared.representation.OrgRequester
+import com.pkb.kms.shared.representation.PersonPublicId
+import com.pkb.kms.shared.representation.PersonRequester
+import com.pkb.kms.shared.representation.Requester
+import com.pkb.kms.shared.representation.TeamPublicId
+import io.vavr.control.Either
+import org.springframework.stereotype.Service
+
+<span class="fc" id="L24">@Service</span>
+<span class="fc" id="L25">class DplKeyService(</span>
+<span class="fc" id="L26">    private val batchDplKeyCacheService: BatchDplKeyCacheService,</span>
+<span class="fc" id="L27">    private val accountCacheService: AccountCacheService,</span>
+<span class="fc" id="L28">    private val accountSymmetricKeyService: AccountSymmetricKeyService,</span>
+<span class="fc" id="L29">    private val accountKeyService: AccountKeyService,</span>
+<span class="fc" id="L30">    private val userPrivateKeyCacheService: UserPrivateKeyCacheService,</span>
+<span class="fc" id="L31">    private val pathCacheService: PathCacheService,</span>
+<span class="fc" id="L32">    private val orgCacheService: OrgCacheService,</span>
+<span class="fc" id="L33">    private val teamCacheService: TeamCacheService,</span>
+<span class="fc" id="L34">    private val uuidService: UUIDService,</span>
+) {
+    fun createDplKey(storeForPeople: List&lt;PersonPublicId&gt;, storeForTeams: List&lt;TeamPublicId&gt;): Either&lt;KmsError, DplKeyDTO&gt; {
+<span class="fc" id="L37">        val dplSymmetricKey = SymmetricKey.newInstance()</span>
+<span class="fc" id="L38">        val dplKeyId = uuidService.uuid()</span>
+<span class="fc" id="L39">        return Either.sequenceRight(getAccountIds(storeForPeople, storeForTeams).map {</span>
+<span class="fc" id="L40">            it.flatMap { accountIds -&gt;</span>
+<span class="fc" id="L41">                saveDplKeyToAccount(dplSymmetricKey, dplKeyId, accountIds)</span>
+            }
+<span class="fc" id="L43">        }).map { it.first() }</span>
+    }
+
+    fun getKeysForUser(requester: Requester, keyIds: List&lt;DplKeyId&gt;, personPublicId: PersonPublicId): Either&lt;KmsError, List&lt;DplKeyDTO&gt;&gt; =
+<span class="nc" id="L47">            getUserAccount(personPublicId).flatMap { getKeys(requester, keyIds, it) }</span>
+
+
+    fun getKeysForTeam(requester: Requester, keyIds: List&lt;DplKeyId&gt;, teamPublicID: TeamPublicId): Either&lt;KmsError, List&lt;DplKeyDTO&gt;&gt; =
+<span class="fc" id="L51">            getTeamAccount(teamPublicID).flatMap { getKeys(requester, keyIds, it) }</span>
+
+
+    private fun getKeys(requester: Requester, keyIds: List&lt;DplKeyId&gt;, accountIds: AccountIds) =
+<span class="fc" id="L55">            when (requester) {</span>
+<span class="fc bfc" id="L56" title="All 2 branches covered.">                is PersonRequester -&gt; getAccountKeysForUser(requester, accountIds.publicId)</span>
+<span class="fc" id="L57">                is OrgRequester -&gt; getAccountKeysForOrg(requester, accountIds.publicId)</span>
+<span class="fc" id="L58">            }.flatMap {</span>
+<span class="fc" id="L59">                batchDplKeyCacheService.getDplKeysForAccount(accountIds, keyIds, it)</span>
+<span class="fc" id="L60">            }</span>
+
+    private fun getAccountIds(personList: List&lt;PersonPublicId&gt;, teamList: List&lt;TeamPublicId&gt;): List&lt;Either&lt;KmsError, AccountIds&gt;&gt; =
+<span class="fc" id="L63">            personList.map(this::getUserAccount) + teamList.map(this::getTeamAccount)</span>
+
+    private fun saveDplKeyToAccount(symmetricKey: SymmetricKey, dplKeyId: DplKeyId, accountIds: AccountIds) =
+<span class="fc" id="L66">            accountSymmetricKeyService.getAnyAccountSymmetricKey(accountIds.publicId).flatMap { accountKeys -&gt;</span>
+<span class="fc" id="L67">                batchDplKeyCacheService.createDplKeyForAccount(symmetricKey, dplKeyId, accountIds.id, accountKeys)</span>
+<span class="fc" id="L68">            }</span>
+
+    private fun getTeamAccount(teamPublicID: TeamPublicId): Either&lt;KmsError, AccountIds&gt; =
+<span class="fc" id="L71">            teamCacheService.findTeam(teamPublicID).map(TeamIds::teamAccountIds)</span>
+
+    private fun getUserAccount(personPublicId: PersonPublicId): Either&lt;KmsError, AccountIds&gt; =
+<span class="fc" id="L74">            accountCacheService.findDefaultAccountForPerson(personPublicId)</span>
+
+    private fun getAccountKeysForOrg(requester: OrgRequester, accountPublicId: AccountPublicId) =
+<span class="fc" id="L77">            orgCacheService.findOrg(requester.orgPublicId).flatMap { orgIds -&gt;</span>
+<span class="pc bpc" id="L78" title="1 of 2 branches missed.">                if (orgIds.orgAccountIds.publicId == accountPublicId) {</span>
+<span class="nc" id="L79">                    accountKeyService.getOrgAccountKeys(orgIds)</span>
+                } else {
+<span class="fc" id="L81">                    pathCacheService.findPath(requester, accountPublicId).flatMap(accountKeyService::getAccountKeysInPathNoUser)</span>
+                }
+<span class="fc" id="L83">            }</span>
+
+    private fun getAccountKeysForUser(requester: PersonRequester, accountPublicId: AccountPublicId) =
+<span class="fc" id="L86">            userPrivateKeyCacheService.getCachedUserPrivateKey(requester.personPublicId).flatMap { upk -&gt;</span>
+<span class="fc" id="L87">                pathCacheService.findPath(requester, accountPublicId)</span>
+<span class="fc" id="L88">                        .flatMap { path -&gt; accountKeyService.getAccountKeysInPath(upk, path) }</span>
+<span class="fc" id="L89">            }</span>
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

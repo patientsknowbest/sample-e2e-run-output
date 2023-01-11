@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ContextUserUtil.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.util</a> &gt; <span class="el_source">ContextUserUtil.java</span></div><h1>ContextUserUtil.java</h1><pre class="source lang-java linenums">package com.pkb.util;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.opensymphony.xwork2.ActionContext;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.DisplayableException;
+import com.pkb.exception.PKBException;
+import com.pkb.exception.SetContextNotAuthorisedException;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.sso.SsoMetrics;
+import com.pkb.user.entity.PKBPerson;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Map;
+import java.util.UUID;
+
+import static com.pkb.util.PKBWebUtil.CONTEXT_USER_ID;
+
+/**
+ * Focused wrapper class around the context user functionality of {@link PKBWebUtil}.
+ * Use this in preference to calling the static methods in {@link PKBWebUtil} directly
+ * (using this class makes your code easier to test).
+ *
+ * @author Russ Gray
+ * @deprecated Do not add anything to this class anymore! Use {@link EHRRequestContext} and its subclasses and the utility methods on them.
+ * For some of the functionality in here methods were added to {@link com.pkb.action.BaseAction} already or should be added, anything related to logged in user and context user should be in {@link EHRRequestContext}
+ * This class only  works in web layer, doesn't work in service or lower so the moment logic is pulled out of JPSs and action classes an alternative must be used, which is {@link EHRRequestContext}
+ */
+@Deprecated
+public class ContextUserUtil {
+
+<span class="fc" id="L36">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private final ContextSwitchValidator contextSwitchValidator;
+    private final LoggedInUserUtil loggedInUserUtil;
+    private final UserManager userManager;
+    private final SessionUtil sessionUtil;
+    private final SsoMetrics ssoMetrics;
+
+    public ContextUserUtil(
+            ContextSwitchValidator contextSwitchValidator,
+            LoggedInUserUtil loggedInUserUtil,
+            UserManager userManager,
+<span class="fc" id="L47">            SessionUtil sessionUtil, SsoMetrics ssoMetrics) {</span>
+<span class="fc" id="L48">        this.contextSwitchValidator = contextSwitchValidator;</span>
+<span class="fc" id="L49">        this.loggedInUserUtil = loggedInUserUtil;</span>
+<span class="fc" id="L50">        this.userManager = userManager;</span>
+<span class="fc" id="L51">        this.sessionUtil = sessionUtil;</span>
+<span class="fc" id="L52">        this.ssoMetrics = ssoMetrics;</span>
+<span class="fc" id="L53">    }</span>
+
+    /**
+     * Get the {@link PKBPerson} of the context user
+     *
+     * @deprecated Use {@link EHRRequestContext#getContextUserId()} and {@link com.pkb.action.BaseAction#getContextAndLoggedInUsers(PKBPerson.Lazy...)}
+     */
+    @Deprecated
+    @Nullable
+    public PKBPerson getContextUser() {
+        try {
+<span class="fc" id="L64">            Long contextUserId = getContextUserId();</span>
+<span class="fc bfc" id="L65" title="All 2 branches covered.">            if (contextUserId == null) {</span>
+<span class="fc" id="L66">                return null;</span>
+            }
+<span class="fc" id="L68">            return userManager.getPKBPerson(</span>
+<span class="fc" id="L69">                    contextUserId,</span>
+                    PKBPerson.Lazy.CONTACTS,
+                    PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS,
+                    PKBPerson.Lazy.PROPERTIES /* only for consent migration status*/);
+<span class="nc" id="L73">        } catch (PKBException e) {</span>
+<span class="nc" id="L74">            LOGGER.error(&quot;Exception while updating the user's new details into the session&quot;, e);</span>
+        }
+<span class="nc" id="L76">        return null;</span>
+    }
+
+    /**
+     * Get the {@link PKBPerson} ID of the context user, as a string
+     * &lt;p&gt;
+     *
+     * @deprecated Use {@link EHRRequestContext#getContextUserId()} or {@link LoggedInEHRRequestContext#getContextUserId()}
+     */
+    @Deprecated
+    @Nullable
+    public Long getContextUserId() {
+<span class="fc" id="L88">        return (Long) getSession().get(CONTEXT_USER_ID);</span>
+    }
+
+    /**
+     * Gets the context user id if available, otherwise
+     * the logged in user id. Will throw an exception if
+     * neither is available so should only be called from
+     * a logged in context
+     *
+     * @deprecated Use {@link EHRRequestContext#getMaybeContextOrAccessingUserId()} or {@link LoggedInEHRRequestContext#getContextOrAccessingUserId()}
+     */
+    @Deprecated
+    public long getContextOrLoggedInUserId() {
+<span class="fc" id="L101">        Long id = getContextUserId();</span>
+<span class="fc bfc" id="L102" title="All 2 branches covered.">        return id == null ? loggedInUserUtil.getLoggedInUserId() : id;</span>
+    }
+
+    /**
+     * Loads specified {@link PKBPerson} and stores in session as current context user
+     * &lt;p&gt;
+     * Security/validation: require that
+     * * 1. current userType in (patient, pro, team coord)
+     * * 2. context user is a patient
+     * * 3. current user has decryption access to context user
+     */
+    public void setContextUserInSession(Long contextUserId) {
+<span class="fc bfc" id="L114" title="All 2 branches covered.">        if (contextUserId == null) {</span>
+<span class="fc" id="L115">            return;</span>
+        }
+
+        try {
+<span class="fc" id="L119">            Map&lt;String, Object&gt; session = getSession();</span>
+<span class="fc" id="L120">            UserType loggedInUserUserType = loggedInUserUtil.getLoggedInUserType();</span>
+<span class="fc" id="L121">            Long loggedInUserId = loggedInUserUtil.getLoggedInUserId();</span>
+<span class="fc" id="L122">            UUID loggedInUserPublicId = loggedInUserUtil.getLoggedInUserPublicId();</span>
+<span class="fc" id="L123">            boolean currentActiveTeamUser = loggedInUserUtil.isLoggedInUserActiveTeamMember();</span>
+
+            // first: if it's already in the session, leave as-is
+<span class="fc bfc" id="L126" title="All 2 branches covered.">            if (contextUserId.equals(session.get(CONTEXT_USER_ID))) {</span>
+<span class="fc" id="L127">                return;</span>
+            }
+
+<span class="fc bfc" id="L130" title="All 4 branches covered.">            if (session.get(CONTEXT_USER_ID) == null || sessionUtil.getDynamicFeatures(session).allowPatientSwitch()) {</span>
+
+                // don't permit setting the current user as contextUser
+<span class="fc bfc" id="L133" title="All 2 branches covered.">                if (contextUserId.equals(loggedInUserId)) {</span>
+<span class="fc" id="L134">                    return;</span>
+                }
+
+
+<span class="fc" id="L138">                session.remove(CONTEXT_USER_ID); // Make sure that we don't end up with an out-of-date value  for context user id  if the next call throws</span>
+<span class="fc" id="L139">                contextSwitchValidator.validateContextSwitchConditions(contextUserId, loggedInUserUserType,currentActiveTeamUser, loggedInUserPublicId);</span>
+
+<span class="fc" id="L141">                session.put(CONTEXT_USER_ID, contextUserId);</span>
+
+<span class="fc" id="L143">                LOGGER.info(&quot;user {} set contextUserId {}&quot;, loggedInUserId, contextUserId);</span>
+            } else {
+                //context is already set and patient switch is not allowed in same session
+<span class="fc" id="L146">                LOGGER.info(&quot;Attempt to switch context to userId {} not permitted&quot;, contextUserId);</span>
+<span class="fc" id="L147">                ssoMetrics.incrementAttemptToHotSwapPatient();</span>
+<span class="fc" id="L148">                throw new DisplayableException(&quot;global.err.context_switch_not_permitted_from_external_systems&quot;, DisplayableException.DisplayAs.error);</span>
+            }
+<span class="nc" id="L150">        } catch (SetContextNotAuthorisedException e) {</span>
+<span class="nc" id="L151">            LOGGER.info(&quot;About to throw SetContextNotAuthorisedException&quot;);</span>
+<span class="nc" id="L152">            throw e;</span>
+<span class="fc" id="L153">        } catch (PKBException pkbe) {</span>
+            // rethrow the same - in particular this is how DisplayableException will get through
+<span class="fc" id="L155">            LOGGER.info(&quot;PKBException setting the context user to {}&quot;, contextUserId, pkbe);</span>
+<span class="fc" id="L156">            throw pkbe;</span>
+<span class="nc" id="L157">        } catch (Exception e) {</span>
+<span class="nc" id="L158">            LOGGER.info(&quot;About to rethrow as PKBException&quot;);</span>
+<span class="nc" id="L159">            throw new PKBException(&quot;Exception while setting the context user to &quot; + contextUserId, e);</span>
+<span class="fc" id="L160">        }</span>
+<span class="fc" id="L161">    }</span>
+
+    /**
+     * Remove and return the {@link PKBPerson} for the context user
+     */
+    @Nullable
+    public PKBPerson clearContextUser() {
+<span class="fc" id="L168">        Map&lt;String, Object&gt; session = getSession();</span>
+<span class="pc bpc" id="L169" title="1 of 2 branches missed.">        if (sessionUtil.getDynamicFeatures(session).allowPatientSwitch()) {</span>
+<span class="fc" id="L170">            Long removedContextUserId = (Long) session.remove(CONTEXT_USER_ID);</span>
+
+<span class="pc bpc" id="L172" title="1 of 2 branches missed.">            LOGGER.info(&quot;user {} removed contextUserId {}&quot;, loggedInUserUtil.isUserLoggedIn() ? loggedInUserUtil.getLoggedInUserId() : null, removedContextUserId);</span>
+<span class="fc" id="L173">        } else {</span>
+<span class="nc" id="L174">            LOGGER.info(&quot;Attempt to clear context not permitted&quot;);</span>
+<span class="nc" id="L175">            throw new DisplayableException(&quot;global.err.context_switch_not_permitted_from_external_systems&quot;, DisplayableException.DisplayAs.error);</span>
+        }
+<span class="fc" id="L177">        return null;</span>
+    }
+
+    @VisibleForTesting
+    Map&lt;String, Object&gt; getSession() {
+<span class="fc" id="L182">        return ActionContext.getContext().getSession();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

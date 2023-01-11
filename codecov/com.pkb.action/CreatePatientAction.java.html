@@ -1,0 +1,1017 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CreatePatientAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action</a> &gt; <span class="el_source">CreatePatientAction.java</span></div><h1>CreatePatientAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+// $Id: $
+//
+//------------------------------------------------------------------------------
+package com.pkb.action;
+
+import com.google.common.collect.Lists;
+import com.opensymphony.xwork2.Action;
+import com.pkb.VersionDetails;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.bean.IUserWebBean;
+import com.pkb.consent.entity.PatientConsent;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.crypto.util.RandomUtil;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.consent.ImmutablePatientConsentUpdateDTO;
+import com.pkb.datamodel.consent.PatientConsentUpdateDTO;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.ConsentReason;
+import com.pkb.entities.enums.Gender;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.PhotoIdType;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.entities.enums.VerificationStatus;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.exception.ConflictingPatientIdentifiersException;
+import com.pkb.exception.IllegalPatientIdentifiersUpdateException;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PKBException;
+import com.pkb.exception.PersonIsNotPatientException;
+import com.pkb.institute.entity.Team;
+import com.pkb.institute.entity.Team.PatientIdSupport;
+import com.pkb.mappers.SourceDetailsMapper;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.notification.entity.Activity;
+import com.pkb.patient.InvitationNationalIdValidator;
+import com.pkb.service.emailmessage.impl.ImmutableEmailInfo;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.IdentityVerification;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.OrgLevelIdType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PasswordAccess;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.user.entity.TeamLevelIdType;
+import com.pkb.util.PKBConstants;
+import com.pkb.util.PKBServiceUtil;
+import com.pkb.util.PatientIdentifiers;
+import com.pkb.util.StringUtil;
+import io.vavr.control.Option;
+import org.apache.struts2.interceptor.validation.SkipValidation;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.inject.Inject;
+import javax.naming.NamingException;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Optional;
+import java.util.SortedSet;
+import java.util.stream.Collectors;
+
+import static com.pkb.datamodel.ImmutableDisclosingEmail.disclosingEmail;
+import static com.pkb.service.notification.impl.tolven.AccessUpdate.ACCESS_GRANT;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * Clinician creates patient account
+ * &lt;p&gt;
+ * if e-mail address has not been used for another account, create and activate this patient's account
+ * if e-mail address DOES exist for another account, invite that patient (and if the account is not activated, activate it)
+ * if e-mail address DOES exist, and the national identifier number entered does not match the previously
+ * entered NHS number, show error message
+ *
+ * @author robwhelan
+ * @author pravinam (Added changes related to creating the patient account without email)
+ */
+<span class="fc" id="L93">public class CreatePatientAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+
+    private Team team;
+
+    private PKBPersonDTO patientDTO;
+    private String customValidatedEmailIdProxy;
+
+<span class="fc" id="L102">    private String message = &quot;&quot;;</span>
+
+    private String nationalId;
+    private String nationalIdName;
+
+    private List&lt;String&gt; groupedOrgLevelIds;
+    private List&lt;String&gt; groupedTeamLevelIds;
+    private List&lt;TeamLevelIdType&gt; teamLevelIdTypes;
+
+    private String gender;
+
+    private String year;
+
+    private String month;
+
+    private String day;
+
+    private Long inviteeId;
+
+<span class="fc" id="L121">    private String confirmedCreate = &quot;N&quot;;</span>
+
+    private List&lt;PKBPerson&gt; similarPatients;
+    private String dateOfBirth;
+
+
+    private TeamUserManager teamUserManager;
+
+    private UserAccessManager userAccessManager;
+
+    private PKBEmailMessageManager pkbEmailMessageManager;
+
+    private IUserWebBean userWebBean;
+
+    private PatientConsent patientConsent;
+
+    private PatientConsentManager patientConsentManager;
+
+    private SourceDetailsMapper sourceDetailsMapper;
+
+    // To return to activatedPatients.jsp
+    private String userId;
+    private String searchString;
+    private String searchIdType; // national/org/team
+    private String searchId;
+    private String searchName;
+    private String searchDobYear;
+    private String searchDobMonth;
+    private String searchDobDay;
+    private String searchLevel;
+
+<span class="fc" id="L152">    private final String tab = &quot;invitations&quot;;</span>
+
+<span class="fc" id="L154">    private final String subTab = &quot;patients&quot;;</span>
+
+<span class="fc" id="L156">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    @Inject
+    private InvitationNationalIdValidator nationalIdValidator;
+
+    public String cancel() {
+
+<span class="nc" id="L163">        prepopulateTeamLevelIdTypes();</span>
+
+<span class="nc" id="L165">        return &quot;input&quot;;</span>
+    }
+
+    private void preloadTeam() {
+<span class="fc" id="L169">        team = loadInstitute(loggedInUserUtil.getLoggedInUserId());</span>
+<span class="fc" id="L170">    }</span>
+
+    /**
+     * show input form to create a new patient account (or invite existing, non-linked patient)
+     */
+    @Override
+    public String input() {
+        try {
+<span class="fc" id="L178">            preloadTeam();</span>
+
+<span class="pc bpc" id="L180" title="2 of 4 branches missed.">            if ((team == null) || getLoggedInEHRRequestContext().isPatient()) {</span>
+                // TODO: error message not displayed
+<span class="nc" id="L182">                addActionError(getText(&quot;not.authorized.to.create.patient.account&quot;));</span>
+<span class="nc" id="L183">                return &quot;becomeInstituteClinician&quot;;</span>
+            }
+
+<span class="fc" id="L186">            prepopulateTeamLevelIdTypes();</span>
+
+<span class="fc" id="L188">            Optional&lt;NationalIdType&gt; maybeTeamNationalIdType = NationalIdType.getPrimaryNationalIdTypeFromCountryCode(team.getCountry());</span>
+<span class="fc" id="L189">            nationalIdName = maybeTeamNationalIdType</span>
+<span class="fc" id="L190">                    .map(NationalIdType::getName)</span>
+<span class="fc" id="L191">                    .orElse(null);</span>
+
+            // pre-load with clicked, previous-shared patient details (if applicable)
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">            if (inviteeId != null) {</span>
+<span class="nc" id="L195">                PKBPerson patient = userManager.getPKBPerson(inviteeId, PKBPerson.Lazy.CONTACTS,</span>
+                        PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);
+<span class="nc" id="L197">                patientDTO = new PKBPersonDTO();</span>
+<span class="nc" id="L198">                patientDTO.setTitle(patient.getTitle());</span>
+<span class="nc" id="L199">                patientDTO.setFirstName(patient.getFirstName());</span>
+<span class="nc" id="L200">                patientDTO.setLastName(patient.getLastName());</span>
+<span class="nc" id="L201">                patientDTO.setEmailId(patient.getEmail());</span>
+
+<span class="nc bnc" id="L203" title="All 2 branches missed.">                if (maybeTeamNationalIdType.isPresent()) {</span>
+<span class="nc" id="L204">                    nationalId = patient.getNationalIdByCountry(team.getCountry())</span>
+<span class="nc" id="L205">                            .map(NationalId::getValueFormatted)</span>
+<span class="nc" id="L206">                            .orElse(null);</span>
+                }
+
+<span class="nc" id="L209">                prepopulateGroupedOrgLevelIds(patient);</span>
+<span class="nc" id="L210">                prepopulateGroupedTeamLevelIds(patient);</span>
+            }
+
+            // Prepopulate requested consent with team defaults
+<span class="fc" id="L214">            patientConsent = new PatientConsent();</span>
+<span class="fc" id="L215">            patientConsent.setGeneralHealthConsentGranted(team.isDefaultRequestGeneral());</span>
+<span class="fc" id="L216">            patientConsent.setSexualHealthConsentGranted(team.isDefaultRequestSexualHealth());</span>
+<span class="fc" id="L217">            patientConsent.setMentalHealthConsentGranted(team.isDefaultRequestMentalHealth());</span>
+<span class="fc" id="L218">            patientConsent.setSocialCareConsentGranted(team.isDefaultRequestSocialCare());</span>
+
+<span class="nc" id="L220">        } catch (PKBException e) {</span>
+<span class="nc" id="L221">            LOGGER.error(&quot;Error in input() to create a patient&quot;, e);</span>
+<span class="fc" id="L222">        }</span>
+<span class="fc" id="L223">        return SUCCESS;</span>
+    }
+
+    private void prepopulateGroupedOrgLevelIds(PKBPerson patient) {
+<span class="nc" id="L227">        groupedOrgLevelIds = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L228" title="All 2 branches missed.">        for (OrgLevelIdType oidt : getOrgLevelIdTypes()) {</span>
+<span class="nc" id="L229">            groupedOrgLevelIds.add(patient.getOrgLevelIdsByTypeAsCSV(oidt.getId()));</span>
+<span class="nc" id="L230">        }</span>
+<span class="nc" id="L231">    }</span>
+
+    private void prepopulateGroupedTeamLevelIds(PKBPerson patient) {
+<span class="nc" id="L234">        groupedTeamLevelIds = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L235">        groupedTeamLevelIds.addAll(</span>
+<span class="nc" id="L236">                teamLevelIdTypes.stream().map(tidt -&gt; patient.getTeamLevelIdsByTypeAsCSV(tidt.getId())).collect(Collectors.toList()));</span>
+<span class="nc" id="L237">    }</span>
+
+    private void prepopulateTeamLevelIdTypes() {
+<span class="fc" id="L240">        teamLevelIdTypes = new ArrayList&lt;&gt;();</span>
+        // Viewing a patient's data, load just the IDs I'm allowed to see
+<span class="fc" id="L242">        Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">        if (!usesOrgLevelIdsOnly(team)) {</span>
+<span class="fc" id="L244">            teamLevelIdTypes.addAll(team.getTeamLevelIdTypes());</span>
+        }
+<span class="fc" id="L246">    }</span>
+
+    private boolean usesOrgLevelIdsOnly(Team team) {
+<span class="fc" id="L249">        PatientIdSupport idSupport = team.getPatientIdSupport();</span>
+<span class="fc bfc" id="L250" title="All 2 branches covered.">        return idSupport == PatientIdSupport.ORG_LEVEL_ONLY;</span>
+    }
+
+    private boolean usesTeamLevelIdsOnly(Team team) {
+<span class="fc" id="L254">        PatientIdSupport idSupport = team.getPatientIdSupport();</span>
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">        return idSupport == PatientIdSupport.TEAM_LEVEL_ONLY;</span>
+    }
+
+    public String adminInput() {
+<span class="fc" id="L259">        team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">        if (team == null) {</span>
+<span class="nc" id="L262">            addActionError(getText(&quot;err.create.patient.invalid.state&quot;));</span>
+<span class="nc" id="L263">            LOGGER.error(&quot;institute admin doesn't have a valid team in session: {}&quot;, loggedInUserUtil.getLoggedInUserId());</span>
+<span class="nc" id="L264">            return &quot;homeInstituteAdmin&quot;; // this is a global redirect</span>
+        }
+<span class="fc" id="L266">        return input();</span>
+    }
+
+    /**
+     * Create the patient user (or invite them to share, or establish consent)
+     */
+    @Override
+    public String execute() throws NamingException {
+        try {
+
+            // validate() is run first -- check that for some side-effect setup of variables...
+<span class="fc" id="L277">            PKBPerson currentUser = loggedInUserUtil.getLoggedInUser();</span>
+<span class="fc" id="L278">            preloadTeam();</span>
+
+            // check current user is institute clinician / admin
+<span class="pc bpc" id="L281" title="2 of 4 branches missed.">            if ((team == null) || currentUser.isPatient()) {</span>
+<span class="nc" id="L282">                addActionError(getText(&quot;not.authorized.to.create.patient.account&quot;));</span>
+<span class="nc" id="L283">                return &quot;becomeInstituteClinician&quot;;</span>
+            }
+
+<span class="fc" id="L286">            PKBPerson invitee = null;</span>
+<span class="fc" id="L287">            Email email = patientDTO.getEmailId();</span>
+
+<span class="fc" id="L289">            prepopulateTeamLevelIdTypes();</span>
+
+<span class="fc" id="L291">            boolean localIdProvided = false;</span>
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">            if (groupedOrgLevelIds != null) {</span>
+<span class="fc bfc" id="L293" title="All 2 branches covered.">                for (String golid : groupedOrgLevelIds) {</span>
+<span class="fc bfc" id="L294" title="All 2 branches covered.">                    if (isNotBlank(golid)) {</span>
+<span class="fc" id="L295">                        localIdProvided = true;</span>
+<span class="fc" id="L296">                        break;</span>
+                    }
+<span class="fc" id="L298">                }</span>
+            }
+<span class="fc bfc" id="L300" title="All 2 branches covered.">            if (groupedTeamLevelIds != null) {</span>
+<span class="fc bfc" id="L301" title="All 2 branches covered.">                for (String gtlid : groupedTeamLevelIds) {</span>
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">                    if (isNotBlank(gtlid)) {</span>
+<span class="nc" id="L303">                        localIdProvided = true;</span>
+<span class="nc" id="L304">                        break;</span>
+                    }
+<span class="fc" id="L306">                }</span>
+            }
+<span class="pc bpc" id="L308" title="1 of 6 branches missed.">            if (email == null &amp;&amp; isBlank(nationalId) &amp;&amp; !localIdProvided) {</span>
+<span class="nc" id="L309">                addActionError(getText(&quot;err.create.patient.no.email.or.id&quot;));</span>
+<span class="nc" id="L310">                return INPUT;</span>
+            }
+
+<span class="fc" id="L313">            LoggedInEHRRequestContext ehrRequestContext = getLoggedInEHRRequestContext();</span>
+            try {
+<span class="fc" id="L315">                Optional&lt;ValidNationalId&gt; maybeValidNationalId = Optional.empty();</span>
+<span class="fc bfc" id="L316" title="All 4 branches covered.">                if (isNotBlank(nationalIdName) &amp;&amp; isNotBlank(nationalId)) {</span>
+<span class="fc" id="L317">                    maybeValidNationalId = NationalIdType.getNationalIdTypeFromName(nationalIdName).flatMap(n -&gt; n.getValidNationalIdAndType(nationalId));</span>
+                }
+
+<span class="fc" id="L320">                PatientIdentifiers idents = maybeValidNationalId.map(vnid -&gt; {</span>
+<span class="fc" id="L321">                    var identsBuilder = new PatientIdentifiers.Builder()</span>
+<span class="fc" id="L322">                            .withNationalId(new NationalId(vnid, VersionDetails.of(ehrRequestContext)))</span>
+<span class="fc" id="L323">                            .withOrgLevelIds(combineOrgLevelIds())</span>
+<span class="fc" id="L324">                            .withTeamLevelIds(combineTeamLevelIds());</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">                    if (email != null) {</span>
+<span class="fc" id="L326">                        identsBuilder = identsBuilder.withEmailAddress(email);</span>
+                    }
+<span class="fc" id="L328">                    return identsBuilder.build();</span>
+<span class="fc" id="L329">                }).orElseGet(() -&gt; {</span>
+<span class="fc" id="L330">                    var identsBuilder = new PatientIdentifiers.Builder()</span>
+<span class="fc" id="L331">                            .withOrgLevelIds(combineOrgLevelIds())</span>
+<span class="fc" id="L332">                            .withTeamLevelIds(combineTeamLevelIds());</span>
+<span class="fc bfc" id="L333" title="All 2 branches covered.">                    if (email != null) {</span>
+<span class="fc" id="L334">                        identsBuilder = identsBuilder.withEmailAddress(email);</span>
+                    }
+<span class="fc" id="L336">                    return identsBuilder.build();</span>
+                });
+
+<span class="fc" id="L339">                LOGGER.info(&quot;Searching for patient as part of creation. has_pkbid={}, has_email={}, has_nid={}, has_olid={}, has_tlid={}, has_publicid={}, has_eguid={}&quot;,</span>
+<span class="fc" id="L340">                        idents.hasPkbId(),</span>
+<span class="fc" id="L341">                        idents.hasEmailAddress(),</span>
+<span class="fc" id="L342">                        idents.hasNid(),</span>
+<span class="fc" id="L343">                        idents.hasOlid(),</span>
+<span class="fc" id="L344">                        idents.hasTlid(),</span>
+<span class="fc" id="L345">                        idents.hasPublicId(),</span>
+<span class="fc" id="L346">                        idents.hasEmisPersonGuid());</span>
+
+<span class="fc" id="L348">                Optional&lt;PKBPerson&gt; lookup = userManager.lookupSinglePatient(idents);</span>
+<span class="fc" id="L349">                LOGGER.info(&quot;Searching for patient as part of creation. result={}.&quot;, lookup.isPresent());</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">                if (lookup.isPresent()) {</span>
+<span class="fc" id="L351">                    invitee = lookup.get();</span>
+                }
+<span class="nc" id="L353">            } catch (ConflictingPatientIdentifiersException ignored) {</span>
+<span class="nc" id="L354">                addActionError(getText(&quot;error.conflicting.patient.identifiers&quot;));</span>
+<span class="nc" id="L355">                return INPUT;</span>
+<span class="fc" id="L356">            } catch (PersonIsNotPatientException ignored) {</span>
+<span class="fc" id="L357">                addActionError(getText(&quot;error.can.invite.only.patient&quot;, new String[]{Option.of(email).map(Email::address).getOrNull()}));</span>
+<span class="fc" id="L358">                return INPUT;</span>
+<span class="fc" id="L359">            }</span>
+
+
+<span class="fc bfc" id="L362" title="All 2 branches covered.">            if (invitee != null) {</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">                if (invitee.getId().equals(currentUser.getId())) {</span>
+<span class="nc" id="L364">                    addActionError(getText(&quot;error.cannot.invite.yourself&quot;));</span>
+<span class="nc" id="L365">                    return INPUT;</span>
+                }
+
+<span class="pc bpc" id="L368" title="1 of 4 branches missed.">                if (invitee.getOptoutDetails() != null &amp;&amp; !invitee.getOptoutDetails().isSharingEnabled()) {</span>
+<span class="fc" id="L369">                    addActionError(getText(&quot;error.cannot.invite.optedout.patient&quot;));</span>
+<span class="fc" id="L370">                    return INPUT;</span>
+                }
+
+                // by here: invitee exists, is type patient
+<span class="fc" id="L374">                var existingInviteeId = invitee.getId();</span>
+<span class="fc" id="L375">                PKBPerson newlyAdded = userManager.transactional(() -&gt; {</span>
+
+                    // fetch the national/org ids emails etc
+<span class="fc" id="L378">                    PKBPerson existingInvitee = userManager.getPKBPerson(existingInviteeId, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS,</span>
+                            PKBPerson.Lazy.PROPERTIES);
+                    // Check if any updated information
+<span class="fc" id="L381">                    updateIdInformation(existingInvitee, email);</span>
+
+<span class="fc" id="L383">                    addPatientToTeam(ehrRequestContext, existingInvitee);</span>
+
+<span class="fc" id="L385">                    return existingInvitee;</span>
+                });
+<span class="pc bpc" id="L387" title="2 of 6 branches missed.">                if (invitee.getEmail() == null &amp;&amp; email != null &amp;&amp; ehrRequestContext.getOrgId().map(orgId -&gt; userAccessManager.orgHasAccessToPerson(orgId, existingInviteeId)).orElse(false)) {</span>
+<span class="fc" id="L388">                    remindPatientToRegister(newlyAdded);</span>
+                }
+<span class="fc" id="L390">                return SUCCESS;</span>
+            }
+
+            // Else create patient account
+<span class="fc" id="L394">            patientDTO.setUserType(UserType.PATIENT);</span>
+<span class="fc" id="L395">            patientDTO.setUserName(email);</span>
+<span class="fc bfc" id="L396" title="All 2 branches covered.">            if (email == null) {</span>
+<span class="fc" id="L397">                patientDTO.setStatus(UserStatus.NOCONTACT);</span>
+<span class="fc" id="L398">                patientDTO.setUserName((Email) null);</span>
+            } else {
+<span class="fc" id="L400">                patientDTO.setStatus(UserStatus.CREATED);</span>
+            }
+
+<span class="pc bpc" id="L403" title="4 of 10 branches missed.">            if ((day != null) &amp;&amp; !&quot;Day&quot;.equals(day) &amp;&amp; (month != null) &amp;&amp; !&quot;Month&quot;.equals(month) &amp;&amp; isNotBlank(year)) {</span>
+<span class="pc bpc" id="L404" title="1 of 2 branches missed.">                if (!StringUtil.isYYYY(year)) {</span>
+<span class="nc" id="L405">                    addFieldError(&quot;dob&quot;, getText(&quot;createPatient.err.please_enter_yyyy&quot;));</span>
+<span class="nc" id="L406">                    return &quot;input&quot;;</span>
+                }
+
+                try {
+<span class="fc" id="L410">                    LocalDate dateOfBirth = parseDOB(this.year, this.month, this.day);</span>
+<span class="fc" id="L411">                    LocalDate tomorrow = dateTimeService.tomorrow();</span>
+<span class="pc bpc" id="L412" title="1 of 2 branches missed.">                    if (dateOfBirth.isAfter(tomorrow)) {</span>
+                        // we are considering date &lt;= tomorrow as valid
+<span class="nc" id="L414">                        addFieldError(&quot;dob&quot;, getText(&quot;createPatient.err.invalid_date&quot;));</span>
+<span class="nc" id="L415">                        return &quot;input&quot;;</span>
+                    }
+<span class="fc" id="L417">                    patientDTO.setDateOfBirthString(dateOfBirth.toString());</span>
+<span class="nc" id="L418">                } catch (Exception ignored) {</span>
+<span class="nc" id="L419">                    addFieldError(&quot;dob&quot;, getText(&quot;createPatient.err.invalid_date&quot;));</span>
+<span class="nc" id="L420">                    return &quot;input&quot;;</span>
+<span class="fc" id="L421">                }</span>
+            }
+
+<span class="pc bpc" id="L424" title="1 of 2 branches missed.">            if (isNotBlank(gender)) {</span>
+<span class="fc" id="L425">                Gender genderConst = Gender.valueOf(gender.toUpperCase());</span>
+<span class="fc" id="L426">                patientDTO.setGender(genderConst.getId());</span>
+            }
+
+<span class="fc" id="L429">            patientDTO.setPassword(RandomUtil.randomPassword(10));</span>
+<span class="fc" id="L430">            patientDTO.setLanguageCode(currentUser.getLanguageCode());</span>
+<span class="fc" id="L431">            patientDTO.setTimeZoneId(PKBConstants.DEFAULT_TIMEZONE_ID);</span>
+
+<span class="fc" id="L433">            PKBPerson newPatient = null;</span>
+
+            // Check for other patients in this org with the same lastname and dob
+
+<span class="pc bpc" id="L437" title="2 of 6 branches missed.">            if (!&quot;Y&quot;.equals(confirmedCreate) &amp;&amp; isNotBlank(patientDTO.getLastName()) &amp;&amp; isNotBlank(patientDTO.getDateOfBirthString())) {</span>
+<span class="fc" id="L438">                similarPatients = teamUserManager.getOrgPatientsByLastnameAndDob(team.getOrg(),</span>
+<span class="fc" id="L439">                        patientDTO.getLastName(), patientDTO.getDateOfBirthString());</span>
+<span class="pc bpc" id="L440" title="1 of 2 branches missed.">                if (!similarPatients.isEmpty()) {</span>
+<span class="nc" id="L441">                    dateOfBirth = patientDTO.getDateOfBirthString();</span>
+<span class="nc" id="L442">                    return &quot;confirmPatientCreation&quot;;</span>
+                }
+            }
+
+            try {
+<span class="fc" id="L447">                userManager.beginTransaction();</span>
+
+                // registerUserFull() handles pkbperson, LDAP, account and account_user links,
+                // InstituteUser (invited), etc.
+<span class="fc" id="L451">                PKBPerson currentClinician = userManager.getPKBPerson(currentUser.getId());</span>
+
+<span class="fc" id="L453">                userManager.registerUserFull(ehrRequestContext, patientDTO, team.getId());</span>
+
+<span class="fc" id="L455">                newPatient = userManager.getPKBPerson(patientDTO.getId());</span>
+<span class="fc" id="L456">                updateIdInformation(newPatient, email);</span>
+
+                // auto-identify the patient; the clinician is vouching for them:
+<span class="fc bfc" id="L459" title="All 2 branches covered.">                if ((currentUser.isPro()</span>
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">                        || currentUser.isTeamCoordinator())</span>
+<span class="pc bpc" id="L461" title="3 of 4 branches missed.">                        &amp;&amp; ((team.getClinicianCanActivate() == null) || team.getClinicianCanActivate())) {</span>
+
+<span class="fc" id="L463">                    IdentityVerification verification = new IdentityVerification();</span>
+<span class="fc" id="L464">                    verification.setPersonId(newPatient.getId());</span>
+<span class="fc" id="L465">                    verification.setVerifierId(currentClinician.getId());</span>
+<span class="fc" id="L466">                    verification.setVerificationDate(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L467">                    verification.setStatus(VerificationStatus.VERIFIED);</span>
+<span class="fc" id="L468">                    verification.setSignedConsentForm(false);</span>
+
+<span class="fc bfc" id="L470" title="All 2 branches covered.">                    if (currentUser.isPro()) {</span>
+<span class="fc" id="L471">                        verification.setPhotoIdType(PhotoIdType.VOUCHED_FOR_BY_CLINICIAN);</span>
+                    } else {
+<span class="fc" id="L473">                        verification.setPhotoIdType(PhotoIdType.VOUCHED_FOR_BY_COORDINATOR);</span>
+                    }
+
+<span class="fc" id="L476">                    verification.setPhotoIdNumber(&quot;Vouched for by &quot; + currentClinician.getTitle() + &quot; &quot;</span>
+<span class="fc" id="L477">                            + currentClinician.getFirstName() + &quot; &quot; + currentClinician.getLastName()</span>
+<span class="fc" id="L478">                            + &quot; of &quot; + team.getName());</span>
+<span class="fc" id="L479">                    verification.setVerifyingTeam(team);</span>
+<span class="fc" id="L480">                    teamUserManager.activateUserAccount(newPatient.getId(), team.getId(), verification);</span>
+                }
+
+                // set up consent
+<span class="fc" id="L484">                setupConsentForPatient(getLoggedInEHRRequestContext(), newPatient);</span>
+
+                // email notification - if this fails, rollback, because the patient needs the email
+<span class="fc" id="L487">                pkbEmailMessageManager.notifyPatientOfCreatedAccount(currentClinician, newPatient, team, message);</span>
+
+                // If the patient has a CHI number, try syncing with SciStore
+                //if (&quot;CHI number&quot;.equals(nationalIdName))
+                //sciStoreManager.syncPatientWithSciStore(newPatient)
+<span class="fc" id="L492">                userManager.commitTransaction();</span>
+            } finally {
+<span class="fc" id="L494">                userManager.rollbackIfNotCommitted();</span>
+            }
+
+            // Log the account creation activity
+<span class="fc bfc" id="L498" title="All 2 branches covered.">            if (patientDTO.getStatus() == UserStatus.CREATED) {</span>
+<span class="fc" id="L499">                logActivity(Activity.Action.CREATED_ACCOUNT, dateTimeService.now(), patientDTO.getId(), false, new NoConsentsRequired());</span>
+            } else {
+<span class="fc" id="L501">                logActivity(Activity.Action.CREATED_NOCONTACT_ACCOUNT, dateTimeService.now(), patientDTO.getId(), false, new NoConsentsRequired());</span>
+            }
+
+<span class="fc" id="L504">            addActionMessage(getText(&quot;create.patient.success&quot;, Lists.newArrayList(newPatient.getTitle(), newPatient.getLastName())));</span>
+
+<span class="nc" id="L506">        } catch (PKBException e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L508">            addActionError(e.getMessage());</span>
+<span class="nc" id="L509">            LOGGER.error(&quot;Error while creating the patient account {}&quot;, patientDTO.getEmailId(), e);</span>
+<span class="nc" id="L510">            throw e;</span>
+<span class="fc" id="L511">        } catch (MailException e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="fc" id="L513">            addActionError(e.getMessage());</span>
+<span class="fc" id="L514">            LOGGER.error(&quot;Mailer exception: {}&quot;, e.getCause(), e);</span>
+<span class="fc" id="L515">            return Action.ERROR;</span>
+<span class="fc" id="L516">        } catch (IllegalPatientIdentifiersUpdateException e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="fc" id="L518">            addActionError(e.getMessage());</span>
+<span class="fc" id="L519">            LOGGER.warn(&quot;Prevented update of national id during invitation: {}&quot;, e.getDetailedMessage());</span>
+<span class="fc" id="L520">            return Action.INPUT;</span>
+<span class="fc" id="L521">        }</span>
+<span class="fc" id="L522">        return SUCCESS;</span>
+    }
+
+    private void addPatientToTeam(LoggedInEHRRequestContext ehrRequestContext, PKBPerson existingInvitee) {
+<span class="fc" id="L526">        addActionMessage(getText(&quot;createPatient.msg.patient_added_from_org&quot;));</span>
+
+<span class="fc" id="L528">        PatientConsentUpdateDTO consent = setupConsentForPatient(ehrRequestContext, existingInvitee);</span>
+
+<span class="fc" id="L530">        pkbEmailMessageManager.sendTeamAccessNotificationToPatient(ACCESS_GRANT,</span>
+<span class="fc" id="L531">                ImmutableEmailInfo.builder()</span>
+<span class="fc" id="L532">                        .recipient(existingInvitee)</span>
+<span class="fc" id="L533">                        .sender(loggedInUserUtil.getLoggedInUser())</span>
+<span class="fc" id="L534">                        .team(team)</span>
+<span class="fc" id="L535">                        .includeSender(true)</span>
+<span class="fc" id="L536">                        .build(),</span>
+                consent);
+
+<span class="fc" id="L539">    }</span>
+
+    @NotNull
+    private PatientConsentUpdateDTO setupConsentForPatient(LoggedInEHRRequestContext ehrRequestContext, PKBPerson patient) {
+<span class="fc" id="L543">        PatientConsentUpdateDTO consent = makePatientConsentDto(ehrRequestContext, patient);</span>
+<span class="fc" id="L544">        patientConsentManager.ensureTeamLinkAndUpdatePatientConsent(ehrRequestContext, consent);</span>
+<span class="fc" id="L545">        return consent;</span>
+    }
+
+    private ImmutablePatientConsentUpdateDTO makePatientConsentDto(LoggedInEHRRequestContext ehrRequestContext, PKBPerson patient) {
+<span class="fc" id="L549">        return ImmutablePatientConsentUpdateDTO.builder()</span>
+<span class="fc" id="L550">                .generalHealthConsentGranted(patientConsent.isGeneralHealthConsentGranted())</span>
+<span class="fc" id="L551">                .sexualHealthConsentGranted(patientConsent.isSexualHealthConsentGranted())</span>
+<span class="fc" id="L552">                .mentalHealthConsentGranted(patientConsent.isMentalHealthConsentGranted())</span>
+<span class="fc" id="L553">                .socialCareConsentGranted(patientConsent.isSocialCareConsentGranted())</span>
+<span class="fc" id="L554">                .proEditOnlyForChild(patientConsent.isProEditOnlyForChild())</span>
+<span class="fc" id="L555">                .discharged(patientConsent.isDischarged())</span>
+<span class="fc" id="L556">                .accessingEntityType(AccessingEntityType.TEAM)</span>
+<span class="fc" id="L557">                .patientPersonId(patient.getId())</span>
+<span class="fc" id="L558">                .source(sourceDetailsMapper.mapFromEHRRequestContext(ehrRequestContext))</span>
+<span class="fc" id="L559">                .generalHealthConsentGrantedReason(ConsentReason.CREATED_ACCOUNT)</span>
+<span class="fc" id="L560">                .sexualHealthConsentGrantedReason(ConsentReason.CREATED_ACCOUNT)</span>
+<span class="fc" id="L561">                .mentalHealthConsentGrantedReason(ConsentReason.CREATED_ACCOUNT)</span>
+<span class="fc" id="L562">                .socialCareConsentGrantedReason(ConsentReason.CREATED_ACCOUNT)</span>
+<span class="fc" id="L563">                .generalHealthConsentGrantedReasonText(&quot;invited patient&quot;)</span>
+<span class="fc" id="L564">                .sexualHealthConsentGrantedReasonText(&quot;invited patient&quot;)</span>
+<span class="fc" id="L565">                .mentalHealthConsentGrantedReasonText(&quot;invited patient&quot;)</span>
+<span class="fc" id="L566">                .socialCareConsentGrantedReasonText(&quot;invited patient&quot;)</span>
+<span class="fc" id="L567">                .accessingTeamId(team.getId())</span>
+<span class="fc" id="L568">                .build();</span>
+    }
+
+    @SkipValidation
+    public String confirmedInvite() {
+        try {
+<span class="nc" id="L574">            prepopulateTeamLevelIdTypes();</span>
+
+<span class="nc" id="L576">            PKBPerson invitee = userManager.getPKBPerson(inviteeId, PKBPerson.Lazy.CONTACTS,</span>
+                    PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS, PKBPerson.Lazy.PROPERTIES);
+            // sanity check validation; tbh we shouldn't skip validation here (for any input that's coming from the browser)
+<span class="nc bnc" id="L579" title="All 4 branches missed.">            if ((invitee == null) || UserType.PATIENT != invitee.getUserType()) {</span>
+<span class="nc" id="L580">                LOGGER.error(&quot;Invalid invitee ID: {}&quot;, inviteeId);</span>
+<span class="nc" id="L581">                throw new RuntimeException(&quot;Invalid invitee ID&quot;); // can't throw ID; that goes back to the browser, whatever it is</span>
+            }
+
+<span class="nc" id="L584">            userManager.transactional(() -&gt; addPatientToTeam(getLoggedInEHRRequestContext(), invitee));</span>
+<span class="nc" id="L585">            return SUCCESS;</span>
+<span class="nc" id="L586">        } catch (Exception e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L588">            addActionError(e.getMessage());</span>
+<span class="nc" id="L589">            LOGGER.error(&quot;Error while inviting patient-{}&quot;, inviteeId);</span>
+<span class="nc" id="L590">            throw e;</span>
+        }
+    }
+
+    /**
+     * @param patient
+     */
+    private void updateIdInformation(PKBPerson patient, Email email)
+            throws NamingException {
+
+        // national ID
+<span class="fc" id="L601">        Instant now = dateTimeService.now();</span>
+<span class="fc" id="L602">        EHRRequestContext ehrRequestContext = getEHRRequestContext();</span>
+<span class="fc bfc" id="L603" title="All 2 branches covered.">        if (isNotBlank(nationalId)) {</span>
+<span class="fc" id="L604">            ValidNationalId validNationalId = NationalIdType.getPrimaryNationalIdTypeFromCountryCode(team.getCountry())</span>
+<span class="fc" id="L605">                    .flatMap(n -&gt; n.getValidNationalIdAndType(nationalId))</span>
+<span class="fc" id="L606">                    .orElseThrow();</span>
+
+<span class="fc bfc" id="L608" title="All 2 branches covered.">            if (nationalIdValidator.isTryingToUpdateNationalId(patient, validNationalId)) {</span>
+                // PHR-7147 - do NOT allow existing national id to be modified
+<span class="fc" id="L610">                throw new IllegalPatientIdentifiersUpdateException(</span>
+                        &quot;This patient can’t be invited because a record already exists with this email address but a different identifier&quot;,
+<span class="fc" id="L612">                        patient.getId());</span>
+            }
+<span class="fc" id="L614">            NationalId setId = new NationalId(validNationalId, VersionDetails.of(ehrRequestContext));</span>
+<span class="fc" id="L615">            setId.setPerson(patient);</span>
+<span class="fc" id="L616">            setId.setEditDate(Date.from(now));</span>
+
+<span class="fc" id="L618">            patient.addOrUpdateNationalId(ehrRequestContext, setId, now);</span>
+
+        }
+        // org level IDs
+<span class="fc" id="L622">        combineOrgLevelIds().forEach(oid -&gt; patient.addOrgLevelId(ehrRequestContext, oid, now));</span>
+
+        // team level IDs
+<span class="pc" id="L625">        combineTeamLevelIds().forEach(tid -&gt; patient.addTeamLevelId(ehrRequestContext, tid, now));</span>
+
+<span class="fc bfc" id="L627" title="All 4 branches covered.">        if (email != null &amp;&amp; patient.getStatus() == UserStatus.NOCONTACT) {</span>
+<span class="fc" id="L628">            patient.setPrimaryEmail(email, VersionDetails.of(ehrRequestContext, now));</span>
+        }
+
+        // save national and org-level id changes
+<span class="fc" id="L632">        userManager.updateUser(ehrRequestContext, patient);</span>
+<span class="fc" id="L633">    }</span>
+
+    @SkipValidation
+    public String remindCreatedPatientToRegister() {
+        try {
+<span class="fc" id="L638">            PKBPerson patient = userManager.getPKBPerson(inviteeId, PKBPerson.Lazy.PROPERTIES);</span>
+<span class="fc" id="L639">            remindPatientToRegister(patient);</span>
+
+<span class="fc" id="L641">            addActionMessage(getText(&quot;registration.remind.success&quot;, Lists.newArrayList(patient.getTitle(), patient.getLastName())));</span>
+
+<span class="nc" id="L643">        } catch (PKBException e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L645">            addActionError(e.getMessage());</span>
+<span class="nc" id="L646">            LOGGER.error(&quot;error&quot;, e);</span>
+<span class="nc" id="L647">            return Action.ERROR;</span>
+<span class="nc" id="L648">        } catch (MailException e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L650">            addActionError(e.getMessage());</span>
+<span class="nc" id="L651">            LOGGER.error(&quot;Mailer exception: {}&quot;, e.getCause(), e);</span>
+<span class="nc" id="L652">            return Action.ERROR;</span>
+        } finally {
+<span class="fc" id="L654">            userManager.rollbackIfNotCommitted();</span>
+        }
+
+<span class="fc" id="L657">        return SUCCESS;</span>
+    }
+
+    /**
+     * @param patient
+     * @throws MailException
+     */
+    private void remindPatientToRegister(PKBPerson patient) throws MailException {
+<span class="fc" id="L665">        PKBPerson reminder = userManager.getPKBPerson(loggedInUserUtil.getLoggedInUserId());</span>
+
+<span class="fc" id="L667">        Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+
+        // special handling for req context!  there's no context user set, BUT we're accessing a patient's account here.
+<span class="fc" id="L670">        LoggedInEHRRequestContext oneOffCtx = getEHRRequestContextSingleAccess(patient.getId(), team);</span>
+
+<span class="fc" id="L672">        PasswordAccess passwordAccess = userAccessManager.getPasswordAccess(patient.getId(), oneOffCtx);</span>
+<span class="fc bfc" id="L673" title="All 2 branches covered.">        if (passwordAccess != null) {</span>
+<span class="fc" id="L674">            patient.setPassword(passwordAccess.getPassword());</span>
+        } else {
+<span class="fc" id="L676">            String newPassword = RandomUtil.randomPassword(10);</span>
+<span class="fc" id="L677">            long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="fc" id="L678">            teamUserManager.resetTempPassword(getLoggedInEHRRequestContext(), patient.getId(), reminder.getId(), team.getOrg().getId(), newPassword);</span>
+<span class="fc" id="L679">            patient = userManager.registerUserFullPasswordAccessThenReturnThatUser(getEHRRequestContext(), patient.getId(), patientAccountId, newPassword);</span>
+<span class="fc" id="L680">            patient.setPassword(newPassword);</span>
+        }
+
+<span class="fc" id="L683">        pkbEmailMessageManager.notifyPatientOfCreatedAccount(reminder, patient, team, null);</span>
+<span class="fc" id="L684">    }</span>
+
+
+
+    /**
+     * Set the institute variable
+     *
+     * @param currentUserId
+     */
+    private Team loadInstitute(long currentUserId) {
+<span class="fc" id="L694">        Team found = null;</span>
+<span class="fc" id="L695">        List&lt;Team&gt; institutes = teamUserManager.getUserTeams(getEHRRequestContext(), currentUserId, true/*activeOnly*/);</span>
+<span class="pc bpc" id="L696" title="1 of 2 branches missed.">        if (!institutes.isEmpty()) {</span>
+<span class="fc" id="L697">            found = institutes.get(0);</span>
+
+<span class="pc bpc" id="L699" title="1 of 2 branches missed.">            if (institutes.size() &gt; 1) {</span>
+<span class="nc" id="L700">                LOGGER.error(&quot;data problem: lookup of institutes for {} returned {}&quot;, currentUserId, institutes.size());</span>
+            }
+        }
+<span class="fc" id="L703">        return found;</span>
+    }
+
+    @Override
+    public void validate() {
+<span class="fc" id="L708">        preloadTeam();</span>
+
+<span class="fc bfc" id="L710" title="All 2 branches covered.">        if (isNotBlank(customValidatedEmailIdProxy)) {</span>
+            try {
+<span class="fc" id="L712">                patientDTO.setEmailId(disclosingEmail(customValidatedEmailIdProxy));</span>
+<span class="fc" id="L713">            } catch (Exception ignored) {</span>
+<span class="fc" id="L714">                addFieldError(&quot;patientDTO.emailId&quot;, getText(&quot;invalid.fieldvalue.patientDTO.emailId&quot;));</span>
+<span class="fc" id="L715">            }</span>
+        }
+
+<span class="pc bpc" id="L718" title="1 of 2 branches missed.">        if (isBlank(patientDTO.getTitle())) {</span>
+<span class="nc" id="L719">            addFieldError(&quot;patientDTO.title&quot;, getText(&quot;user.required.title&quot;));</span>
+        }
+
+<span class="pc bpc" id="L722" title="1 of 2 branches missed.">        if (isBlank(patientDTO.getFirstName())) {</span>
+<span class="nc" id="L723">            addFieldError(&quot;patientDTO.firstName&quot;, getText(&quot;user.required.firstName&quot;));</span>
+        }
+
+<span class="pc bpc" id="L726" title="1 of 2 branches missed.">        if (isBlank(patientDTO.getLastName())) {</span>
+<span class="nc" id="L727">            addFieldError(&quot;patientDTO.lastName&quot;, getText(&quot;user.required.lastName&quot;));</span>
+        }
+
+<span class="fc bfc" id="L730" title="All 2 branches covered.">        if (isNotBlank(nationalId)) {</span>
+<span class="fc" id="L731">            NationalIdType.getNationalIdTypeFromName(nationalIdName)</span>
+<span class="fc" id="L732">                    .flatMap(n -&gt; n.getValidNationalIdAndType(nationalId))</span>
+<span class="fc" id="L733">                    .ifPresentOrElse(vnid -&gt; {</span>
+                                try {
+<span class="fc" id="L735">                                    PKBServiceUtil.checkSandboxNationalID(loggedInUserUtil.getLoggedInUserOrg(), vnid.type(), vnid.value());</span>
+<span class="nc" id="L736">                                } catch (ApiCallMalformedException ignored) {</span>
+<span class="nc" id="L737">                                    addFieldError(&quot;nationalId&quot;, getText(&quot;err.sandbox.national.id&quot;));</span>
+<span class="fc" id="L738">                                }</span>
+<span class="fc" id="L739">                            },</span>
+<span class="nc" id="L740">                            () -&gt; addFieldError(&quot;nationalId&quot;, getText(&quot;global.err.activation.invalid_national_id&quot;, new String[]{nationalIdName})));</span>
+
+<span class="fc bfc" id="L742" title="All 2 branches covered.">        } else if (loggedInUserUtil.getLoggedInUserPrimaryTeam().isMandatoryNationalId()) {</span>
+<span class="fc" id="L743">            addFieldError(&quot;nationalId&quot;, getText(&quot;createPatient.err.mandatory_national_id&quot;, new String[]{nationalIdName}));</span>
+        }
+<span class="fc" id="L745">    }</span>
+
+    private SortedSet&lt;OrgLevelId&gt; combineOrgLevelIds() {
+<span class="fc" id="L748">        return OrgLevelId.combineOrgLevelIds(getOrgLevelIdTypes(), groupedOrgLevelIds);</span>
+    }
+
+    private SortedSet&lt;TeamLevelId&gt; combineTeamLevelIds() {
+<span class="fc" id="L752">        return TeamLevelId.combineTeamLevelIds(teamLevelIdTypes, groupedTeamLevelIds);</span>
+    }
+
+    public Team getTeam() {
+<span class="nc" id="L756">        return team;</span>
+    }
+
+    public void setTeam(Team team) {
+<span class="nc" id="L760">        this.team = team;</span>
+<span class="nc" id="L761">    }</span>
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L764">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L765">    }</span>
+
+    public void setUserWebBean(IUserWebBean userWebBean) {
+<span class="fc" id="L768">        this.userWebBean = userWebBean;</span>
+<span class="fc" id="L769">    }</span>
+
+    public String getNationalIdName() {
+<span class="fc" id="L772">        return nationalIdName;</span>
+    }
+
+    public void setNationalIdName(String nationalIdName) {
+<span class="fc" id="L776">        this.nationalIdName = nationalIdName;</span>
+<span class="fc" id="L777">    }</span>
+
+    public List&lt;String&gt; getGroupedOrgLevelIds() {
+<span class="fc" id="L780">        return groupedOrgLevelIds;</span>
+    }
+
+    public void setGroupedOrgLevelIds(List&lt;String&gt; groupedOrgLevelIds) {
+<span class="fc" id="L784">        this.groupedOrgLevelIds = groupedOrgLevelIds;</span>
+<span class="fc" id="L785">    }</span>
+
+    public List&lt;OrgLevelIdType&gt; getOrgLevelIdTypes() {
+<span class="fc" id="L788">        List&lt;OrgLevelIdType&gt; orgLevelIdTypes = new ArrayList&lt;&gt;();</span>
+        // Viewing a patient's data, load just the IDs I'm allowed to see
+<span class="fc" id="L790">        Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="pc bpc" id="L791" title="1 of 2 branches missed.">        if (!usesTeamLevelIdsOnly(team)) {</span>
+<span class="fc" id="L792">            orgLevelIdTypes.addAll(team.getOrg().getOrgLevelIdTypes());</span>
+        }
+<span class="fc" id="L794">        return orgLevelIdTypes;</span>
+    }
+
+    public List&lt;String&gt; getGroupedTeamLevelIds() {
+<span class="fc" id="L798">        return groupedTeamLevelIds;</span>
+    }
+
+    public void setGroupedTeamLevelIds(List&lt;String&gt; groupedTeamLevelIds) {
+<span class="fc" id="L802">        this.groupedTeamLevelIds = groupedTeamLevelIds;</span>
+<span class="fc" id="L803">    }</span>
+
+    public List&lt;TeamLevelIdType&gt; getTeamLevelIdTypes() {
+<span class="fc" id="L806">        return teamLevelIdTypes;</span>
+    }
+
+    public void setTeamLevelIdTypes(List&lt;TeamLevelIdType&gt; teamLevelIdTypes) {
+<span class="nc" id="L810">        this.teamLevelIdTypes = teamLevelIdTypes;</span>
+<span class="nc" id="L811">    }</span>
+
+    public PKBPersonDTO getPatientDTO() {
+<span class="fc" id="L814">        return patientDTO;</span>
+    }
+
+    public void setPatientDTO(PKBPersonDTO patientDTO) {
+<span class="fc" id="L818">        this.patientDTO = patientDTO;</span>
+<span class="fc" id="L819">    }</span>
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L822">        this.userManager = userManager;</span>
+<span class="fc" id="L823">    }</span>
+
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L826">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L827">    }</span>
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L830">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L831">    }</span>
+
+    public void setPatientConsentManager(PatientConsentManager patientConsentManager) {
+<span class="fc" id="L834">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L835">    }</span>
+
+    public void setSourceDetailsMapper(SourceDetailsMapper sourceDetailsMapper) {
+<span class="fc" id="L838">        this.sourceDetailsMapper = sourceDetailsMapper;</span>
+<span class="fc" id="L839">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L842">        return tab;</span>
+    }
+
+    public String getSubTab() {
+<span class="fc" id="L846">        return subTab;</span>
+    }
+
+    public String getNationalId() {
+<span class="fc" id="L850">        return nationalId;</span>
+    }
+
+    public void setNationalId(String nationalId) {
+<span class="fc" id="L854">        this.nationalId = nationalId;</span>
+<span class="fc" id="L855">    }</span>
+
+    public String getGender() {
+<span class="fc" id="L858">        return gender;</span>
+    }
+
+    public void setGender(String gender) {
+<span class="fc" id="L862">        this.gender = gender;</span>
+<span class="fc" id="L863">    }</span>
+
+    public String getYear() {
+<span class="fc" id="L866">        return year;</span>
+    }
+
+    public void setYear(String year) {
+<span class="fc" id="L870">        this.year = year;</span>
+<span class="fc" id="L871">    }</span>
+
+    public String getMonth() {
+<span class="fc" id="L874">        return month;</span>
+    }
+
+    public void setMonth(String month) {
+<span class="fc" id="L878">        this.month = month;</span>
+<span class="fc" id="L879">    }</span>
+
+    public String getDay() {
+<span class="fc" id="L882">        return day;</span>
+    }
+
+    public void setDay(String day) {
+<span class="fc" id="L886">        this.day = day;</span>
+<span class="fc" id="L887">    }</span>
+
+    public String getMessage() {
+<span class="fc" id="L890">        return message;</span>
+    }
+
+    public void setMessage(String message) {
+<span class="fc" id="L894">        this.message = message;</span>
+<span class="fc" id="L895">    }</span>
+
+    public Long getInviteeId() {
+<span class="nc" id="L898">        return inviteeId;</span>
+    }
+
+    public void setInviteeId(Long inviteeId) {
+<span class="fc" id="L902">        this.inviteeId = inviteeId;</span>
+<span class="fc" id="L903">    }</span>
+
+    public List&lt;PKBPerson&gt; getSimilarPatients() {
+<span class="nc" id="L906">        return similarPatients;</span>
+    }
+
+    public void setSimilarPatients(List&lt;PKBPerson&gt; similarPatients) {
+<span class="nc" id="L910">        this.similarPatients = similarPatients;</span>
+<span class="nc" id="L911">    }</span>
+
+    public String getDateOfBirth() {
+<span class="nc" id="L914">        return dateOfBirth;</span>
+    }
+
+    public void setDateOfBirth(String dateOfBirth) {
+<span class="nc" id="L918">        this.dateOfBirth = dateOfBirth;</span>
+<span class="nc" id="L919">    }</span>
+
+    public String getConfirmedCreate() {
+<span class="nc" id="L922">        return confirmedCreate;</span>
+    }
+
+    public void setConfirmedCreate(String confirmedCreate) {
+<span class="nc" id="L926">        this.confirmedCreate = confirmedCreate;</span>
+<span class="nc" id="L927">    }</span>
+
+    public PatientConsent getPatientConsent() {
+<span class="fc" id="L930">        return patientConsent;</span>
+    }
+
+    public void setPatientConsent(PatientConsent patientConsent) {
+<span class="fc" id="L934">        this.patientConsent = patientConsent;</span>
+<span class="fc" id="L935">    }</span>
+
+    public String getSearchString() {
+<span class="fc" id="L938">        return searchString;</span>
+    }
+
+    public void setSearchString(String searchString) {
+<span class="nc" id="L942">        this.searchString = searchString;</span>
+<span class="nc" id="L943">    }</span>
+
+    public String getSearchIdType() {
+<span class="fc" id="L946">        return searchIdType;</span>
+    }
+
+    public void setSearchIdType(String searchIdType) {
+<span class="fc" id="L950">        this.searchIdType = searchIdType;</span>
+<span class="fc" id="L951">    }</span>
+
+    public String getSearchId() {
+<span class="fc" id="L954">        return searchId;</span>
+    }
+
+    public void setSearchId(String searchId) {
+<span class="nc" id="L958">        this.searchId = searchId;</span>
+<span class="nc" id="L959">    }</span>
+
+    public String getSearchName() {
+<span class="fc" id="L962">        return searchName;</span>
+    }
+
+    public void setSearchName(String searchName) {
+<span class="nc" id="L966">        this.searchName = searchName;</span>
+<span class="nc" id="L967">    }</span>
+
+    public String getSearchDobYear() {
+<span class="fc" id="L970">        return searchDobYear;</span>
+    }
+
+    public void setSearchDobYear(String searchDobYear) {
+<span class="fc" id="L974">        this.searchDobYear = searchDobYear;</span>
+<span class="fc" id="L975">    }</span>
+
+    public String getSearchDobMonth() {
+<span class="fc" id="L978">        return searchDobMonth;</span>
+    }
+
+    public void setSearchDobMonth(String searchDobMonth) {
+<span class="nc" id="L982">        this.searchDobMonth = searchDobMonth;</span>
+<span class="nc" id="L983">    }</span>
+
+    public String getSearchDobDay() {
+<span class="fc" id="L986">        return searchDobDay;</span>
+    }
+
+    public void setSearchDobDay(String searchDobDay) {
+<span class="nc" id="L990">        this.searchDobDay = searchDobDay;</span>
+<span class="nc" id="L991">    }</span>
+
+    public String getSearchLevel() {
+<span class="fc" id="L994">        return searchLevel;</span>
+    }
+
+    public void setSearchLevel(String searchLevel) {
+<span class="fc" id="L998">        this.searchLevel = searchLevel;</span>
+<span class="fc" id="L999">    }</span>
+
+    public boolean isNationalIdInputVisible() {
+<span class="pc bpc" id="L1002" title="1 of 4 branches missed.">        return nationalIdName != null &amp;&amp; !nationalIdName.equals(&quot;&quot;);</span>
+    }
+
+    public boolean isMandatoryNationalId() {
+<span class="fc" id="L1006">        return team.isMandatoryNationalId();</span>
+    }
+
+    public String getCustomValidatedEmailIdProxy() {
+<span class="fc" id="L1010">        return customValidatedEmailIdProxy;</span>
+    }
+
+    public void setCustomValidatedEmailIdProxy(String customValidatedEmailIdProxy) {
+<span class="fc" id="L1014">        this.customValidatedEmailIdProxy = customValidatedEmailIdProxy;</span>
+<span class="fc" id="L1015">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

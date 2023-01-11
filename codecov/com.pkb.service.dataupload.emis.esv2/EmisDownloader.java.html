@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisDownloader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisDownloader.java</span></div><h1>EmisDownloader.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.google.common.collect.Sets;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFile;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileSet;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileType;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Metrics;
+import org.apache.commons.collections4.CollectionUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.BeanFactory;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDate;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+
+import static java.util.function.Function.identity;
+
+public class EmisDownloader {
+
+<span class="fc" id="L29">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String EMIS_DOWNLOAD_METRIC_NAME = &quot;pkb_phr_integration_emis_csv_downloader&quot;;
+    private static final String TAG_TYPE = &quot;type&quot;;
+<span class="fc" id="L33">    private static final DistributionSummary EMIS_DOWNLOAD_METRIC = DistributionSummary</span>
+<span class="fc" id="L34">            .builder(EMIS_DOWNLOAD_METRIC_NAME)</span>
+<span class="fc" id="L35">            .tag(TAG_TYPE, &quot;&quot;)</span>
+<span class="fc" id="L36">            .description(&quot;Number of files and batches to download&quot;).register(Metrics.globalRegistry);</span>
+
+    private static final String EMIS_DOWNLOADER_PREVIOUS_BATCH_METRIC_NAME = &quot;pkb_phr_integration_emis_csv_downloader_previous_batch&quot;;
+<span class="fc" id="L39">    private static final Counter EMIS_DOWNLOADER_PREVIOUS_BATCH_METRIC = Counter</span>
+<span class="fc" id="L40">            .builder(EMIS_DOWNLOADER_PREVIOUS_BATCH_METRIC_NAME)</span>
+<span class="fc" id="L41">            .description(&quot;Number of times we've spotted emis providing an older batch&quot;).register(Metrics.globalRegistry);</span>
+
+    private final EmisFileSetUtils emisFileSetUtils;
+    private final BeanFactory beanFactory;
+
+<span class="fc" id="L46">    public EmisDownloader(@NotNull EmisFileSetUtils emisFileSetUtils, @NotNull BeanFactory beanFactory) {</span>
+<span class="fc" id="L47">        this.beanFactory = beanFactory;</span>
+<span class="fc" id="L48">        this.emisFileSetUtils = emisFileSetUtils;</span>
+<span class="fc" id="L49">    }</span>
+
+    /**
+     * Downloads EMIS files from EMIS SFTP.
+     *
+     * @param connectionData  connection and authentication information to use to connect to SFTP
+
+     * @param lastBatchProcessed  The last successfully processed EMIS file's timestamp.
+     * @param localDirectory      The local directory to download the EMIS files to
+     * @return {@link EmisStepResult#FINISHED} in case of success,
+     * {@link EmisStepResult#FINISHED_WITH_ERRORS} in case some download happened, but the result should be a failure due to error
+     * condition,
+     * {@link EmisStepResult#FAILED} in case an error occurred.
+     */
+    @NotNull
+    public EmisStepResult startDownload(@NotNull ConnectionData connectionData, @NotNull LocalDate lastBatchProcessed, @NotNull Path localDirectory) {
+        EmisStepResult result;
+<span class="fc" id="L66">        LOGGER.info(&quot;EMIS file downloader started on {}&quot;, connectionData.uniqueTag());</span>
+<span class="fc" id="L67">        try (IEmisDownloadConnection connection = connectionData.connection()) {</span>
+<span class="fc" id="L68">            connection.connect();</span>
+<span class="fc" id="L69">            List&lt;EmisFileSet&gt; availableBatches = getAvailableBatches(connection);</span>
+<span class="fc" id="L70">            recordDownload(&quot;batchesAvailableToDownload&quot;, availableBatches.size());</span>
+<span class="fc" id="L71">            List&lt;EmisFileSet&gt; newBatches = emisFileSetUtils.filterBatchesAlreadyProcessed(availableBatches, lastBatchProcessed, identity());</span>
+
+<span class="fc" id="L73">            checkNoUnexpectedPreviousBatches(localDirectory, CollectionUtils.removeAll(availableBatches, newBatches), lastBatchProcessed);</span>
+
+<span class="fc" id="L75">            recordDownload(&quot;newBatches&quot;, newBatches.size());</span>
+<span class="fc" id="L76">            EmisInternalResult&lt;List&lt;EmisFileSet&gt;&gt; resultWithBatches = emisFileSetUtils.getAllBatches(newBatches, identity());</span>
+<span class="fc" id="L77">            downloadBatches(connection, resultWithBatches.getContent(), localDirectory);</span>
+<span class="fc" id="L78">            result = resultWithBatches.getStepResult();</span>
+<span class="fc" id="L79">        } catch (Exception e) {</span>
+<span class="fc" id="L80">            result = EmisStepResult.FAILED;</span>
+<span class="fc" id="L81">            LOGGER.error(&quot;Error during EMIS download on {}!&quot;, connectionData.uniqueTag(), e);</span>
+<span class="fc" id="L82">        }</span>
+<span class="fc" id="L83">        LOGGER.info(&quot;EMIS file downloader finished on {}.&quot;, connectionData.uniqueTag());</span>
+<span class="fc" id="L84">        return result;</span>
+    }
+
+    private void checkNoUnexpectedPreviousBatches(@NotNull Path localDirectory, Collection&lt;EmisFileSet&gt; oldBatches, LocalDate lastBatchProcessed) {
+<span class="fc" id="L88">        oldBatches.forEach(oldBatch -&gt; {</span>
+<span class="fc bfc" id="L89" title="All 2 branches covered.">            if (!Files.exists(localDirectory.resolve(oldBatch.path()))) {</span>
+<span class="fc" id="L90">                Metrics.counter(EMIS_DOWNLOADER_PREVIOUS_BATCH_METRIC_NAME).increment();</span>
+<span class="fc" id="L91">                LOGGER.error(&quot;sftp has {} directory available but we don't. It's earlier than our lastBatchProcessed {}. &quot; +</span>
+<span class="fc" id="L92">                        &quot;Have we previously missed a delta? Did EMIS provide this later than another?&quot;, oldBatch.path(), lastBatchProcessed);</span>
+            }
+<span class="fc" id="L94">        });</span>
+<span class="fc" id="L95">    }</span>
+
+    private void downloadBatches(IEmisDownloadConnection connection, List&lt;EmisFileSet&gt; batchesToDownload, Path localSftpDirectory) throws Exception {
+<span class="fc bfc" id="L98" title="All 2 branches covered.">        if (batchesToDownload.isEmpty()) {</span>
+<span class="fc" id="L99">            LOGGER.info(&quot;Skipping download of EMIS deltas as there is nothing to download from {}&quot;, connection.uniqueTag());</span>
+        } else {
+<span class="fc" id="L101">            LOGGER.info(&quot;Downloading these EMIS deltas {}: {} to {}&quot;, connection.uniqueTag(), emisFileSetUtils.toTimestampList(batchesToDownload, identity()), localSftpDirectory);</span>
+<span class="fc bfc" id="L102" title="All 2 branches covered.">            for (EmisFileSet fileSet : batchesToDownload) {</span>
+<span class="fc" id="L103">                Path filesetPath = localSftpDirectory.resolve(fileSet.path());</span>
+<span class="fc" id="L104">                Files.createDirectories(filesetPath);</span>
+
+<span class="fc" id="L106">                fileSet.supportedFiles().values().stream().flatMap(List::stream).forEach(emisFile -&gt; {</span>
+<span class="fc" id="L107">                    Path localFile = localSftpDirectory.resolve(emisFile.relativePath());</span>
+<span class="fc" id="L108">                    download(emisFile, localFile, connection);</span>
+<span class="fc" id="L109">                });</span>
+
+<span class="fc" id="L111">                Set&lt;EmisFileType&gt; notSupportedTypes = fileSet.notSupportedFiles().keySet().stream().collect(Sets.toImmutableEnumSet());</span>
+<span class="fc" id="L112">                LOGGER.info(&quot;Skipped not supported types in batch: {}, types: {}&quot;, fileSet.dateStamp(), notSupportedTypes);</span>
+<span class="fc" id="L113">                LOGGER.info(&quot;Finished downloading EMIS delta {}: {}&quot;, connection.uniqueTag(), fileSet.dateStamp());</span>
+<span class="fc" id="L114">            }</span>
+        }
+<span class="fc" id="L116">    }</span>
+
+    private void download(EmisFile emisFile, Path localFile, IEmisDownloadConnection connection){
+        try{
+<span class="pc bpc" id="L120" title="1 of 4 branches missed.">            if (!Files.exists(localFile) || Files.size(localFile) != emisFile.size()) {</span>
+<span class="fc" id="L121">                connection.download(emisFile.relativePath().toString(), localFile);</span>
+<span class="fc" id="L122">                recordDownload(&quot;downloadedFileSize&quot;, emisFile.size());</span>
+            }
+<span class="nc" id="L124">        }catch(IOException ioe){</span>
+<span class="nc" id="L125">            throw new RuntimeException(ioe);</span>
+<span class="fc" id="L126">        }</span>
+<span class="fc" id="L127">    }</span>
+
+
+    private List&lt;EmisFileSet&gt; getAvailableBatches(IEmisDownloadConnection connection) throws IOException {
+<span class="fc" id="L131">        List&lt;EmisFileSet&gt; result = Collections.emptyList();</span>
+<span class="fc" id="L132">        Collection&lt;EmisLsEntry&gt; remoteFiles = connection.listDirectory();</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        if (!remoteFiles.isEmpty()) {</span>
+<span class="fc" id="L134">            AbstractEmisBatchBuilder batchBuilder = beanFactory.getBean(EmisDownloadBatchBuilder.class);</span>
+<span class="fc" id="L135">            result = batchBuilder.buildFilesets(remoteFiles, connection.uniqueTag());</span>
+        }
+<span class="fc" id="L137">        LOGGER.info(&quot;There are {} EMIS deltas available on {}.&quot;, result.size(), connection.uniqueTag());</span>
+<span class="fc" id="L138">        return result;</span>
+    }
+
+    private void recordDownload(String type, double value) {
+<span class="fc" id="L142">        Metrics.summary(EMIS_DOWNLOAD_METRIC_NAME, TAG_TYPE, type).record(value);</span>
+<span class="fc" id="L143">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

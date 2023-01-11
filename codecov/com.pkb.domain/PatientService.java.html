@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PatientService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain</a> &gt; <span class="el_source">PatientService.java</span></div><h1>PatientService.java</h1><pre class="source lang-java linenums">package com.pkb.domain;
+
+import ca.uhn.fhir.rest.server.exceptions.ForbiddenOperationException;
+import com.cosium.spring.data.jpa.entity.graph.domain2.DynamicEntityGraph;
+import com.pkb.authentication.principal.user.AuthenticatedPatient;
+import com.pkb.authentication.principal.user.AuthenticatedSystemUser;
+import com.pkb.authz.AuthorizationService;
+import com.pkb.authz.data.AuthorizationData;
+import com.pkb.datamodel.PatientIdentifierDTO;
+import com.pkb.datamodel.entity.mapper.DateOfLastDataPointMapper;
+import com.pkb.datamodel.entity.mapper.PersonMapper;
+import com.pkb.datamodel.projections.PatientDateOfLastDataPoint;
+import com.pkb.datamodel.projections.PatientStatus;
+import com.pkb.datamodel.projections.PatientStatus.DIAGNOSTICS;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.internal.repository.InstituteUserRepository;
+import com.pkb.domain.repository.MenuDataPointRepository;
+import com.pkb.domain.repository.NationalIdRepository;
+import com.pkb.domain.repository.OrgLevelIdRepository;
+import com.pkb.domain.repository.PersonRepository;
+import com.pkb.domain.repository.TeamLevelIdRepository;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.entities.pub.PublicInstituteUser;
+import com.pkb.entities.pub.PublicNationalId;
+import com.pkb.entities.pub.PublicOrgLevelId;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.entities.pub.PublicTeamLevelId;
+import io.vavr.Value;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.collection.Seq;
+import io.vavr.collection.Set;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.tuple.Pair;
+import org.jetbrains.annotations.NotNull;
+
+import java.time.Instant;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.UUID;
+import java.util.function.Function;
+
+import static com.pkb.datamodel.projections.ImmutablePatientStatus.patientStatus;
+import static io.vavr.API.List;
+import static io.vavr.control.Option.none;
+import static java.util.Comparator.comparing;
+
+public class PatientService {
+
+    private final AuthorizationService authorizationService;
+    private final PersonRepository personRepo;
+    private final PersonMapper personMapper;
+    private final InstituteUserRepository instituteUserRepo;
+    private final MenuDataPointRepository dataPointRepo;
+    private final TeamLevelIdRepository teamLevelIdRepository;
+    private final OrgLevelIdRepository orgLevelIdRepository;
+    private final NationalIdRepository nationalIdRepository;
+    private final DateOfLastDataPointMapper dateOfLastDataPointMapper;
+
+    public PatientService(AuthorizationService authorizationService,
+            PersonRepository personRepo,
+            PersonMapper personMapper,
+            InstituteUserRepository instituteUserRepo,
+            MenuDataPointRepository dataPointRepo,
+            TeamLevelIdRepository teamLevelIdRepository,
+            OrgLevelIdRepository orgLevelIdRepository,
+            NationalIdRepository nationalIdRepository,
+<span class="fc" id="L75">            DateOfLastDataPointMapper dateOfLastDataPointMapper) {</span>
+<span class="fc" id="L76">        this.authorizationService = authorizationService;</span>
+<span class="fc" id="L77">        this.personRepo = personRepo;</span>
+<span class="fc" id="L78">        this.personMapper = personMapper;</span>
+<span class="fc" id="L79">        this.instituteUserRepo = instituteUserRepo;</span>
+<span class="fc" id="L80">        this.dataPointRepo = dataPointRepo;</span>
+<span class="fc" id="L81">        this.teamLevelIdRepository = teamLevelIdRepository;</span>
+<span class="fc" id="L82">        this.orgLevelIdRepository = orgLevelIdRepository;</span>
+<span class="fc" id="L83">        this.nationalIdRepository = nationalIdRepository;</span>
+<span class="fc" id="L84">        this.dateOfLastDataPointMapper = dateOfLastDataPointMapper;</span>
+<span class="fc" id="L85">    }</span>
+
+    public Either&lt;RuntimeException, List&lt;PatientStatus&gt;&gt; findPatientStatuses(@NotNull AuthorizationData authorizationData, @NotNull List&lt;ValidNationalId&gt; patientIdentifiers) {
+<span class="fc" id="L88">        return authorizationService.authorize(authorizationData)</span>
+<span class="fc" id="L89">                .checkSingleResult(() -&gt; {</span>
+<span class="fc" id="L90">                    AuthenticatedSystemUser systemUser = authorizationData.inputs().requireAuthenticatedSystemUser();</span>
+<span class="fc" id="L91">                    return findPatientStatusesWithOrgId(patientIdentifiers, systemUser.getOrgId());</span>
+                });
+    }
+
+    public Either&lt;RuntimeException, List&lt;? extends PatientDateOfLastDataPoint&gt;&gt; findMultipleLastDataPointDate(@NotNull AuthorizationData authorizationData,
+                                                                                                            @NotNull List&lt;PatientIdentifierDTO&gt; patientIdentifiers, @NotNull Set&lt;MenuDataType&gt; excludeTypes) {
+<span class="fc" id="L97">        return authorizationService.authorize(authorizationData)</span>
+<span class="fc" id="L98">                .checkSingleResult(() -&gt; {</span>
+<span class="fc" id="L99">                    AuthenticatedSystemUser authenticatedSystemUser = authorizationData.inputs().requireAuthenticatedSystemUser();</span>
+<span class="fc" id="L100">                    return findMultipleLastDataPointDate(patientIdentifiers,</span>
+<span class="fc" id="L101">                            authenticatedSystemUser.getOrgId(), excludeTypes);</span>
+                });
+    }
+
+    public Either&lt;RuntimeException, Option&lt;PatientDateOfLastDataPoint&gt;&gt; findSingleLastDataPointDate(@NotNull AuthorizationData authorizationData,
+                                                                                                           @NotNull Set&lt;MenuDataType&gt; excludeTypes) {
+<span class="fc" id="L107">        return authorizationService.authorize(authorizationData)</span>
+<span class="fc" id="L108">                .checkSingleResult(() -&gt; {</span>
+<span class="fc" id="L109">                    AuthenticatedPatient authenticatedPatient = authorizationData.inputs().requireAuthenticatedPatient();</span>
+<span class="fc" id="L110">                    return findSingleLastDataPointDate(authenticatedPatient.getPublicId(), excludeTypes);</span>
+                });
+    }
+
+    private List&lt;? extends PatientDateOfLastDataPoint&gt; findMultipleLastDataPointDate(@NotNull List&lt;PatientIdentifierDTO&gt; patientIdentifiers,
+                                                                                 @NotNull Long orgId,
+                                                                                 @NotNull Set&lt;MenuDataType&gt; excludeTypes) {
+<span class="fc" id="L117">        List&lt;ValidNationalId&gt; natIds = List();</span>
+<span class="fc" id="L118">        List&lt;UUID&gt; pkbIds = List();</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">        for (PatientIdentifierDTO pi : patientIdentifiers) {</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">            if (pi.getValidNationalId().isDefined()) {</span>
+<span class="fc" id="L121">                natIds = natIds.append(pi.getValidNationalId().get());</span>
+<span class="pc bpc" id="L122" title="2 of 4 branches missed.">            } else if (pi.getIdValue().isDefined() &amp;&amp; pi.getValidNationalId().isEmpty()) {</span>
+<span class="fc" id="L123">                pkbIds = pkbIds.append(pi.getIdValue().get());</span>
+            } else {
+<span class="nc" id="L125">                throw new ForbiddenOperationException(&quot;Unexpected type of Patient Identifier.&quot;);</span>
+            }
+<span class="fc" id="L127">        }</span>
+<span class="fc" id="L128">        return mergeLastDataPointDates(natIds, pkbIds, orgId, excludeTypes);</span>
+    }
+
+    private List&lt;? extends PatientDateOfLastDataPoint&gt; mergeLastDataPointDates(@NotNull List&lt;ValidNationalId&gt; nationalIdentifiers,
+                                                                      @NotNull List&lt;UUID&gt; pkbIdentifiers,
+                                                                      @NotNull Long orgId, @NotNull Set&lt;MenuDataType&gt; excludeTypes) {
+
+<span class="fc" id="L135">        List&lt;PublicNationalId&gt; nationalIds = List.ofAll(nationalIdRepository.findAll(new NationalIdRepository.PublicNationalIdByTypeAndValueSpecification(nationalIdentifiers), DynamicEntityGraph.loading(Collections.singletonList(&quot;person&quot;))));</span>
+
+<span class="fc" id="L137">        Map&lt;Long, List&lt;PublicNationalId&gt;&gt; nationalIdsByPersonId = nationalIds.groupBy(nid -&gt; nid.getPerson().getId());</span>
+<span class="fc" id="L138">        Set&lt;Long&gt; personIdsInOrg = HashSet.ofAll(instituteUserRepo.filterPersonIdsInOrg(orgId, nationalIdsByPersonId.keySet()));</span>
+<span class="fc" id="L139">        var nationalIdsByPersonIdInOrg = nationalIdsByPersonId.filter((key, value) -&gt; personIdsInOrg.contains(key));</span>
+
+<span class="fc" id="L141">        var personIds = HashSet.ofAll(nationalIdsByPersonIdInOrg.keySet());</span>
+<span class="fc" id="L142">        var personByPersonId = personRepo.findOptedInPersonsByPublicIds(pkbIdentifiers.toSet()).toMap(PublicPKBPerson::getId, Function.identity());</span>
+
+<span class="fc" id="L144">        personIds = personIds.union(personByPersonId.keySet());</span>
+
+<span class="fc" id="L146">        List&lt;Pair&lt;Long, Instant&gt;&gt; lastDatapointDates = dataPointRepo.findLastDatapointDatesByPersonId(personIds, excludeTypes);</span>
+
+<span class="fc" id="L148">        var lastDatapointDatesByNationalId = lastDatapointDates</span>
+<span class="fc" id="L149">                .filter(pair -&gt; nationalIdsByPersonIdInOrg.containsKey(pair.getLeft()))</span>
+<span class="fc" id="L150">                .flatMap(pair -&gt; nationalIdsByPersonIdInOrg.get(pair.getLeft()).get()</span>
+<span class="fc" id="L151">                        .map(natId -&gt; dateOfLastDataPointMapper.mapToDataModelWithNationalId(natId, pair)))</span>
+<span class="fc" id="L152">                .sorted(comparing(ldp -&gt; ldp.getValidNationalId().map(ValidNationalId::value).getOrElse(&quot;&quot;)));</span>
+
+<span class="fc" id="L154">        var lastDataPointsByPublicId = lastDatapointDates</span>
+<span class="fc" id="L155">                .filter(pair -&gt; personByPersonId.containsKey(pair.getLeft()))</span>
+<span class="fc" id="L156">                .flatMap(pair -&gt; personByPersonId.get(pair.getLeft())</span>
+<span class="fc" id="L157">                        .map(person -&gt; dateOfLastDataPointMapper.mapToDataModelWithPublicId(person.getPublicId(), pair)))</span>
+<span class="fc" id="L158">                .sorted(comparing(ldp -&gt; ldp.getIdValue().map(UUID::toString).getOrElse(&quot;&quot;)));</span>
+
+<span class="fc" id="L160">        return lastDatapointDatesByNationalId.appendAll(lastDataPointsByPublicId);</span>
+    }
+
+    private Option&lt;PatientDateOfLastDataPoint&gt; findSingleLastDataPointDate(UUID publicId,
+            Set&lt;MenuDataType&gt; excludeTypes) {
+<span class="fc" id="L165">        return personRepo.findOptionByPublicId(publicId)</span>
+<span class="fc" id="L166">                .map(PublicPKBPerson::getId)</span>
+<span class="fc" id="L167">                .flatMap(id -&gt; dataPointRepo.findSingleLastDataPointDate(id, excludeTypes));</span>
+    }
+
+    private List&lt;PatientStatus&gt; findPatientStatusesWithOrgId(List&lt;ValidNationalId&gt; patientIdentifiers, Long orgId) {
+        // group by unique NationalIdTypes
+<span class="fc" id="L172">        var nationalIdsGroupedByNationalIdType = patientIdentifiers</span>
+<span class="fc" id="L173">                .groupBy(ValidNationalId::type)</span>
+<span class="fc" id="L174">                .mapValues(Value::toSet);</span>
+
+        // query for each different NationalIdType
+<span class="fc" id="L177">        var persons = nationalIdsGroupedByNationalIdType</span>
+<span class="fc" id="L178">                .flatMap(nationalIdType -&gt; personRepo.findByNationalIds(nationalIdType._1, nationalIdType._2.map(ValidNationalId::value)))</span>
+<span class="fc" id="L179">                .collect(List.collector());</span>
+
+<span class="fc" id="L181">        var instituteUsers = instituteUserRepo.findActiveTeamsForPatients(</span>
+<span class="fc" id="L182">                persons.map(PublicPKBPerson::getId)).groupBy(PublicInstituteUser::getPersonId);</span>
+
+<span class="fc" id="L184">        List&lt;Person&gt; datamodel = persons.map(person -&gt; {</span>
+<span class="fc" id="L185">            var instituteUsersForPerson = instituteUsers.get(person.getId()).getOrElse(List.empty());</span>
+<span class="fc" id="L186">            return personMapper.entityToPatient(person, instituteUsersForPerson);</span>
+        });
+
+<span class="fc" id="L189">        return patientIdentifiers.map(patientIdentifier -&gt; {</span>
+<span class="fc" id="L190">            Option&lt;Person&gt; maybePerson = findPerson(datamodel, patientIdentifier);</span>
+<span class="fc" id="L191">            var activeStatuses = EnumSet.of(UserStatus.ACTIVE, UserStatus.EMAIL_CONFIRMED);</span>
+<span class="fc" id="L192">            return patientStatus()</span>
+<span class="fc" id="L193">                    .validNationalId(patientIdentifier)</span>
+<span class="fc" id="L194">                    .build()</span>
+<span class="fc" id="L195">                    .withRegistered(maybePerson</span>
+<span class="fc" id="L196">                            .map(p -&gt; activeStatuses.contains(p.getUserStatus())))</span>
+<span class="fc" id="L197">                    .withDeceased(maybePerson</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">                            .map(p -&gt; p.getUserStatus() == UserStatus.DEAD))</span>
+<span class="fc" id="L199">                    .withDateOfBirth(maybePerson</span>
+<span class="fc" id="L200">                            .filter(p -&gt; hasAccess(p, orgId))</span>
+<span class="fc" id="L201">                            .flatMap(p -&gt; p.demographics().getDateOfBirth()))</span>
+<span class="fc" id="L202">                    .withDiagnostics(maybePerson</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">                            .map(p -&gt; Option.when(!hasAccess(p, orgId), DIAGNOSTICS.NO_ACCESS))</span>
+<span class="fc" id="L204">                            .getOrElse(Option.of(DIAGNOSTICS.NOT_FOUND)));</span>
+        });
+    }
+
+    private Option&lt;Person&gt; findPerson(Seq&lt;Person&gt; persons, ValidNationalId patientIdentifiers) {
+<span class="fc" id="L209">        return persons</span>
+<span class="fc" id="L210">                .filter(person -&gt; person.demographics().getNationalId()</span>
+<span class="fc" id="L211">                        .find(nationalId -&gt; nationalId.getValue()</span>
+<span class="pc bpc" id="L212" title="1 of 4 branches missed.">                                .map(value -&gt; value.equals(patientIdentifiers.value()) &amp;&amp; nationalId.getType() == patientIdentifiers.type())</span>
+<span class="fc" id="L213">                                .getOrElse(false))</span>
+<span class="fc" id="L214">                        .isDefined())</span>
+<span class="fc" id="L215">                .headOption();</span>
+    }
+
+    private boolean hasAccess(Person person, Long orgId) {
+<span class="fc" id="L219">        return person.getTeams()</span>
+<span class="fc" id="L220">                .map(teamUsers -&gt; teamUsers</span>
+<span class="pc bpc" id="L221" title="1 of 4 branches missed.">                        .find(teamUser -&gt; orgId.equals(teamUser.getTeamWithOrg().getOrg().getId()) &amp;&amp; teamUser.getSponsorshipStatus() == SponsorshipStatus.ACTIVE).isDefined())</span>
+<span class="fc" id="L222">                .getOrElse(false);</span>
+    }
+
+    public List&lt;Either&lt;RuntimeException, Patient&gt;&gt; getPatients(
+            AuthorizationData authorizationData,
+            List&lt;UUID&gt; ids) {
+        // Filter the ones we're authorized to see
+<span class="fc" id="L229">        var idsOrErrors = ids.map(id -&gt; authorizationService.authorize(authorizationData)</span>
+<span class="pc bpc" id="L230" title="1 of 2 branches missed.">                .checkFilteredSingleResult(tm -&gt; tm.targetType() == Patient.class</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">                        &amp;&amp; id.equals(tm.requireUUID()), () -&gt; id));</span>
+        // Fetch the one's we're authorized to see in a batch
+<span class="fc" id="L233">        var authorizedIds = idsOrErrors.filter(Either::isRight).map(Either::get);</span>
+<span class="fc" id="L234">        var patients = findAllByPublicIds(authorizedIds)</span>
+<span class="fc" id="L235">                .toMap(Patient::getPublicId, Function.identity());</span>
+        // Group it back together, return another exception if the patient couldn't be found
+<span class="fc" id="L237">        return idsOrErrors</span>
+<span class="fc" id="L238">                .map(e -&gt; e.flatMap(id -&gt; patients.get(id).map(Either::&lt;RuntimeException, Patient&gt;right)</span>
+<span class="fc" id="L239">                        .getOrElse(Either.left(new RuntimeException(String.format(&quot;Patient not found for public id %s&quot;, id))))));</span>
+    }
+
+    private List&lt;Patient&gt; findAllByPublicIds(@NotNull List&lt;UUID&gt; publicIds) {
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">        if (publicIds.isEmpty()) {</span>
+<span class="nc" id="L244">            return List();</span>
+        }
+
+<span class="fc" id="L247">        List&lt;PublicPKBPerson&gt; persons = personRepo.findByPublicIdsWithAllIds(publicIds);</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">        if (persons.isEmpty()) {</span>
+<span class="nc" id="L249">            return List();</span>
+        }
+
+<span class="fc" id="L252">        Collection&lt;Long&gt; personIds = persons.map(PublicPKBPerson::getId).toJavaSet();</span>
+<span class="fc" id="L253">        Map&lt;Long, List&lt;PublicOrgLevelId&gt;&gt; orgLevelIdsByPersonId = orgLevelIdRepository.findAllByPersonId(personIds)</span>
+<span class="fc" id="L254">                .groupBy(PublicOrgLevelId::getPersonId);</span>
+<span class="fc" id="L255">        Map&lt;Long, List&lt;PublicTeamLevelId&gt;&gt; teamLevelIdsByPersonId = teamLevelIdRepository.findAllByPersonId(personIds).groupBy(PublicTeamLevelId::getPersonId);</span>
+<span class="fc" id="L256">        return persons</span>
+<span class="fc" id="L257">                .map(person -&gt; personMapper.entityToPatient(person, List.of(), orgLevelIdsByPersonId.get(person.getId()), teamLevelIdsByPersonId.get(person.getId()), none()));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

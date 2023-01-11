@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GooglePubSubHelper.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel</a> &gt; <span class="el_source">GooglePubSubHelper.kt</span></div><h1>GooglePubSubHelper.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel
+
+import com.pkb.aggregator.camel.routing.dto.UpstreamChangeNotification
+import com.pkb.aggregator.extension.valueAsMutableMapOf
+import com.pkb.aggregator.service.exception.DownstreamResourceExistsException
+import com.pkb.aggregator.service.exception.DownstreamVersionConflictException
+import org.apache.camel.Body
+import org.apache.camel.Exchange
+import org.apache.camel.Headers
+import org.apache.camel.component.google.pubsub.GooglePubsubConstants
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+
+<span class="fc" id="L16">@Service</span>
+<span class="fc" id="L17">class GooglePubSubHelper {</span>
+
+<span class="fc" id="L19">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    companion object {
+
+        const val PUBSUB_ACTION_CREATE_RESOURCE = &quot;CreateResource&quot;
+        const val PUBSUB_ACTION_UPDATE_RESOURCE = &quot;UpdateResource&quot;
+        const val PUBSUB_ACTION_DELETE_RESOURCE = &quot;DeleteResource&quot;
+
+        // These are the attribute names defined by the Google PubSub integration. See
+        // https://cloud.google.com/healthcare-api/docs/concepts/pubsub
+        const val ATTRIBUTE_ACTION = &quot;action&quot;
+        const val ATTRIBUTE_RESOURCE_TYPE = &quot;resourceType&quot;
+
+<span class="fc" id="L32">        private val CHANGE_NOTIFICATION_ATTRIBUTES = setOf(ATTRIBUTE_RESOURCE_TYPE, ATTRIBUTE_ACTION)</span>
+        private const val DELIVERY_COUNT_ATTRIBUTE_KEY = &quot;googclient_deliveryattempt&quot;
+    }
+
+    fun parseIncomingMessage(
+        @Body body: ByteArray,
+        @Headers headers: MutableMap&lt;String, Any&gt;,
+    ): UpstreamChangeNotification {
+<span class="fc" id="L40">        val attributes = getChangeNotificationAttributes(headers)</span>
+<span class="fc" id="L41">        val notification = UpstreamChangeNotification(String(body), attributes)</span>
+
+<span class="fc" id="L43">        log.info(</span>
+<span class="fc" id="L44">            &quot;Received {} notification for {} (delivery attempt {})&quot;,</span>
+<span class="fc" id="L45">            notification.attributes[ATTRIBUTE_ACTION],</span>
+<span class="fc" id="L46">            notification.data,</span>
+<span class="fc" id="L47">            getDeliveryCount(headers)</span>
+        )
+<span class="fc" id="L49">        return notification</span>
+    }
+
+    fun checkForErrorRequiringRedelivery(exchange: Exchange) {
+        // Some errors require a pubsub redelivery rather than a camel retry-from-point-of-failure. Such errors are
+        // detected here and the exception re-thrown so that the pubsub message is nack'd
+<span class="fc" id="L55">        when (val exception = exchange.getProperty(Exchange.EXCEPTION_CAUGHT)) {</span>
+<span class="fc bfc" id="L56" title="All 2 branches covered.">            is DownstreamVersionConflictException -&gt; {</span>
+                // Log an info-level message so as not to trigger any alerts, since this 'error' is just a retry
+<span class="fc" id="L58">                log.info(&quot;Version conflict, will retry: {} {} (upstream={}, downstream={})&quot;,</span>
+<span class="fc" id="L59">                    exception.code,</span>
+<span class="fc" id="L60">                    exception.message,</span>
+<span class="fc" id="L61">                    exchange.getProperty(SOURCED_RESOURCE_PROPERTY),</span>
+<span class="fc" id="L62">                    exchange.getProperty(DOWNSTREAM_RESOURCE_ID_PROPERTY)</span>
+                )
+<span class="fc" id="L64">                throw exception</span>
+            }
+<span class="fc bfc" id="L66" title="All 2 branches covered.">            is DownstreamResourceExistsException -&gt; {</span>
+<span class="fc" id="L67">                log.info(&quot;Downstream resource unexpectedly existed during POST, will retry: {} (upstream={}, downstream={})&quot;,</span>
+<span class="fc" id="L68">                    exception.message,</span>
+<span class="fc" id="L69">                    exchange.getProperty(SOURCED_RESOURCE_PROPERTY),</span>
+<span class="fc" id="L70">                    exchange.getProperty(DOWNSTREAM_RESOURCE_ID_PROPERTY)</span>
+                )
+<span class="fc" id="L72">                throw exception</span>
+            }
+        }
+<span class="fc" id="L75">    }</span>
+
+    private fun getChangeNotificationAttributes(headers: MutableMap&lt;String, Any&gt;) =
+<span class="fc" id="L78">        headers.valueAsMutableMapOf&lt;String, String&gt;(GooglePubsubConstants.ATTRIBUTES)</span>
+<span class="fc" id="L79">            .filterKeys { CHANGE_NOTIFICATION_ATTRIBUTES.contains(it) }</span>
+<span class="fc" id="L80">            .toMutableMap()</span>
+
+    private fun getDeliveryCount(headers: Map&lt;String, Any&gt;) =
+<span class="fc" id="L83">        headers.valueAsMutableMapOf&lt;String, String&gt;(GooglePubsubConstants.ATTRIBUTES)</span>
+<span class="fc" id="L84">            .getOrDefault(DELIVERY_COUNT_ATTRIBUTE_KEY, &quot;1&quot;)</span>
+<span class="fc" id="L85">            .toInt()</span>
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

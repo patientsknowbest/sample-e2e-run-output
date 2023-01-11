@@ -1,0 +1,434 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TestManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.test</a> &gt; <span class="el_source">TestManager.java</span></div><h1>TestManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.test;
+
+import com.pkb.app.dto.SavedIdsDTO;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.exception.PKBException;
+import com.pkb.service.SynchableManager;
+import com.pkb.service.dataupload.processor.UploadedDataService;
+import com.pkb.service.devices.coredevices.CoreDevicesManager;
+import com.pkb.service.reference.ReferenceDataManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.test.IncludeDeletedResults;
+import com.pkb.test.UploadedDataDeletionMetadata;
+import com.pkb.test.entity.LoincCommonForm;
+import com.pkb.test.entity.TestHistoryDTO;
+import com.pkb.test.entity.TestHistoryFilter;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.time.StopWatch;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.ReferenceDataType.LAB_DISCIPLINE;
+import static com.pkb.sciStore.util.SciStoreConstants.SCISTORE_LOINC_WHITELIST;
+import static com.pkb.service.dataupload.processor.ImmutableLoggedInUploadedDataProcessingContext.loggedInUploadedDataProcessingContext;
+import static com.pkb.service.integration.SciStoreManager.SCISTORE_SOURCE_TEXT;
+import static java.lang.String.format;
+import static java.util.Optional.empty;
+import static java.util.stream.Collectors.joining;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+public class TestManager extends TransactionManager implements SynchableManager {
+<span class="fc" id="L51">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final UserManager userManager;
+    private final CoreDevicesManager coreDevicesManager;
+
+    private final ReferenceDataManager referenceDataManager;
+    private final UploadedDataService uploadedDataService;
+    private final LoincManager loincManager;
+
+    public TestManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, UserManager userManager,
+                       CoreDevicesManager coreDevicesManager, ReferenceDataManager referenceDataManager, UploadedDataService uploadedDataService,
+                       LoincManager loincManager) {
+<span class="fc" id="L63">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L64">        this.userManager = userManager;</span>
+<span class="fc" id="L65">        this.coreDevicesManager = coreDevicesManager;</span>
+<span class="fc" id="L66">        this.referenceDataManager = referenceDataManager;</span>
+<span class="fc" id="L67">        this.uploadedDataService = uploadedDataService;</span>
+<span class="fc" id="L68">        this.loincManager = loincManager;</span>
+<span class="fc" id="L69">    }</span>
+
+    public List&lt;LoincCommonForm&gt; getLoincCommonFormList() {
+        try {
+<span class="fc" id="L73">            return loincManager.getLoincCommonFormList();</span>
+<span class="nc" id="L74">        } catch (Exception e) {</span>
+<span class="nc" id="L75">            throw new PKBException(&quot;failed getting common forms&quot;, e);</span>
+        }
+    }
+
+    public List&lt;LoincCommonForm&gt; getLoincCommonFormsByTestId(long loincTestId) {
+        try {
+<span class="fc" id="L81">            return loincManager.getLoincCommonFormsByTestId(loincTestId);</span>
+<span class="nc" id="L82">        } catch (Exception e) {</span>
+<span class="nc" id="L83">            throw new PKBException(&quot;failed getting LoincCommonForm for test&quot; + loincTestId, e);</span>
+        }
+    }
+
+    public Optional&lt;TestResultDTO&gt; findExistingTestResultById(long id, @NotNull LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L88">        return loincManager.findExistingTestResultById(id, requestContext);</span>
+    }
+
+    public Optional&lt;TestHistoryDTO&gt; getTestHistory(LoggedInEHRRequestContext requestContext, Long loincTestId, Long loincMappingId,
+                                                   long patientUserId, IncludeDeletedResults deleted) {
+
+        // retrieves ALL of the history(!) for the selected test or mapping
+<span class="fc" id="L95">        TestHistoryFilter filter = new TestHistoryFilter(patientUserId);</span>
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        if (loincTestId != null) {</span>
+<span class="fc" id="L97">            filter.addLoincTestId(loincTestId);</span>
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">        } else if (loincMappingId != null) {</span>
+<span class="fc" id="L99">            filter.addLoincMappingId(loincMappingId);</span>
+        } else {
+<span class="nc" id="L101">            throw new IllegalArgumentException(&quot;both loincId and loincMappingId are null&quot;);</span>
+        }
+
+        List&lt;TestHistoryDTO&gt; resultList;
+        try {
+<span class="fc" id="L106">            resultList = accessTestHistory(filter, requestContext, null, deleted);</span>
+<span class="nc" id="L107">        } catch (Exception e) {</span>
+<span class="nc" id="L108">            throw new PKBException(&quot;failed getting test history for &quot; + patientUserId, e);</span>
+<span class="fc" id="L109">        }</span>
+
+<span class="fc bfc" id="L111" title="All 2 branches covered.">        if (resultList.isEmpty()) {</span>
+<span class="fc" id="L112">            return empty();</span>
+<span class="pc bpc" id="L113" title="1 of 2 branches missed.">        } else if (resultList.size() == 1) {</span>
+<span class="fc" id="L114">            return Optional.of(resultList.get(0));</span>
+        } else {
+            // more than one?  this is a bug
+<span class="nc" id="L117">            throw new PKBException(</span>
+                    &quot;Expected single TestHistoryDTO for patient &quot; + patientUserId + &quot; but got &quot; +
+<span class="nc" id="L119">                            resultList.size() + &quot; resultMenudataIds: &quot; + getDebugInfo(resultList));</span>
+        }
+    }
+
+    private String getDebugInfo(List&lt;TestHistoryDTO&gt; historyList) {
+<span class="nc" id="L124">        return historyList.stream().filter(dto -&gt; isNotEmpty(dto.getTestResultList()))</span>
+<span class="nc" id="L125">                .map(dto -&gt; dto.getTestResultList().stream().map(tr -&gt; tr.getId().toString()).collect(joining(&quot;,&quot;, &quot;[&quot;, &quot;]&quot;)))</span>
+<span class="nc" id="L126">                .collect(joining(&quot;,&quot;));</span>
+    }
+
+    /**
+     * @param requestContext
+     * @param patientUserId
+     * @param testIds
+     * @param lastXMonthsOfDataPerTest
+     * @return
+     */
+    public List&lt;TestHistoryDTO&gt; getTestHistoryList(LoggedInEHRRequestContext requestContext, long patientUserId, List&lt;Long&gt; testIds, Integer lastXMonthsOfDataPerTest, IncludeDeletedResults deleted) {
+<span class="fc" id="L137">        TestHistoryFilter filter = new TestHistoryFilter(patientUserId);</span>
+<span class="fc bfc" id="L138" title="All 2 branches covered.">        if (lastXMonthsOfDataPerTest != null) {</span>
+<span class="fc" id="L139">            filter.limitRangeXMonthsPerTest(lastXMonthsOfDataPerTest);</span>
+        }
+<span class="fc" id="L141">        filter.addLoincTestIdList(testIds);</span>
+
+        try {
+<span class="fc" id="L144">            return accessTestHistory(filter, requestContext, null, deleted);</span>
+<span class="nc" id="L145">        } catch (Exception e) {</span>
+<span class="nc" id="L146">            throw new PKBException(&quot;failed getting test history list for &quot; + patientUserId + &quot; for tests &quot; + testIds, e);</span>
+        }
+    }
+
+    public List&lt;TestHistoryDTO&gt; getTestHistoryList(LoggedInEHRRequestContext requestContext, long patientUserId, Integer latestResults, IncludeDeletedResults deleted) {
+<span class="fc" id="L151">        TestHistoryFilter filter = new TestHistoryFilter(patientUserId);</span>
+        try {
+<span class="fc" id="L153">            return accessTestHistory(filter, requestContext, latestResults, deleted);</span>
+<span class="nc" id="L154">        } catch (Exception e) {</span>
+<span class="nc" id="L155">            throw new PKBException(&quot;failed getting test history for &quot; + patientUserId, e);</span>
+        }
+    }
+
+    public List&lt;TestHistoryDTO&gt; getTestHistoryListByServiceName(LoggedInEHRRequestContext ehrRequestContext, long patientId, String serviceName, IncludeDeletedResults deleted) {
+<span class="fc" id="L160">        TestHistoryFilter filter = new TestHistoryFilter(patientId);</span>
+<span class="fc" id="L161">        filter.setLoincMappingServiceName(serviceName);</span>
+        try {
+<span class="fc" id="L163">            return accessTestHistory(filter, ehrRequestContext, null, deleted);</span>
+<span class="nc" id="L164">        } catch (Exception e) {</span>
+<span class="nc" id="L165">            throw new PKBException(&quot;failed getting test history list for &quot; + ehrRequestContext + &quot; for service name &quot; + serviceName, e);</span>
+        }
+    }
+
+    public List&lt;SavedIdsDTO&gt; saveTestResults(@NotNull LoggedInEHRRequestContext requestContext, List&lt;TestResultDTO&gt; testResults, long patientUserId) {
+<span class="fc" id="L170">        return doSaveTestResults(testResults, patientUserId, accountId -&gt; loincManager.saveTestResults(requestContext, testResults, patientUserId, accountId));</span>
+    }
+
+
+    public List&lt;SavedIdsDTO&gt; saveTestResultsNoUpdates(@NotNull EHRRequestContext requestContext, List&lt;TestResultDTO&gt; testResults, long patientUserId) {
+<span class="fc" id="L175">        return doSaveTestResults(testResults, patientUserId, accountId -&gt; loincManager.saveTestResultsNoUpdate(requestContext, testResults, accountId));</span>
+    }
+
+    private List&lt;SavedIdsDTO&gt; doSaveTestResults(List&lt;TestResultDTO&gt; testResults, long patientUserId, Function&lt;Long, List&lt;SavedIdsDTO&gt;&gt; testResultsSaver) {
+<span class="fc" id="L179">        Long accountId = userManager.getDefaultAccountId(patientUserId);</span>
+        try {
+<span class="fc" id="L181">            List&lt;SavedIdsDTO&gt; savedTestResults = testResultsSaver.apply(accountId);</span>
+
+            // update the uniqueId and ID values in the DTOs
+<span class="fc bfc" id="L184" title="All 2 branches covered.">            for (int i = 0; i &lt; savedTestResults.size(); i++) {</span>
+<span class="fc" id="L185">                testResults.get(i).setId(savedTestResults.get(i).getId());</span>
+<span class="fc" id="L186">                testResults.get(i).getBaseFields().setUniqueId(savedTestResults.get(i).getUniqueId());</span>
+            }
+
+<span class="fc" id="L189">            return savedTestResults;</span>
+<span class="nc" id="L190">        } catch (Exception e) {</span>
+<span class="nc" id="L191">            throw new PKBException(format(&quot;failed saving test results for %s&quot;, patientUserId), e);</span>
+        }
+    }
+
+
+    /**
+     * Returns the single latest result for each requested test. The list of
+     * {@code testIds} must be non-null and non-empty. The internal LOINC Id
+     * will be used as the key to the returned {@code Map}.
+     *
+     * @param patientId      The patient whose results should be returned.
+     * @param testIds        A non-null, non-empty list of internal LOINC Ids.
+     * @param includeDeleted
+     * @return The latest test results for each test in {@code testIds}.
+     */
+    public Map&lt;Long, TestResultDTO&gt; getLatestTestResults(@NotNull LoggedInEHRRequestContext requestContext, long patientId,
+                                                         List&lt;Long&gt; testIds, IncludeDeletedResults deleted) {
+
+<span class="pc bpc" id="L209" title="1 of 4 branches missed.">        if ((testIds == null) || testIds.isEmpty()) {</span>
+<span class="fc" id="L210">            throw new IllegalArgumentException(&quot;A list of testIds must be provided&quot;);</span>
+        }
+
+<span class="fc" id="L213">        TestHistoryFilter filter = new TestHistoryFilter(patientId);</span>
+<span class="fc" id="L214">        filter.limitRangeLatestOnly();</span>
+<span class="fc" id="L215">        filter.addLoincTestIdList(testIds);</span>
+
+<span class="fc" id="L217">        List&lt;TestResultDTO&gt; resultList = null;</span>
+        try {
+<span class="fc" id="L219">            resultList = accessTestResults(filter, requestContext, deleted);</span>
+<span class="nc" id="L220">        } catch (Exception e) {</span>
+<span class="nc" id="L221">            throw new PKBException(&quot;Exception while getting latest test results for user &quot; + patientId, e);</span>
+<span class="fc" id="L222">        }</span>
+
+        // put into a map (simple: loinc IDs will be unique)
+<span class="fc" id="L225">        Map&lt;Long, TestResultDTO&gt; map = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L226" title="All 2 branches covered.">        for (TestResultDTO result : resultList) {</span>
+<span class="fc" id="L227">            map.put(result.getLoincTestId(), result);</span>
+<span class="fc" id="L228">        }</span>
+<span class="fc" id="L229">        return map;</span>
+    }
+
+    /**
+     * @param requestContext
+     * @param userId
+     * @param testIds
+     * @param includeDeleted
+     * @return
+     */
+    public List&lt;TestHistoryDTO&gt; getLatestTestHistory(
+            LoggedInEHRRequestContext requestContext,
+            long patientId,
+            List&lt;Long&gt; testIds, IncludeDeletedResults deleted) {
+
+<span class="fc" id="L244">        TestHistoryFilter filter = new TestHistoryFilter(patientId);</span>
+<span class="fc" id="L245">        filter.limitRangeLatestOnly();</span>
+<span class="pc bpc" id="L246" title="1 of 2 branches missed.">        if (testIds != null) {</span>
+<span class="fc" id="L247">            filter.addLoincTestIdList(testIds);</span>
+        }
+
+        try {
+<span class="fc" id="L251">            return accessTestHistory(filter, requestContext, null, deleted);</span>
+<span class="nc" id="L252">        } catch (Exception e) {</span>
+<span class="nc" id="L253">            throw new PKBException(&quot;Exception while getting latest test results for user &quot; + patientId, e);</span>
+        }
+    }
+
+    public void deleteTestResult(LoggedInEHRRequestContext requestContext, long testResultId, UploadedDataDeletionMetadata deletionMetadata) {
+        try {
+<span class="fc" id="L259">            loincManager.deleteTestResult(requestContext, testResultId, deletionMetadata);</span>
+<span class="nc" id="L260">        } catch (Exception e) {</span>
+<span class="nc" id="L261">            throw new PKBException(&quot;failed deleting test result &quot; + testResultId, e);</span>
+<span class="fc" id="L262">        }</span>
+<span class="fc" id="L263">    }</span>
+
+    /**
+     * This wrapper around the bean call is to make sure we load queued test results -- data loaded via the HL7 API
+     * (which doesn't have decryption access, and thus can't use private mappings).
+     *
+     * @param testBean
+     * @param filter
+     * @return
+     */
+    private List&lt;TestResultDTO&gt; accessTestResults(TestHistoryFilter filter, @NotNull LoggedInEHRRequestContext requestContext, IncludeDeletedResults deleted) {
+
+        try {
+<span class="fc" id="L276">            synchUploadedData(Collections.singletonList(filter.getPatientId()), requestContext);</span>
+
+<span class="fc" id="L278">            long fromMS = System.currentTimeMillis();</span>
+<span class="fc" id="L279">            LOGGER.info(&quot;TIMING: accessTestHistory: accessTestResults for {}&quot;, filter.getPatientId());</span>
+
+<span class="fc" id="L281">            List&lt;TestResultDTO&gt; results = loincManager.getTestResults(requestContext, filter, null, deleted);</span>
+
+<span class="fc" id="L283">            LOGGER.info(&quot;TIMING: accessTestHistory({}): done getTestHistoryList for {}&quot;,</span>
+<span class="fc" id="L284">                    (System.currentTimeMillis() - fromMS), filter.getPatientId());</span>
+<span class="fc" id="L285">            return results;</span>
+<span class="nc" id="L286">        } catch (Exception e) {</span>
+<span class="nc" id="L287">            throw new PKBException(&quot;&quot;, e);</span>
+        }
+    }
+
+    /**
+     * This wrapper around the bean call is to make sure we load queued test results -- data loaded via the HL7 API
+     * (which doesn't have decryption access, and thus can't use private mappings).
+     *
+     * @param testBean
+     * @param filter
+     * @return
+     */
+    private List&lt;TestHistoryDTO&gt; accessTestHistory(
+            TestHistoryFilter filter,
+            LoggedInEHRRequestContext context,
+            Integer latestResults,
+            IncludeDeletedResults deleted) {
+
+        try {
+<span class="fc" id="L306">            synchUploadedData(Collections.singletonList(filter.getPatientId()), context);</span>
+
+<span class="fc" id="L308">            long fromMS = System.currentTimeMillis();</span>
+<span class="fc" id="L309">            LOGGER.info(&quot;TIMING: accessTestHistory: getTestHistoryList for {}&quot;, filter.getPatientId());</span>
+
+<span class="fc" id="L311">            List&lt;TestHistoryDTO&gt; results = loincManager.getTestHistoryList(filter, context, latestResults, deleted);</span>
+
+<span class="fc" id="L313">            filterTestResultsForGlasgowPatients(context, results);</span>
+<span class="fc" id="L314">            LOGGER.info(&quot;No of results after filtering results for glasgow patients-{}&quot;, results.size());</span>
+
+<span class="fc" id="L316">            LOGGER.info(&quot;TIMING: accessTestHistory({}): done getTestHistoryList for {}&quot;,</span>
+<span class="fc" id="L317">                    (System.currentTimeMillis() - fromMS), filter.getPatientId());</span>
+
+<span class="fc" id="L319">            return results;</span>
+<span class="nc" id="L320">        } catch (Exception e) {</span>
+<span class="nc" id="L321">            throw new PKBException(&quot;&quot;, e);</span>
+        }
+    }
+
+    // Horrible temporary kludge for SciStore 8/2/2016
+    //
+    // From https://pkbdev.atlassian.net/browse/PHR-460
+    //
+    //		If a test result comes from orgId=55508 (production glasgow org id)
+    //		For patients do not show test results unless the LOINC code is one of:
+    //			8123-2
+    //			24467-3
+    //			20447-9
+    //
+    // From https://pkbdev.atlassian.net/browse/PHR-2107
+    //
+    //     Extend the same kludge to all data with sourceText = 'SciStore'
+
+    public static boolean isLoincHiddenFromGlasgowPatients(String loinc) {
+<span class="fc bfc" id="L340" title="All 2 branches covered.">        return !SCISTORE_LOINC_WHITELIST.contains(loinc);</span>
+    }
+
+    private void filterTestResultsForGlasgowPatients(LoggedInEHRRequestContext context, List&lt;TestHistoryDTO&gt; results) {
+
+        try {
+<span class="fc" id="L346">            PKBPerson requestor = userManager.getPKBPerson(context.getAccessingUserId());</span>
+<span class="fc bfc" id="L347" title="All 2 branches covered.">            if (requestor.isPatient()) {</span>
+
+<span class="fc bfc" id="L349" title="All 2 branches covered.">                for (Iterator&lt;TestHistoryDTO&gt; historyIterator = results.iterator(); historyIterator.hasNext(); ) {</span>
+<span class="fc" id="L350">                    TestHistoryDTO history = historyIterator.next();</span>
+
+<span class="fc bfc" id="L352" title="All 4 branches covered.">                    if ((history.getLoincTest() == null) || isLoincHiddenFromGlasgowPatients(history.getLoincTest().getLoinc())) {</span>
+<span class="fc" id="L353">                        history.getTestResultList().removeIf(resultDTO -&gt;</span>
+<span class="fc" id="L354">                                SCISTORE_SOURCE_TEXT.equals(resultDTO.getSource().getText()));</span>
+<span class="fc bfc" id="L355" title="All 2 branches covered.">                        if (history.getTestResultList().isEmpty()) {</span>
+<span class="fc" id="L356">                            historyIterator.remove();</span>
+                        }
+                    }
+<span class="fc" id="L359">                }</span>
+            }
+<span class="nc" id="L361">        } catch (Exception e) {</span>
+<span class="nc" id="L362">            LOGGER.error(&quot;NON-FATAL error: failed filtering results for SCIStore&quot;, e);</span>
+<span class="fc" id="L363">        }</span>
+<span class="fc" id="L364">    }</span>
+
+    /**
+     * Uses transactions, and commits after each UploadedData is processed... if this needs to be called from within a
+     * transaction in the action, we'll need some fancier coding here (maybe programmatically merge the messages and submit
+     * at once?).
+     * &lt;p&gt;
+     * Doesn't catch/handle any exceptions; just logs errors and sometimes lets them flow out (but more often just logs)
+     */
+    private void synchUploadedData(Collection&lt;Long&gt; patientIds, @NotNull LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L374">        patientIds.forEach(patientId -&gt; {</span>
+<span class="fc" id="L375">            LOGGER.info(&quot;TIMING: synchUploadedDate: starting for {}&quot;, patientId);</span>
+<span class="fc" id="L376">            StopWatch timer = new StopWatch();</span>
+<span class="fc" id="L377">            timer.start();</span>
+
+<span class="fc" id="L379">            LoggedInEHRRequestContext piggybackContext = requestContext.withPiggyback(true);</span>
+<span class="fc" id="L380">            processUploadedTestResult(piggybackContext, patientId);</span>
+
+<span class="fc" id="L382">            LOGGER.info(&quot;TIMING: synchUploadedDate ({}): claimed and handled uploaded data for {}&quot;, timer.getTime(), patientId);</span>
+
+            // Also sync any queued data from devices (uses its own transactions)
+<span class="fc" id="L385">            coreDevicesManager.synchUploadedData(requestContext, patientId);</span>
+
+<span class="fc" id="L387">            LOGGER.info(&quot;TIMING: synchUploadedDate ({}): core devices synched for {}&quot;, timer.getTime(), patientIds);</span>
+<span class="fc" id="L388">        });</span>
+<span class="fc" id="L389">    }</span>
+
+    private void processUploadedTestResult(@NotNull LoggedInEHRRequestContext requestContext, Long patientId) {
+<span class="fc" id="L392">        uploadedDataService.synchUploadedData(</span>
+<span class="fc" id="L393">                loggedInUploadedDataProcessingContext()</span>
+<span class="fc" id="L394">                        .requestContext(requestContext)</span>
+<span class="fc" id="L395">                        .patientId(patientId)</span>
+<span class="fc" id="L396">                        .destination(UploadedData.Destination.TEST_RESULT)</span>
+<span class="fc" id="L397">                        .build());</span>
+<span class="fc" id="L398">    }</span>
+
+    /**
+     * Collects all test results in each of the provided histories and then updates their lab discipline based on a
+     * matching ReferenceDatum record. If no match is found, the original value is left unmodified.
+     * &lt;p&gt;
+     * This is a display-time call, no database updates are made.
+     *
+     * @param testHistories The collection of test histories to update.
+     */
+    public void applyLabDisciplineReferenceDataMappingsToTestHistories(Collection&lt;TestHistoryDTO&gt; testHistories) {
+<span class="fc" id="L409">        List&lt;TestResultDTO&gt; testResults = testHistories.stream()</span>
+<span class="fc" id="L410">                .map(TestHistoryDTO::getTestResultList)</span>
+<span class="fc" id="L411">                .flatMap(List::stream)</span>
+<span class="fc" id="L412">                .collect(Collectors.toList());</span>
+<span class="fc" id="L413">        Map&lt;TestResultDTO, ReferenceDataManager.RefDatumOrgAndData&gt; testsToRefDatumMap = testResults.stream()</span>
+<span class="fc bfc" id="L414" title="All 4 branches covered.">                .filter(resultDTO -&gt; resultDTO.getSource().getOrgId() != null &amp;&amp; StringUtils.isNotBlank(resultDTO.getLabDiscipline()))</span>
+<span class="fc" id="L415">                .collect(Collectors.toMap(</span>
+<span class="fc" id="L416">                        Function.identity(),</span>
+<span class="fc" id="L417">                        result -&gt; new ReferenceDataManager.RefDatumOrgAndData(result.getSource().getOrgId(), LAB_DISCIPLINE, result.getLabDiscipline())));</span>
+<span class="fc" id="L418">        Map&lt;ReferenceDataManager.RefDatumOrgAndData, String&gt; refDatumToTextMap = referenceDataManager.processReferenceDatumBatch(testsToRefDatumMap,</span>
+<span class="fc" id="L419">                Collections.singletonList(LAB_DISCIPLINE));</span>
+<span class="fc" id="L420">        testsToRefDatumMap.forEach((result, refDatum) -&gt; result.setLabDiscipline(refDatumToTextMap.getOrDefault(refDatum, result.getLabDiscipline())));</span>
+<span class="fc" id="L421">    }</span>
+
+    /**
+     * This is called from the new FHIR API
+     * We haven't ported over the code to sync uploaded data yet, and it's out of scope for
+     * the current implementation. However, it's not safe to go without it as the user could
+     * be missing some test results from view.
+     */
+    @Override
+    public void syncUploadedData(LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; targetPersonIds) {
+<span class="fc" id="L431">        synchUploadedData(targetPersonIds, requestContext);</span>
+<span class="fc" id="L432">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

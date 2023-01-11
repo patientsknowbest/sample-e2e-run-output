@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OwnAccessRepairService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.backgroundtasks.service</a> &gt; <span class="el_source">OwnAccessRepairService.kt</span></div><h1>OwnAccessRepairService.kt</h1><pre class="source lang-java linenums">package com.pkb.backgroundtasks.service
+
+import com.pkb.backgroundtasks.OutOfAreaActivationNotificationDTO
+import com.pkb.backgroundtasks.PhrClient
+import com.pkb.backgroundtasks.repository.AccountRepository
+import com.pkb.backgroundtasks.repository.OutOfAreaRepairJobRepository
+import com.pkb.backgroundtasks.repository.PKBPersonRepository
+import com.pkb.common.datetime.DateTimeService
+import com.pkb.entities.enums.OutOfAreaRepairJobStatus
+import com.pkb.entities.enums.OutOfAreaRepairJobStatus.FAILED
+import com.pkb.entities.enums.OutOfAreaRepairJobStatus.REPAIRED
+import com.pkb.entities.pub.PublicOutOfAreaRepairJob
+import com.pkb.kms.client.core.Kms
+import com.pkb.kms.shared.representation.GrantUserAccessToAccountRequest
+import io.micrometer.core.annotation.Timed
+import io.micrometer.core.instrument.Metrics.counter
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.scheduling.annotation.Scheduled
+import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
+import java.lang.invoke.MethodHandles
+import java.util.UUID
+
+<span class="fc" id="L25">@Service</span>
+<span class="fc" id="L26">class OwnAccessRepairService(private val personRepository: PKBPersonRepository,</span>
+<span class="fc" id="L27">                             private val accountRepository: AccountRepository,</span>
+<span class="fc" id="L28">                             private val jobRepository: OutOfAreaRepairJobRepository,</span>
+<span class="fc" id="L29">                             private val kms: Kms,</span>
+<span class="fc" id="L30">                             private val phr: PhrClient,</span>
+<span class="fc" id="L31">                             private val dateTimeService: DateTimeService) {</span>
+
+<span class="fc" id="L33">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    @Transactional()
+    @Scheduled(fixedDelayString = &quot;\${backgroundtasks.own-access-repair.fixed-delay-ms}&quot;)
+    @Timed(histogram = true)
+    fun tryRepairAll() {
+<span class="fc" id="L39">        log.trace(&quot;Repair scheduled task triggered&quot;)</span>
+
+<span class="fc" id="L41">        jobRepository.findNewOrFailedJobs()</span>
+<span class="fc" id="L42">                .map { tryRepair(it) }</span>
+<span class="fc" id="L43">    }</span>
+
+    private fun tryRepair(job: PublicOutOfAreaRepairJob) {
+<span class="fc" id="L46">        Pair(personRepository.findById(job.targetPersonId), accountRepository.findById(job.accountId))</span>
+<span class="pc bpc" id="L47" title="3 of 6 branches missed.">                .takeIf { it.first.isPresent &amp;&amp; it.second.isPresent }</span>
+<span class="pc bpc" id="L48" title="1 of 2 branches missed.">                ?.let {</span>
+<span class="fc" id="L49">                    GrantUserAccessToAccountRequest(</span>
+<span class="fc" id="L50">                            it.second.get().publicId,</span>
+<span class="fc" id="L51">                            it.first.get().publicId</span>
+                    )
+<span class="fc" id="L53">                }?.run {</span>
+<span class="fc" id="L54">                    val requestId = UUID.randomUUID().toString()</span>
+
+<span class="fc" id="L56">                    kms.grantAccessToAccountOwner(requestId, this)</span>
+<span class="pc" id="L57">                            .peekLeft {</span>
+<span class="nc" id="L58">                                updateJobStatus(job, FAILED)</span>
+<span class="nc" id="L59">                                counter(&quot;access.granted&quot;, &quot;outcome&quot;, &quot;FAILURE&quot;).increment()</span>
+<span class="nc" id="L60">                                log.debug(&quot;Unable to grant owner access: $it&quot;)</span>
+<span class="nc" id="L61">                            }</span>
+<span class="fc" id="L62">                            .peek {</span>
+<span class="fc" id="L63">                                counter(&quot;access.granted&quot;, &quot;outcome&quot;, &quot;SUCCESS&quot;).increment()</span>
+<span class="fc" id="L64">                                val dto = OutOfAreaActivationNotificationDTO(this.targetPersonPublicId)</span>
+<span class="fc" id="L65">                                phr.notifyOutOfAreaPatientAccountActivation(requestId, dto).execute()</span>
+<span class="fc" id="L66">                                updateJobStatus(job, REPAIRED)</span>
+<span class="fc" id="L67">                                log.info(&quot;Access to account ${this.accountPublicId} granted to owner ${this.targetPersonPublicId}&quot;)</span>
+<span class="fc" id="L68">                            }</span>
+                }
+
+<span class="fc" id="L71">    }</span>
+
+    private fun updateJobStatus(job: PublicOutOfAreaRepairJob, status: OutOfAreaRepairJobStatus): PublicOutOfAreaRepairJob {
+<span class="fc" id="L74">        job.status = status</span>
+<span class="fc" id="L75">        job.statusDate = dateTimeService.nowLocalDateTime()</span>
+
+<span class="fc" id="L77">        return jobRepository.save(job)</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

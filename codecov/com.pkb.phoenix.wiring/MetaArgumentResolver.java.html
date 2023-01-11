@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MetaArgumentResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.phoenix.wiring</a> &gt; <span class="el_source">MetaArgumentResolver.java</span></div><h1>MetaArgumentResolver.java</h1><pre class="source lang-java linenums">package com.pkb.phoenix.wiring;
+
+import com.pkb.phoenix.api.service.ImmutableKeycloakId;
+import com.pkb.phoenix.api.service.Meta;
+import com.pkb.phoenix.api.service.user.UserService;
+import org.jetbrains.annotations.NotNull;
+import org.keycloak.KeycloakPrincipal;
+import org.keycloak.adapters.RefreshableKeycloakSecurityContext;
+import org.keycloak.representations.AccessToken;
+import org.springframework.beans.factory.ObjectFactory;
+import org.springframework.core.MethodParameter;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.web.bind.support.WebDataBinderFactory;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.method.support.HandlerMethodArgumentResolver;
+import org.springframework.web.method.support.ModelAndViewContainer;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+import javax.servlet.http.HttpSession;
+import java.util.List;
+import java.util.UUID;
+
+import static com.pkb.phoenix.api.service.ImmutableMeta.meta;
+import static com.pkb.phoenix.api.service.ImmutableSession.session;
+import static com.pkb.phoenix.api.service.ImmutableUser.user;
+import static com.pkb.phoenix.api.service.Role.CUSTOMER_SUPPORT_SPECIALIST;
+import static com.pkb.phoenix.api.service.Role.INFORMATION_GOVERNOR;
+import static com.pkb.phoenix.wiring.Role.CS;
+import static com.pkb.phoenix.wiring.Role.IG;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static java.util.UUID.randomUUID;
+import static java.util.stream.Collectors.toUnmodifiableSet;
+
+/**
+ * This class makes it possible to declare resolvable {@link Meta} parameters to request controller methods.
+ *
+ * &lt;pre&gt;
+ * &lt;code&gt;
+ *
+ *  {@literal @}RestController
+ *  {@literal @}RequestMapping(value = &quot;/phoenix/task&quot;)
+ *   public class TaskController {
+ *    {@literal @}PostMapping
+ *     public DetailedTask createTask(@Valid @RequestBody CreateTask payload, Meta meta) {
+ *       // ...
+ *     }
+ *   }
+ * &lt;/code&gt;
+ * &lt;/pre&gt;
+ */
+public class MetaArgumentResolver implements HandlerMethodArgumentResolver {
+    public static class MetaArgumentResolverConfigurer implements WebMvcConfigurer {
+        private final ObjectFactory&lt;HttpSession&gt; httpSessionFactory;
+        private final String resource;
+        private final UserService userService;
+
+<span class="fc" id="L59">        public MetaArgumentResolverConfigurer(ObjectFactory&lt;HttpSession&gt; httpSessionFactory, String resource, UserService userService) {</span>
+<span class="fc" id="L60">            this.httpSessionFactory = httpSessionFactory;</span>
+<span class="fc" id="L61">            this.resource = resource;</span>
+<span class="fc" id="L62">            this.userService = userService;</span>
+<span class="fc" id="L63">        }</span>
+
+        @Override
+        public void addArgumentResolvers(
+                List&lt;HandlerMethodArgumentResolver&gt; resolvers) {
+<span class="fc" id="L68">            resolvers.add(new MetaArgumentResolver(httpSessionFactory, resource, userService));</span>
+<span class="fc" id="L69">        }</span>
+    }
+
+    private final ObjectFactory&lt;HttpSession&gt; httpSessionFactory;
+    private final String resource;
+    private final UserService userService;
+
+<span class="fc" id="L76">    public MetaArgumentResolver(ObjectFactory&lt;HttpSession&gt; httpSessionFactory, String resource, UserService userService) {</span>
+<span class="fc" id="L77">        this.httpSessionFactory = httpSessionFactory;</span>
+<span class="fc" id="L78">        this.resource = resource;</span>
+<span class="fc" id="L79">        this.userService = userService;</span>
+<span class="fc" id="L80">    }</span>
+
+    @Override
+    public boolean supportsParameter(MethodParameter parameter) {
+<span class="fc bfc" id="L84" title="All 2 branches covered.">        return parameter.getParameter().getType() == Meta.class;</span>
+    }
+
+    @Override
+    public Object resolveArgument(@NotNull MethodParameter parameter,
+            ModelAndViewContainer mavContainer,
+            @NotNull NativeWebRequest webRequest,
+            WebDataBinderFactory binderFactory) throws Exception {
+
+<span class="fc" id="L93">        var sessionId = ensureSessionIdExistsAndGetIt();</span>
+<span class="fc" id="L94">        var token = getToken();</span>
+<span class="fc" id="L95">        var keycloakId = ImmutableKeycloakId.of(token.getSubject());</span>
+<span class="fc" id="L96">        var roles = token.getResourceAccess().get(resource).getRoles()</span>
+<span class="fc" id="L97">                .stream()</span>
+<span class="fc" id="L98">                .map(role -&gt; Match(role).of(</span>
+<span class="fc" id="L99">                        Case($(IG.code()), INFORMATION_GOVERNOR),</span>
+<span class="fc" id="L100">                        Case($(CS.code()), CUSTOMER_SUPPORT_SPECIALIST)))</span>
+<span class="fc" id="L101">                .collect(toUnmodifiableSet());</span>
+
+<span class="fc" id="L103">        var username = token.getName();</span>
+
+<span class="fc" id="L105">        var user = userService.findUserByKeycloakId(keycloakId)</span>
+<span class="fc" id="L106">                .map(registeredUser -&gt; {</span>
+<span class="pc bpc" id="L107" title="1 of 2 branches missed.">                    if (!registeredUser.name().equalsIgnoreCase(username)) {</span>
+<span class="nc" id="L108">                        return userService.updateExistingUser(registeredUser.internalId(), username, roles);</span>
+                    }
+<span class="fc" id="L110">                    return registeredUser;</span>
+                })
+<span class="fc" id="L112">                .orElseGet(() -&gt; userService.createNewUser(username, keycloakId, roles));</span>
+<span class="fc" id="L113">        return meta(session(sessionId, user(user.internalId(), keycloakId.value(), user.name(), roles, user.fdApiKey())), randomUUID());</span>
+    }
+
+    private UUID ensureSessionIdExistsAndGetIt() {
+<span class="fc" id="L117">        var session = httpSessionFactory.getObject();</span>
+<span class="fc" id="L118">        var attribute = session.getAttribute(&quot;sid-phoenix&quot;);</span>
+
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">        if (attribute == null) {</span>
+<span class="fc" id="L121">            session.setAttribute(&quot;sid-phoenix&quot;, randomUUID());</span>
+<span class="fc" id="L122">            attribute = session.getAttribute(&quot;sid-phoenix&quot;);</span>
+        }
+<span class="fc" id="L124">        return UUID.fromString(attribute.toString());</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private AccessToken getToken() {
+        //noinspection unchecked
+<span class="fc" id="L130">        var keycloakPrincipal = (KeycloakPrincipal&lt;RefreshableKeycloakSecurityContext&gt;) SecurityContextHolder.getContext().getAuthentication().getPrincipal();</span>
+
+<span class="fc" id="L132">        return keycloakPrincipal.getKeycloakSecurityContext().getToken();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

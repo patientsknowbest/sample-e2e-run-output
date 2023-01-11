@@ -1,0 +1,1452 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EHRData.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.app.entity</a> &gt; <span class="el_source">EHRData.java</span></div><h1>EHRData.java</h1><pre class="source lang-java linenums">package com.pkb.app.entity;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.common.ehrdata.serialization.EHRDataDeserializer;
+import com.pkb.common.ehrdata.serialization.EHRDataSerializer;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.Route;
+import com.pkb.infrastructure.hibernate.id.enhanced.ResettablePooledLoOptimizer;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.privacy.entity.PrivacyFlags;
+import com.pkb.user.entity.PKBPerson;
+import org.apache.commons.lang3.ClassUtils;
+import org.apache.commons.lang3.NotImplementedException;
+import org.apache.commons.lang3.StringUtils;
+import org.hibernate.annotations.GenericGenerator;
+import org.hibernate.annotations.JoinFormula;
+import org.hibernate.annotations.Type;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.persistence.Column;
+import javax.persistence.Entity;
+import javax.persistence.EnumType;
+import javax.persistence.Enumerated;
+import javax.persistence.FetchType;
+import javax.persistence.GeneratedValue;
+import javax.persistence.GenerationType;
+import javax.persistence.Id;
+import javax.persistence.ManyToOne;
+import javax.persistence.PrePersist;
+import javax.persistence.PreUpdate;
+import javax.persistence.Table;
+import javax.persistence.Temporal;
+import javax.persistence.TemporalType;
+import javax.persistence.Transient;
+import java.io.IOException;
+import java.io.Serializable;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.math.BigInteger;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+import static java.util.function.Function.identity;
+
+/**
+ * Simpler replacement to Tolven's MenuData class.
+ * Ignores many of their fields, and adds some of our own.
+ * Working on making interface consistent, and getting all data in here...
+ *
+ * @author robwhelan
+ */
+@Entity(name = &quot;EHRData&quot;)
+@Table(schema = &quot;app&quot;, name = &quot;menu_data&quot;)
+public class EHRData implements Serializable {
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L73">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    /**
+     * treat this value as &quot;null&quot; for entered date... this field must be non-null in the DB so that latestByType queries work
+     */
+<span class="fc" id="L78">    private static final Date NULL_ENTERED_DATE = new Date(-2208988800000L); // 1/1/1900 GMT</span>
+
+    public static final String UNIQUE_ID = &quot;uniqueId&quot;;
+    public static final String ENTERED_DATE = &quot;enteredDate&quot;;
+    public static final String PERSISTED_DATE = &quot;persistedDate&quot;;
+    public static final String SOURCE_ORG_ID = &quot;sourceOrgId&quot;;
+
+    // loaded on class load and cached; used by DTOMapping and EHRBean
+<span class="fc" id="L86">    public static final Set&lt;String&gt; objectDbColumnSet = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;());</span>
+<span class="fc" id="L87">    public static final Set&lt;String&gt; primitiveDbColumnSet = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;());</span>
+<span class="fc" id="L88">    public static final Set&lt;String&gt; fieldSet = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;());</span>
+<span class="fc" id="L89">    public static final Set&lt;String&gt; dbColumnSet = Collections.newSetFromMap(new ConcurrentHashMap&lt;&gt;());</span>
+<span class="fc" id="L90">    public static final Map&lt;String, String&gt; fieldToDbColumnMap = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L91">    public static final Map&lt;String, String&gt; dbColumnMapToField = new ConcurrentHashMap&lt;&gt;();</span>
+
+    // used for setQueryField() and getQueryField()
+<span class="fc" id="L94">    private static final Set&lt;String&gt; queryFields = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L95">    private static final Map&lt;String, Method&gt; queryFieldSetters = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L96">    private static final Map&lt;String, Method&gt; queryFieldGetters = new ConcurrentHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L98">    private static final EHRDataSerializer dataSerializer = new EHRDataSerializer() {</span>
+    };
+<span class="fc" id="L100">    private static final EHRDataDeserializer dataDeserializer = new EHRDataDeserializer() {</span>
+    };
+    public static final String JAVA_UTIL_DATE = &quot;java.util.Date&quot;;
+
+    static {
+<span class="fc bfc" id="L105" title="All 2 branches covered.">        for (Method method : EHRData.class.getMethods()) {</span>
+<span class="fc" id="L106">            String methodName = method.getName();</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">            if (methodName.startsWith(&quot;set&quot;)</span>
+<span class="fc bfc" id="L108" title="All 2 branches covered.">                    &amp;&amp; (method.getReturnType() == void.class)</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">                    &amp;&amp; (method.getParameterTypes().length == 1)</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">                    &amp;&amp; !methodName.equals(&quot;setQueryField&quot;)) {</span>
+<span class="fc" id="L111">                String attribute = methodName.substring(3, 4).toLowerCase() + methodName.substring(4);</span>
+<span class="fc" id="L112">                queryFieldSetters.put(attribute, method);</span>
+<span class="fc" id="L113">                queryFields.add(attribute);</span>
+            }
+<span class="fc bfc" id="L115" title="All 2 branches covered.">            if (methodName.startsWith(&quot;get&quot;)</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">                    &amp;&amp; (method.getReturnType() != void.class)</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">                    &amp;&amp; (method.getParameterTypes().length == 0)</span>
+<span class="pc bpc" id="L118" title="1 of 2 branches missed.">                    &amp;&amp; !methodName.equals(&quot;getQueryField&quot;)) {</span>
+<span class="fc" id="L119">                String attribute = methodName.substring(3, 4).toLowerCase() + methodName.substring(4);</span>
+<span class="fc" id="L120">                queryFieldGetters.put(attribute, method);</span>
+            }
+        }
+
+        // init and cache these lists for all instances to share
+
+        // id doesn't have a @Column annotation -- just add manually first
+<span class="fc" id="L127">        primitiveDbColumnSet.add(&quot;id&quot;);</span>
+<span class="fc" id="L128">        fieldToDbColumnMap.put(&quot;id&quot;, &quot;id&quot;);</span>
+<span class="fc" id="L129">        fieldSet.add(&quot;id&quot;);</span>
+<span class="fc" id="L130">        dbColumnMapToField.put(&quot;id&quot;, &quot;id&quot;);</span>
+<span class="fc" id="L131">        dbColumnSet.add(&quot;id&quot;);</span>
+        // now add all declared columns
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        for (Field field : EHRData.class.getDeclaredFields()) {</span>
+            // if the DB column != field name, they have a @Column annotation with name=COL_NAME
+<span class="fc" id="L135">            Column colAnno = field.getAnnotation(Column.class);</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">            if (colAnno != null) {</span>
+<span class="fc" id="L137">                String fieldName = field.getName();</span>
+                // if there's no DB column specified, just use the field name
+<span class="fc bfc" id="L139" title="All 2 branches covered.">                String colName = StringUtils.isNotBlank(colAnno.name()) ? colAnno.name() : fieldName;</span>
+
+<span class="fc bfc" id="L141" title="All 2 branches covered.">                if (field.getType().isPrimitive()) {</span>
+<span class="fc" id="L142">                    primitiveDbColumnSet.add(colName);</span>
+                } else {
+<span class="fc" id="L144">                    objectDbColumnSet.add(colName);</span>
+                }
+
+<span class="fc" id="L147">                fieldToDbColumnMap.put(fieldName, colName);</span>
+<span class="fc" id="L148">                dbColumnMapToField.put(colName, fieldName);</span>
+<span class="fc" id="L149">                fieldSet.add(fieldName);</span>
+<span class="fc" id="L150">                dbColumnSet.add(colName);</span>
+            }
+            // ignore fields w/o @Column annotation
+        }
+<span class="fc" id="L154">    }</span>
+
+    @Id
+    @GenericGenerator(name = &quot;seq_app_gen&quot;, strategy = &quot;enhanced-sequence&quot;,
+            parameters = {
+                    @org.hibernate.annotations.Parameter(
+                            name = &quot;optimizer&quot;,
+                            value = ResettablePooledLoOptimizer.OPTIMIZER_CANONICAL_NAME),
+                    @org.hibernate.annotations.Parameter(
+                            name = &quot;schema&quot;,
+                            value = &quot;app&quot;),
+                    @org.hibernate.annotations.Parameter(
+                            name = &quot;sequence_name&quot;,
+                            value = &quot;seq_app&quot;),
+                    @org.hibernate.annotations.Parameter(
+                            name = &quot;increment_size&quot;,
+                            value = &quot;50&quot;)
+            }
+    )
+    @GeneratedValue(strategy = GenerationType.SEQUENCE, generator = &quot;seq_app_gen&quot;)
+    private long id;
+
+    @Column
+    @Enumerated(EnumType.STRING)
+    @Type(type = &quot;com.vladmihalcea.hibernate.type.basic.PostgreSQLEnumType&quot;)
+    private MenuDataType dataType;
+
+    @Column(name = &quot;account_id&quot;, updatable = false)
+    private long accountId;
+
+    @Column(name = &quot;document_metadata_id&quot;)
+    @Type(type = &quot;pg-uuid&quot;)
+    private UUID documentMetadataId;
+
+    /**
+     * The deleted flag should only be set to true if the data point was explicitly deleted. For example, if a document
+     * provided via HL7 MDM T02 was subsequently deleted using an HL7 MDM T11.
+     *
+     * If an update was provided to an existing data point then any existing versions of that data should remain with
+     * the deleted flag set to false; searches should group by the uniqueid and select the version with the most recent
+     * entereddate in order to select the most recent version. Setting the deleted flag to true on existing versions
+     * will cause problems because when out-of-date data is received the entereddate prioritisation mechanism will try
+     * to gracefully ignore the old version (even though it might have been received more recently) but if the version
+     * with the most recent entereddate has been marked as deleted then the entire data point will be treated as
+     * deleted. See PHR-8948 for an example of this.
+     *
+     * A data point is considered to be deleted if and only if the version with the most recent entereddate has the
+     * deleted flag set to true.
+     */
+    @Column
+    private Boolean deleted;
+
+    // the &quot;require&quot; columns determine who is allowed to access this part of the patient's record.
+    // For most data, requireGeneral = true and the others are false.
+    // These correspond to access granted checks for users who have been granted access to the patient's account.
+    @Column
+    private boolean requireGeneral;
+    @Column
+    private boolean requireSexualHealth;
+    @Column
+    private boolean requireMentalHealth;
+    @Column
+    private boolean requireSocialCare;
+
+    @ManyToOne(fetch = FetchType.EAGER)
+    @JoinFormula(&quot;(SELECT pf.id FROM privacy_flags pf WHERE pf.uniqueid = uniqueid ORDER BY pf.override DESC, pf.change_date DESC, id DESC LIMIT 1)&quot;)
+    private PrivacyFlags latestPrivacyFlags;
+
+    /**
+     * sometimes we migrate data from old structures to newer ones -- this tracks what records have been migrated to what level.
+     */
+    @Column(name = &quot;migration_version&quot;, nullable = false, columnDefinition = &quot;integer default 0&quot;)
+    private int migrationVersion;
+
+    @Temporal(TemporalType.TIMESTAMP)
+    @Column
+    private Date date01;
+
+    @Temporal(TemporalType.TIMESTAMP)
+    @Column
+    private Date date02;
+
+    @Temporal(TemporalType.TIMESTAMP)
+    @Column
+    private Date date03;
+
+    @Temporal(TemporalType.TIMESTAMP)
+    @Column
+    private Date date04;
+
+    @Temporal(TemporalType.TIMESTAMP)
+    @Column
+    private Date date05;
+
+    @Column
+    private String code01CodeSystem;
+
+    @Column
+    private String code01Code;
+
+    @Column(length = 1000)
+    private String string01;
+
+    @Column(length = 1000)
+    private String string02;
+
+    @Column(length = 1000)
+    private String string03;
+
+    @Column(length = 1000)
+    private String string04;
+
+    @Column(length = 1000)
+    private String string05;
+
+    @Column(name = &quot;sourcePersonId&quot;)
+    private Long sourcePersonId;
+
+    @Column(name = &quot;sourceTeamId&quot;)
+    private Long sourceTeamId;
+
+    @Column(name = &quot;sourceOrgId&quot;)
+    private Long sourceOrgId;
+
+    @Column(name = &quot;connectingOrgId&quot;)
+    private Long connectingOrgId;
+
+    @Column(name = &quot;hl7partnerid&quot;)
+    private Long hl7PartnerId;
+
+    @Column(name = &quot;responsibleOrganisationIdentifier&quot;)
+    private String responsibleOrganisationIdentifier;
+
+    @Column(length = 1000)
+    private String string09;
+
+    @Column(length = 1000)
+    private String string10;
+
+    @Column(length = 1000)
+    private String string11;
+
+    @Column(length = 1000)
+    private String string12;
+
+    @Column(length = 1000)
+    private String string13;
+
+    @Column(length = 1000)
+    private String string14;
+
+    @Column
+    private Long long01;
+
+    @Column
+    private Long long02;
+
+    @Column
+    private Long long03;
+
+    @Column
+    private Long long04;
+
+    @Column
+    private Boolean boolean01;
+
+    @Column
+    private Boolean boolean02;
+
+    @Column
+    private Boolean boolean03;
+
+    @Column
+    @Type(type = &quot;pg-uuid&quot;)
+    private UUID uuid01;
+
+    @Column
+    @Type(type = &quot;pg-uuid&quot;)
+    private UUID uniqueId;
+
+    @Temporal(TemporalType.TIMESTAMP)
+    @Column
+    private Date enteredDate;
+
+    @Temporal(TemporalType.TIMESTAMP)
+    @Column
+    private Date persistedDate;
+
+    @Column(nullable = false)
+    @Enumerated(EnumType.STRING)
+    @Type(type = &quot;com.vladmihalcea.hibernate.type.basic.PostgreSQLEnumType&quot;)
+    private Route route;
+
+    @Column
+    private Long uploadedDataId;
+
+    @Column(name = &quot;encrypted_data&quot;)
+    private byte[] encryptedData;
+
+    @Column(name = &quot;secret_key_inline&quot;)
+    private byte[] secretKeyInline;
+
+    @Column(name = &quot;symmetric_encryption_key_id&quot;)
+    private Long symmetricEncryptionKeyId;
+
+    @Column(name = &quot;symmetric_encryption_nonce_base64&quot;)
+    private String nonceBase64;
+
+    // TODO: need to populate this with a default value for old records... so we can migrate/upgrade.
+    @Column(name = &quot;secret_key_algorithm&quot;, length = 255)
+    private String secretKeyAlgorithm;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinFormula(value = &quot;sourceTeamId&quot;, referencedColumnName = &quot;id&quot;)
+    private Team sourceTeam;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinFormula(value = &quot;sourceOrgId&quot;, referencedColumnName = &quot;id&quot;)
+    private Org sourceOrg;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinFormula(value = &quot;connectingOrgId&quot;, referencedColumnName = &quot;id&quot;)
+    private Org connectingOrg;
+
+<span class="fc" id="L378">    @Transient</span>
+    private Map&lt;String, Object&gt; encryptedFields = new HashMap&lt;&gt;(); // naming note: &quot;encryptable&quot; better?  They're NOT encrypted in the Map
+
+<span class="fc" id="L381">    @Transient</span>
+    private boolean encryptedFieldsEdited = false;
+
+<span class="fc" id="L384">    @Transient</span>
+    private boolean decrypted = false;
+
+<span class="fc" id="L387">    @Transient</span>
+    transient boolean migrationInProcess = false;
+
+    @Transient
+    private PKBPerson sourcePerson;
+
+    public EHRData() {
+<span class="fc" id="L394">        super();</span>
+<span class="fc" id="L395">    }</span>
+
+    public boolean isDecrypted() {
+<span class="fc" id="L398">        return decrypted;</span>
+    }
+
+    /**
+     * Compare two EHRData objects for equality. This test is based on the surrogate ID, not the
+     * data contents.
+     */
+    @Override
+    public boolean equals(Object obj) {
+<span class="nc bnc" id="L407" title="All 2 branches missed.">        if (!(obj instanceof EHRData)) {</span>
+<span class="nc" id="L408">            return false;</span>
+        }
+<span class="nc bnc" id="L410" title="All 4 branches missed.">        if ((this.getId() == 0) || (((EHRData) obj).getId() == 0)) {</span>
+<span class="nc" id="L411">            throw new RuntimeException(&quot;EHRData that has not been persisted cannot be compared for equality &quot; + this);</span>
+        }
+<span class="nc bnc" id="L413" title="All 2 branches missed.">        if (this.getId() == ((EHRData) obj).getId()) {</span>
+<span class="nc" id="L414">            return true;</span>
+        }
+<span class="nc" id="L416">        return false;</span>
+    }
+
+    /**
+     * Provide a debug string representation for this object.
+     * (non-Javadoc)
+     *
+     * @see java.lang.Object#toString()
+     */
+    @Override
+    public String toString() {
+<span class="nc" id="L427">        StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L428">        sb.append(&quot;[EHRData] Account: &quot;);</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">        if (accountId &lt;= 0) {</span>
+<span class="nc" id="L430">            sb.append(&quot;null&quot;);</span>
+        } else {
+<span class="nc" id="L432">            sb.append(accountId);</span>
+        }
+<span class="nc" id="L434">        sb.append(&quot; DataType: &quot;).append(dataType.name());</span>
+
+<span class="nc" id="L436">        return sb.toString();</span>
+    }
+
+    public String dumpConsentRequirements() {
+<span class="nc" id="L440">        return String.format(&quot;EHRData[consent]{id=%d, general=%b, mental=%b, sexual=%b, social=%b}&quot;,</span>
+<span class="nc" id="L441">                id, requireGeneral, requireMentalHealth, requireSexualHealth, requireSocialCare);</span>
+    }
+
+    /**
+     * Return a hash code for this object. Note: The hashCode is based on the id
+     * and therefore cannot be determined until the ide is created which will be after a call to
+     * em.persist().
+     *
+     * @throws IllegalStateException if the id has not been established
+     */
+    @Override
+    public int hashCode() {
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">        if (getId() == 0) {</span>
+<span class="nc" id="L454">            throw new IllegalStateException(&quot;id not yet established in EHRData object&quot;);</span>
+        }
+<span class="fc" id="L456">        return Long.valueOf(getId()).hashCode();</span>
+    }
+
+    /**
+     * Get an encrypted field. Any column definition that doesn't mention an internal
+     * column comes here. Encrypted fields are stored in an XML structure.
+     *
+     * @param fieldName
+     * @return field value
+     */
+    public @Nullable Object getEncryptedField(String fieldName) {
+<span class="fc" id="L467">        return encryptedFields.get(fieldName);</span>
+    }
+
+    public void setEncryptedField(String fieldName, Object fieldValue) {
+<span class="fc" id="L471">        Object prevValue = encryptedFields.put(fieldName, fieldValue);</span>
+<span class="fc bfc" id="L472" title="All 2 branches covered.">        if (!Objects.equals(prevValue, fieldValue)) {</span>
+<span class="fc" id="L473">            encryptedFieldsEdited = true;</span>
+        }
+<span class="fc" id="L475">    }</span>
+
+    /**
+     * A map of additional attributes held by this EHRData item. The map itself is not persisted but
+     * is populated by reading the contents from an xml representation of the fields.
+     *
+     * @return
+     * @throws ClassNotFoundException
+     * @throws IOException
+     */
+    public Map&lt;String, Object&gt; getEncryptedFields() {
+<span class="fc" id="L486">        return encryptedFields;</span>
+    }
+
+    /**
+     * Set the value for a field using the name assigned by the placeholder column definition.
+     * If the field is encrypted, then we always store the type of object provided. If it is an internal field, then we
+     * store it in the type of that internal field in which case we can provide some trivial type conversion such as string to long or long
+     * to string.
+     *
+     * @param fieldName
+     * @param value
+     */
+    public void setField(String fieldName, Object value) {
+        Object fieldValue;
+        // In general, empty strings are treated as null
+<span class="nc bnc" id="L501" title="All 4 branches missed.">        if ((value instanceof String) &amp;&amp; ((String) value).isEmpty()) {</span>
+<span class="nc" id="L502">            fieldValue = null;</span>
+        } else {
+<span class="nc" id="L504">            fieldValue = value;</span>
+        }
+
+<span class="nc bnc" id="L507" title="All 2 branches missed.">        if (isQueryField(fieldName)) {</span>
+<span class="nc" id="L508">            setQueryField(fieldName, fieldValue);</span>
+<span class="nc" id="L509">            return;</span>
+        } else {
+            // TODO: enforce specific field names based on DTO
+<span class="nc" id="L512">            setEncryptedField(fieldName, fieldValue);</span>
+<span class="nc" id="L513">            return;</span>
+        }
+    }
+
+    private static @Nullable Long coerceLong(Object value) {
+<span class="nc bnc" id="L518" title="All 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L519">            return null;</span>
+        }
+<span class="nc bnc" id="L521" title="All 2 branches missed.">        if (value instanceof Long) {</span>
+<span class="nc" id="L522">            return (Long) value;</span>
+        }
+<span class="nc bnc" id="L524" title="All 2 branches missed.">        if (value instanceof Integer) {</span>
+<span class="nc" id="L525">            return ((Integer) value).longValue();</span>
+        }
+<span class="nc bnc" id="L527" title="All 2 branches missed.">        if (value instanceof String) {</span>
+<span class="nc" id="L528">            return Long.parseLong((String) value);</span>
+        }
+<span class="nc bnc" id="L530" title="All 2 branches missed.">        if (value instanceof BigInteger) {</span>
+<span class="nc" id="L531">            long converted = ((BigInteger) value).longValue();</span>
+<span class="nc bnc" id="L532" title="All 2 branches missed.">            if (!BigInteger.valueOf(converted).equals(value)) {</span>
+<span class="nc" id="L533">                throw new RuntimeException(&quot;Cannot convert &quot; + value + &quot; to Long value from BigInteger (overflow)&quot;);</span>
+            }
+        }
+<span class="nc" id="L536">        throw new RuntimeException(&quot;Cannot convert &quot; + value + &quot; to Long value&quot;);</span>
+    }
+
+    /**
+     * Return a field from EHRData by the name assigned by the Placeholder Columns in application.xml.
+     *
+     * @param fieldName
+     * @return the column value (which may be null)
+     */
+    public @Nullable Object getField(String fieldName) {
+<span class="nc" id="L546">        Object value = encryptedFields.get(fieldName);</span>
+
+<span class="nc bnc" id="L548" title="All 2 branches missed.">        if (value == null) {</span>
+<span class="nc" id="L549">            value = getQueryField(fieldName);</span>
+        }
+
+<span class="nc" id="L552">        return value;</span>
+    }
+
+    /**
+     * Return true if the named field is an internal field name
+     *
+     * @param fieldName
+     * @return
+     */
+    public static boolean isQueryField(String fieldName) {
+<span class="nc" id="L562">        return queryFields.contains(fieldName);</span>
+    }
+
+    public static String[] getQueryFields() {
+<span class="nc" id="L566">        return queryFields.toArray(new String[queryFields.size()]);</span>
+    }
+
+    public @Nullable Object getQueryField(String fieldName) {
+<span class="fc" id="L570">        Method method = queryFieldGetters.get(fieldName);</span>
+<span class="pc bpc" id="L571" title="1 of 2 branches missed.">        if (method == null) {</span>
+<span class="nc" id="L572">            throw new IllegalArgumentException(&quot;Invalid EHRData field name: &quot; + fieldName);</span>
+        }
+        try {
+<span class="fc" id="L575">            return method.invoke(this);</span>
+<span class="nc" id="L576">        } catch (Exception e) {</span>
+<span class="nc" id="L577">            throw new IllegalArgumentException(&quot;Error getting EHRData field: &quot; + fieldName, e);</span>
+        }
+    }
+
+    /**
+     * Set the value of an internal field.
+     *
+     * @param fieldName
+     * @param value
+     */
+    public void setQueryField(String fieldName, Object value) {
+<span class="fc" id="L588">        Method method = queryFieldSetters.get(fieldName);</span>
+<span class="pc bpc" id="L589" title="1 of 2 branches missed.">        if (method == null) {</span>
+<span class="nc" id="L590">            throw new IllegalArgumentException(&quot;Invalid menuData field name: &quot; + fieldName);</span>
+        }
+        Object normalizedValue;
+<span class="fc bfc" id="L593" title="All 2 branches covered.">        if (value == null) {</span>
+<span class="fc" id="L594">            normalizedValue = null;</span>
+            // special handling for primitive fields -- don't overwrite these fields with null
+<span class="pc bpc" id="L596" title="1 of 6 branches missed.">            if (fieldName.equals(&quot;id&quot;) || fieldName.equals(&quot;dataType&quot;) || fieldName.equals(&quot;accountId&quot;)) {</span>
+<span class="fc" id="L597">                return;</span>
+            }
+        } else {
+<span class="fc" id="L600">            Class&lt;?&gt; paramClass = method.getParameterTypes()[0];</span>
+
+            // don't break just because we're setting a Long as a long param!
+<span class="fc bfc" id="L603" title="All 2 branches covered.">            if (paramClass.isPrimitive()) {</span>
+<span class="fc" id="L604">                paramClass = ClassUtils.primitiveToWrapper(paramClass);</span>
+            }
+
+<span class="fc bfc" id="L607" title="All 2 branches covered.">            if (paramClass.isInstance(value)) {</span>
+<span class="fc" id="L608">                normalizedValue = value;</span>
+            } else {
+                // Cast to string?
+<span class="pc bpc" id="L611" title="1 of 4 branches missed.">                if (String.class.isAssignableFrom(paramClass) &amp;&amp; (value instanceof Number)) {</span>
+<span class="fc" id="L612">                    normalizedValue = value.toString();</span>
+<span class="pc bpc" id="L613" title="3 of 4 branches missed.">                } else if (Long.class.isAssignableFrom(paramClass) &amp;&amp; (value instanceof String)) {</span>
+<span class="nc" id="L614">                    normalizedValue = Long.parseLong((String) value);</span>
+<span class="pc bpc" id="L615" title="3 of 4 branches missed.">                } else if (Long.class.isAssignableFrom(paramClass) &amp;&amp; (value instanceof Number)) {</span>
+<span class="nc" id="L616">                    normalizedValue = ((Number) value).longValue();</span>
+<span class="pc bpc" id="L617" title="1 of 4 branches missed.">                } else if (paramClass.isEnum() &amp;&amp; (value instanceof String)) {</span>
+<span class="fc" id="L618">                    normalizedValue = Enum.valueOf((Class) paramClass, (String) value);</span>
+<span class="pc bpc" id="L619" title="2 of 4 branches missed.">                } else if (paramClass.getTypeName().equals(JAVA_UTIL_DATE) &amp;&amp; value instanceof Instant) {</span>
+<span class="fc" id="L620">                    normalizedValue = Date.from((Instant) value);</span>
+                } else {
+<span class="nc" id="L622">                    throw new RuntimeException(</span>
+<span class="nc" id="L623">                            &quot;Type mismatch in setQueryField (&quot; + value.getClass().getName() + &quot;) requires: &quot; + method.toString());</span>
+                }
+            }
+        }
+        try {
+<span class="fc" id="L628">            method.invoke(this, normalizedValue);</span>
+<span class="nc" id="L629">        } catch (Exception e) {</span>
+<span class="nc" id="L630">            throw new IllegalArgumentException(&quot;Error setting menuData field name: &quot; + fieldName + &quot; value &quot; + value, e);</span>
+<span class="fc" id="L631">        }</span>
+<span class="fc" id="L632">    }</span>
+
+    public @Nullable Date getDateField(String fieldName) {
+<span class="nc" id="L635">        Object result = getField(fieldName);</span>
+<span class="nc bnc" id="L636" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L637">            return null;</span>
+        }
+<span class="nc bnc" id="L639" title="All 2 branches missed.">        if (result instanceof Date) {</span>
+<span class="nc" id="L640">            return (Date) result;</span>
+        }
+<span class="nc" id="L642">        throw new IllegalArgumentException(&quot;Field: &quot; + fieldName + &quot; is not a Date&quot;);</span>
+    }
+
+    public @Nullable String getStringField(String fieldName) {
+<span class="nc" id="L646">        Object result = getField(fieldName);</span>
+<span class="nc bnc" id="L647" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L648">            return null;</span>
+        }
+<span class="nc bnc" id="L650" title="All 2 branches missed.">        if (result instanceof String) {</span>
+<span class="nc" id="L651">            return (String) result;</span>
+        }
+<span class="nc" id="L653">        throw new IllegalArgumentException(&quot;Field: &quot; + fieldName + &quot; is not a String&quot;);</span>
+    }
+
+    public @Nullable Long getLongField(String fieldName) {
+<span class="nc" id="L657">        return coerceLong(getField(fieldName));</span>
+    }
+
+    public @Nullable Boolean getBooleanField(String fieldName) {
+<span class="nc" id="L661">        Object result = getField(fieldName);</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L663">            return null;</span>
+        }
+<span class="nc bnc" id="L665" title="All 2 branches missed.">        if (result instanceof Boolean) {</span>
+<span class="nc" id="L666">            return (Boolean) result;</span>
+        }
+<span class="nc" id="L668">        throw new IllegalArgumentException(&quot;Field: &quot; + fieldName + &quot; is not a Boolean&quot;);</span>
+    }
+
+    public @Nullable Double getDoubleField(String fieldName) {
+<span class="nc" id="L672">        Object result = getField(fieldName);</span>
+<span class="nc bnc" id="L673" title="All 2 branches missed.">        if (result == null) {</span>
+<span class="nc" id="L674">            return null;</span>
+        }
+<span class="nc bnc" id="L676" title="All 2 branches missed.">        if (result instanceof Double) {</span>
+<span class="nc" id="L677">            return (Double) result;</span>
+        }
+<span class="nc" id="L679">        throw new IllegalArgumentException(&quot;Field: &quot; + fieldName + &quot; is not a Double&quot;);</span>
+    }
+
+    public @Nullable Date getQueryDateField(String fieldName) {
+<span class="nc" id="L683">        Object value = getQueryField(fieldName);</span>
+<span class="nc bnc" id="L684" title="All 2 branches missed.">        if (value instanceof Date) {</span>
+<span class="nc" id="L685">            return (Date) value;</span>
+        }
+<span class="nc" id="L687">        return null;</span>
+    }
+
+    public @Nullable Long getQueryLongField(String fieldName) {
+<span class="nc" id="L691">        return coerceLong(getQueryField(fieldName));</span>
+    }
+
+    public @Nullable String getQueryStringField(String fieldName) {
+<span class="nc" id="L695">        Object value = getQueryField(fieldName);</span>
+<span class="nc bnc" id="L696" title="All 2 branches missed.">        if (value instanceof String) {</span>
+<span class="nc" id="L697">            return (String) value;</span>
+        }
+<span class="nc" id="L699">        return null;</span>
+    }
+
+    /*
+     * Unmarshal an XML string into the specified encrypted fields map.
+     */
+    public void unmarshalEncryptedFields(byte[] decryptedData) {
+
+<span class="pc bpc" id="L707" title="2 of 4 branches missed.">        if ((decryptedData != null) &amp;&amp; (decryptedData.length &gt; 0)) {</span>
+<span class="fc" id="L708">            encryptedFields = dataDeserializer.deserialize(decryptedData, identity());</span>
+<span class="fc" id="L709">            decrypted = true;</span>
+        }
+<span class="fc" id="L711">    }</span>
+
+    /**
+     * Note: calling setEncryptedData() with the newly-encrypted encryptedFields will reset the &quot;edited&quot; flag.
+     * &lt;p&gt;
+     * Marshal into xml like this:
+     * &lt;?xml version=&quot;1.0&quot; encoding=&quot;UTF-8&quot;?&gt;
+     * &lt;fields cdataEncoding=&quot;Base64&quot;&gt;
+     * &lt;field name=&quot;thisIsNull&quot; type=&quot;null&quot;/&gt;
+     * &lt;field name=&quot;diagnosisStr&quot; type=&quot;String&quot;&gt;&lt;![CDATA[Scrofular goiter]]&gt;&lt;/field&gt;
+     * &lt;field name=&quot;endTimestamp&quot; type=&quot;Date&quot;&gt;&lt;![CDATA[1236739182736]]&gt;&lt;/field&gt;
+     * ...or Long, Boolean, or Double
+     * &lt;field name=&quot;symptomList&quot; type=&quot;List&amp;lt;String&amp;gt;&quot;&gt;
+     * &lt;item&gt;&lt;![CDATA[...in base64: Sprouted grains]]&gt;&lt;/item&gt;
+     * &lt;item&gt;&lt;![CDATA[...etc. Herniated Impetigo]]&gt;&lt;/item&gt;
+     * &lt;/field&gt;
+     * &lt;field name=&quot;nestedDTO&quot; type=&quot;Map&amp;lt;String,Object&amp;gt;&quot;&gt;
+     * &lt;fields&gt;
+     * &lt;field name=&quot;alsoNull&quot; type=&quot;null&quot; /&gt;
+     * &lt;field name=&quot;participantId&quot; type=&quot;Long&quot;&gt;&lt;![CDATA[12345]]&gt;&lt;/field&gt;
+     * &lt;/fields&gt;
+     * &lt;/field&gt;
+     * &lt;field name=&quot;nestedDTOList&quot; type=&quot;List&amp;lt;Map&amp;lt;String,Object&amp;gt;&amp;gt;&quot;&gt;
+     * &lt;item&gt;
+     * &lt;fields&gt;
+     * &lt;field name=&quot;alsoNull&quot; type=&quot;null&quot; /&gt;
+     * &lt;field name=&quot;participantId&quot; type=&quot;Long&quot;&gt;&lt;![CDATA[12345]]&gt;&lt;/field&gt;
+     * &lt;/fields&gt;
+     * &lt;/item&gt;
+     * &lt;/field&gt;
+     * &lt;/fields&gt;
+     *
+     * @return null if fields have not been edited (and encryptedData doesn't need to be changed)
+     * else marshal the fields into XML and return the byte array.
+     */
+    @Nullable
+    public byte[] marshalEncryptedFieldsIfEdited() {
+        // if edited... OR if encryptedData isn't here.  It will be missing if this was decrypted with the crypto service, or is new
+<span class="fc bfc" id="L749" title="All 2 branches covered.">        if (!isEncryptionNeeded()) {</span>
+<span class="fc" id="L750">            return null;</span>
+        }
+
+<span class="fc" id="L753">        return dataSerializer.serialize(getEncryptedFields());</span>
+    }
+
+    public boolean isEncryptionNeeded() {
+<span class="fc bfc" id="L757" title="All 4 branches covered.">        return encryptedFieldsEdited || getEncryptedData() == null;</span>
+    }
+
+    /**
+     * Pre-persist / pre-update: make sure external fields have already been marshaled into encryptedData and encrypted
+     * If you change fields in an EHRData entity *without* calling EHRBean.saveEHRData() then exit that EJB method, Hibernate tries to save
+     * it.
+     * We can't let Hibernate do that! Because we have fancy XML stuff to do.
+     */
+    @PrePersist
+    @PreUpdate
+    protected void detectUnsafeSave() {
+<span class="fc" id="L769">        LOGGER.debug(&quot;detecting non-bean save...&quot;);</span>
+<span class="pc bpc" id="L770" title="3 of 4 branches missed.">        if (encryptedFieldsEdited &amp;&amp; !migrationInProcess) {</span>
+<span class="nc" id="L771">            throw new IllegalAccessError(</span>
+                    &quot;Sorry, you need to call ehrBean.saveEhrData() so encrypted fields can be marshalled and encrypted into encryptedData! &quot; +
+                            &quot;id &quot; + id + &quot;, accountId &quot; + accountId + &quot;, dataType &quot; + dataType
+<span class="nc" id="L774">                            + /*&quot;, encryptedFields &quot; + encryptedFields +*/ &quot;, encryptedData &quot; + Arrays.toString(getEncryptedData()));</span>
+        }
+<span class="fc" id="L776">        String subject = (String)getEncryptedField(&quot;subject&quot;);</span>
+<span class="fc" id="L777">        String content = (String)getEncryptedField(&quot;content&quot;);</span>
+<span class="fc bfc" id="L778" title="All 4 branches covered.">        boolean subjectOrContentIsMissing = StringUtils.isBlank(subject) || StringUtils.isBlank(content);</span>
+<span class="fc bfc" id="L779" title="All 4 branches covered.">        if (dataType == MenuDataType.encounterEvent</span>
+                &amp;&amp; subjectOrContentIsMissing
+<span class="pc bpc" id="L781" title="1 of 2 branches missed.">                &amp;&amp; isDecrypted()) {</span>
+<span class="nc" id="L782">            LOGGER.error(String.format(&quot;PHR-9900: encounterEvent id %d is missing subject and/or content (subject is null=%b, subject is blank=%b&quot; +</span>
+                                    &quot;, content is null=%b, content is blank=%b)&quot;,
+<span class="nc bnc" id="L784" title="All 2 branches missed.">                            getId(),</span>
+<span class="nc bnc" id="L785" title="All 2 branches missed.">                            subject == null,</span>
+<span class="nc bnc" id="L786" title="All 4 branches missed.">                            subject != null &amp;&amp; subject.isBlank(),</span>
+<span class="nc bnc" id="L787" title="All 2 branches missed.">                            content == null,</span>
+<span class="nc bnc" id="L788" title="All 2 branches missed.">                            content != null &amp;&amp; content.isBlank()));</span>
+        }
+<span class="fc" id="L790">    }</span>
+
+    /**
+     * return the unique id of this EHRData item
+     *
+     * @return a unique id, greater than 0
+     */
+    public long getId() {
+<span class="fc" id="L798">        return id;</span>
+    }
+
+    public void setId(long id) {
+<span class="fc" id="L802">        this.id = id;</span>
+<span class="fc" id="L803">    }</span>
+
+    /**
+     * &lt;p&gt;
+     * Optionally references the document which gave rise to this EHRData item.
+     * If the EHRData item is a summary, then this will be the last document contributing to its value.
+     * If the NenuData item is updateable, then this will be the last document affecting the value(s).
+     * One document may affect many EHRData items. For example, a single CBC lab result might have separate
+     * EHRData items for each test value (RBC, WBC, HCT, HGB, etc).
+     * &lt;/p&gt;
+     *
+     * @return ID of document or null
+     */
+    public @Nullable UUID getDocumentMetadataId() {
+<span class="fc" id="L817">        return documentMetadataId;</span>
+    }
+
+    public void setDocumentMetadataId(UUID documentMetadataId) {
+<span class="fc" id="L821">        this.documentMetadataId = documentMetadataId;</span>
+<span class="fc" id="L822">    }</span>
+
+    /**
+     * fix these to work with primitives -- boolean objects are annoying! null = &quot;false&quot;.
+     */
+    public boolean getDeleted() {
+<span class="pc bpc" id="L828" title="1 of 2 branches missed.">        if (deleted == null) {</span>
+<span class="nc" id="L829">            return false;</span>
+        }
+
+<span class="fc" id="L832">        return deleted;</span>
+    }
+
+    public void setDeleted(Boolean deleted) {
+<span class="fc" id="L836">        this.deleted = deleted;</span>
+<span class="fc" id="L837">    }</span>
+
+    /**
+     * Expose the Boolean object version so we can determine null-ness
+     */
+    public Boolean getDeletedObject() {
+<span class="fc" id="L843">        return deleted;</span>
+    }
+
+    /**
+     * An an arbitrary date, the contents and description of which is determined by a rule defined by data type
+     *
+     * @return Date
+     */
+    public @Nullable Date getDate01() {
+<span class="fc" id="L852">        return date01;</span>
+    }
+
+    public void setDate01(Date date01) {
+<span class="fc" id="L856">        this.date01 = date01;</span>
+<span class="fc" id="L857">    }</span>
+
+    /**
+     * An an arbitrary date, the contents and description of which is determined by a rule defined by data type
+     *
+     * @return Date
+     */
+    public @Nullable Date getDate02() {
+<span class="fc" id="L865">        return date02;</span>
+    }
+
+    public void setDate02(Date date02) {
+<span class="fc" id="L869">        this.date02 = date02;</span>
+<span class="fc" id="L870">    }</span>
+
+    /**
+     * An an arbitrary date, the contents and description of which is determined by a rule defined by data type
+     *
+     * @return Date
+     */
+    public @Nullable Date getDate03() {
+<span class="fc" id="L878">        return date03;</span>
+    }
+
+    public void setDate03(Date date03) {
+<span class="fc" id="L882">        this.date03 = date03;</span>
+<span class="fc" id="L883">    }</span>
+
+    /**
+     * An an arbitrary date, the contents and description of which is determined by a rule defined by data type
+     *
+     * @return Date
+     */
+    public @Nullable Date getDate04() {
+<span class="fc" id="L891">        return date04;</span>
+    }
+
+    public void setDate04(Date date04) {
+<span class="fc" id="L895">        this.date04 = date04;</span>
+<span class="fc" id="L896">    }</span>
+
+    public @Nullable Date getDate05() {
+<span class="fc" id="L899">        return date05;</span>
+    }
+
+    public void setDate05(Date date05) {
+<span class="fc" id="L903">        this.date05 = date05;</span>
+<span class="fc" id="L904">    }</span>
+
+    /**
+     * An an arbitrary integer, the contents and description of which is determined by a rule defined by data type
+     *
+     * @return long
+     */
+    public @Nullable Long getLong01() {
+<span class="fc" id="L912">        return long01;</span>
+    }
+
+    public void setLong01(Long long01) {
+<span class="fc" id="L916">        this.long01 = long01;</span>
+<span class="fc" id="L917">    }</span>
+
+    /**
+     * An an arbitrary integer, the contents and description of which is determined by a rule defined by data type
+     *
+     * @return long
+     */
+    public @Nullable Long getLong02() {
+<span class="fc" id="L925">        return long02;</span>
+    }
+
+    public void setLong02(Long long02) {
+<span class="fc" id="L929">        this.long02 = long02;</span>
+<span class="fc" id="L930">    }</span>
+
+    /**
+     * An an arbitrary integer, the contents and description of which is determined by a rule defined by data type
+     *
+     * @return long
+     */
+    public @Nullable Long getLong03() {
+<span class="fc" id="L938">        return long03;</span>
+    }
+
+    public void setLong03(Long long03) {
+<span class="fc" id="L942">        this.long03 = long03;</span>
+<span class="fc" id="L943">    }</span>
+
+    /**
+     * An an arbitrary integer, the contents and description of which is determined by a rule defined by data type
+     *
+     * @return long
+     */
+    public @Nullable Long getLong04() {
+<span class="fc" id="L951">        return long04;</span>
+    }
+
+    public void setLong04(Long long04) {
+<span class="fc" id="L955">        this.long04 = long04;</span>
+<span class="fc" id="L956">    }</span>
+
+    /**
+     * An arbitrary string used to describe a EHRData item. The rule associated with data type creates and updates this string.
+     *
+     * @return
+     */
+    public @Nullable String getString01() {
+<span class="fc" id="L964">        return string01;</span>
+    }
+
+    public void setString01(String string01) {
+<span class="fc" id="L968">        this.string01 = string01;</span>
+<span class="fc" id="L969">    }</span>
+
+    public @Nullable String getString02() {
+<span class="fc" id="L972">        return string02;</span>
+    }
+
+    public void setString02(String string02) {
+<span class="fc" id="L976">        this.string02 = string02;</span>
+<span class="fc" id="L977">    }</span>
+
+    public @Nullable String getString03() {
+<span class="fc" id="L980">        return string03;</span>
+    }
+
+    public void setString03(String string03) {
+<span class="fc" id="L984">        this.string03 = string03;</span>
+<span class="fc" id="L985">    }</span>
+
+    public @Nullable String getString04() {
+<span class="fc" id="L988">        return string04;</span>
+    }
+
+    public void setString04(String string04) {
+<span class="fc" id="L992">        this.string04 = string04;</span>
+<span class="fc" id="L993">    }</span>
+
+    /**
+     * &lt;p&gt;
+     * An arbitrary XML snippet associated with a EHRData item. This attribute is usually the last resort as a means of displaying
+     * information.
+     * the most efficient technique is usually to store each display attribute in one of the explicit datatypes in this entity.
+     * the most thorough method is to provide a drilldown to the actual underlying document using the document attribute. In these fields,
+     * an
+     * XML snippet, the schema of which is known to the menu structure, holds either a copy of part of the document or a completely separate
+     * snippet created for display purpose.
+     * &lt;/p&gt;
+     * &lt;p&gt;
+     * Consider Patient name as an example: A rule can extract patient name information for a complete document and store it in a single
+     * String field.
+     * While most efficient, it means the name format is determined, forever more, by the rule, not by the display template.
+     * Instead, the display could navigate into the document to pull out the name field. But this could require coupling display logic to
+     * the possible many different document
+     * formats containing name information. A compromise provides maximum decoupling: The rule knows where to find the name information and
+     * provides it to the application
+     * as an XML snippet (making no assumption about how it will be displayed). The display template can then decide how to display the name
+     * without having to know anything
+     * about the original transaction.
+     * &lt;/p&gt;
+     * &lt;p&gt;
+     * Performance note: One larger XML snippet is more efficient than two smaller ones, all else being equal.
+     * &lt;/p&gt;
+     *
+     * @return XML Snippet
+     */
+    public @Nullable byte[] getEncryptedData() {
+<span class="fc" id="L1024">        return encryptedData;</span>
+    }
+
+    /**
+     * Side-effect: set &quot;edited&quot; flag for encrypted fields to false
+     *
+     * @param encryptedData
+     */
+    public void setEncryptedData(byte[] encryptedData) {
+<span class="fc" id="L1033">        encryptedFieldsEdited = false;</span>
+<span class="fc" id="L1034">        this.encryptedData = encryptedData;</span>
+<span class="fc" id="L1035">    }</span>
+
+    public long getAccountId() {
+<span class="fc" id="L1038">        return accountId;</span>
+    }
+
+    public void setAccountId(long accountId) {
+<span class="fc" id="L1042">        this.accountId = accountId;</span>
+<span class="fc" id="L1043">    }</span>
+
+    public @Nullable String getString05() {
+<span class="fc" id="L1046">        return string05;</span>
+    }
+
+    public void setString05(String string05) {
+<span class="fc" id="L1050">        this.string05 = string05;</span>
+<span class="fc" id="L1051">    }</span>
+
+    public @Nullable Long getSourcePersonId() {
+<span class="fc" id="L1054">        return sourcePersonId;</span>
+    }
+
+    public void setSourcePersonId(Long sourcePersonId) {
+<span class="fc" id="L1058">        this.sourcePersonId = sourcePersonId;</span>
+<span class="fc" id="L1059">    }</span>
+
+    public @Nullable Long getSourceTeamId() {
+<span class="fc" id="L1062">        return sourceTeamId;</span>
+    }
+
+    public void setSourceTeamId(Long sourceTeamId) {
+<span class="fc" id="L1066">        this.sourceTeamId = sourceTeamId;</span>
+<span class="fc" id="L1067">    }</span>
+
+    public @Nullable Long getSourceOrgId() {
+<span class="fc" id="L1070">        return sourceOrgId;</span>
+    }
+
+    public void setSourceOrgId(Long sourceOrgId) {
+<span class="fc" id="L1074">        this.sourceOrgId = sourceOrgId;</span>
+<span class="fc" id="L1075">    }</span>
+
+    public @Nullable String getCode01CodeSystem() {
+<span class="fc" id="L1078">        return code01CodeSystem;</span>
+    }
+
+    public void setCode01CodeSystem(String code01CodeSystem) {
+<span class="fc" id="L1082">        this.code01CodeSystem = code01CodeSystem;</span>
+<span class="fc" id="L1083">    }</span>
+
+    public @Nullable String getCode01Code() {
+<span class="fc" id="L1086">        return code01Code;</span>
+    }
+
+    public void setCode01Code(String code01Code) {
+<span class="fc" id="L1090">        this.code01Code = code01Code;</span>
+<span class="fc" id="L1091">    }</span>
+
+    public @Nullable byte[] getSecretKey() {
+<span class="fc" id="L1094">        return secretKeyInline;</span>
+    }
+
+    public void setSecretKey(byte[] secretKey) {
+<span class="fc" id="L1098">        this.secretKeyInline = secretKey;</span>
+<span class="fc" id="L1099">    }</span>
+
+    public @Nullable String getSecretKeyAlgorithm() {
+<span class="fc" id="L1102">        return secretKeyAlgorithm;</span>
+    }
+
+    public void setSecretKeyAlgorithm(String secretKeyAlgorithm) {
+<span class="fc" id="L1106">        this.secretKeyAlgorithm = secretKeyAlgorithm;</span>
+<span class="fc" id="L1107">    }</span>
+
+    public Boolean getBoolean01() {
+<span class="fc" id="L1110">        return boolean01;</span>
+    }
+
+    public void setBoolean01(Boolean boolean01) {
+<span class="fc" id="L1114">        this.boolean01 = boolean01;</span>
+<span class="fc" id="L1115">    }</span>
+
+    public @Nullable UUID getUuid01() {
+<span class="fc" id="L1118">        return uuid01;</span>
+    }
+
+    public void setUuid01(UUID uuid01) {
+<span class="fc" id="L1122">        this.uuid01 = uuid01;</span>
+<span class="fc" id="L1123">    }</span>
+
+    public @Nullable UUID getUniqueId() {
+<span class="fc" id="L1126">        return uniqueId;</span>
+    }
+
+    public void setUniqueId(UUID uniqueId) {
+<span class="fc" id="L1130">        this.uniqueId = uniqueId;</span>
+<span class="fc" id="L1131">    }</span>
+
+    public @Nullable Boolean getBoolean02() {
+<span class="fc" id="L1134">        return boolean02;</span>
+    }
+
+    public void setBoolean02(Boolean boolean02) {
+<span class="fc" id="L1138">        this.boolean02 = boolean02;</span>
+<span class="fc" id="L1139">    }</span>
+
+    public @Nullable Date getEnteredDate() {
+<span class="fc bfc" id="L1142" title="All 2 branches covered.">        if (NULL_ENTERED_DATE.equals(enteredDate)) {</span>
+<span class="fc" id="L1143">            return null;</span>
+        }
+
+<span class="fc" id="L1146">        return enteredDate;</span>
+    }
+
+    public void setEnteredDate(Date enteredDate) {
+<span class="fc" id="L1150">        this.enteredDate = enteredDate;</span>
+<span class="fc" id="L1151">    }</span>
+
+    public @Nullable Date getPersistedDate() {
+<span class="fc" id="L1154">        return persistedDate;</span>
+    }
+
+    public void setPersistedDate(Date persistedDate) {
+<span class="fc" id="L1158">        this.persistedDate = persistedDate;</span>
+<span class="fc" id="L1159">    }</span>
+
+    public Route getRoute() {
+<span class="fc" id="L1162">        return route;</span>
+    }
+
+    public void setRoute(Route route) {
+<span class="fc" id="L1166">        this.route = route;</span>
+<span class="fc" id="L1167">    }</span>
+
+    public @Nullable Long getUploadedDataId() {
+<span class="fc" id="L1170">        return uploadedDataId;</span>
+    }
+
+    public void setUploadedDataId(Long uploadedDataId) {
+<span class="fc" id="L1174">        this.uploadedDataId = uploadedDataId;</span>
+<span class="fc" id="L1175">    }</span>
+
+    public int getMigrationVersion() {
+<span class="fc" id="L1178">        return migrationVersion;</span>
+    }
+
+    public void setMigrationVersion(int migrationVersion) {
+<span class="fc" id="L1182">        this.migrationVersion = migrationVersion;</span>
+<span class="fc" id="L1183">    }</span>
+
+    public boolean getRequireGeneral() {
+<span class="fc" id="L1186">        return requireGeneral;</span>
+    }
+
+    public void setRequireGeneral(boolean requireGeneral) {
+<span class="fc" id="L1190">        this.requireGeneral = requireGeneral;</span>
+<span class="fc" id="L1191">    }</span>
+
+    public boolean getRequireSexualHealth() {
+<span class="fc" id="L1194">        return requireSexualHealth;</span>
+    }
+
+    public void setRequireSexualHealth(boolean requireSexualHealth) {
+<span class="fc" id="L1198">        this.requireSexualHealth = requireSexualHealth;</span>
+<span class="fc" id="L1199">    }</span>
+
+    public boolean getRequireMentalHealth() {
+<span class="fc" id="L1202">        return requireMentalHealth;</span>
+    }
+
+    public void setRequireMentalHealth(boolean requireMentalHealth) {
+<span class="fc" id="L1206">        this.requireMentalHealth = requireMentalHealth;</span>
+<span class="fc" id="L1207">    }</span>
+
+    public boolean getRequireSocialCare() {
+<span class="fc" id="L1210">        return requireSocialCare;</span>
+    }
+
+    public void setRequireSocialCare(boolean requireSocialCare) {
+<span class="fc" id="L1214">        this.requireSocialCare = requireSocialCare;</span>
+<span class="fc" id="L1215">    }</span>
+
+    public @Nullable PrivacyFlags getLatestPrivacyFlags() {
+<span class="fc" id="L1218">        return latestPrivacyFlags;</span>
+    }
+
+    public void setLatestPrivacyFlags(PrivacyFlags latestPrivacyFlags) {
+<span class="nc" id="L1222">        this.latestPrivacyFlags = latestPrivacyFlags;</span>
+<span class="nc" id="L1223">    }</span>
+
+    public @Nullable String getString09() {
+<span class="fc" id="L1226">        return string09;</span>
+    }
+
+    public void setString09(String string09) {
+<span class="fc" id="L1230">        this.string09 = string09;</span>
+<span class="fc" id="L1231">    }</span>
+
+    public @Nullable String getString10() {
+<span class="fc" id="L1234">        return string10;</span>
+    }
+
+    public void setString10(String string10) {
+<span class="fc" id="L1238">        this.string10 = string10;</span>
+<span class="fc" id="L1239">    }</span>
+
+    public @Nullable Boolean getBoolean03() {
+<span class="nc" id="L1242">        return boolean03;</span>
+    }
+
+    public void setBoolean03(Boolean boolean03) {
+<span class="nc" id="L1246">        this.boolean03 = boolean03;</span>
+<span class="nc" id="L1247">    }</span>
+
+    public @Nullable String getString11() {
+<span class="nc" id="L1250">        return string11;</span>
+    }
+
+    public void setString11(String string11) {
+<span class="nc" id="L1254">        this.string11 = string11;</span>
+<span class="nc" id="L1255">    }</span>
+
+    public @Nullable String getString12() {
+<span class="fc" id="L1258">        return string12;</span>
+    }
+
+    public void setString12(String string12) {
+<span class="fc" id="L1262">        this.string12 = string12;</span>
+<span class="fc" id="L1263">    }</span>
+
+    public boolean isMigrationInProcess() {
+<span class="nc" id="L1266">        return migrationInProcess;</span>
+    }
+
+    public void setMigrationInProcess(boolean migrationInProcess) {
+<span class="fc" id="L1270">        this.migrationInProcess = migrationInProcess;</span>
+<span class="fc" id="L1271">    }</span>
+
+    public @Nullable String getString13() {
+<span class="nc" id="L1274">        return string13;</span>
+    }
+
+    public void setString13(String string13) {
+<span class="nc" id="L1278">        this.string13 = string13;</span>
+<span class="nc" id="L1279">    }</span>
+
+    public @Nullable String getString14() {
+<span class="fc" id="L1282">        return string14;</span>
+    }
+
+    public void setString14(String string14) {
+<span class="fc" id="L1286">        this.string14 = string14;</span>
+<span class="fc" id="L1287">    }</span>
+
+    public MenuDataType getDataType() {
+<span class="fc" id="L1290">        return dataType;</span>
+    }
+
+    public void setDataType(MenuDataType dataType) {
+<span class="fc" id="L1294">        this.dataType = dataType;</span>
+<span class="fc" id="L1295">    }</span>
+
+    public @Nullable Team getSourceTeam() {
+<span class="fc" id="L1298">        return sourceTeam;</span>
+    }
+
+    public void setSourceTeam(Team sourceTeam) {
+<span class="nc" id="L1302">        this.sourceTeam = sourceTeam;</span>
+<span class="nc" id="L1303">    }</span>
+
+    public @Nullable Org getSourceOrg() {
+<span class="fc" id="L1306">        return sourceOrg;</span>
+    }
+
+    public void setSourceOrg(Org sourceOrg) {
+<span class="nc" id="L1310">        this.sourceOrg = sourceOrg;</span>
+<span class="nc" id="L1311">    }</span>
+
+    public Org getConnectingOrg() {
+<span class="fc" id="L1314">        return connectingOrg;</span>
+    }
+
+    public void setConnectingOrg(Org connectingOrg) {
+<span class="nc" id="L1318">        this.connectingOrg = connectingOrg;</span>
+<span class="nc" id="L1319">    }</span>
+
+    public @Nullable Long getSymmetricEncryptionKeyId() {
+<span class="fc" id="L1322">        return symmetricEncryptionKeyId;</span>
+    }
+
+    public void setSymmetricEncryptionKeyId(Long aesEncryptionKeyId) {
+<span class="fc" id="L1326">        this.symmetricEncryptionKeyId = aesEncryptionKeyId;</span>
+<span class="fc" id="L1327">    }</span>
+
+    public @Nullable String getNonceBase64() {
+<span class="fc" id="L1330">        return nonceBase64;</span>
+    }
+
+    public void setNonceBase64(String nonceBase64) {
+<span class="fc" id="L1334">        this.nonceBase64 = nonceBase64;</span>
+<span class="fc" id="L1335">    }</span>
+
+    public @Nullable byte[] getNonce() {
+<span class="nc" id="L1338">        return Base64.getDecoder().decode(getNonceBase64());</span>
+    }
+
+    public void setNonce(byte[] nonce) {
+<span class="fc" id="L1342">        setNonceBase64(Base64.getEncoder().encodeToString(nonce));</span>
+<span class="fc" id="L1343">    }</span>
+
+    public Long getConnectingOrgId() {
+<span class="fc" id="L1346">        return connectingOrgId;</span>
+    }
+
+    public void setConnectingOrgId(Long connectingOrgId) {
+<span class="fc" id="L1350">        this.connectingOrgId = connectingOrgId;</span>
+<span class="fc" id="L1351">    }</span>
+
+    public Long getHl7PartnerId() {
+<span class="fc" id="L1354">        return hl7PartnerId;</span>
+    }
+
+    public void setHl7PartnerId(Long hl7PartnerId) {
+<span class="fc" id="L1358">        this.hl7PartnerId = hl7PartnerId;</span>
+<span class="fc" id="L1359">    }</span>
+
+    public PKBPerson getSourcePerson() {
+<span class="fc" id="L1362">        return sourcePerson;</span>
+    }
+
+    public void setSourcePerson(PKBPerson sourcePerson) {
+<span class="fc" id="L1366">        this.sourcePerson = sourcePerson;</span>
+<span class="fc" id="L1367">    }</span>
+
+    public String getResponsibleOrganisationIdentifier() {
+<span class="fc" id="L1370">        return responsibleOrganisationIdentifier;</span>
+    }
+
+    public void setResponsibleOrganisationIdentifier(String responsibleOrganisationIdentifier) {
+<span class="fc" id="L1374">        this.responsibleOrganisationIdentifier = responsibleOrganisationIdentifier;</span>
+<span class="fc" id="L1375">    }</span>
+
+    /**
+     * Don't call this from real code! It's here for setting state during testing
+     */
+    @VisibleForTesting
+    @Deprecated
+    public void resetEditStateAndDecryptedFlag(boolean decrypted) {
+<span class="nc" id="L1383">        this.encryptedFieldsEdited = false;</span>
+<span class="nc" id="L1384">        this.decrypted = decrypted;</span>
+<span class="nc" id="L1385">    }</span>
+
+    public int countPrivacyFlagsSet() {
+<span class="fc" id="L1388">        int flags = 0;</span>
+<span class="fc bfc" id="L1389" title="All 2 branches covered.">        if (requireGeneral) {</span>
+<span class="fc" id="L1390">            ++flags;</span>
+        }
+<span class="fc bfc" id="L1392" title="All 2 branches covered.">        if (requireMentalHealth) {</span>
+<span class="fc" id="L1393">            ++flags;</span>
+        }
+<span class="fc bfc" id="L1395" title="All 2 branches covered.">        if (requireSexualHealth) {</span>
+<span class="fc" id="L1396">            ++flags;</span>
+        }
+<span class="fc bfc" id="L1398" title="All 2 branches covered.">        if (requireSocialCare) {</span>
+<span class="fc" id="L1399">            ++flags;</span>
+        }
+<span class="fc" id="L1401">        return flags;</span>
+    }
+
+    public void setDefaultGeneralConsentIfNoneSet() {
+<span class="pc bpc" id="L1405" title="1 of 2 branches missed.">        if (countPrivacyFlagsSet() &lt; 1) {</span>
+<span class="fc" id="L1406">            setPrivacyFlag(PrivacyFlag.GENERAL);</span>
+        }
+<span class="fc" id="L1408">    }</span>
+
+    public EHRData setPrivacyFlag(@NotNull PrivacyFlag requiredFlag) {
+<span class="pc bpc" id="L1411" title="4 of 5 branches missed.">        switch (requiredFlag) {</span>
+            case GENERAL:
+<span class="fc" id="L1413">                requireGeneral = true;</span>
+<span class="fc" id="L1414">                requireMentalHealth = false;</span>
+<span class="fc" id="L1415">                requireSexualHealth = false;</span>
+<span class="fc" id="L1416">                requireSocialCare = false;</span>
+<span class="fc" id="L1417">                return this;</span>
+            case MENTAL_HEALTH:
+<span class="nc" id="L1419">                requireGeneral = false;</span>
+<span class="nc" id="L1420">                requireMentalHealth = true;</span>
+<span class="nc" id="L1421">                requireSexualHealth = false;</span>
+<span class="nc" id="L1422">                requireSocialCare = false;</span>
+<span class="nc" id="L1423">                return this;</span>
+            case SEXUAL_HEALTH:
+<span class="nc" id="L1425">                requireGeneral = false;</span>
+<span class="nc" id="L1426">                requireMentalHealth = false;</span>
+<span class="nc" id="L1427">                requireSexualHealth = true;</span>
+<span class="nc" id="L1428">                requireSocialCare = false;</span>
+<span class="nc" id="L1429">                return this;</span>
+            case SOCIAL_CARE:
+<span class="nc" id="L1431">                requireGeneral = false;</span>
+<span class="nc" id="L1432">                requireMentalHealth = false;</span>
+<span class="nc" id="L1433">                requireSexualHealth = false;</span>
+<span class="nc" id="L1434">                requireSocialCare = true;</span>
+<span class="nc" id="L1435">                return this;</span>
+            default:
+<span class="nc" id="L1437">                throw new NotImplementedException(&quot;Privacy flag type &quot; + requiredFlag + &quot; not implemented yet!&quot;);</span>
+        }
+    }
+
+    public UUID generateNewRandomUniqueId() {
+<span class="fc bfc" id="L1442" title="All 2 branches covered.">        if (uniqueId == null) {</span>
+<span class="fc" id="L1443">            this.setUniqueId(UUID.randomUUID());</span>
+        }
+<span class="fc" id="L1445">        return uniqueId;</span>
+    }
+
+    public boolean isNewDatapoint() {
+<span class="fc bfc" id="L1449" title="All 2 branches covered.">        return id &lt;= 0;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

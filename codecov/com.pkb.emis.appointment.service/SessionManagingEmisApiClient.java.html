@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SessionManagingEmisApiClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.emis.appointment.service</a> &gt; <span class="el_source">SessionManagingEmisApiClient.java</span></div><h1>SessionManagingEmisApiClient.java</h1><pre class="source lang-java linenums">package com.pkb.emis.appointment.service;
+
+import com.google.common.collect.ImmutableList;
+import com.pkb.datamodel.EmisRegistrationDetailsDto;
+import com.pkb.datamodel.EmisRegistrationDetailsNewDto;
+import com.pkb.datamodel.ImmutableEmisRegistrationDetailsNewDto;
+import com.pkb.repository.util.EmisContextHolder;
+import com.pkb.domain.appointment.EmisAppointmentService;
+import com.pkb.integrations.emis.model.restcalls.EmisAccountLinkRequest;
+import com.pkb.integrations.emis.model.restcalls.EmisAccountLinkResponse;
+import com.pkb.integrations.emis.model.restcalls.EmisInSessionRequest;
+import com.pkb.integrations.emis.model.restcalls.EmisRequest;
+import com.pkb.integrations.emis.model.restcalls.EmisResponse;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
+
+import java.lang.invoke.MethodHandles;
+import java.util.List;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+import static com.pkb.emis.appointment.service.ErrorCode.EMIS_SESSION_EXPIRED;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+
+public class SessionManagingEmisApiClient {
+<span class="fc" id="L30">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+    private final EmisApiClient emisApiClient;
+    private final EmisSessionService sessionService;
+    private final EmisAppointmentService emisAppointmentService;
+
+<span class="fc" id="L35">    public SessionManagingEmisApiClient(EmisApiClient emisApiClient, EmisSessionService sessionService, EmisAppointmentService emisAppointmentService) {</span>
+<span class="fc" id="L36">        this.emisApiClient = emisApiClient;</span>
+<span class="fc" id="L37">        this.sessionService = sessionService;</span>
+<span class="fc" id="L38">        this.emisAppointmentService = emisAppointmentService;</span>
+<span class="fc" id="L39">    }</span>
+
+    Either&lt;ErrorCode, EmisAccountLinkResponse&gt; linkToGPPractice(EmisContextHolder emisContextHolder, EmisAccountLinkRequest request, ImmutableList&lt;ErrorCode&gt; codes) {
+<span class="fc" id="L42">        return emisApiClient.startEndUserSession()</span>
+<span class="fc" id="L43">                .flatMap(endUserSessionData -&gt; {</span>
+<span class="fc" id="L44">                    HttpHeaders headers = emisApiClient.getHeadersForEndUserSession(endUserSessionData.getEndUserSessionId());</span>
+<span class="fc" id="L45">                    return emisApiClient.callExchange(request, headers, codes);</span>
+                })
+<span class="fc" id="L47">                .map(linkResponse -&gt; {</span>
+<span class="fc" id="L48">                    sessionService.removeSession(emisContextHolder.personId());</span>
+<span class="fc" id="L49">                    EmisAccountLinkRequest.LinkageDetails linkageDetails = request.getLinkageDetails();</span>
+<span class="fc" id="L50">                    EmisRegistrationDetailsNewDto details = ImmutableEmisRegistrationDetailsNewDto.builder()</span>
+<span class="fc" id="L51">                            .personId(emisContextHolder.personId())</span>
+<span class="fc" id="L52">                            .odsCode(linkageDetails.getNationalPracticeCode())</span>
+<span class="fc" id="L53">                            .accessIdentityGuid(linkResponse.getAccessIdentityGuid())</span>
+<span class="fc" id="L54">                            .deleted(false)</span>
+<span class="fc" id="L55">                            .build();</span>
+<span class="fc" id="L56">                    emisAppointmentService.persistNewRegistrationDetails(emisContextHolder, details);</span>
+<span class="fc" id="L57">                    return linkResponse;</span>
+                });
+    }
+
+    Either&lt;ErrorCode, SessionData&gt; getSessionInfo(EmisContextHolder emisContextHolder) {
+<span class="fc" id="L62">        return sessionService.getSessionData(emisContextHolder);</span>
+    }
+
+    &lt;T extends EmisResponse, U extends EmisInSessionRequest&lt;T, U&gt;&gt; Either&lt;ErrorCode, T&gt; makeCallWithRetryInSession(EmisContextHolder emisContextHolder, U request, ImmutableList&lt;ErrorCode&gt; codes) {
+<span class="fc" id="L66">        return makeCallWithRetryInSessionInternal(emisContextHolder, sessionData -&gt; request.withUserPatientLinkToken(sessionData.getUserPatientLinkToken()), codes);</span>
+    }
+
+    &lt;T extends EmisResponse, U extends EmisRequest&lt;T&gt;&gt; Either&lt;ErrorCode, T&gt; makeCallWithRetryInSession(EmisContextHolder emisContextHolder, U request, ImmutableList&lt;ErrorCode&gt; codes) {
+<span class="fc" id="L70">        return makeCallWithRetryInSessionInternal(emisContextHolder, sessionData -&gt; request, codes);</span>
+    }
+
+    private &lt;T extends EmisResponse, U extends EmisRequest&lt;T&gt;&gt; Either&lt;ErrorCode, T&gt; makeCallWithRetryInSessionInternal(EmisContextHolder emisContextHolder, Function&lt;SessionData, U&gt; requestProvider,
+                                                                                                                       ImmutableList&lt;ErrorCode&gt; codes) {
+<span class="fc" id="L75">        Supplier&lt;Either&lt;ErrorCode, T&gt;&gt; caller = () -&gt; sessionService.getSessionData(emisContextHolder)</span>
+<span class="fc" id="L76">                .flatMap(sessionData -&gt; emisApiClient.callExchange(</span>
+<span class="fc" id="L77">                        requestProvider.apply(sessionData),</span>
+<span class="fc" id="L78">                        getHeadersWithSession(sessionData),</span>
+                        codes));
+
+<span class="fc" id="L81">        return caller.get().fold(error -&gt; handleSessionExpiry(emisContextHolder, caller, error), Either::right);</span>
+    }
+
+    private &lt;T&gt; Either&lt;ErrorCode, T&gt; handleSessionExpiry(EmisContextHolder emisContextHolder, Supplier&lt;Either&lt;ErrorCode, T&gt;&gt; apiCaller, ErrorCode originalError) {
+<span class="fc bfc" id="L85" title="All 2 branches covered.">        if (originalError == EMIS_SESSION_EXPIRED) {</span>
+<span class="fc" id="L86">            LOGGER.info(&quot;EMIS-API-SESSION: Emis session expired for patient with id {}, trying to refresh session&quot;, emisContextHolder.personId());</span>
+<span class="fc" id="L87">            sessionService.reloadSession(emisContextHolder);</span>
+<span class="fc" id="L88">            return apiCaller.get();</span>
+        }
+<span class="fc" id="L90">        return left(originalError);</span>
+    }
+
+    @NotNull
+    private HttpHeaders getHeadersWithSession(SessionData sessionData) {
+<span class="fc" id="L95">        HttpHeaders headers = emisApiClient.getHeadersForEndUserSession(sessionData.getEndUserSessionId());</span>
+<span class="fc" id="L96">        headers.set(&quot;X-API-SessionId&quot;, sessionData.getSessionId());</span>
+<span class="fc" id="L97">        return headers;</span>
+    }
+
+    Either&lt;ErrorCode, String&gt; getNationalPracticeCode(EmisContextHolder emisContextHolder) {
+<span class="fc" id="L101">        return sessionService.getODSCodeFromCache(emisContextHolder.personId())</span>
+<span class="fc" id="L102">                .fold(error -&gt; getNationalPracticeCodeFromDB(emisContextHolder), Either::right);</span>
+    }
+
+    @NotNull
+    private Either&lt;ErrorCode, String&gt; getNationalPracticeCodeFromDB(EmisContextHolder emisContextHolder) {
+<span class="fc" id="L107">        List&lt;EmisRegistrationDetailsDto&gt; emisAppointmentRegistrationDetails = emisAppointmentService.findEmisRegistrationDetailsByPersonId(emisContextHolder);</span>
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">        if (emisAppointmentRegistrationDetails.isEmpty()) {</span>
+<span class="nc" id="L109">            LOGGER.error(&quot;Failed to find EMIS registration details record for patient with id {}&quot;, emisContextHolder.personId());</span>
+<span class="nc" id="L110">            return left(ErrorCode.INTERNAL_ERROR);</span>
+        } else {
+<span class="fc" id="L112">            return right(emisAppointmentRegistrationDetails.get(0).getOdsCode());</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

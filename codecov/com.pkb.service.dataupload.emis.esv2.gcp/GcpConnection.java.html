@@ -1,0 +1,153 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GcpConnection.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.gcp</a> &gt; <span class="el_source">GcpConnection.java</span></div><h1>GcpConnection.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.gcp;
+
+import com.amazonaws.ClientConfiguration;
+import com.amazonaws.auth.AWSStaticCredentialsProvider;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.client.builder.AwsClientBuilder;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3ClientBuilder;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.service.dataupload.emis.esv2.EmisLsEntry;
+import com.pkb.service.dataupload.emis.esv2.EmisLsRegFileEntry;
+import com.pkb.service.dataupload.emis.esv2.IEmisDownloadConnection;
+import com.pkb.service.dataupload.emis.esv2.ImmutableEmisLsDirEntry;
+import com.pkb.service.dataupload.emis.esv2.ImmutableEmisLsRegFileEntry;
+import io.vavr.control.Option;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import static io.vavr.API.None;
+import static io.vavr.API.Some;
+
+public class GcpConnection implements IEmisDownloadConnection {
+<span class="fc" id="L36">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private final GcpConnectionData connectionData;
+<span class="fc" id="L38">    private Option&lt;AmazonS3&gt; googleStorageS3interop = None();</span>
+
+    @VisibleForTesting
+    void setGoogleStorageS3interop(AmazonS3 googleStorageS3interop) {
+<span class="nc" id="L42">        this.googleStorageS3interop = Some(googleStorageS3interop);</span>
+<span class="nc" id="L43">    }</span>
+
+    private AmazonS3 assumeClient() {
+<span class="pc" id="L46">        return googleStorageS3interop.getOrElseThrow(() -&gt; new IllegalStateException(&quot;No active connection to Google Cloud Storage.&quot;));</span>
+    }
+
+    private void assumeNoClientDefinition() {
+<span class="pc bpc" id="L50" title="1 of 2 branches missed.">        if (googleStorageS3interop.isDefined()) {</span>
+<span class="nc" id="L51">            throw new IllegalStateException(&quot;Gcp session is already defined.&quot;);</span>
+        }
+<span class="fc" id="L53">    }</span>
+
+<span class="fc" id="L55">    public GcpConnection(GcpConnectionData connectionData) {</span>
+<span class="fc" id="L56">        this.connectionData = connectionData;</span>
+<span class="fc" id="L57">    }</span>
+
+    @Override
+    public void connect() throws IOException {
+<span class="fc" id="L61">        assumeNoClientDefinition();</span>
+<span class="fc" id="L62">        BasicAWSCredentials googleCreds = new BasicAWSCredentials(this.connectionData.keyId(), this.connectionData.keySecret());</span>
+
+<span class="fc" id="L64">        this.googleStorageS3interop = Some(</span>
+<span class="fc" id="L65">                AmazonS3ClientBuilder.standard()</span>
+<span class="fc" id="L66">                        .withClientConfiguration(</span>
+                                new ClientConfiguration()
+<span class="fc" id="L68">                                        .withClientExecutionTimeout((int) connectionData.timeout().toMillis()))</span>
+<span class="fc" id="L69">                        .withEndpointConfiguration(</span>
+                                new AwsClientBuilder.EndpointConfiguration(
+<span class="fc" id="L71">                                        this.connectionData.apiUrl().toString(), &quot;auto&quot;))</span>
+<span class="fc" id="L72">                        .withCredentials(new AWSStaticCredentialsProvider(googleCreds))</span>
+<span class="fc" id="L73">                        .withPathStyleAccessEnabled(true)</span>
+<span class="fc" id="L74">                        .build());</span>
+<span class="fc" id="L75">    }</span>
+
+    @Override
+    /**
+     * no directories on GCS, but you can mimic by including slashes in the name.
+     * This converts file entries with names like 20210101/bulk_53_Admin_Patient_20210101_0ABCDEFG.csv into:
+     *  - a fake directory listing (20210101)
+     *  - a file listing within that directory (bulk_53_Admin_Patient_20210101_0ABCDEFG.csv)
+     */
+    public Collection&lt;EmisLsEntry&gt; listDirectory() {
+
+<span class="fc" id="L86">        Map&lt;String, List&lt;EmisLsEntryWithPrefix&gt;&gt; emisLsEntriesByPrefix = assumeClient().listObjects(connectionData.bucketName())</span>
+<span class="fc" id="L87">                .getObjectSummaries()</span>
+<span class="fc" id="L88">                .stream()</span>
+<span class="fc" id="L89">                .map(this::toEmisLsEntryWithPrefix)</span>
+<span class="fc" id="L90">                .collect(Collectors.groupingBy(EmisLsEntryWithPrefix::keyPrefix));</span>
+
+
+<span class="fc" id="L93">        return emisLsEntriesByPrefix.keySet().stream()</span>
+<span class="fc" id="L94">                .map(directoryName -&gt; buildEmisLsDirEntry(directoryName, emisLsEntriesByPrefix.get(directoryName)))</span>
+<span class="fc" id="L95">                .collect(Collectors.toList());</span>
+    }
+
+    @NotNull
+    private ImmutableEmisLsDirEntry buildEmisLsDirEntry(String directoryName, List&lt;EmisLsEntryWithPrefix&gt; childrenWithPrefix) {
+<span class="fc" id="L100">        List&lt;EmisLsRegFileEntry&gt; children = childrenWithPrefix.stream()</span>
+<span class="fc" id="L101">                .map(EmisLsEntryWithPrefix::emisLsRegFileEntry)</span>
+<span class="fc" id="L102">                .collect(Collectors.toList());</span>
+
+<span class="fc" id="L104">        Long directorySize = children.stream().map(EmisLsEntry::size).reduce(0L, Long::sum);</span>
+<span class="fc" id="L105">        return ImmutableEmisLsDirEntry.builder()</span>
+<span class="fc" id="L106">                .relativePath(Path.of(directoryName))</span>
+<span class="fc" id="L107">                .children(children)</span>
+<span class="fc" id="L108">                .size(directorySize)</span>
+<span class="fc" id="L109">                .build();</span>
+    }
+
+    private EmisLsEntryWithPrefix toEmisLsEntryWithPrefix(S3ObjectSummary s3ObjectSummary) {
+<span class="fc" id="L113">        String objectKey = s3ObjectSummary.getKey();</span>
+<span class="fc" id="L114">        int nameSeparatorIndex = objectKey.indexOf(&quot;/&quot;);</span>
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">        if (nameSeparatorIndex == -1) {</span>
+<span class="nc" id="L116">            throw new RuntimeException(&quot;Unexpected file &quot; + objectKey + &quot; from GCP connection&quot;);</span>
+        }
+<span class="fc" id="L118">        String prefix = objectKey.substring(0, nameSeparatorIndex);</span>
+<span class="fc" id="L119">        String remainder = objectKey.substring(nameSeparatorIndex + 1);</span>
+
+<span class="fc" id="L121">        ImmutableEmisLsRegFileEntry EmisLsRegFileEntry = ImmutableEmisLsRegFileEntry.builder()</span>
+<span class="fc" id="L122">                .relativePath(Path.of(prefix, remainder))</span>
+<span class="fc" id="L123">                .size(s3ObjectSummary.getSize())</span>
+<span class="fc" id="L124">                .build();</span>
+
+<span class="fc" id="L126">        return ImmutableEmisLsEntryWithPrefix.of(prefix, EmisLsRegFileEntry);</span>
+    }
+
+    @Override
+    public void download(@NotNull String blobId, @NotNull Path localFileWithPath) throws IOException {
+<span class="fc" id="L131">        InputStream blobContent = assumeClient().getObject(connectionData.bucketName(), blobId).getObjectContent();</span>
+<span class="fc" id="L132">        Files.copy(blobContent, localFileWithPath, StandardCopyOption.REPLACE_EXISTING);</span>
+
+<span class="fc" id="L134">        LOGGER.trace(&quot;Downloaded {} to {}.&quot;, blobId, localFileWithPath);</span>
+<span class="fc" id="L135">    }</span>
+
+    @Override
+    public String uniqueTag() {
+<span class="fc" id="L139">        return connectionData.uniqueTag();</span>
+    }
+
+    @Override
+    public void close() {
+<span class="fc" id="L144">        assumeClient().shutdown();</span>
+<span class="fc" id="L145">    }</span>
+
+    @Value.Immutable
+    interface EmisLsEntryWithPrefix {
+        @Value.Parameter String keyPrefix();
+        @Value.Parameter EmisLsRegFileEntry emisLsRegFileEntry();
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

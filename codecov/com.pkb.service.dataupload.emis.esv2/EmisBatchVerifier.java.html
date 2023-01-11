@@ -1,0 +1,321 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisBatchVerifier.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisBatchVerifier.java</span></div><h1>EmisBatchVerifier.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.hash.Hashing;
+import com.google.common.hash.HashingInputStream;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.dataupload.emis.esv2.EmisEsBatchState;
+import com.pkb.service.dataupload.emis.esv2.ImmutableEmisInternalResult.Builder;
+import com.pkb.service.dataupload.emis.esv2.model.BaseEmisEsDomainModel;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFile;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileSftpSet;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileType;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutableVerifiedEmisFileSetLists;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFile;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFileSetLists;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFileSftpSet;
+import com.pkb.service.dataupload.emis.esv2.pgp.EmisPGPInputStreamProvider;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import io.vavr.control.Either;
+import name.neuhalfen.projects.crypto.bouncycastle.openpgp.keys.keyrings.KeyringConfig;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.BeanFactory;
+
+import java.io.BufferedInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.NoSuchProviderException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static com.fasterxml.jackson.databind.DeserializationFeature.ACCEPT_EMPTY_STRING_AS_NULL_OBJECT;
+import static com.pkb.service.dataupload.emis.esv2.EmisCsvMapperFactory.getEmisCsvMapper;
+import static java.util.Collections.emptyList;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+public class EmisBatchVerifier {
+
+<span class="fc" id="L53">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String TAG_NO_FILES = &quot;number_of_files_in_status&quot;;
+    private static final String STATUS_FAILED = &quot;FAILED&quot;;
+    private static final String STATUS_SUCCESS = &quot;SUCCESS&quot;;
+    private static final String EMIS_VERIFY_FILE_METRIC_NAME = &quot;pkb_phr_integration_emis_csv_file_verifier&quot;;
+
+    private static final String CSV_VALIDATE_TIMER_NAME = &quot;pkb_phr_integration_emis_csv_validation&quot;;
+<span class="fc" id="L61">    private static final Timer CSV_VALIDATE_TIMER = Timer.builder(CSV_VALIDATE_TIMER_NAME)</span>
+<span class="fc" id="L62">            .description(&quot;Time needed to validate an encrypted EMIS CSV file&quot;)</span>
+<span class="fc" id="L63">            .publishPercentiles(0.5, 0.95)</span>
+<span class="fc" id="L64">            .publishPercentileHistogram()</span>
+<span class="fc" id="L65">            .percentilePrecision(2)</span>
+<span class="fc" id="L66">            .register(Metrics.globalRegistry);</span>
+
+    private final EmisFileSetUtils emisFileSetUtils;
+    private final EmisPGPInputStreamProvider emisPGPInputStreamProvider;
+    private final BeanFactory beanFactory;
+    private final PhrConfig phrConfig;
+    private final EmisCsvProcessorProvider emisCsvProcessorProvider;
+    private final EmisEsDatestampSkipService emisEsDatestampSkipService;
+
+<span class="fc" id="L75">    public EmisBatchVerifier(@NotNull EmisCsvProcessorProvider emisCsvProcessorProvider, @NotNull EmisFileSetUtils emisFileSetUtils, @NotNull EmisPGPInputStreamProvider emisPGPInputStreamProvider, @NotNull BeanFactory beanFactory, @NotNull PhrConfig phrConfig, @NotNull EmisEsDatestampSkipService emisEsDatestampSkipService) {</span>
+<span class="fc" id="L76">        this.emisFileSetUtils = emisFileSetUtils;</span>
+<span class="fc" id="L77">        this.emisPGPInputStreamProvider = emisPGPInputStreamProvider;</span>
+<span class="fc" id="L78">        this.beanFactory = beanFactory;</span>
+<span class="fc" id="L79">        this.phrConfig = phrConfig;</span>
+<span class="fc" id="L80">        this.emisCsvProcessorProvider = emisCsvProcessorProvider;</span>
+<span class="fc" id="L81">        this.emisEsDatestampSkipService = emisEsDatestampSkipService;</span>
+<span class="fc" id="L82">    }</span>
+
+
+    public EmisInternalResult&lt;VerifiedEmisFileSetLists&gt; verifyBatches(@NotNull Path localDirectory,
+                                                                      @NotNull KeyringConfig keyringConfig,
+                                                                      @NotNull Map&lt;String, EmisEsBatchState&gt; batchStateBySftpTag) {
+<span class="fc" id="L88">        List&lt;EmisFileSftpSet&gt; allNotProcessedBatches = new ArrayList&lt;&gt;();</span>
+
+        try {
+<span class="fc" id="L91">            batchStateBySftpTag.entrySet().forEach(bs -&gt; {</span>
+<span class="fc" id="L92">                Path serverDownloadDir = localDirectory.resolve(bs.getKey());</span>
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">                if (Files.notExists(serverDownloadDir)) {</span>
+<span class="nc" id="L94">                    throw new RuntimeException(String.format(&quot;Failed EMIS verify as directory %s and sftp %s does not exists!&quot;, serverDownloadDir, bs.getValue().getSftpUniqueId()));</span>
+                }
+<span class="fc" id="L96">                List&lt;EmisFileSftpSet&gt; allAvailableBatchesOnSftp = getAvailableBatches(serverDownloadDir, bs.getValue().getSftpUniqueId());</span>
+<span class="fc" id="L97">                List&lt;EmisFileSftpSet&gt; notProcessedBatches = emisFileSetUtils.filterBatchesAlreadyProcessed(allAvailableBatchesOnSftp, bs.getValue().getLastProcessedBatchDatestamp(), EmisFileSftpSet::emisFileSet);</span>
+<span class="fc" id="L98">                allNotProcessedBatches.addAll(notProcessedBatches);</span>
+
+<span class="fc" id="L100">            });</span>
+<span class="fc" id="L101">            List&lt;EmisFileSftpSet&gt; allNotProcessedBatchesSorted = emisFileSetUtils.getBatchesSortedByDayAndServer(allNotProcessedBatches);</span>
+
+<span class="fc bfc" id="L103" title="All 2 branches covered.">            if (isNotEmpty(allNotProcessedBatchesSorted)) {</span>
+<span class="fc" id="L104">                return verifyAvailableBatches(allNotProcessedBatchesSorted, keyringConfig);</span>
+            } else {
+<span class="fc" id="L106">                LOGGER.info(&quot;Skipped EMIS batch verification as there are no batches to verify.&quot;);</span>
+<span class="fc" id="L107">                return ImmutableEmisInternalResult.of(ImmutableVerifiedEmisFileSetLists.of(emptyList(), emptyList()), EmisStepResult.FINISHED);</span>
+            }
+<span class="fc" id="L109">        } catch (Exception e) {</span>
+<span class="fc" id="L110">            LOGGER.error(&quot;Failed EMIS batch verification. &quot;, e);</span>
+<span class="fc" id="L111">            return ImmutableEmisInternalResult.of(ImmutableVerifiedEmisFileSetLists.of(emptyList(), emptyList()), EmisStepResult.FAILED);</span>
+        }
+    }
+
+
+    private EmisInternalResult&lt;VerifiedEmisFileSetLists&gt; verifyAvailableBatches(List&lt;EmisFileSftpSet&gt; notProcessedBatches,
+                                                                                KeyringConfig keyringConfig) {
+
+
+<span class="fc" id="L120">        Builder&lt;VerifiedEmisFileSetLists&gt; result = ImmutableEmisInternalResult.builder();</span>
+<span class="pc bpc" id="L121" title="1 of 2 branches missed.">        if (isNotEmpty(notProcessedBatches)) {</span>
+<span class="fc" id="L122">            EmisInternalResult&lt;List&lt;EmisFileSftpSet&gt;&gt; resultWithCompleteBatches = emisFileSetUtils.getBatchesUpToTheFirstNotCompleteBatch(notProcessedBatches, EmisFileSftpSet::emisFileSet);</span>
+
+<span class="fc" id="L124">            ImmutableVerifiedEmisFileSetLists verifiedBatches = getVerifiedBatches(resultWithCompleteBatches.getContent(), keyringConfig);</span>
+<span class="fc" id="L125">            result.content(verifiedBatches);</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">            if (verifiedBatches.verifiedBatchesForProcessing().isEmpty()) {</span>
+<span class="fc" id="L127">                result.stepResult(EmisStepResult.FAILED);</span>
+<span class="fc" id="L128">                LOGGER.error(&quot;EMIS batch verification failed!&quot;);</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">            } else if (verifiedBatches.verifiedBatchesForProcessing().size() != notProcessedBatches.size()) {</span>
+<span class="fc" id="L130">                result.stepResult(EmisStepResult.FINISHED_WITH_ERRORS);</span>
+<span class="fc" id="L131">                LOGGER.warn(&quot;Some EMIS batch failed verification!&quot;);</span>
+            } else {
+<span class="fc" id="L133">                result.stepResult(EmisStepResult.FINISHED);</span>
+<span class="fc" id="L134">                LOGGER.info(&quot;Successfully verified {} EMIS batches.&quot;, verifiedBatches.verifiedBatchesForProcessing().size());</span>
+            }
+<span class="fc" id="L136">        } else {</span>
+<span class="nc" id="L137">            result.content(ImmutableVerifiedEmisFileSetLists.of(emptyList(), emptyList()));</span>
+<span class="nc" id="L138">            result.stepResult(EmisStepResult.FINISHED);</span>
+<span class="nc" id="L139">            LOGGER.info(&quot;Skipped EMIS batch verification as there are no new batches to verify.&quot;);</span>
+        }
+
+<span class="fc" id="L142">        return result.build();</span>
+    }
+
+    /**
+     * We need to verify files are valid _before_ we start processing them. Files themselves aren't signed, but the
+     * MDC chunk of a file at its end can be used to verify the file isn't corrupt.
+     * To verify the file, we need to read it all, so may as well collect other info, such as total row
+     * &lt;p&gt;
+     * verified files are separated in 2 lists, one which will be actuall processed (before failure), another (after failure)
+     */
+    private ImmutableVerifiedEmisFileSetLists getVerifiedBatches(List&lt;EmisFileSftpSet&gt; emisBatch, KeyringConfig keyringConfig) {
+<span class="fc" id="L153">        List&lt;VerifiedEmisFileSftpSet&gt; batchesForProcessing = new ArrayList&lt;&gt;(emisBatch.size());</span>
+<span class="fc" id="L154">        List&lt;VerifiedEmisFileSftpSet&gt; batchesForCodeValidating = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L155">        boolean verificationNotFailed = true;</span>
+<span class="fc" id="L156">        List&lt;EmisFileSftpSet&gt; failedVerification = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L157">        Exception verifyException = null;</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">        for (EmisFileSftpSet efss : emisBatch) {</span>
+            try {
+<span class="fc" id="L160">                Either&lt;Exception, VerifiedEmisFileSftpSet&gt; exceptionOrVerifiedFileSet = verifyBatch(efss, keyringConfig);</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">                if (exceptionOrVerifiedFileSet.isRight()) {</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">                    if (verificationNotFailed) {</span>
+<span class="fc" id="L163">                        batchesForProcessing.add(exceptionOrVerifiedFileSet.get());</span>
+                    } else {
+<span class="fc" id="L165">                        batchesForCodeValidating.add(exceptionOrVerifiedFileSet.get());</span>
+                    }
+                } else {
+<span class="fc" id="L168">                    verificationNotFailed = false;</span>
+<span class="fc" id="L169">                    verifyException = exceptionOrVerifiedFileSet.getLeft();</span>
+<span class="fc" id="L170">                    failedVerification.add(efss);</span>
+                }
+<span class="nc" id="L172">            } catch (Exception e) {</span>
+<span class="nc" id="L173">                verificationNotFailed = false;</span>
+<span class="nc" id="L174">                failedVerification.add(efss);</span>
+<span class="nc" id="L175">                verifyException = e;</span>
+<span class="fc" id="L176">            }</span>
+<span class="fc" id="L177">        }</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">        if (isNotEmpty(failedVerification)) {</span>
+<span class="fc" id="L179">            LOGGER.error(&quot;Error verifying batch {}, skipping batches: {}!&quot;, failedVerification.get(0).emisFileSet().dateStamp(), emisFileSetUtils.toTimestampList(failedVerification, EmisFileSftpSet::emisFileSet),</span>
+                    verifyException);
+        }
+<span class="fc" id="L182">        return ImmutableVerifiedEmisFileSetLists.of(batchesForProcessing, batchesForCodeValidating);</span>
+
+    }
+
+    @VisibleForTesting
+    protected Either&lt;Exception, VerifiedEmisFileSftpSet&gt; verifyBatch(EmisFileSftpSet efss, KeyringConfig keyringConfig) {
+
+<span class="fc" id="L189">        List&lt;Either&lt;Exception, VerifiedEmisFile&gt;&gt; verifiedFilesOrExceptions = efss.emisFileSet().supportedFiles()</span>
+<span class="fc" id="L190">                .values()</span>
+<span class="fc" id="L191">                .parallelStream()</span>
+<span class="fc" id="L192">                .flatMap(List::stream)</span>
+<span class="fc" id="L193">                .map(ef -&gt; verifyEmisFile(ef, efss.serverDownloadDir(), keyringConfig))</span>
+<span class="fc" id="L194">                .collect(Collectors.toList());</span>
+
+<span class="fc" id="L196">        Optional&lt;Exception&gt; firstException = verifiedFilesOrExceptions.stream()</span>
+<span class="fc" id="L197">                .filter(Either::isLeft)</span>
+<span class="fc" id="L198">                .findAny()</span>
+<span class="fc" id="L199">                .map(Either::getLeft);</span>
+
+<span class="fc bfc" id="L201" title="All 2 branches covered.">        if (firstException.isPresent()) {</span>
+<span class="fc" id="L202">            return Either.left(firstException.get());</span>
+        }
+
+<span class="fc" id="L205">        Map&lt;EmisFileType, VerifiedEmisFile&gt; verifiedFiles = verifiedFilesOrExceptions.stream()</span>
+<span class="fc" id="L206">                .map(Either::get)</span>
+<span class="fc" id="L207">                .collect(Collectors.toMap(VerifiedEmisFile::type, Function.identity()));</span>
+
+<span class="fc" id="L209">        return Either.right(</span>
+<span class="fc" id="L210">                VerifiedEmisFileSftpSet.fromEmisFileSftpSet(efss, verifiedFiles)</span>
+        );
+
+    }
+
+    private Either&lt;Exception, VerifiedEmisFile&gt; verifyEmisFile(EmisFile ef, Path localDirectory, KeyringConfig keyringConfig) {
+<span class="fc" id="L216">        LOGGER.info(&quot;Going to verify {}&quot;, ef.relativePath());</span>
+<span class="fc" id="L217">        Path localFile = localDirectory.resolve(ef.relativePath());</span>
+<span class="fc" id="L218">        Class&lt;BaseEmisEsDomainModel&gt; rowClass = emisCsvProcessorProvider.getInterface(ef.type());</span>
+<span class="fc" id="L219">        CsvMapper csvMapper = getEmisCsvMapper();</span>
+<span class="fc" id="L220">        CsvSchema csvSchema = csvMapper.typedSchemaFor(rowClass).withNullValue(&quot;&quot;).withHeader();</span>
+
+<span class="fc" id="L222">        LOGGER.info(&quot;validation starts for type {}&quot;, rowClass.getSimpleName());</span>
+
+<span class="fc" id="L224">        try (HashingInputStream pgpInputStream = new HashingInputStream(Hashing.sha256(), getEmisPgpInputStream(localFile, keyringConfig))) {</span>
+<span class="fc" id="L225">            Timer.Sample csvTimer = Timer.start(Metrics.globalRegistry);</span>
+            try {
+<span class="fc" id="L227">                long totalCount = validateFileAndGetCount(pgpInputStream, getRowReader(rowClass, csvMapper, csvSchema));</span>
+<span class="fc" id="L228">                LOGGER.info(&quot;Finished verifying {}&quot;, ef.relativePath());</span>
+<span class="fc" id="L229">                String hash = pgpInputStream.hash().toString();</span>
+<span class="fc" id="L230">                incrementFileVerifierStatusCounter(STATUS_SUCCESS);</span>
+<span class="fc" id="L231">                return Either.right(VerifiedEmisFile.fromEmisFile(ef, totalCount, hash));</span>
+            } finally {
+<span class="fc" id="L233">                csvTimer.stop(CSV_VALIDATE_TIMER);</span>
+            }
+<span class="fc" id="L235">        } catch (Exception e) {</span>
+<span class="fc" id="L236">            LOGGER.error(&quot;Failed validating EMIS CSV for {}&quot;, localFile, e);</span>
+<span class="fc" id="L237">            incrementFileVerifierStatusCounter(STATUS_FAILED);</span>
+<span class="fc" id="L238">            return Either.left(e);</span>
+        }
+
+    }
+
+    private &lt;T&gt; Long validateFileAndGetCount(InputStream in, ObjectReader rowReader)
+            throws IOException {
+
+<span class="fc" id="L246">        long totalRecords = 0;</span>
+
+<span class="fc" id="L248">        MappingIterator&lt;T&gt; rowMapper = rowReader.readValues(new InputStreamReader(in, Charset.forName(phrConfig.getEmisEsCsvEncoding())));</span>
+<span class="fc bfc" id="L249" title="All 2 branches covered.">        while (rowMapper.hasNextValue()) {</span>
+            //check the row can be read
+<span class="fc" id="L251">            totalRecords++;</span>
+<span class="fc" id="L252">            rowMapper.nextValue();</span>
+        }
+
+<span class="fc" id="L255">        return totalRecords;</span>
+    }
+
+    private &lt;T&gt; ObjectReader getRowReader(@NotNull Class&lt;T&gt; rowClass, CsvMapper csvMapper, CsvSchema csvSchema) {
+<span class="fc" id="L259">        return csvMapper.readerFor(rowClass).with(csvSchema).withFeatures(ACCEPT_EMPTY_STRING_AS_NULL_OBJECT);</span>
+    }
+
+    private List&lt;EmisLsEntry&gt; convertToEmisLsListings(Path localSftpDirectory) throws IOException {
+
+<span class="fc" id="L264">        List&lt;EmisLsEntry&gt; emisLsListing = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L265">        List&lt;Path&gt; filesetDirectoryPaths = Files.list(localSftpDirectory)</span>
+<span class="fc" id="L266">                .peek(filesetDirectoryPath -&gt; {</span>
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">                    if (!Files.isDirectory(filesetDirectoryPath)) {</span>
+                        //based on exa spec, this shouldn't happen, plus we should have skipped earlier. Has someone manually added a file locally?
+<span class="nc" id="L269">                        LOGGER.error(&quot;Found regular file {} in unexpected location, skipping&quot;, filesetDirectoryPath.getFileName().toString());</span>
+                    }
+<span class="fc" id="L271">                })</span>
+<span class="fc" id="L272">                .filter(Files::isDirectory)</span>
+<span class="fc" id="L273">                .collect(Collectors.toList());</span>
+
+        //Annoyingly, IO exceptions in lambdas are messy to deal with, and there are several here, so just going old-skool.
+<span class="fc bfc" id="L276" title="All 2 branches covered.">        for (Path filesetDirectoryPath : filesetDirectoryPaths) {</span>
+<span class="fc" id="L277">            ImmutableEmisLsDirEntry.Builder dirEntryBuilder = ImmutableEmisLsDirEntry.builder()</span>
+<span class="fc" id="L278">                    .relativePath(localSftpDirectory.relativize(filesetDirectoryPath))</span>
+<span class="fc" id="L279">                    .size(Files.size(filesetDirectoryPath));</span>
+
+<span class="fc" id="L281">            List&lt;Path&gt; emisFilePaths = Files.list(filesetDirectoryPath).collect(Collectors.toList());</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">            for (Path emisFilePath : emisFilePaths) {</span>
+<span class="fc" id="L283">                ImmutableEmisLsRegFileEntry emisFile = ImmutableEmisLsRegFileEntry.builder()</span>
+<span class="fc" id="L284">                        .relativePath(localSftpDirectory.relativize(emisFilePath))</span>
+<span class="fc" id="L285">                        .size(Files.size(emisFilePath))</span>
+<span class="fc" id="L286">                        .build();</span>
+<span class="fc" id="L287">                dirEntryBuilder.addChildren(emisFile);</span>
+<span class="fc" id="L288">            }</span>
+<span class="fc" id="L289">            emisLsListing.add(dirEntryBuilder.build());</span>
+<span class="fc" id="L290">        }</span>
+
+<span class="fc" id="L292">        return emisLsListing;</span>
+    }
+
+    private List&lt;EmisFileSftpSet&gt; getAvailableBatches(Path serverDownloadDir, String sftpUniqueId) {
+<span class="fc" id="L296">        EmisVerifyBatchBuilder batchBuilder = beanFactory.getBean(EmisVerifyBatchBuilder.class);</span>
+        try {
+<span class="fc" id="L298">            List&lt;EmisLsEntry&gt; emisLsEntries = convertToEmisLsListings(serverDownloadDir);</span>
+<span class="fc" id="L299">            List&lt;EmisFileSftpSet&gt; allParseableFilesets = batchBuilder.buildEmisFileSftpSets(emisLsEntries, sftpUniqueId, serverDownloadDir);</span>
+<span class="fc" id="L300">            List&lt;EmisFileSftpSet&gt; availableBatches = allParseableFilesets.stream()</span>
+<span class="fc bfc" id="L301" title="All 2 branches covered.">                    .filter(efss -&gt; !emisEsDatestampSkipService.shouldSkipDateStamp(efss.emisFileSet().dateStamp(), sftpUniqueId))</span>
+<span class="fc" id="L302">                    .collect(Collectors.toList());</span>
+<span class="fc" id="L303">            LOGGER.info(&quot;There are {} EMIS deltas available to verify.&quot;, availableBatches.size());</span>
+<span class="fc" id="L304">            return availableBatches;</span>
+<span class="fc" id="L305">        } catch (Exception e) {</span>
+<span class="fc" id="L306">            throw new RuntimeException((&quot;Failed EMIS fetch of available batches to verify for directory &quot; + serverDownloadDir + &quot;and sftp &quot; + sftpUniqueId), e);</span>
+        }
+
+    }
+
+    @VisibleForTesting
+    BufferedInputStream getEmisPgpInputStream(Path localFile, KeyringConfig keyringConfig) throws NoSuchProviderException, IOException {
+<span class="fc" id="L313">        return new BufferedInputStream(emisPGPInputStreamProvider.decryptingInputStream(localFile, keyringConfig));</span>
+    }
+
+    private void incrementFileVerifierStatusCounter(String status) {
+<span class="fc" id="L317">        Metrics.counter(EMIS_VERIFY_FILE_METRIC_NAME, TAG_NO_FILES, status).increment();</span>
+<span class="fc" id="L318">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

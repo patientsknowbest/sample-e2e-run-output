@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EhrDataMigrationBootstrapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.analysis.core.threading</a> &gt; <span class="el_source">EhrDataMigrationBootstrapper.java</span></div><h1>EhrDataMigrationBootstrapper.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.analysis.core.threading;
+
+import com.pkb.fhir.analysis.core.domain.EhrDataProcessingContext;
+import com.pkb.fhir.analysis.core.domain.EhrDataProcessingState;
+import com.pkb.fhir.analysis.core.domain.MigrationParameters;
+import com.pkb.fhir.analysis.process.domain.ProcessorEnum;
+import com.pkb.fhir.analysis.ui.rest.MigrationController;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
+
+import static java.lang.invoke.MethodHandles.lookup;
+
+/**
+ * This is a core part of the application.
+ * The migration parameters are passed in from the controller {@link MigrationController}.
+ * By default, we don't override already processed data, the min and max menu_data ids are not required: we process all data if left empty.
+ * It initializes the context, uses the worker factory and executes multiple workers. {@link EhrDataProcessorWorker}.
+ */
+public class EhrDataMigrationBootstrapper {
+<span class="fc" id="L28">    private static final Logger LOG = LoggerFactory.getLogger(lookup().lookupClass());</span>
+
+    private final ExecutorServiceFactory executorServiceFactory;
+    private final Map&lt;ProcessorEnum, EhrDataProcessingWorkerFactory&gt; ehrDataProcessorWorkerFactoryMap;
+    private EhrDataProcessingContext context;
+    private ExecutorService taskExecutor;
+<span class="fc" id="L34">    private List&lt;EhrDataProcessorWorker&gt; workers = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L36">    public EhrDataMigrationBootstrapper(ExecutorServiceFactory executorServiceFactory, Map&lt;ProcessorEnum, EhrDataProcessingWorkerFactory&gt; ehrDataProcessorWorkerFactoryMap) {</span>
+<span class="fc" id="L37">        this.executorServiceFactory = executorServiceFactory;</span>
+<span class="fc" id="L38">        this.ehrDataProcessorWorkerFactoryMap = ehrDataProcessorWorkerFactoryMap;</span>
+<span class="fc" id="L39">        context = null;</span>
+<span class="fc" id="L40">    }</span>
+
+    public synchronized void bootstrapProcessorWorkers(MigrationParameters migrationParameters) {
+<span class="fc bfc" id="L43" title="All 2 branches covered.">        if (this.context != null) {</span>
+<span class="fc" id="L44">            throw new IllegalStateException(&quot;There is an ongoing procedure. Stop it first.&quot;);</span>
+        }
+<span class="fc" id="L46">        applyDefaults(migrationParameters);</span>
+<span class="pc bpc" id="L47" title="1 of 2 branches missed.">        if (tearDownProcesses()) {</span>
+<span class="fc" id="L48">            doBootstrapMigration(migrationParameters);</span>
+        } else {
+<span class="nc" id="L50">            throw new RuntimeException(&quot;Failed to stop previous run&quot;);</span>
+        }
+
+<span class="fc" id="L53">    }</span>
+
+    private void doBootstrapMigration(MigrationParameters migrationParameters) {
+<span class="fc" id="L56">        Instant start = Instant.now();</span>
+<span class="fc" id="L57">        taskExecutor = executorServiceFactory.createExecutorService(migrationParameters.getMaxThreads());</span>
+<span class="fc" id="L58">        context = new EhrDataProcessingContext(migrationParameters, new EhrDataProcessingState(start, migrationParameters.getStartFromId()));</span>
+
+<span class="fc" id="L60">        LOG.info(&quot;Bootstrapping {} worker threads to do {}, each working with page size {} on menu data type {}&quot;, migrationParameters.getMaxThreads(), migrationParameters.getProcessorEnum(), migrationParameters.getDataPageSize(), migrationParameters.getMenuDataType());</span>
+
+<span class="fc bfc" id="L62" title="All 2 branches covered.">        for (int i = 0; i &lt; migrationParameters.getMaxThreads(); ++i) {</span>
+<span class="fc" id="L63">            createWorker(migrationParameters.getProcessorEnum(), i);</span>
+        }
+<span class="fc" id="L65">        watchWorkersCompletion();</span>
+<span class="fc" id="L66">    }</span>
+
+    private void watchWorkersCompletion() {
+<span class="fc" id="L69">        CompletableFuture.runAsync(() -&gt; {</span>
+            try {
+<span class="fc" id="L71">                taskExecutor.shutdown();</span>
+<span class="fc" id="L72">                taskExecutor.awaitTermination(9999, TimeUnit.DAYS);</span>
+<span class="nc" id="L73">            } catch (InterruptedException e) {</span>
+<span class="nc" id="L74">                LOG.error(e.getMessage(), e);</span>
+<span class="fc" id="L75">            }</span>
+<span class="fc" id="L76">        }).thenApply(i -&gt; {</span>
+<span class="fc" id="L77">            context.getState().registerEnd(Instant.now());</span>
+<span class="fc" id="L78">            LOG.info(&quot;All process finished in {} seconds&quot;, context.getState().getRuntimeSeconds());</span>
+<span class="fc" id="L79">            return &quot;&quot;;</span>
+        });
+<span class="fc" id="L81">    }</span>
+
+    private void createWorker(ProcessorEnum processorEnum, int workerNumber) {
+<span class="fc" id="L84">        String processId = String.format(&quot;ehr-data-processor-%d&quot;, workerNumber);</span>
+<span class="fc" id="L85">        context.getState().registerProcessingState(processId);</span>
+<span class="fc" id="L86">        EhrDataProcessorWorker ehrDataProcessorWorker = ehrDataProcessorWorkerFactoryMap.get(processorEnum).createEhrDataProcessorWorker(processId, context);</span>
+<span class="fc" id="L87">        workers.add(ehrDataProcessorWorker);</span>
+<span class="fc" id="L88">        taskExecutor.submit(ehrDataProcessorWorker);</span>
+<span class="fc" id="L89">    }</span>
+
+    private void applyDefaults(MigrationParameters migrationParameters) {
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">        if (migrationParameters.getMaxThreads() &lt; 0) {</span>
+<span class="nc" id="L93">            migrationParameters.setMaxThreads(5);</span>
+        }
+<span class="pc bpc" id="L95" title="2 of 4 branches missed.">        if (migrationParameters.getDataPageSize() &lt; 0 || migrationParameters.getDataPageSize() &gt; 10000) {</span>
+<span class="nc" id="L96">            migrationParameters.setDataPageSize(1000);</span>
+        }
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">        if (migrationParameters.getStartFromId() == null) {</span>
+<span class="nc" id="L99">            migrationParameters.setStartFromId(-1L);</span>
+        }
+<span class="fc" id="L101">    }</span>
+
+    public EhrDataProcessingContext getState() {
+<span class="fc" id="L104">        return context;</span>
+    }
+
+    public boolean tearDownProcesses() {
+<span class="fc" id="L108">        shutdown();</span>
+<span class="fc bfc" id="L109" title="All 4 branches covered.">        if (context == null || context.getState().isFinished()) {</span>
+<span class="fc" id="L110">            workers.clear();</span>
+<span class="fc" id="L111">            context = null;</span>
+<span class="fc" id="L112">            return true;</span>
+        } else {
+<span class="fc" id="L114">            return false;</span>
+        }
+    }
+
+    public void shutdown() {
+<span class="fc bfc" id="L119" title="All 2 branches covered.">        if (taskExecutor != null) {</span>
+<span class="fc" id="L120">            workers.forEach(EhrDataProcessorWorker::cancel);</span>
+<span class="fc" id="L121">            LOG.info(&quot;Executor shut down. Processes cancelled.&quot;);</span>
+        }
+<span class="fc" id="L123">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

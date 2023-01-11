@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BulkInvitationCsvProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.patient.invite.bulk.csv</a> &gt; <span class="el_source">BulkInvitationCsvProcessor.java</span></div><h1>BulkInvitationCsvProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.patient.invite.bulk.csv;
+
+import com.pkb.common.base.ProcessingResults;
+import com.pkb.common.csv.CsvRecord;
+import com.pkb.common.csv.ParsingResult;
+import com.pkb.common.csv.RowMapper;
+import com.pkb.datamodel.consent.PatientConsentUpdateTemplate;
+import com.pkb.patient.invite.InvitationDto;
+import com.pkb.patient.invite.PatientRegister;
+import com.pkb.patient.invite.PatientRegister.FailedInvitation;
+import com.pkb.patient.invite.PatientRegister.SuccessfulInvitation;
+import com.pkb.patient.invite.bulk.LineNumberedInvitationResult;
+import io.vavr.collection.List;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+
+import static com.pkb.common.csv.ParsingResult.resultAt;
+import static com.pkb.patient.invite.bulk.AbstractLineNumberedResult.byLineNumber;
+
+public class BulkInvitationCsvProcessor {
+    private final RowMapper&lt;InvitationParsingError, InvitationDto&gt; rowMapper;
+    private final PatientRegister patientRegister;
+    private final InvitationResultConverter resultConverter;
+
+    public BulkInvitationCsvProcessor(
+            @NotNull RowMapper&lt;InvitationParsingError, InvitationDto&gt; rowMapper,
+            @NotNull InvitationResultConverter resultConverter,
+<span class="fc" id="L28">            @NotNull PatientRegister patientRegister) {</span>
+<span class="fc" id="L29">        this.rowMapper = rowMapper;</span>
+<span class="fc" id="L30">        this.resultConverter = resultConverter;</span>
+<span class="fc" id="L31">        this.patientRegister = patientRegister;</span>
+<span class="fc" id="L32">    }</span>
+
+    public BulkInvitationResult processRows(@NotNull List&lt;CsvRecord&gt; originalRows, @NotNull PatientConsentUpdateTemplate patientConsent) {
+<span class="fc" id="L35">        ProcessingResults&lt;InvitationParsingError, ParsingResult&lt;InvitationDto&gt;&gt; validatedRows = parseRows(originalRows);</span>
+<span class="fc" id="L36">        ProcessingResults&lt;LineNumberedFailedInvitation, LineNumberedSuccessfulInvitation&gt; processedInvitations = invitePatients(validatedRows.getSuccesses(), patientConsent);</span>
+
+<span class="fc" id="L38">        List&lt;LineNumberedInvitationResult&gt; invitationResults = orderedResults(</span>
+<span class="fc" id="L39">                validatedRows.getFailures(),</span>
+<span class="fc" id="L40">                processedInvitations.getFailures(),</span>
+<span class="fc" id="L41">                processedInvitations.getSuccesses());</span>
+
+<span class="fc" id="L43">        List&lt;LineNumberedSuccessfulInvitation&gt; successes = processedInvitations.getSuccesses();</span>
+
+<span class="fc" id="L45">        int partialSuccesses = Math.toIntExact(successes.filter(result -&gt; result.getSuccessfulInvitation().isPartialSuccess()).size());</span>
+<span class="fc" id="L46">        int successCount = successes.size() - partialSuccesses;</span>
+<span class="fc" id="L47">        int failureCount = validatedRows.getFailures().size() + processedInvitations.getFailures().size() + partialSuccesses;</span>
+
+<span class="fc" id="L49">        return new BulkInvitationResult(successCount, failureCount, invitationResults);</span>
+    }
+
+    // ========== Helper methods below. ==========
+
+    private ProcessingResults&lt;InvitationParsingError, ParsingResult&lt;InvitationDto&gt;&gt; parseRows(List&lt;CsvRecord&gt; originalRows) {
+<span class="fc" id="L55">        List&lt;Either&lt;InvitationParsingError, ParsingResult&lt;InvitationDto&gt;&gt;&gt; rows = originalRows</span>
+<span class="fc" id="L56">                .map(row -&gt; rowMapper.map(row).map(validatedInvitation -&gt; resultAt(row.logicalLineNumber(), validatedInvitation)));</span>
+<span class="fc" id="L57">        return partition(rows);</span>
+    }
+
+    private ProcessingResults&lt;LineNumberedFailedInvitation, LineNumberedSuccessfulInvitation&gt; invitePatients(
+            List&lt;ParsingResult&lt;InvitationDto&gt;&gt; invitations, PatientConsentUpdateTemplate patientConsent) {
+<span class="fc" id="L62">        List&lt;InvitationDto&gt; invitationToBeProcessed = invitations.map(ParsingResult::getResult);</span>
+<span class="fc" id="L63">        List&lt;Either&lt;FailedInvitation, SuccessfulInvitation&gt;&gt; processedInvitations = List.ofAll(patientRegister.registerAndActivateInBulk(invitationToBeProcessed.toJavaList(), patientConsent));</span>
+<span class="fc" id="L64">        return partition(correlateResultsWithLineNumbers(invitations, processedInvitations));</span>
+    }
+
+    private List&lt;LineNumberedInvitationResult&gt; orderedResults(
+            List&lt;InvitationParsingError&gt; parsingErrors,
+            List&lt;LineNumberedFailedInvitation&gt; invitationErrors,
+            List&lt;LineNumberedSuccessfulInvitation&gt; invitationSuccesses) {
+
+<span class="fc" id="L72">        List&lt;LineNumberedInvitationResult&gt; allResults = parsingErrors.map(resultConverter::convert).appendAll(invitationErrors.map(resultConverter::convert)).appendAll(invitationSuccesses.map(resultConverter::convert));</span>
+<span class="fc" id="L73">        return allResults.sorted(byLineNumber());</span>
+    }
+
+    private List&lt;Either&lt;LineNumberedFailedInvitation, LineNumberedSuccessfulInvitation&gt;&gt; correlateResultsWithLineNumbers(
+            List&lt;ParsingResult&lt;InvitationDto&gt;&gt; linesToBeProcessed,
+            List&lt;Either&lt;FailedInvitation, SuccessfulInvitation&gt;&gt; processedInvitations) {
+
+<span class="fc" id="L80">        return linesToBeProcessed.map(ParsingResult::getRowNumber).zip(processedInvitations)</span>
+<span class="fc" id="L81">                .map(pair -&gt; {</span>
+<span class="fc" id="L82">                    Long lineNumber = pair._1;</span>
+<span class="fc" id="L83">                    Either&lt;FailedInvitation, SuccessfulInvitation&gt; validationResult = pair._2;</span>
+
+<span class="fc" id="L85">                    return validationResult</span>
+<span class="fc" id="L86">                            .map(success -&gt; new LineNumberedSuccessfulInvitation(lineNumber, success))</span>
+<span class="fc" id="L87">                    .mapLeft(failure -&gt; new LineNumberedFailedInvitation(lineNumber, failure));</span>
+                });
+    }
+
+    private &lt;L,R&gt; ProcessingResults&lt;L,R&gt; partition(List&lt;Either&lt;L,R&gt;&gt; eithers) {
+<span class="fc" id="L92">        List&lt;R&gt; successes = eithers.flatMap(v -&gt; v.right());</span>
+<span class="fc" id="L93">        List&lt;L&gt; failures = eithers.flatMap(v -&gt; v.left());</span>
+<span class="fc" id="L94">        return new ProcessingResults&lt;&gt;(failures, successes);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,621 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ManageUserProfileAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.userprofile</a> &gt; <span class="el_source">ManageUserProfileAction.java</span></div><h1>ManageUserProfileAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.userprofile;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.calculators.qrisk2.Qrisk2;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.entities.enums.Gender;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.UserType;
+import com.pkb.institute.entity.Team;
+import com.pkb.notification.entity.Activity;
+import com.pkb.security.NhsLoginAuthenticationDetails;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelIdType;
+import com.pkb.user.entity.PersonSecurePropertyDTO;
+import com.pkb.user.entity.TeamLevelIdType;
+import com.pkb.util.FormValidationErrors;
+import com.pkb.util.InvalidUIDateException;
+import com.pkb.util.UIDate;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.struts2.interceptor.validation.SkipValidation;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.NavigableMap;
+import java.util.TreeMap;
+import java.util.UUID;
+
+import static com.pkb.util.Constants.APPLICATION_TZ;
+import static java.util.Arrays.asList;
+import static java.util.Collections.emptyList;
+import static java.util.stream.Collectors.toMap;
+import static org.apache.logging.log4j.util.Strings.EMPTY;
+
+<span class="fc" id="L48">public class ManageUserProfileAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+<span class="fc" id="L51">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L52">    private static final DateTimeFormatter DEATH_TIMESTAMP_FORMATTER = DateTimeFormatter.ofPattern(&quot;dd/MMM/y&quot;, Locale.UK).withZone(APPLICATION_TZ);</span>
+    static final String RETURN_FOR_USER_IN_RECORD = &quot;returnForUserInRecord&quot;;
+    static final String RETURN_FOR_TEAM_COORD = &quot;returnForTeamCoord&quot;;
+
+    public static String formatDeathTimestamp(Instant deathTimestamp) {
+<span class="fc" id="L57">        return DEATH_TIMESTAMP_FORMATTER.format(deathTimestamp);</span>
+    }
+
+    // Dependencies
+    private TeamUserManager teamUserManager;
+
+    private UserProfileDataSourceFactory userProfileDataSourceFactory;
+
+    private UserProfileDataSource profileDataSource;
+
+    private UserProfile user;
+
+    private List&lt;NationalIdType&gt; nationalIdTypes; // From manageProfile.jsp
+    private List&lt;String&gt; nationalIdNumbers; // From manageProfile.jsp
+
+    private List&lt;NationalId&gt; nationalIds; // To manageProfile.jsp
+
+    private String instituteCountry;
+
+    private Long clinicianOrgId;
+
+    private String gender;
+
+    private List&lt;String&gt; ethnGrpList;
+    private String ethnGrp;
+
+    private boolean reminderOptOut;
+
+    private boolean instituteUser;
+
+    private NavigableMap&lt;String, List&lt;PersonSecurePropertyDTO&gt;&gt; propertiesByCountry;
+
+<span class="fc" id="L89">    private String tab = &quot;myaccount&quot;;</span>
+
+<span class="fc" id="L91">    private String subTab = &quot;myProfile&quot;;</span>
+
+    // To return to activatedPatients.jsp on error
+    private String userId;
+    private String searchString;
+    private String searchIdType; // national/org/team
+    private String searchId;
+    private String searchName;
+    private String searchDobYear;
+    private String searchDobMonth;
+    private boolean displayMarkDeceasedButton;
+    private String searchDobDay;
+
+    private String searchLevel;
+    private boolean displayMarkNotDeceasedButton;
+
+    private String formattedDeathTimestamp;
+
+    private UIDate deathTimestamp;
+
+    private boolean deathTimestampReadonly;
+
+    private Map&lt;String, Boolean&gt; fieldsDisability;
+
+    @Override
+    public String input() {
+        //This flow can switch the context hence set the contextUserId first
+<span class="fc" id="L118">        contextUserUtil.setContextUserInSession(contextUserId);</span>
+        // set user to context user (if any) or logged in user
+<span class="fc" id="L120">        user = getDataSource().getProfile();</span>
+<span class="fc" id="L121">        prepopulateInputs();</span>
+<span class="fc" id="L122">        populateOptionsPerTeam();</span>
+<span class="fc" id="L123">        return Action.INPUT;</span>
+    }
+
+    @Override
+    public EHRRequestContext getEHRRequestContext() {
+<span class="fc" id="L128">        EHRRequestContext context = super.getEHRRequestContext();</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        if (contextUserId == null) {</span>
+<span class="fc" id="L130">            context = context.withConsentNotRequired();</span>
+        }
+<span class="fc" id="L132">        return context;</span>
+    }
+
+    private void populateDeceasedStateControls() {
+<span class="fc bfc" id="L136" title="All 4 branches covered.">        if (user.getId().equals(loggedInUserUtil.getLoggedInUserId()) || isLoggedInUserPatient()) {</span>
+<span class="fc" id="L137">            displayMarkDeceasedButton = false;</span>
+<span class="fc" id="L138">            displayMarkNotDeceasedButton = false;</span>
+        } else {
+<span class="fc bfc" id="L140" title="All 2 branches covered.">            displayMarkDeceasedButton = !user.isDeceased();</span>
+<span class="fc bfc" id="L141" title="All 2 branches covered.">            displayMarkNotDeceasedButton = !displayMarkDeceasedButton;</span>
+        }
+<span class="fc bfc" id="L143" title="All 2 branches covered.">        if (user.getDeathTimestamp() != null) {</span>
+<span class="fc" id="L144">            this.deathTimestamp = new UIDate(user.getDeathTimestamp());</span>
+        }
+<span class="fc bfc" id="L146" title="All 4 branches covered.">        this.deathTimestampReadonly = isLoggedInUserPatient() &amp;&amp; !user.getId().equals(loggedInUserUtil.getLoggedInUserId());</span>
+<span class="fc" id="L147">    }</span>
+
+    @SkipValidation
+    public String cancelEdit() {
+<span class="fc bfc" id="L151" title="All 2 branches covered.">        if (contextUserUtil.getContextUserId() == null) {</span>
+<span class="fc" id="L152">            return input();</span>
+        } else {
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">            return getLoggedInEHRRequestContext().isTeamCoordinator() ? RETURN_FOR_TEAM_COORD : RETURN_FOR_USER_IN_RECORD;</span>
+        }
+    }
+
+    @Override
+    public String execute() throws InvalidUIDateException {
+<span class="fc" id="L160">        String result = Action.SUCCESS;</span>
+        try {
+<span class="fc" id="L162">            userManager.beginTransaction();</span>
+<span class="fc" id="L163">            user.setLanguageCode(getLocale().getLanguage());</span>
+<span class="fc" id="L164">            user.setNationalIds(nationalIds);</span>
+<span class="fc bfc" id="L165" title="All 2 branches covered.">            if (gender != null) {</span>
+<span class="fc" id="L166">                user.setGender(Gender.getByCode(gender.toLowerCase()).getId());</span>
+            }
+<span class="fc" id="L168">            user.setNationalIdNumbers(nationalIdNumbers);</span>
+<span class="fc" id="L169">            user.setNationalIdTypes(nationalIdTypes);</span>
+<span class="fc" id="L170">            FormValidationErrors errors = getDataSource().updateProfile(getEHRRequestContext(), user);</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">            if (!errors.isEmpty()) {</span>
+<span class="fc" id="L172">                applyErrors(errors);</span>
+<span class="fc" id="L173">                prepopulateInputs();</span>
+<span class="fc" id="L174">                return Action.INPUT;</span>
+            }
+<span class="fc" id="L176">            saveSecureProperties();</span>
+
+<span class="fc" id="L178">            userManager.commitTransaction();</span>
+
+            // If profile is being changed by other user, log and notify the activity
+<span class="fc" id="L181">            logActivityByOthers(Activity.Action.UPDATED_PROFILE, dateTimeService.now(), true, new NoConsentsRequired(), getLoggedInEHRRequestContext());</span>
+        } finally {
+<span class="fc" id="L183">            userManager.rollbackIfNotCommitted();</span>
+        }
+
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">        if (!hasErrors()) {</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">            if (contextUserUtil.getContextUser() == null) {</span>
+<span class="fc" id="L188">                addActionMessage(getText(&quot;manageprofile.sucess.message&quot;));</span>
+            } else {
+<span class="fc" id="L190">                getDataSource().prepareForDisplay(user);</span>
+<span class="fc" id="L191">                addActionMessage(getText(&quot;manageprofile.sucess.other&quot;, new String[]{user.getFirstName(), user.getLastName()}));</span>
+            }
+        }
+
+<span class="pc bpc" id="L195" title="1 of 4 branches missed.">        if (contextUserUtil.getContextUserId() != null &amp;&amp; !asList(ERROR, INPUT).contains(result)) {</span>
+<span class="fc bfc" id="L196" title="All 2 branches covered.">            result = getLoggedInEHRRequestContext().isTeamCoordinator() ? RETURN_FOR_TEAM_COORD : RETURN_FOR_USER_IN_RECORD;</span>
+        }
+
+<span class="fc" id="L199">        return result;</span>
+    }
+
+    @Override
+    public void validate() {
+<span class="fc" id="L204">        user.setId(getDataSource().getProfile().getId()); // needed by some logic still left in this class</span>
+<span class="fc" id="L205">        user.setUserType(getDataSource().getProfile().getUserType());</span>
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">        if (this.deathTimestamp != null) {</span>
+            try {
+<span class="nc" id="L208">                user.setDeathTimestamp(this.deathTimestamp.toInstant());</span>
+<span class="nc" id="L209">            } catch (InvalidUIDateException ignored) {</span>
+<span class="nc" id="L210">                addFieldError(&quot;user.deathTimestamp&quot;, getText(&quot;markdeceased.error.invaliddate&quot;));</span>
+<span class="nc" id="L211">            }</span>
+        }
+
+<span class="fc" id="L214">        Map&lt;String, List&lt;String&gt;&gt; errors = getFieldErrors();</span>
+<span class="pc bpc" id="L215" title="2 of 4 branches missed.">        if ((errors != null) &amp;&amp; (!errors.isEmpty())) {</span>
+<span class="nc" id="L216">            prepopulateInputs();</span>
+        }
+<span class="fc" id="L218">    }</span>
+
+    private void prepopulateInputs() {
+<span class="fc" id="L221">        getDataSource().prepareForDisplay(user);</span>
+<span class="fc" id="L222">        nationalIds = getDataSource().getProfile().getNationalIds();</span>
+<span class="fc" id="L223">        instituteCountry = user.getInstituteCountry();</span>
+        // Right now, the web interface is concerned with date only, not absolute time of birth.
+<span class="fc" id="L225">        this.gender = String.valueOf(user.getGender());</span>
+
+<span class="fc bfc" id="L227" title="All 2 branches covered.">        if (user.getDeathTimestamp() != null) {</span>
+<span class="fc" id="L228">            this.formattedDeathTimestamp = formatDeathTimestamp(user.getDeathTimestamp());</span>
+        }
+
+<span class="fc" id="L231">        this.instituteUser = teamUserManager.isTeamUser(user.getId());</span>
+
+<span class="fc" id="L233">        populateDeceasedStateControls();</span>
+
+<span class="fc" id="L235">        ethnGrpList = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">        for (Qrisk2.Ethnicity e : Qrisk2.Ethnicity.values()) {</span>
+<span class="fc" id="L237">            ethnGrpList.add(e.getText());</span>
+        }
+<span class="fc" id="L239">        populateFieldsDisabilityMap();</span>
+<span class="fc" id="L240">    }</span>
+
+    private void saveSecureProperties() {
+<span class="fc" id="L243">        List&lt;PersonSecurePropertyDTO&gt; properties = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L244" title="1 of 4 branches missed.">        if (ethnGrp != null &amp;&amp; loggedInUserUtil.isLoggedInUserActiveTeamMember()) {</span>
+<span class="fc" id="L245">            PersonSecurePropertyDTO dto = new PersonSecurePropertyDTO(new SourceDetails(getLoggedInEHRRequestContext()));</span>
+<span class="fc" id="L246">            dto.setCountryOrNull(null);</span>
+<span class="fc" id="L247">            dto.setPropertyName(PersonSecurePropertyDTO.PropertyName.ethnicGroup);</span>
+<span class="fc" id="L248">            dto.setValue(ethnGrp);</span>
+<span class="fc" id="L249">            dto.generateNewRandomUniqueId();</span>
+<span class="fc" id="L250">            properties.add(dto);</span>
+        }
+<span class="fc bfc" id="L252" title="All 2 branches covered.">        if (!properties.isEmpty()) {</span>
+<span class="fc" id="L253">            userManager.saveSecureProperties(getLoggedInEHRRequestContext(), properties, user.getId());</span>
+
+        }
+<span class="fc" id="L256">    }</span>
+
+    /**
+     * Cycles through the teams a user is attached to, populating options to do
+     * with things specific to then eg countries, email reminders etc
+     */
+    private void populateOptionsPerTeam() {
+
+        List&lt;Team&gt; teamList;
+
+        //IMPORTANT: we only want clinicians to be able to see the race/religion for the country of the organisation they are attached to:
+<span class="fc bfc" id="L267" title="All 2 branches covered.">        if (loggedInUserUtil.getLoggedInUserType() != UserType.PATIENT) {</span>
+
+            //for clinicians, generate a list of teams the CLINICIAN is attached to:
+<span class="fc" id="L270">            teamList = teamUserManager.getUserTeams(getEHRRequestContext(), loggedInUserUtil.getLoggedInUserId(), true);</span>
+<span class="fc bfc" id="L271" title="All 2 branches covered.">        } else if (contextUserUtil.getContextUser() == null) {</span>
+
+            //for patients, get their list of teams:
+<span class="fc" id="L274">            teamList = teamUserManager.getUserTeams(getEHRRequestContext(), loggedInUserUtil.getLoggedInUserId(), true);</span>
+        } else {
+
+            //for carer, don't display country options
+<span class="fc" id="L278">            propertiesByCountry = new TreeMap&lt;&gt;();</span>
+<span class="fc" id="L279">            return;</span>
+        }
+        //use the team list to populate the list of countries we are interested in (ie for clinician, this will just be their team's country)
+<span class="fc" id="L282">        List&lt;String&gt; instituteCountries = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L284" title="All 2 branches covered.">        for (Team team : teamList) {</span>
+<span class="fc bfc" id="L285" title="All 2 branches covered.">            if (!instituteCountries.contains(team.getCountry())) {</span>
+<span class="fc" id="L286">                instituteCountries.add(team.getCountry());</span>
+            }
+<span class="fc" id="L288">        }</span>
+
+<span class="fc" id="L290">        propertiesByCountry = new TreeMap&lt;&gt;();</span>
+
+        //add entries to the map for the countries that are collecting properties we're interested in:
+<span class="pc bpc" id="L293" title="1 of 4 branches missed.">        instituteCountries.stream().filter(countryCode -&gt; !getEthnicities(countryCode).isEmpty() || !getReligions(countryCode).isEmpty())</span>
+<span class="fc" id="L294">                .forEach(countryCode -&gt; propertiesByCountry.put(countryCode, new ArrayList&lt;&gt;()));</span>
+<span class="fc" id="L295">        List&lt;PersonSecurePropertyDTO&gt; properties = userManager.getAllSecureProperties(getLoggedInEHRRequestContext(), user.getId());</span>
+
+        //populate the properties list for the countries in the map
+<span class="fc bfc" id="L298" title="All 2 branches covered.">        for (PersonSecurePropertyDTO property : properties) {</span>
+<span class="fc" id="L299">            String country = property.getCountryOrNull();</span>
+
+<span class="pc bpc" id="L301" title="3 of 4 branches missed.">            if ((country != null) &amp;&amp; propertiesByCountry.containsKey(country)) {</span>
+<span class="nc" id="L302">                propertiesByCountry.get(country).add(property);</span>
+            }
+
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">            if (property.getPropertyName() == PersonSecurePropertyDTO.PropertyName.ethnicGroup) {</span>
+<span class="fc" id="L306">                ethnGrp = property.getValue();</span>
+            }
+
+<span class="fc" id="L309">        }</span>
+
+<span class="fc" id="L311">    }</span>
+
+    private UserProfileDataSource getDataSource() {
+<span class="fc bfc" id="L314" title="All 2 branches covered.">        if (profileDataSource == null) {</span>
+<span class="fc" id="L315">            profileDataSource = userProfileDataSourceFactory.create(getEHRRequestContext());</span>
+        }
+<span class="fc" id="L317">        return profileDataSource;</span>
+    }
+
+    public List&lt;String&gt; getNationalIdNumbers() {
+<span class="fc" id="L321">        return nationalIdNumbers;</span>
+    }
+
+    public void setNationalIdNumbers(List&lt;String&gt; nationalIdNumbers) {
+<span class="fc" id="L325">        this.nationalIdNumbers = nationalIdNumbers;</span>
+<span class="fc" id="L326">    }</span>
+
+    public List&lt;NationalIdType&gt; getNationalIdTypes() {
+<span class="nc" id="L329">        return nationalIdTypes;</span>
+    }
+
+    public void setNationalIdTypes(List&lt;NationalIdType&gt; nationalIdTypes) {
+<span class="fc" id="L333">        this.nationalIdTypes = nationalIdTypes;</span>
+<span class="fc" id="L334">    }</span>
+
+    public boolean isReminderOptOut() {
+<span class="fc" id="L337">        return reminderOptOut;</span>
+    }
+
+    public void setReminderOptOut(boolean reminderOptOut) {
+<span class="fc" id="L341">        this.reminderOptOut = reminderOptOut;</span>
+<span class="fc" id="L342">    }</span>
+
+    public List&lt;NationalId&gt; getNationalIds() {
+<span class="fc" id="L345">        return nationalIds;</span>
+    }
+
+    public String getInstituteCountry() {
+<span class="nc" id="L349">        return instituteCountry;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L353">        this.userManager = userManager;</span>
+<span class="fc" id="L354">    }</span>
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L357">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L358">    }</span>
+
+    public String getGender() {
+<span class="fc" id="L361">        Gender g = Gender.getById(user.getGender());</span>
+<span class="fc" id="L362">        gender = StringUtils.capitalize(StringUtils.lowerCase(g.name()));</span>
+<span class="fc" id="L363">        return gender;</span>
+    }
+
+    public void setGender(String gender) {
+<span class="fc" id="L367">        this.gender = gender;</span>
+<span class="fc" id="L368">    }</span>
+
+    public UserProfile getUser() {
+<span class="fc" id="L371">        return user;</span>
+    }
+
+    public void setUser(UserProfile user) {
+<span class="fc" id="L375">        this.user = user;</span>
+<span class="fc" id="L376">    }</span>
+
+    public boolean getInstituteUser() {
+<span class="fc" id="L379">        return instituteUser;</span>
+    }
+
+    public void setInstituteUser(boolean instituteUser) {
+<span class="nc" id="L383">        this.instituteUser = instituteUser;</span>
+<span class="nc" id="L384">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L387">        return tab;</span>
+    }
+
+    public String getSubTab() {
+<span class="fc" id="L391">        return subTab;</span>
+    }
+
+    public void setTab(String tab) {
+<span class="fc" id="L395">        this.tab = tab;</span>
+<span class="fc" id="L396">    }</span>
+
+    public void setSubTab(String subTab) {
+<span class="fc" id="L399">        this.subTab = subTab;</span>
+<span class="fc" id="L400">    }</span>
+
+    /**
+     * Returns a list of the available ethnicity options for the given country
+     *
+     * @param countryCode
+     * @return
+     */
+    public List&lt;String&gt; getEthnicities(String countryCode) {
+<span class="fc" id="L409">        return pkbWebUtil.getEthnicities(Locale.getDefault())</span>
+<span class="fc" id="L410">                .getOrDefault(countryCode, emptyList());</span>
+    }
+
+    /**
+     * Returns a list of the available religions options for the given country
+     *
+     * @param countryCode
+     * @return
+     */
+    public List&lt;String&gt; getReligions(String countryCode) {
+<span class="fc" id="L420">        return pkbWebUtil.getReligions(Locale.getDefault())</span>
+<span class="fc" id="L421">                .getOrDefault(countryCode, emptyList());</span>
+    }
+
+    /**
+     * @return the propertiesByCountry
+     */
+    public NavigableMap&lt;String, List&lt;PersonSecurePropertyDTO&gt;&gt; getPropertiesByCountry() {
+<span class="nc" id="L428">        return propertiesByCountry;</span>
+    }
+
+    /**
+     * @param propertiesByCountry the propertiesByCountry to set
+     */
+    public void setPropertiesByCountry(
+            NavigableMap&lt;String, List&lt;PersonSecurePropertyDTO&gt;&gt; propertiesByCountry) {
+<span class="nc" id="L436">        this.propertiesByCountry = propertiesByCountry;</span>
+<span class="nc" id="L437">    }</span>
+
+    public Long getClinicianOrgId() {
+<span class="nc" id="L440">        return clinicianOrgId;</span>
+    }
+
+    public List&lt;OrgLevelIdType&gt; getOrgLevelIdTypes() {
+<span class="fc" id="L444">        return getDataSource().getHandledOrgLevelIdTypes();</span>
+    }
+
+    public List&lt;TeamLevelIdType&gt; getTeamLevelIdTypes() {
+<span class="fc" id="L448">        return getDataSource().getHandledTeamLevelIdTypes();</span>
+    }
+
+    public String getEthnGrp() {
+<span class="fc" id="L452">        return ethnGrp;</span>
+    }
+
+    public void setEthnGrp(String ethnGrp) {
+<span class="fc" id="L456">        this.ethnGrp = ethnGrp;</span>
+<span class="fc" id="L457">    }</span>
+
+    public List&lt;String&gt; getEthnGrpList() {
+<span class="fc" id="L460">        return ethnGrpList;</span>
+    }
+
+    public void setEthnGrpList(List&lt;String&gt; ethnGrpList) {
+<span class="nc" id="L464">        this.ethnGrpList = ethnGrpList;</span>
+<span class="nc" id="L465">    }</span>
+
+    public String getSearchString() {
+<span class="nc" id="L468">        return searchString;</span>
+    }
+
+    public void setSearchString(String searchString) {
+<span class="nc" id="L472">        this.searchString = searchString;</span>
+<span class="nc" id="L473">    }</span>
+
+    public String getSearchIdType() {
+<span class="nc" id="L476">        return searchIdType;</span>
+    }
+
+    public void setSearchIdType(String searchIdType) {
+<span class="fc" id="L480">        this.searchIdType = searchIdType;</span>
+<span class="fc" id="L481">    }</span>
+
+    public String getSearchId() {
+<span class="nc" id="L484">        return searchId;</span>
+    }
+
+    public void setSearchId(String searchId) {
+<span class="fc" id="L488">        this.searchId = searchId;</span>
+<span class="fc" id="L489">    }</span>
+
+    public String getSearchName() {
+<span class="nc" id="L492">        return searchName;</span>
+    }
+
+    public void setSearchName(String searchName) {
+<span class="fc" id="L496">        this.searchName = searchName;</span>
+<span class="fc" id="L497">    }</span>
+
+    public String getSearchDobYear() {
+<span class="nc" id="L500">        return searchDobYear;</span>
+    }
+
+    public void setSearchDobYear(String searchDobYear) {
+<span class="nc" id="L504">        this.searchDobYear = searchDobYear;</span>
+<span class="nc" id="L505">    }</span>
+
+    public String getSearchDobMonth() {
+<span class="nc" id="L508">        return searchDobMonth;</span>
+    }
+
+    public void setSearchDobMonth(String searchDobMonth) {
+<span class="nc" id="L512">        this.searchDobMonth = searchDobMonth;</span>
+<span class="nc" id="L513">    }</span>
+
+    public String getSearchDobDay() {
+<span class="nc" id="L516">        return searchDobDay;</span>
+    }
+
+    public void setSearchDobDay(String searchDobDay) {
+<span class="nc" id="L520">        this.searchDobDay = searchDobDay;</span>
+<span class="nc" id="L521">    }</span>
+
+    public String getSearchLevel() {
+<span class="nc" id="L524">        return searchLevel;</span>
+    }
+
+    public void setSearchLevel(String searchLevel) {
+<span class="fc" id="L528">        this.searchLevel = searchLevel;</span>
+<span class="fc" id="L529">    }</span>
+
+    public String getUserId() {
+<span class="nc" id="L532">        return userId;</span>
+    }
+
+    public void setUserId(String userId) {
+<span class="fc" id="L536">        this.userId = userId;</span>
+<span class="fc" id="L537">    }</span>
+
+    public boolean isDisplayMarkDeceasedButton() {
+<span class="fc" id="L540">        return displayMarkDeceasedButton;</span>
+    }
+
+    public boolean isDisplayMarkNotDeceasedButton() {
+<span class="fc" id="L544">        return displayMarkNotDeceasedButton;</span>
+    }
+
+    public String getFormattedDeathTimestamp() {
+<span class="fc" id="L548">        return formattedDeathTimestamp;</span>
+    }
+
+    public UIDate getDeathTimestamp() {
+<span class="fc" id="L552">        return deathTimestamp;</span>
+    }
+
+    public void setDeathTimestamp(UIDate deathTimestamp) {
+<span class="nc" id="L556">        this.deathTimestamp = deathTimestamp;</span>
+<span class="nc" id="L557">    }</span>
+
+    public boolean isDeathTimestampReadonly() {
+<span class="fc" id="L560">        return deathTimestampReadonly;</span>
+    }
+
+    public void setDeathTimestampReadonly(boolean deathTimestampReadonly) {
+<span class="nc" id="L564">        this.deathTimestampReadonly = deathTimestampReadonly;</span>
+<span class="nc" id="L565">    }</span>
+
+    @VisibleForTesting
+    void setInstituteCountry(String instituteCountry) {
+<span class="nc" id="L569">        this.instituteCountry = instituteCountry;</span>
+<span class="nc" id="L570">    }</span>
+
+    public void setUserProfileDataSourceFactory(UserProfileDataSourceFactory userProfileDataSourceFactory) {
+<span class="fc" id="L573">        this.userProfileDataSourceFactory = userProfileDataSourceFactory;</span>
+<span class="fc" id="L574">    }</span>
+
+    public String getNhsSettingsUrl() {
+<span class="fc" id="L577">        return config.getNhsIntegrationUrl() + &quot;/settings?code=&quot; + loggedInUserUtil.getNhsLoginAuthenticationDetails()</span>
+<span class="fc" id="L578">                .flatMap(NhsLoginAuthenticationDetails::getJti)</span>
+<span class="fc" id="L579">                .map(UUID::toString)</span>
+<span class="fc" id="L580">                .orElse(EMPTY);</span>
+    }
+
+    public boolean isDisabled(String field) {
+<span class="fc" id="L584">        return fieldsDisability.getOrDefault(field, false);</span>
+    }
+
+    @VisibleForTesting
+    void populateFieldsDisabilityMap() {
+<span class="fc bfc" id="L589" title="All 4 branches covered.">        boolean isIndividualProfOrPatient = loggedInUserUtil.isLoggedInUserIndividualProfessional() || loggedInUserUtil.isLoggedInUserPatient();</span>
+<span class="fc" id="L590">        boolean isIndividualProf = loggedInUserUtil.isLoggedInUserIndividualProfessional();</span>
+<span class="fc" id="L591">        fieldsDisability = ImmutableMap.&lt;String, Boolean&gt;builder()</span>
+<span class="fc" id="L592">                .put(&quot;title&quot;, isIndividualProf)</span>
+<span class="fc" id="L593">                .put(&quot;firstName&quot;, isIndividualProf)</span>
+<span class="fc" id="L594">                .put(&quot;middleName&quot;, isIndividualProf)</span>
+<span class="fc" id="L595">                .put(&quot;lastName&quot;, isIndividualProf)</span>
+<span class="fc" id="L596">                .put(&quot;nationalIdNumbers&quot;, isIndividualProfOrPatient)</span>
+<span class="fc" id="L597">                .put(&quot;groupedOrgLevelIds&quot;, isIndividualProfOrPatient)</span>
+<span class="fc" id="L598">                .put(&quot;groupedTeamLevelIds&quot;, isIndividualProfOrPatient)</span>
+<span class="fc" id="L599">                .put(&quot;dateOfBirth&quot;, isIndividualProfOrPatient)</span>
+<span class="fc" id="L600">                .put(&quot;address1&quot;, isIndividualProf)</span>
+<span class="fc" id="L601">                .put(&quot;address2&quot;, isIndividualProf)</span>
+<span class="fc" id="L602">                .put(&quot;city&quot;, isIndividualProf)</span>
+<span class="fc" id="L603">                .put(&quot;state&quot;, isIndividualProf)</span>
+<span class="fc" id="L604">                .put(&quot;postalCode&quot;, isIndividualProf)</span>
+<span class="fc" id="L605">                .put(&quot;country&quot;, isIndividualProf)</span>
+<span class="fc" id="L606">                .put(&quot;genderSelect&quot;, isIndividualProfOrPatient)</span>
+<span class="fc" id="L607">                .put(&quot;ethnGrp&quot;, isIndividualProfOrPatient)</span>
+<span class="fc" id="L608">                .put(&quot;symptomsReminder&quot;, isIndividualProfOrPatient)</span>
+<span class="fc" id="L609">                .putAll(getNationalIdDisability(isIndividualProfOrPatient))</span>
+<span class="fc" id="L610">                .build();</span>
+<span class="fc" id="L611">    }</span>
+
+    @NotNull
+    private Map&lt;String, Boolean&gt; getNationalIdDisability(boolean notTeamClincianOrgEmployee) {
+<span class="fc" id="L615">        return getNationalIds()</span>
+<span class="fc" id="L616">                .stream()</span>
+<span class="fc" id="L617">                .collect(toMap(NationalId::getValueFormatted,</span>
+<span class="fc bfc" id="L618" title="All 4 branches covered.">                        nationalId -&gt; notTeamClincianOrgEmployee || !nationalId.getType().isCountryCodeSupported(instituteCountry)));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,204 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TeamMigrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration.migrators</a> &gt; <span class="el_source">TeamMigrator.java</span></div><h1>TeamMigrator.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration.migrators;
+
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.entities.pub.PublicTeam;
+import com.pkb.fhir.common.exception.MigrationEntityNotFoundException;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.migration.service.AccountService;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.ResourceType;
+import org.hl7.fhir.r4.model.codesystems.OrganizationType;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.List;
+import java.util.Optional;
+
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.CREATE_OR_UPDATE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.DELETE;
+import static io.vavr.control.Either.right;
+
+public class TeamMigrator extends BaseFhirMigrator {
+
+    //See https://dev.patientsknowbest.com/home/fhir-api/identifier-systems
+    private static final String TEAM_CODE_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/team-code&quot;;
+    private static final String TEAM_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/team-legacy-identifier&quot;;
+
+    // See https://dev.patientsknowbest.com/home/fhir-api/structuredefinition
+    private static final String TEAM_ADMIN_CRM_LINK_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-admin-crm-link&quot;;
+    private static final String TEAM_BACKGROUND_COLOUR_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-background-colour&quot;;
+    private static final String TEAM_BUTTON_ACCENT_COLOUR_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-button-accent-colour&quot;;
+    private static final String TEAM_CLINICIAN_CAN_ACTIVATE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-clinician-can-activate&quot;;
+    private static final String TEAM_CLINICIAN_WELCOME_TEXT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-clinician-welcome-text&quot;;
+    private static final String TEAM_CONSENT_MIGRATED_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-consent-migrated&quot;;
+    private static final String TEAM_COUNTRY_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-country&quot;;
+    private static final String TEAM_CUSTOM_HTML_FOOTER_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-custom-html-footer&quot;;
+    private static final String TEAM_DASHBOARD_BUTTON_COLOUR_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-dashboard-button-colour&quot;;
+    private static final String TEAM_DATA_UPLOAD_IP_WHITELIST_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-data-upload-ip-whitelist&quot;;
+    private static final String TEAM_DEFAULT_NEW_PROS_CONTACTABLE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-default-new-pros-contactable&quot;;
+    private static final String TEAM_DEFAULT_REQUEST_GENERAL_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-default-request-general&quot;;
+    private static final String TEAM_DEFAULT_REQUEST_MENTAL_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-default-request-mental&quot;;
+    private static final String TEAM_DEFAULT_REQUEST_SEXUAL_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-default-request-sexual&quot;;
+    private static final String TEAM_DEFAULT_REQUEST_SOCIAL_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-default-request-social&quot;;
+    private static final String TEAM_FOOTER_FILENAME_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-footer-filtername&quot;;
+    private static final String TEAM_HEADER_FILENAME_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-header-filename&quot;;
+    private static final String TEAM_HL7_AUTO_CREATE_RECORDS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-hl7-auto-create-records&quot;;
+    private static final String TEAM_HL7_CHECK_NHS_NUMBERS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-hl7-check-nhs_numbers&quot;;
+    private static final String TEAM_HL7_UPLOAD_VALIDATE_PID_LIST_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-hl7-validate-pid-list&quot;;
+    private static final String TEAM_LANGUAGE_CODE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-language-code&quot;;
+    private static final String TEAM_LOGO_FILE_NAME_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-logo-file-name&quot;;
+    private static final String TEAM_MANDATORY_NATIONAL_ID_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-mandatory-national-id&quot;;
+    private static final String TEAM_PATIENT_ID_SUPPORT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-patient-id-support&quot;;
+    private static final String TEAM_PATIENT_MESSAGE_FOOTER_HTML_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-patient-message-footer-html&quot;;
+    private static final String TEAM_PATIENT_MESSAGE_FOOTER_TEXT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-patient-message-footer-text&quot;;
+    private static final String TEAM_PATIENT_TEAM_INFORMATION_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-patient-team-information&quot;;
+    private static final String TEAM_PATIENT_WELCOME_TEXT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-patient-welcome-text&quot;;
+    private static final String TEAM_REQUIRE_GENERAL_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-require-general&quot;;
+    private static final String TEAM_REQUIRE_MENTAL_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-require-mental&quot;;
+    private static final String TEAM_REQUIRE_SEXUAL_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-require-sexual&quot;;
+    private static final String TEAM_REQUIRE_SOCIAL_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-require-social&quot;;
+    private static final String TEAM_SEND_REMINDERS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-send-reminders&quot;;
+    private static final String TEAM_SPECIALTY_ID_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-specialty-id&quot;;
+    private static final String TEAM_SYMPTOM_ALARM_AMBER_THRESHOLD_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-symptom-alarm-amber-threshold&quot;;
+    private static final String TEAM_SYMPTOM_ALARM_DAYS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-symptom-alarm-days&quot;;
+    private static final String TEAM_SYMPTOM_ALARMS_NEED_REFRESH_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-symptom-alarms-need-refresh&quot;;
+    private static final String TEAM_SYMPTOM_ALARM_THRESHOLD_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-symptom-alarm-threshold&quot;;
+    private static final String TEAM_ACCOUNT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-account&quot;;
+    private static final String TEAM_BASED_MESSAGING_ENABLED_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-based-messaging-enabled&quot;;
+    private static final String TEAM_CRM_LINK_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-crm-link&quot;;
+    private static final String TEAM_TIMEZONE_ID_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-timezone-id&quot;;
+    private static final String TEAM_WHITE_DASHBOARD_ICONS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-white-dashboard-icons&quot;;
+
+    private static final String TEAM_HEADING_COLOUR_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-heading-colour&quot;;
+    private static final String TEAM_LINK_COLOUR_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-link-colour&quot;;
+    private static final String TEAM_MENU_BAR_COLOUR_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-menu-bar-colour&quot;;
+    private static final String TEAM_TOP_HEADER_BACKGROUND_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/team-top-header-background&quot;;
+
+    private final AccountService accountService;
+
+    public TeamMigrator(PersonService personService, TeamService teamService, OrgService orgService,
+                        Hl7PartnerService hl7PartnerService, AccountService accountService) {
+<span class="fc" id="L92">        super(personService, teamService, orgService, hl7PartnerService);</span>
+<span class="fc" id="L93">        this.accountService = accountService;</span>
+<span class="fc" id="L94">    }</span>
+
+    @Override
+    Either&lt;MigrationException, List&lt;ResourceAndOperation&gt;&gt; migrate(@NotNull PublicFhirStoreSync fhirStoreSync) {
+<span class="fc bfc" id="L98" title="All 2 branches covered.">        if (fhirStoreSync.isDeleteOperation()) {</span>
+<span class="fc" id="L99">            Organization toDelete = new Organization();</span>
+<span class="fc" id="L100">            IdType idType = new IdType(ResourceType.Organization.name(),</span>
+<span class="fc" id="L101">                    String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()));</span>
+<span class="fc" id="L102">            toDelete.setId(idType);</span>
+<span class="fc" id="L103">            return right(ResourceAndOperation.all(List.of(toDelete), DELETE));</span>
+        }
+
+<span class="fc" id="L106">        return Option.ofOptional(teamService.findById(fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="pc" id="L107">                .toEither(() -&gt; (MigrationException)new MigrationEntityNotFoundException(&quot;Failed to sync team to fhir store for source id &quot;</span>
+<span class="nc" id="L108">                        + fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="fc" id="L109">                .map(team -&gt; ResourceAndOperation.all(List.of(transformTeamToFhir(team)), CREATE_OR_UPDATE));</span>
+    }
+
+    private Organization transformTeamToFhir(@NotNull PublicTeam team) {
+<span class="fc" id="L113">        Organization organization = new Organization();</span>
+<span class="fc" id="L114">        organization.setId(String.valueOf(team.getPublicId()));</span>
+<span class="fc" id="L115">        organization.addIdentifier(getPkbIdentifier(team.getId(), TEAM_LEGACY_PRIMARY_KEY_SYSTEM_URL));</span>
+
+<span class="fc" id="L117">        Optional.ofNullable(team.getName()).filter(StringUtils::isNotBlank).ifPresent(organization::setName);</span>
+
+<span class="fc" id="L119">        Optional.ofNullable(team.getCode()).filter(StringUtils::isNotBlank)</span>
+<span class="fc" id="L120">                .ifPresent(teamCode -&gt; {</span>
+<span class="fc" id="L121">                    Identifier identifier = new Identifier();</span>
+<span class="fc" id="L122">                    identifier.setSystem(TEAM_CODE_SYSTEM_URL);</span>
+<span class="fc" id="L123">                    identifier.setValue(teamCode);</span>
+<span class="fc" id="L124">                    organization.addIdentifier(identifier);</span>
+<span class="fc" id="L125">                });</span>
+
+        //We don't actually have this concept in our current data model, but I think it would be handy in the future.
+        // We have teams that stop using PKB and at the moment that's just hidden knowledge.
+<span class="fc" id="L129">        organization.setActive(true);</span>
+
+<span class="fc" id="L131">        Coding coding = new Coding();</span>
+<span class="fc" id="L132">        coding.setSystem(&quot;http://hl7.org/fhir/organization-type&quot;);</span>
+<span class="fc" id="L133">        coding.setCode(OrganizationType.TEAM.toCode());</span>
+<span class="fc" id="L134">        CodeableConcept organizationType = new CodeableConcept();</span>
+<span class="fc" id="L135">        organizationType.setCoding(List.of(coding));</span>
+
+<span class="fc" id="L137">        organization.addType(organizationType);</span>
+
+<span class="fc" id="L139">        organization.setPartOf(new Reference(new Organization().setId(String.valueOf(team.getOrg().getPublicId()))));</span>
+
+<span class="fc" id="L141">        addExtensions(team, organization);</span>
+<span class="fc" id="L142">        return organization;</span>
+    }
+
+    private void addExtensions(PublicTeam team, Organization organization) {
+<span class="fc" id="L146">        addExtension(team.getAdminCRMLink(), TEAM_ADMIN_CRM_LINK_EXTENSION_URL, organization);</span>
+<span class="fc" id="L147">        addExtension(team.getBackgroundColour(), TEAM_BACKGROUND_COLOUR_EXTENSION_URL, organization);</span>
+<span class="fc" id="L148">        addExtension(team.getButtonAccentColour(), TEAM_BUTTON_ACCENT_COLOUR_EXTENSION_URL, organization);</span>
+<span class="fc" id="L149">        addExtension(team.getClinicianCanActivate(), TEAM_CLINICIAN_CAN_ACTIVATE_EXTENSION_URL, organization);</span>
+<span class="fc" id="L150">        addExtension(team.getClinicianWelcomeText(), TEAM_CLINICIAN_WELCOME_TEXT_EXTENSION_URL, organization);</span>
+<span class="fc" id="L151">        addExtension(team.getCountry(), TEAM_COUNTRY_EXTENSION_URL, organization);</span>
+<span class="fc" id="L152">        addExtension(team.getCustomHtmlFooter(), TEAM_CUSTOM_HTML_FOOTER_EXTENSION_URL, organization);</span>
+<span class="fc" id="L153">        addExtension(team.getDashboardButtonColour(), TEAM_DASHBOARD_BUTTON_COLOUR_EXTENSION_URL, organization);</span>
+<span class="fc" id="L154">        addExtension(team.getDataUploadIpWhitelist(), TEAM_DATA_UPLOAD_IP_WHITELIST_EXTENSION_URL, organization);</span>
+<span class="fc" id="L155">        addExtension(team.isDefaultNewProsContactable(), TEAM_DEFAULT_NEW_PROS_CONTACTABLE_EXTENSION_URL, organization);</span>
+<span class="fc" id="L156">        addExtension(team.isDefaultRequestGeneral(), TEAM_DEFAULT_REQUEST_GENERAL_EXTENSION_URL, organization);</span>
+<span class="fc" id="L157">        addExtension(team.isDefaultRequestMentalHealth(), TEAM_DEFAULT_REQUEST_MENTAL_EXTENSION_URL, organization);</span>
+<span class="fc" id="L158">        addExtension(team.isDefaultRequestSexualHealth(), TEAM_DEFAULT_REQUEST_SEXUAL_EXTENSION_URL, organization);</span>
+<span class="fc" id="L159">        addExtension(team.isDefaultRequestSocialCare(), TEAM_DEFAULT_REQUEST_SOCIAL_EXTENSION_URL, organization);</span>
+<span class="fc" id="L160">        addExtension(team.getFooterFileName(), TEAM_FOOTER_FILENAME_EXTENSION_URL, organization);</span>
+<span class="fc" id="L161">        addExtension(team.getHeaderFileName(), TEAM_HEADER_FILENAME_EXTENSION_URL, organization);</span>
+<span class="fc" id="L162">        addExtension(team.isHl7AutoCreateRecords(), TEAM_HL7_AUTO_CREATE_RECORDS_EXTENSION_URL, organization);</span>
+<span class="fc" id="L163">        addExtension(team.isHl7CheckNhsNumberStatus(), TEAM_HL7_CHECK_NHS_NUMBERS_EXTENSION_URL, organization);</span>
+<span class="fc" id="L164">        addExtension(team.getHl7UploadValidatePidList(), TEAM_HL7_UPLOAD_VALIDATE_PID_LIST_EXTENSION_URL, organization);</span>
+<span class="fc" id="L165">        addExtension(team.getLanguageCode(), TEAM_LANGUAGE_CODE_EXTENSION_URL, organization);</span>
+<span class="fc" id="L166">        addExtension(team.getLogoFileName(), TEAM_LOGO_FILE_NAME_EXTENSION_URL, organization);</span>
+<span class="fc" id="L167">        addExtension(team.isMandatoryNationalId(), TEAM_MANDATORY_NATIONAL_ID_EXTENSION_URL, organization);</span>
+<span class="fc" id="L168">        addExtension(team.getPatientIdSupport(), TEAM_PATIENT_ID_SUPPORT_EXTENSION_URL, organization);</span>
+<span class="fc" id="L169">        addExtension(team.getPatientMessageFooterHTML(), TEAM_PATIENT_MESSAGE_FOOTER_HTML_EXTENSION_URL, organization);</span>
+<span class="fc" id="L170">        addExtension(team.getPatientMessageFooterText(), TEAM_PATIENT_MESSAGE_FOOTER_TEXT_EXTENSION_URL, organization);</span>
+<span class="fc" id="L171">        addExtension(team.getPatientTeamInformation(), TEAM_PATIENT_TEAM_INFORMATION_EXTENSION_URL, organization);</span>
+<span class="fc" id="L172">        addExtension(team.getPatientWelcomeText(), TEAM_PATIENT_WELCOME_TEXT_EXTENSION_URL, organization);</span>
+<span class="fc" id="L173">        addExtension(team.isRequireGeneral(), TEAM_REQUIRE_GENERAL_EXTENSION_URL, organization);</span>
+<span class="fc" id="L174">        addExtension(team.isRequireMentalHealth(), TEAM_REQUIRE_MENTAL_EXTENSION_URL, organization);</span>
+<span class="fc" id="L175">        addExtension(team.isRequireSexualHealth(), TEAM_REQUIRE_SEXUAL_EXTENSION_URL, organization);</span>
+<span class="fc" id="L176">        addExtension(team.isRequireSocialCare(), TEAM_REQUIRE_SOCIAL_EXTENSION_URL, organization);</span>
+<span class="fc" id="L177">        addExtension(team.isSendSymptomReminders(), TEAM_SEND_REMINDERS_EXTENSION_URL, organization);</span>
+
+<span class="fc" id="L179">        Optional.ofNullable(team.getSpecialtyId())</span>
+<span class="fc" id="L180">                .ifPresent(specialtyId -&gt; organization.addExtension(getExtensionWithReferenceIdentifier(TEAM_SPECIALTY_ID_EXTENSION_URL, specialtyId)));</span>
+
+<span class="fc" id="L182">        addExtension(team.getSymptomAlarmAmberThreshold(), TEAM_SYMPTOM_ALARM_AMBER_THRESHOLD_EXTENSION_URL, organization);</span>
+<span class="fc" id="L183">        addExtension(team.getSymptomAlarmDays(), TEAM_SYMPTOM_ALARM_DAYS_EXTENSION_URL, organization);</span>
+<span class="fc" id="L184">        addExtension(team.getSymptomAlarmsNeedRefresh(), TEAM_SYMPTOM_ALARMS_NEED_REFRESH_EXTENSION_URL, organization);</span>
+<span class="fc" id="L185">        addExtension(team.getSymptomAlarmThreshold(), TEAM_SYMPTOM_ALARM_THRESHOLD_EXTENSION_URL, organization);</span>
+
+        //There is a small amount of data without this set, and the app keeps on chuggin'
+<span class="fc" id="L188">        Optional.ofNullable(team.getTeamAccountId())</span>
+<span class="fc" id="L189">                .flatMap(accountService::findAccount)</span>
+<span class="fc" id="L190">                .ifPresent(teamAccount -&gt; organization.addExtension(getExtensionWithReferenceIdentifier(TEAM_ACCOUNT_EXTENSION_URL, teamAccount.getPublicId())));</span>
+
+<span class="fc" id="L192">        addExtension(team.isTeamBasedMessagingEnabled(), TEAM_BASED_MESSAGING_ENABLED_EXTENSION_URL, organization);</span>
+<span class="fc" id="L193">        addExtension(team.getTeamCRMLink(), TEAM_CRM_LINK_EXTENSION_URL, organization);</span>
+<span class="fc" id="L194">        addExtension(team.getTimeZoneId(), TEAM_TIMEZONE_ID_EXTENSION_URL, organization);</span>
+<span class="fc" id="L195">        addExtension(team.isWhiteDashboardIcons(), TEAM_WHITE_DASHBOARD_ICONS_EXTENSION_URL, organization);</span>
+
+        //These don't appear to ever be set...
+<span class="fc" id="L198">        addExtension(team.getHeadingColour(), TEAM_HEADING_COLOUR_EXTENSION_URL, organization);</span>
+<span class="fc" id="L199">        addExtension(team.getLinkColour(), TEAM_LINK_COLOUR_EXTENSION_URL, organization);</span>
+<span class="fc" id="L200">        addExtension(team.getMenuBarColour(), TEAM_MENU_BAR_COLOUR_EXTENSION_URL, organization);</span>
+<span class="fc" id="L201">        addExtension(team.getTopHeaderBackground(), TEAM_TOP_HEADER_BACKGROUND_EXTENSION_URL, organization);</span>
+<span class="fc" id="L202">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

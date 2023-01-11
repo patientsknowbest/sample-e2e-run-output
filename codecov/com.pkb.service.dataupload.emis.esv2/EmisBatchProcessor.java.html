@@ -1,0 +1,433 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisBatchProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisBatchProcessor.java</span></div><h1>EmisBatchProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.dataupload.emis.esv2.EmisEsProcessedRow;
+import com.pkb.service.dataupload.emis.esv2.batch.BatchDataProcessor;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.AbstractBatchCodeValidator;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.BatchProcessingCache;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.CareRecordObservationBatchCodeValidator;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.PrescribingDrugRecordBatchCodeValidator;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.StatelessAdminOrganisationProcessor;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.StatelessAdminPatientProcessor;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.StatelessCodingClinicalCodeProcessor;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.StatelessCodingDrugCodeProcessor;
+import com.pkb.service.dataupload.emis.esv2.model.BaseEmisEsDomainModel;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileType;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFile;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFileSet;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFileSftpSet;
+import com.pkb.service.dataupload.emis.esv2.sorting.EmisCsvReader;
+import com.pkb.service.dataupload.emis.esv2.sorting.RowId;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import io.vavr.Tuple2;
+import io.vavr.Tuple3;
+import io.vavr.control.Either;
+import name.neuhalfen.projects.crypto.bouncycastle.openpgp.keys.keyrings.KeyringConfig;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.lang.invoke.MethodHandles;
+import java.nio.file.Path;
+import java.time.LocalDate;
+import java.util.Comparator;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
+
+import static com.pkb.service.dataupload.emis.esv2.model.EmisFileType.ADMIN_ORGANISATION;
+import static com.pkb.service.dataupload.emis.esv2.model.EmisFileType.ADMIN_PATIENT;
+import static com.pkb.service.dataupload.emis.esv2.model.EmisFileType.ADMIN_USER_IN_ROLE;
+import static com.pkb.service.dataupload.emis.esv2.model.EmisFileType.CARE_RECORD_OBSERVATION;
+import static com.pkb.service.dataupload.emis.esv2.model.EmisFileType.CARE_RECORD_PROBLEM;
+import static com.pkb.service.dataupload.emis.esv2.model.EmisFileType.CODING_CLINICAL_CODES;
+import static com.pkb.service.dataupload.emis.esv2.model.EmisFileType.CODING_DRUG_CODES;
+import static com.pkb.service.dataupload.emis.esv2.model.EmisFileType.PRESCRIBING_DRUG_RECORD;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class EmisBatchProcessor {
+
+<span class="fc" id="L57">    private static final Logger LOGGER = getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final String METRIC_DATATYPE_TAG = &quot;type&quot;;
+
+    private static final String POST_PROCESSOR_TIMER_NAME = &quot;pkb_phr_integration_emis_csv_batchprocessor_post_processing_timings&quot;;
+<span class="fc" id="L62">    private static final Timer POST_PROCESSING_TIMER = Timer.builder(POST_PROCESSOR_TIMER_NAME)</span>
+<span class="fc" id="L63">            .tag(METRIC_DATATYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L64">            .description(&quot;Time needed to process a single row of a given type&quot;)</span>
+<span class="fc" id="L65">            .publishPercentileHistogram()</span>
+<span class="fc" id="L66">            .publishPercentiles(0.5, 0.95)</span>
+<span class="fc" id="L67">            .percentilePrecision(2)</span>
+<span class="fc" id="L68">            .register(Metrics.globalRegistry);</span>
+
+    private static final String FAILURE_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_batchprocessor_failures&quot;;
+<span class="fc" id="L71">    private static final Counter FAILURE_COUNTER = Counter.builder(FAILURE_COUNTER_NAME)</span>
+<span class="fc" id="L72">            .description(&quot;Number of failed rows&quot;)</span>
+<span class="fc" id="L73">            .tag(METRIC_DATATYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L74">            .register(Metrics.globalRegistry);</span>
+    private static final String SUCCESS_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_batchprocessor_success&quot;;
+<span class="fc" id="L76">    private static final Counter SUCCESS_COUNTER = Counter.builder(SUCCESS_COUNTER_NAME)</span>
+<span class="fc" id="L77">            .tag(METRIC_DATATYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L78">            .description(&quot;Number of successfully parsed rows&quot;)</span>
+<span class="fc" id="L79">            .register(Metrics.globalRegistry);</span>
+    private static final String FILE_SKIP_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_batchprocessor_file_skipped&quot;;
+<span class="fc" id="L81">    private static final Counter FILE_SKIP_COUNTER = Counter.builder(FILE_SKIP_COUNTER_NAME)</span>
+<span class="fc" id="L82">            .description(&quot;Number of skipped files that were previously processed&quot;)</span>
+<span class="fc" id="L83">            .tag(METRIC_DATATYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L84">            .register(Metrics.globalRegistry);</span>
+
+    private static final String FILE_PROCESSING_TIMER_NAME = &quot;pkb_phr_integration_emis_csv_batchprocessor_file_processing_timings&quot;;
+<span class="fc" id="L87">    private static final Timer FILE_PROCESSING_TIMER = Timer.builder(FILE_PROCESSING_TIMER_NAME)</span>
+<span class="fc" id="L88">            .tag(METRIC_DATATYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L89">            .description(&quot;Time needed to process a single file of a given type&quot;)</span>
+<span class="fc" id="L90">            .publishPercentileHistogram()</span>
+<span class="fc" id="L91">            .publishPercentiles(0.5, 0.95)</span>
+<span class="fc" id="L92">            .percentilePrecision(2)</span>
+<span class="fc" id="L93">            .register(Metrics.globalRegistry);</span>
+
+    private static &lt;T&gt; void incrementCounter(String name, BatchDataProcessor&lt;BaseEmisEsDomainModel&gt; processor) {
+<span class="fc" id="L96">        Metrics.counter(name, METRIC_DATATYPE_TAG, processor.getClass().getSimpleName()).increment();</span>
+<span class="fc" id="L97">    }</span>
+
+    // Dependencies: ((org | ccode | dcode) &amp; patient &amp; (observation | issuerecord))
+
+<span class="fc" id="L101">    static final Map&lt;EmisFileType, Integer&gt; PROCESSING_GROUPS = ImmutableMap.&lt;EmisFileType, Integer&gt;builder()</span>
+<span class="fc" id="L102">            .put(ADMIN_ORGANISATION, 1)</span>
+<span class="fc" id="L103">            .put(CODING_CLINICAL_CODES, 1)</span>
+<span class="fc" id="L104">            .put(CODING_DRUG_CODES, 1)</span>
+<span class="fc" id="L105">            .put(ADMIN_USER_IN_ROLE, 2)</span>
+<span class="fc" id="L106">            .put(ADMIN_PATIENT, 3)</span>
+<span class="fc" id="L107">            .put(CARE_RECORD_PROBLEM, 4)</span>
+<span class="fc" id="L108">            .put(CARE_RECORD_OBSERVATION, 5)</span>
+<span class="fc" id="L109">            .put(PRESCRIBING_DRUG_RECORD, 5)</span>
+<span class="fc" id="L110">            .build();</span>
+
+    private final EmisCsvProcessorProvider emisCsvProcessorProvider;
+
+    /**
+     * used only after a failure, to search for missing codes in subsequent batches
+     */
+    private final ImmutableMap&lt;EmisFileType, AbstractBatchCodeValidator&lt;BaseEmisEsDomainModel&gt;&gt; codeValidators;
+    private final ImmutableMap&lt;EmisFileType, BatchDataProcessor&lt;BaseEmisEsDomainModel&gt;&gt; statelessProcessors;
+
+    private final Set&lt;BatchProcessingCache&gt; batchProcessingCaches;
+
+    private final EmisCsvReader csvReader;
+
+    private final EmisEsProcessedRowService emisEsProcessedRowService;
+
+    private final PhrConfig configuration;
+
+    private final EmisEsStatusService emisEsStatusService;
+
+    private final EmisEsDatestampSkipService emisEsDatestampSkipService;
+
+    public EmisBatchProcessor(EmisCsvProcessorProvider emisCsvProcessorProvider, Set&lt;BatchProcessingCache&gt; batchProcessingCaches,
+                              CareRecordObservationBatchCodeValidator careRecordObservationBatchCodeValidator, PrescribingDrugRecordBatchCodeValidator prescribingDrugRecordBatchCodeValidator, StatelessCodingClinicalCodeProcessor statelessCodingClinicalCodeProcessor,
+                              StatelessCodingDrugCodeProcessor statelessCodingDrugCodeProcessor,
+                              StatelessAdminOrganisationProcessor statelessAdminOrganisationProcessor,
+                              StatelessAdminPatientProcessor statelessAdminPatientProcessor,
+                              EmisCsvReader csvReader, EmisEsProcessedRowService emisEsProcessedRowService,
+                              PhrConfig configuration,
+                              EmisEsStatusService emisEsStatusService,
+<span class="fc" id="L140">                              EmisEsDatestampSkipService emisEsDatestampSkipService) {</span>
+<span class="fc" id="L141">        this.batchProcessingCaches = batchProcessingCaches;</span>
+<span class="fc" id="L142">        this.statelessProcessors = Maps.immutableEnumMap(ImmutableMap.&lt;EmisFileType, BatchDataProcessor&lt;BaseEmisEsDomainModel&gt;&gt;builder()</span>
+<span class="fc" id="L143">                .put(statelessCodingDrugCodeProcessor.getSupportedType(), (BatchDataProcessor) statelessCodingDrugCodeProcessor)</span>
+<span class="fc" id="L144">                .put(statelessCodingClinicalCodeProcessor.getSupportedType(), statelessCodingClinicalCodeProcessor)</span>
+<span class="fc" id="L145">                .put(statelessAdminOrganisationProcessor.getSupportedType(), statelessAdminOrganisationProcessor)</span>
+<span class="fc" id="L146">                .put(statelessAdminPatientProcessor.getSupportedType(), statelessAdminPatientProcessor)</span>
+<span class="fc" id="L147">                .build());</span>
+<span class="fc" id="L148">        this.codeValidators = Maps.immutableEnumMap(ImmutableMap.&lt;EmisFileType, AbstractBatchCodeValidator&lt;BaseEmisEsDomainModel&gt;&gt;builder()</span>
+<span class="fc" id="L149">                .put(careRecordObservationBatchCodeValidator.getSupportedType(), (AbstractBatchCodeValidator) careRecordObservationBatchCodeValidator)</span>
+<span class="fc" id="L150">                .put(prescribingDrugRecordBatchCodeValidator.getSupportedType(), prescribingDrugRecordBatchCodeValidator)</span>
+<span class="fc" id="L151">                .build());</span>
+<span class="fc" id="L152">        this.csvReader = csvReader;</span>
+<span class="fc" id="L153">        this.emisEsProcessedRowService = emisEsProcessedRowService;</span>
+<span class="fc" id="L154">        this.configuration = configuration;</span>
+<span class="fc" id="L155">        this.emisCsvProcessorProvider = emisCsvProcessorProvider;</span>
+<span class="fc" id="L156">        this.emisEsStatusService = emisEsStatusService;</span>
+<span class="fc" id="L157">        this.emisEsDatestampSkipService = emisEsDatestampSkipService;</span>
+<span class="fc" id="L158">    }</span>
+
+    /**
+     * @return &lt;code&gt;true&lt;/code&gt; when processing was successful without any error, &lt;code&gt;false&lt;/code&gt; otherwise.
+     */
+    boolean processBatch(@NotNull VerifiedEmisFileSftpSet batch, @NotNull KeyringConfig keyringConfig, @NotNull Long batchId) {
+<span class="fc" id="L164">        Map&lt;EmisFileType, EmisEsProcessedRow&gt; previousStates = emisEsProcessedRowService.findByJob(batchId);</span>
+        try {
+<span class="fc" id="L166">            boolean processingResult = batch.verifiedEmisFileSet()</span>
+<span class="fc" id="L167">                    .files()</span>
+<span class="fc" id="L168">                    .entrySet()</span>
+<span class="fc" id="L169">                    .stream()</span>
+<span class="fc" id="L170">                    .collect(Collectors.groupingBy(file -&gt; PROCESSING_GROUPS.get(file.getKey())))</span>
+<span class="fc" id="L171">                    .entrySet()</span>
+<span class="fc" id="L172">                    .stream()</span>
+<span class="fc" id="L173">                    .sorted(Map.Entry.comparingByKey(Comparator.naturalOrder()))</span>
+<span class="fc" id="L174">                    .map(Map.Entry::getValue)</span>
+<span class="fc" id="L175">                    .map(processingGroup -&gt; processingGroup.stream()</span>
+<span class="fc" id="L176">                            .map(typeAndFile -&gt; processFile(typeAndFile.getKey(), typeAndFile.getValue(), keyringConfig,</span>
+<span class="fc" id="L177">                                    batchId, previousStates.get(typeAndFile.getKey()), batch))</span>
+<span class="fc" id="L178">                            .map(t -&gt; updateStateMap(t, previousStates))</span>
+<span class="fc bfc" id="L179" title="All 4 branches covered.">                            .reduce((l, r) -&gt; l &amp;&amp; r) // overall result := result1 &amp;&amp; result2 &amp;&amp; .... &amp;&amp; resultN</span>
+<span class="fc" id="L180">                            .orElse(true))</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">                    .filter(result -&gt; !result)</span>
+<span class="fc" id="L182">                    .findFirst() // short-circuits, so processing stops when the first processing group fails</span>
+<span class="fc" id="L183">                    .orElse(true);</span>
+
+            //before clearing any caches , perform a postProcess step if the processing went OK (currently only needed for CRP processing)
+<span class="fc bfc" id="L186" title="All 2 branches covered.">            if (processingResult) {</span>
+<span class="fc bfc" id="L187" title="All 4 branches covered.">                boolean postProcessResult = emisCsvProcessorProvider.get().values().stream().map(p -&gt; postProcess(p, previousStates.get(p.getSupportedType()))).reduce((l, r) -&gt; l &amp;&amp; r).orElse(true);</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">                if (postProcessResult) {</span>
+<span class="fc" id="L189">                    emisEsProcessedRowService.deleteStatesForBatch(batchId);</span>
+                }
+<span class="fc" id="L191">                processingResult &amp;= postProcessResult;</span>
+            }
+<span class="fc" id="L193">            return processingResult;</span>
+        } finally {
+<span class="fc" id="L195">            batchProcessingCaches.forEach(c -&gt; clearCache(c, previousStates));</span>
+        }
+    }
+
+<span class="fc" id="L199">    private static final Set&lt;EmisFileType&gt; STATELESS_PROCESSING_REQUIRED = Sets.immutableEnumSet(ADMIN_ORGANISATION, CODING_CLINICAL_CODES, CODING_DRUG_CODES, ADMIN_PATIENT);</span>
+<span class="fc" id="L200">    private static final Set&lt;EmisFileType&gt; SCAN_FOR_MISSING_CODES = Sets.immutableEnumSet(CARE_RECORD_OBSERVATION, PRESCRIBING_DRUG_RECORD);</span>
+
+    /**
+     * @return &lt;code&gt;true&lt;/code&gt; when processing was successful without any error, &lt;code&gt;false&lt;/code&gt; otherwise.
+     */
+    boolean processBatchValidateEmisCodes(@NotNull VerifiedEmisFileSet batch, @NotNull KeyringConfig keyringConfig, @NotNull Path localDirectory) {
+<span class="fc" id="L206">        boolean result = true;</span>
+<span class="fc bfc" id="L207" title="All 2 branches covered.">        for (EmisFileType actual : STATELESS_PROCESSING_REQUIRED) {</span>
+<span class="fc" id="L208">            VerifiedEmisFile codesEmisFile = batch.files().get(actual);</span>
+<span class="fc" id="L209">            result &amp;= processCodesStatelessly(codesEmisFile, keyringConfig, localDirectory);</span>
+<span class="fc" id="L210">        }</span>
+
+<span class="fc bfc" id="L212" title="All 2 branches covered.">        for (EmisFileType actual : SCAN_FOR_MISSING_CODES) {</span>
+<span class="fc" id="L213">            VerifiedEmisFile observationsEmisFile = batch.files().get(actual);</span>
+<span class="fc" id="L214">            result &amp;= processCodeValidation(observationsEmisFile, keyringConfig, localDirectory);</span>
+<span class="fc" id="L215">        }</span>
+<span class="fc" id="L216">        return result;</span>
+    }
+
+    private void clearCache(BatchProcessingCache cache, Map&lt;EmisFileType, EmisEsProcessedRow&gt; previousStates) {
+<span class="fc" id="L220">        EmisEsProcessedRow previousState = previousStates.get(cache.getSupportedType());</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">        if (previousState != null) {</span>
+<span class="fc" id="L222">            cache.clearCached(previousState.getBatchId());</span>
+        }
+<span class="fc" id="L224">    }</span>
+
+    private boolean updateStateMap(Tuple3&lt;Boolean, EmisFileType, EmisEsProcessedRow&gt; input, Map&lt;EmisFileType, EmisEsProcessedRow&gt; states) {
+<span class="fc" id="L227">        states.put(input._2(), input._3);</span>
+<span class="fc" id="L228">        return input._1;</span>
+    }
+
+    private boolean postProcess(BatchDataProcessor&lt;BaseEmisEsDomainModel&gt; processor, EmisEsProcessedRow previousFileState) {
+<span class="fc" id="L232">        boolean result = true;</span>
+<span class="fc bfc" id="L233" title="All 2 branches covered.">        if (processor.isPostProcessingRequired()) {</span>
+<span class="fc" id="L234">            LOGGER.info(&quot;Starting post processing {}&quot;, processor.interfaceClass().getSimpleName());</span>
+            try {
+<span class="fc" id="L236">                result = recordTime(POST_PROCESSOR_TIMER_NAME, processor.getClass().getSimpleName(), () -&gt; processor.postProcess(previousFileState));</span>
+<span class="fc" id="L237">                LOGGER.info(&quot;Successfully post processed {}&quot;, processor.interfaceClass().getSimpleName());</span>
+<span class="fc" id="L238">            } catch (Exception e) {</span>
+<span class="fc" id="L239">                LOGGER.error(&quot;Post processing failed!&quot;, e);</span>
+<span class="fc" id="L240">                result = false;</span>
+<span class="fc" id="L241">            }</span>
+        }
+<span class="fc" id="L243">        return result;</span>
+    }
+
+    @VisibleForTesting
+    Tuple3&lt;Boolean, EmisFileType, EmisEsProcessedRow&gt; processFile(EmisFileType emisFileType,
+                                                                  VerifiedEmisFile emisFile,
+                                                                  KeyringConfig keyringConfig,
+                                                                  Long batchId,
+                                                                  EmisEsProcessedRow previousFileState,
+                                                                  VerifiedEmisFileSftpSet parentSftpSet) {
+<span class="fc" id="L253">        return recordTime(FILE_PROCESSING_TIMER_NAME, emisFileType.name(), () -&gt; {</span>
+<span class="fc" id="L254">            LocalDate datestamp = parentSftpSet.dateStamp();</span>
+
+<span class="fc" id="L256">            Either&lt;Exception, EmisEsProcessedRow&gt; validatedStateOrError = validateAndInitFileStateOrError(emisFileType, emisFile, batchId, parentSftpSet, datestamp, previousFileState);</span>
+<span class="fc bfc" id="L257" title="All 2 branches covered.">            if (validatedStateOrError.isLeft()) {</span>
+<span class="fc" id="L258">                LOGGER.error(&quot;Error validating: &quot;, validatedStateOrError.getLeft());</span>
+<span class="fc" id="L259">                return new Tuple3&lt;&gt;(false, emisFileType, previousFileState);</span>
+            }
+<span class="fc" id="L261">            EmisEsProcessedRow fileState = validatedStateOrError.get();</span>
+
+<span class="pc bpc" id="L263" title="1 of 4 branches missed.">            if (configuration.isEmisEsStateResumeEnabled() &amp;&amp; isPreviouslyProcessed(fileState, emisFile)) {</span>
+<span class="fc" id="L264">                LOGGER.info(&quot;Skip processing of {} as it was previously processed. Hash: {}&quot;, emisFile.relativePath(), fileState.getFileHash());</span>
+<span class="fc" id="L265">                BatchDataProcessor&lt;BaseEmisEsDomainModel&gt; selected = emisCsvProcessorProvider.getProcessor(emisFileType);</span>
+<span class="fc" id="L266">                incrementCounter(FILE_SKIP_COUNTER_NAME, selected);</span>
+<span class="fc" id="L267">                return new Tuple3&lt;&gt;(true, emisFileType, fileState);</span>
+            } else {
+<span class="fc" id="L269">                return buildStreamAndProcess(emisFileType, emisFile, keyringConfig, parentSftpSet, fileState);</span>
+            }
+        });
+    }
+
+    private Either&lt;Exception, EmisEsProcessedRow&gt; validateAndInitFileStateOrError(EmisFileType emisFileType, VerifiedEmisFile emisFile, Long batchId, VerifiedEmisFileSftpSet parentSftpSet, LocalDate datestamp, EmisEsProcessedRow fileState) {
+<span class="fc bfc" id="L275" title="All 2 branches covered.">        if (fileState == null) {</span>
+<span class="fc" id="L276">            return Either.right(emisEsProcessedRowService.createDefault(batchId, emisFileType, datestamp));</span>
+<span class="fc bfc" id="L277" title="All 2 branches covered.">        } else if (!fileState.getFilesetDatestamp().equals(datestamp)) {</span>
+            //previous state is for a different datestamp. This is only ok if the previous state is for a date
+            // we've since decided to skip (e.g. EMIS sent us broken files, we partially parsed, now want to skip)
+<span class="fc bfc" id="L280" title="All 2 branches covered.">            if (emisEsDatestampSkipService.shouldSkipDateStamp(fileState.getFilesetDatestamp(), parentSftpSet.sftpUniqueId())) {</span>
+<span class="fc" id="L281">                LOGGER.info(&quot;Skipping previous state for {} due to datestamp skip&quot;, emisFile.relativePath());</span>
+<span class="fc" id="L282">                emisEsProcessedRowService.clearProgress(fileState);</span>
+<span class="fc" id="L283">                fileState.setFilesetDatestamp(datestamp);</span>
+<span class="fc" id="L284">                return Either.right(fileState);</span>
+            } else {
+<span class="fc" id="L286">                return Either.left(new IllegalStateException(&quot;Abort processing, something is wrong, datestamp does not match previous run. &quot; +</span>
+<span class="fc" id="L287">                        &quot;Current: &quot; + datestamp + &quot; Previous: &quot; + fileState.getFilesetDatestamp() + &quot; File: &quot; + emisFile.relativePath()));</span>
+
+            }
+        }
+<span class="fc" id="L291">        return Either.right(fileState);</span>
+    }
+
+    @NotNull
+    @VisibleForTesting
+    Tuple3&lt;Boolean, EmisFileType, EmisEsProcessedRow&gt; buildStreamAndProcess(EmisFileType emisFileType, VerifiedEmisFile emisFile, KeyringConfig keyringConfig, VerifiedEmisFileSftpSet parentSftpSet, EmisEsProcessedRow fileState) {
+<span class="fc" id="L297">        LOGGER.info(&quot;Starting processing {} for server {}&quot;, emisFile, parentSftpSet.sftpUniqueId());</span>
+<span class="fc" id="L298">        BatchDataProcessor&lt;BaseEmisEsDomainModel&gt; selected = emisCsvProcessorProvider.getProcessor(emisFileType);</span>
+<span class="pc bpc" id="L299" title="1 of 2 branches missed.">        if (selected == null) {</span>
+<span class="nc" id="L300">            LOGGER.error(&quot;Could not find suitable data type processor for {} &quot;, emisFileType);</span>
+<span class="nc" id="L301">            return new Tuple3&lt;&gt;(false, emisFileType, fileState);</span>
+        }
+
+<span class="pc bpc" id="L304" title="1 of 2 branches missed.">        RowId&lt;Long&gt; previousProcessingState = configuration.isEmisEsStateResumeEnabled() ? convert(fileState) : null;</span>
+
+<span class="fc" id="L306">        Path filePath = parentSftpSet.serverDownloadDir().resolve(emisFile.relativePath());</span>
+<span class="fc" id="L307">        try (var entityStream = csvReader.buildStream(filePath, keyringConfig, selected.interfaceClass(), emisFile, previousProcessingState)) {</span>
+<span class="fc" id="L308">            emisEsStatusService.reportCurrentFile(selected.getProcessorType(), emisFile);</span>
+
+<span class="fc" id="L310">            String currentHash = emisFile.gpgHash();</span>
+<span class="fc" id="L311">            LOGGER.info(&quot;Current file {} for server {} hash: {}&quot;, emisFile.relativePath(), parentSftpSet.sftpUniqueId(), currentHash);</span>
+
+<span class="fc bfc" id="L313" title="All 2 branches covered.">            if (StringUtils.isBlank(fileState.getFileHash())) {</span>
+<span class="fc" id="L314">                fileState = setHashAndSave(fileState, currentHash);</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">            } else if (!currentHash.equals(fileState.getFileHash())) {</span>
+
+<span class="fc" id="L317">                LOGGER.error(&quot;Abort processing, something is wrong, file hash does not match previous run. Current: {}, Previous: {}, File: {}&quot;, currentHash,</span>
+<span class="fc" id="L318">                        fileState.getFileHash(),</span>
+<span class="fc" id="L319">                        emisFile.relativePath());</span>
+<span class="fc" id="L320">                return new Tuple3&lt;&gt;(false, emisFileType, fileState);</span>
+            }
+
+<span class="fc" id="L323">            Tuple2&lt;Boolean, EmisEsProcessedRow&gt; processResult = selected.process(entityStream.getRecordStream(), fileState);</span>
+<span class="fc" id="L324">            fileState = processResult._2;</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">            if (processResult._1) {</span>
+<span class="fc bfc" id="L326" title="All 2 branches covered.">                if (!selected.isPostProcessingRequired()) {</span>
+<span class="fc" id="L327">                    fileState.setFullyProcessed(true);</span>
+<span class="fc" id="L328">                    emisEsProcessedRowService.save(fileState);</span>
+                }
+<span class="fc" id="L330">                LOGGER.info(&quot;Successfully processed {} for server {}&quot;, emisFileType, parentSftpSet.sftpUniqueId());</span>
+<span class="fc" id="L331">                incrementCounter(SUCCESS_COUNTER_NAME, selected);</span>
+            } else {
+<span class="fc" id="L333">                LOGGER.error(&quot;Failed to process {} for server {}&quot;, emisFileType, parentSftpSet.sftpUniqueId());</span>
+<span class="fc" id="L334">                incrementCounter(FAILURE_COUNTER_NAME, selected);</span>
+            }
+
+<span class="fc" id="L337">            return new Tuple3&lt;&gt;(processResult._1, emisFileType, processResult._2);</span>
+
+<span class="pc bpc" id="L339" title="1 of 2 branches missed.">        } catch (Exception e) {</span>
+<span class="fc" id="L340">            LOGGER.error(&quot;Failed streaming EMIS CSV {}&quot;, filePath, e);</span>
+<span class="fc" id="L341">            return new Tuple3&lt;&gt;(false, emisFileType, fileState);</span>
+        }
+    }
+
+    private EmisEsProcessedRow setHashAndSave(EmisEsProcessedRow fileState, String currentHash) {
+<span class="fc" id="L346">        fileState.setFileHash(currentHash);</span>
+<span class="fc" id="L347">        fileState = emisEsProcessedRowService.save(fileState);</span>
+<span class="fc" id="L348">        return fileState;</span>
+    }
+
+
+    /**
+     * Used only for scanning future batches, loading the codes into our DB so that we can check EMIS observations for missing codes.
+     * Temporary code.
+     */
+    @VisibleForTesting
+    boolean processCodesStatelessly(VerifiedEmisFile emisFile, KeyringConfig keyringConfig, Path localDirectory) {
+<span class="fc" id="L358">        LOGGER.info(&quot;Stateless processing starting for {}&quot;, emisFile);</span>
+<span class="fc" id="L359">        BatchDataProcessor&lt;BaseEmisEsDomainModel&gt; codeProcessor = statelessProcessors.get(emisFile.type());</span>
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">        if (codeProcessor == null) {</span>
+<span class="nc" id="L361">            LOGGER.error(&quot;Stateless processing: no stateless processor of type {}&quot;, emisFile.type());</span>
+<span class="nc" id="L362">            return false;</span>
+        }
+
+<span class="fc" id="L365">        Path filePath = localDirectory.resolve(emisFile.relativePath());</span>
+<span class="fc" id="L366">        try (var entityStream = csvReader.buildStream(filePath, keyringConfig, codeProcessor.interfaceClass(), emisFile, null)) {</span>
+<span class="fc" id="L367">            emisEsStatusService.reportCurrentFile(codeProcessor.getProcessorType(), emisFile);</span>
+
+<span class="fc" id="L369">            LOGGER.info(&quot;Stateless processing: current file {}&quot;, emisFile.relativePath());</span>
+
+<span class="fc" id="L371">            EmisEsProcessedRow unusedFileState = new EmisEsProcessedRow();</span>
+<span class="fc" id="L372">            Tuple2&lt;Boolean, EmisEsProcessedRow&gt; processResult = codeProcessor.process(entityStream.getRecordStream(), unusedFileState);</span>
+
+<span class="fc bfc" id="L374" title="All 2 branches covered.">            if (processResult._1) {</span>
+<span class="fc" id="L375">                LOGGER.info(&quot;Stateless processing: successfully processed {}&quot;, codeProcessor.getSupportedType());</span>
+<span class="fc" id="L376">                incrementCounter(SUCCESS_COUNTER_NAME, codeProcessor);</span>
+            } else {
+<span class="fc" id="L378">                LOGGER.error(&quot;Stateless processing: failed to process {}&quot;, codeProcessor.getSupportedType());</span>
+<span class="fc" id="L379">                incrementCounter(FAILURE_COUNTER_NAME, codeProcessor);</span>
+            }
+
+<span class="fc" id="L382">            return processResult._1;</span>
+<span class="fc" id="L383">        } catch (Exception e) {</span>
+<span class="fc" id="L384">            LOGGER.error(&quot;Stateless processing: failed streaming EMIS CSV {}&quot;, filePath, e);</span>
+<span class="fc" id="L385">            return false;</span>
+        }
+    }
+
+    /**
+     * Used only for scanning future batches, loading the codes into our DB so that we can check EMIS observations for missing codes.
+     * Temporary code.
+     */
+    @VisibleForTesting
+    boolean processCodeValidation(VerifiedEmisFile emisFile, KeyringConfig keyringConfig, Path localDirectory) {
+<span class="fc" id="L395">        Path filePath = localDirectory.resolve(emisFile.relativePath());</span>
+
+<span class="fc" id="L397">        LOGGER.info(&quot;Code validation: starting processing {}&quot;, emisFile);</span>
+<span class="fc" id="L398">        AbstractBatchCodeValidator&lt;BaseEmisEsDomainModel&gt; codeValidator = codeValidators.get(emisFile.type());</span>
+<span class="fc" id="L399">        try (var entityStream = csvReader.buildStream(filePath, keyringConfig, codeValidator.interfaceClass(), emisFile,null)) {</span>
+<span class="fc" id="L400">            emisEsStatusService.reportCurrentFile(codeValidator.getProcessorType(), emisFile);</span>
+<span class="fc" id="L401">            LOGGER.info(&quot;Code validation: current file {}&quot;, emisFile.relativePath());</span>
+
+<span class="fc" id="L403">            codeValidator.process(entityStream.getRecordStream());</span>
+
+<span class="fc" id="L405">            LOGGER.info(&quot;Code validation: successfully processed validation {}&quot;, emisFile.type());</span>
+
+<span class="fc" id="L407">            return true;</span>
+<span class="fc" id="L408">        } catch (Exception e) {</span>
+<span class="fc" id="L409">            LOGGER.error(&quot;Code validation: failed streaming EMIS CSV {}&quot;, filePath, e);</span>
+<span class="fc" id="L410">            return false;</span>
+        }
+    }
+
+    private boolean isPreviouslyProcessed(EmisEsProcessedRow fileState, VerifiedEmisFile emisFile) {
+<span class="pc bpc" id="L415" title="1 of 4 branches missed.">        return fileState.isFullyProcessed() &amp;&amp; emisFile.type().ordinal() == fileState.getEmisFileType();</span>
+    }
+
+    private RowId&lt;Long&gt; convert(EmisEsProcessedRow fileState) {
+<span class="fc bfc" id="L419" title="All 2 branches covered.">        if (fileState.getLastProcessedRow() == null) {</span>
+<span class="fc" id="L420">            return null;</span>
+        }
+<span class="fc" id="L422">        return new RowId&lt;&gt;(fileState.getLastProcessedRow());</span>
+    }
+
+    private &lt;T&gt; T recordTime(String timerName, String name, Callable&lt;T&gt; toMeasure) {
+        try {
+<span class="fc" id="L427">            return Metrics.timer(timerName, METRIC_DATATYPE_TAG, name).recordCallable(toMeasure);</span>
+<span class="fc" id="L428">        } catch (Exception e) {</span>
+<span class="fc" id="L429">            throw new RuntimeException(e);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

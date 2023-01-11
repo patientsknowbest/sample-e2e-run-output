@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BulkInvitationFacade.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.patient.invite.bulk.csv</a> &gt; <span class="el_source">BulkInvitationFacade.java</span></div><h1>BulkInvitationFacade.java</h1><pre class="source lang-java linenums">package com.pkb.patient.invite.bulk.csv;
+
+import com.google.common.collect.ImmutableMap;
+import com.pkb.common.csv.CsvRecord;
+import com.pkb.common.csv.ImmutableCsvRecord;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.BulkInvitationOutcome;
+import com.pkb.datamodel.consent.PatientConsentUpdateTemplate;
+import com.pkb.institute.entity.Team;
+import com.pkb.patient.invite.bulk.LineNumberedInvitationResult;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.user.BulkInvitationOutcomesManager;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.collection.Iterator;
+import io.vavr.collection.List;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.enterprise.concurrent.ManagedExecutorService;
+import javax.naming.InitialContext;
+import java.lang.invoke.MethodHandles;
+import java.time.LocalDateTime;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Future;
+import java.util.function.BinaryOperator;
+
+public class BulkInvitationFacade {
+<span class="fc" id="L30">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    public interface ParallelismStrategy {
+        BulkInvitationResult processCsvRows(io.vavr.collection.List&lt;CsvRecord&gt; originalRows, BulkInvitationCsvProcessor csvProcessor, PatientConsentUpdateTemplate consent);
+
+    }
+
+<span class="pc" id="L37">    public static final ParallelismStrategy SYNCHRONOUS_EXECUTION_STRATEGY = (originalRows, csvProcessor, patientConsent) -&gt; csvProcessor</span>
+<span class="nc" id="L38">            .processRows(originalRows, patientConsent);</span>
+
+    public static ParallelismStrategy parallelStrategy() {
+<span class="fc" id="L41">        return new ParallelismStrategy() {</span>
+
+            private static final int PARALLELISM = 16;
+
+<span class="fc" id="L45">            BinaryOperator&lt;BulkInvitationResult&gt; reducer = (r1, r2) -&gt; new BulkInvitationResult(r1.getSuccessCount() + r2.getSuccessCount(),</span>
+<span class="fc" id="L46">                    r1.getFailureCount() + r2.getFailureCount(),</span>
+<span class="fc" id="L47">                    r1.getResults().appendAll(r2.getResults()));</span>
+
+            private ManagedExecutorService getManagedExecutorService() {
+                try {
+<span class="fc" id="L51">                    javax.naming.InitialContext ctx = new InitialContext();</span>
+<span class="fc" id="L52">                    ManagedExecutorService mes = (ManagedExecutorService)</span>
+<span class="fc" id="L53">                            ctx.lookup(&quot;java:jboss/ee/concurrency/executor/default&quot;);</span>
+<span class="fc" id="L54">                    return mes;</span>
+<span class="nc" id="L55">                } catch (Exception e) {</span>
+<span class="nc" id="L56">                    throw new RuntimeException(e);</span>
+                }
+            }
+            
+            private Callable&lt;BulkInvitationResult&gt; task(List&lt;CsvRecord&gt; rows, BulkInvitationCsvProcessor csvProcessor, PatientConsentUpdateTemplate patientConsent){
+<span class="fc" id="L61">                return () -&gt; csvProcessor.processRows(rows, patientConsent);</span>
+            }
+            
+            @Override
+            public BulkInvitationResult processCsvRows(List&lt;CsvRecord&gt; originalRows, BulkInvitationCsvProcessor csvProcessor, PatientConsentUpdateTemplate patientConsent) {
+<span class="fc" id="L66">                ManagedExecutorService executorService = getManagedExecutorService();</span>
+                try {
+<span class="fc" id="L68">                    Iterator&lt;io.vavr.collection.List&lt;CsvRecord&gt;&gt; rowGroups = originalRows.grouped(1 + originalRows.size() / PARALLELISM);</span>
+<span class="fc" id="L69">                    java.util.List&lt;Callable&lt;BulkInvitationResult&gt;&gt; tasks = rowGroups.map(rows -&gt; task(rows, csvProcessor, patientConsent)).toJavaList();</span>
+
+<span class="fc" id="L71">                    java.util.List&lt;Future&lt;BulkInvitationResult&gt;&gt; result = executorService.invokeAll(tasks);</span>
+
+<span class="fc" id="L73">                    return result.stream().map((future) -&gt; {</span>
+                        try {
+<span class="fc" id="L75">                            return future.get();</span>
+<span class="nc" id="L76">                        } catch (Exception e) {</span>
+<span class="nc" id="L77">                            throw new RuntimeException(e);</span>
+                        }
+<span class="fc" id="L79">                    }).reduce(new BulkInvitationResult(0, 0, List.empty()),</span>
+                            reducer);
+
+<span class="nc" id="L82">                } catch (Exception e) {</span>
+<span class="nc" id="L83">                    throw new RuntimeException(e);</span>
+                }
+            }
+        };
+    }
+
+    private final DateTimeService dateTimeService;
+    private final BulkInvitationOutcomesManager outcomesManager;
+    private final BulkInvitationCsvProcessor csvProcessor;
+    private final BulkInvitationResultProcessor resultProcessor;
+    private final CsvContentConverter csvContentConverter;
+    private final PKBEmailMessageManager pkbEmailMessageManager;
+    private static final String MESSAGE_PATTERN = &quot;Bulk Patient Invitation (Coordinator id: '{}', Team id: '{}') {}, because:&quot;;
+
+    public BulkInvitationFacade(
+            PKBEmailMessageManager pkbEmailMessageManager,
+            @NotNull BulkInvitationResultProcessor resultProcessor,
+            @NotNull CsvContentConverter csvContentConverter,
+            @NotNull BulkInvitationOutcomesManager outcomesManager,
+            @NotNull DateTimeService dateTimeService,
+<span class="fc" id="L103">            @NotNull BulkInvitationCsvProcessor csvProcessor) {</span>
+<span class="fc" id="L104">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L105">        this.resultProcessor = resultProcessor;</span>
+<span class="fc" id="L106">        this.csvContentConverter = csvContentConverter;</span>
+<span class="fc" id="L107">        this.outcomesManager = outcomesManager;</span>
+<span class="fc" id="L108">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L109">        this.csvProcessor = csvProcessor;</span>
+<span class="fc" id="L110">    }</span>
+
+    public void invitePatientsInBulk(PKBPerson initiator, Team invitingTeam, List&lt;CsvRecord&gt; csvContent,
+            @NotNull ParallelismStrategy parallelismStrategy, PatientConsentUpdateTemplate patientConsent,
+            long actorId) {
+<span class="fc" id="L115">        LocalDateTime initiatedAt = dateTimeService.nowLocalDateTime();</span>
+
+<span class="fc" id="L117">        boolean couldProcess = false;</span>
+        try {
+<span class="fc" id="L119">            BulkInvitationOutcome outcome = outcomesManager.registerBulkInvitationStart(initiator, invitingTeam, initiatedAt);</span>
+<span class="fc" id="L120">            BulkInvitationResult result = parallelismStrategy.processCsvRows(csvContent, csvProcessor, patientConsent);</span>
+
+<span class="fc" id="L122">            String csvEnrichedWithOutcomes = csvContentConverter</span>
+<span class="fc" id="L123">                    .convert(enrichOriginalRowsWithOutcomes(csvContent, result.getResults()));</span>
+
+<span class="fc" id="L125">            outcomesManager.markAsFinished(outcome, csvEnrichedWithOutcomes, result.getSuccessCount(), result.getFailureCount());</span>
+
+<span class="fc" id="L127">            couldProcess = true;</span>
+<span class="nc" id="L128">        } catch (Exception cause) {</span>
+            // TODO PKB-1741: should we generate an incident number?
+<span class="nc" id="L130">            LOGGER.error(MESSAGE_PATTERN, initiator.getId(), invitingTeam.getId(), &quot;has failed&quot;, cause);</span>
+<span class="nc" id="L131">            couldProcess = markOutcomesAsFailedSilently(initiator, invitingTeam, initiatedAt);</span>
+        } finally {
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">            if (couldProcess) {</span>
+<span class="fc" id="L134">                pkbEmailMessageManager.notifyCoordinatorBulkAccountCreationCompleted(initiator, invitingTeam, actorId);</span>
+            } else {
+<span class="nc" id="L136">                pkbEmailMessageManager.notifyCoordinatorBulkAccountCreationFailed(initiator, invitingTeam, actorId);</span>
+            }
+        }
+<span class="fc" id="L139">    }</span>
+
+    private boolean markOutcomesAsFailedSilently(PKBPerson initiator, Team invitingTeam, LocalDateTime uploadedAt) {
+<span class="nc" id="L142">        boolean couldMarkAsFailed = true;</span>
+
+        try {
+<span class="nc" id="L145">            outcomesManager.markAsFailed(initiator, invitingTeam, uploadedAt);</span>
+<span class="nc" id="L146">        } catch (Exception cause) {</span>
+<span class="nc" id="L147">            LOGGER.error(MESSAGE_PATTERN, initiator.getId(), invitingTeam.getId(), &quot;failed to mark outcomes as failed&quot;, cause);</span>
+<span class="nc" id="L148">            couldMarkAsFailed = false;</span>
+<span class="nc" id="L149">        }</span>
+<span class="nc" id="L150">        return couldMarkAsFailed;</span>
+    }
+
+    private List&lt;CsvRecord&gt; enrichOriginalRowsWithOutcomes(List&lt;CsvRecord&gt; originalRows, List&lt;LineNumberedInvitationResult&gt; results) {
+<span class="fc" id="L154">        return originalRows.zipWith(results,</span>
+                (originalRow, invitationResult) -&gt; {
+<span class="fc" id="L156">                    Map&lt;String, String&gt; process = resultProcessor.process(originalRow, invitationResult);</span>
+
+<span class="fc" id="L158">                    ImmutableMap&lt;String, String&gt; columns = ImmutableMap.&lt;String, String&gt; builder()</span>
+<span class="fc" id="L159">                            .putAll(originalRow.toMap())</span>
+<span class="fc" id="L160">                            .putAll(process)</span>
+<span class="fc" id="L161">                            .build();</span>
+
+<span class="fc" id="L163">                    return new ImmutableCsvRecord(originalRow.logicalLineNumber(), columns);</span>
+<span class="fc" id="L164">                }).collect(List.collector());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

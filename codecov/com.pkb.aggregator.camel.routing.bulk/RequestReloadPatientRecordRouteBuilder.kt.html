@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestReloadPatientRecordRouteBuilder.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel.routing.bulk</a> &gt; <span class="el_source">RequestReloadPatientRecordRouteBuilder.kt</span></div><h1>RequestReloadPatientRecordRouteBuilder.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel.routing.bulk
+
+import com.pkb.aggregator.camel.PATIENT_PROPERTY
+import com.pkb.aggregator.camel.UPSTREAM_IDENTIFIERS_PROPERTY
+import com.pkb.aggregator.camel.bean.process.PatientDeleter
+import com.pkb.aggregator.camel.bean.process.PatientProcessor
+import com.pkb.aggregator.camel.bean.search.AllergySearch
+import com.pkb.aggregator.camel.bean.search.AppointmentSearch
+import com.pkb.aggregator.camel.bean.search.ConditionSearch
+import com.pkb.aggregator.camel.bean.search.EncounterSearch
+import com.pkb.aggregator.camel.bean.search.MedicationStatementSearch
+import com.pkb.aggregator.camel.bean.search.ObservationSearch
+import com.pkb.aggregator.camel.bean.search.PaginatedSearch
+import com.pkb.aggregator.camel.bean.search.PatientSearch
+import com.pkb.aggregator.camel.bean.search.PersonSearch
+import com.pkb.aggregator.camel.beanMethod
+import com.pkb.aggregator.camel.parallelFhirSearch
+import com.pkb.aggregator.camel.parallelMulticast
+import com.pkb.aggregator.camel.routing.AbstractAggregatorRouteBuilder
+import com.pkb.aggregator.camel.routing.createFhirSearchRoute
+import com.pkb.aggregator.camel.routing.createFhirTransactionRoute
+import com.pkb.aggregator.camel.strategy.BodyMutableListBundleAggregationStrategy
+import com.pkb.aggregator.camel.strategy.PropertyMutableListAggregationStrategy
+import com.pkb.aggregator.configuration.FhirConfiguration
+import com.pkb.aggregator.service.FHIR_TYPE_ALLERGY_INTOLERANCE
+import com.pkb.aggregator.service.FHIR_TYPE_APPOINTMENT
+import com.pkb.aggregator.service.FHIR_TYPE_CONDITION
+import com.pkb.aggregator.service.FHIR_TYPE_ENCOUNTER
+import com.pkb.aggregator.service.FHIR_TYPE_MEDICATION_STATEMENT
+import com.pkb.aggregator.service.FHIR_TYPE_OBSERVATION
+import com.pkb.aggregator.service.FHIR_TYPE_PATIENT
+import com.pkb.aggregator.service.FHIR_TYPE_PERSON
+import com.pkb.common.testcontrol.services.PubSubNamespaceService
+import org.hl7.fhir.instance.model.api.IAnyResource
+import org.springframework.stereotype.Component
+
+
+/**
+ * Defines camel routes for performing full reloads of particular resources, including patient records, organisations,
+ * and medication reference data. A full reload involves resolving identifiers across multiple upstreams and loading
+ * all available information, then aggregating it into a single resource to be pushed downstream to the aggregated store
+ */
+@Component
+<span class="fc" id="L44">class RequestReloadPatientRecordRouteBuilder(</span>
+<span class="fc" id="L45">    private val fhirConfiguration: FhirConfiguration,</span>
+<span class="fc" id="L46">    private val bundleAggregationStrategy: BodyMutableListBundleAggregationStrategy,</span>
+    pubSubNamespaceService: PubSubNamespaceService,
+<span class="fc" id="L48">) : AbstractAggregatorRouteBuilder(pubSubNamespaceService) {</span>
+
+    companion object {
+        const val REQUEST_PATIENT_RECORD_RELOAD = &quot;direct:aggregator/reload/patient&quot;
+
+        private const val ROUTE_ID = &quot;patient-reload&quot;
+
+        // Keep these sorted so it's easy to compare to usages
+        private const val REQUEST_ALL_ALLERGIES = &quot;direct:aggregator/reload/patient/allergyIntolerance&quot;
+        private const val REQUEST_ALL_APPOINTMENTS = &quot;direct:aggregator/reload/patient/appointment&quot;
+        private const val REQUEST_ALL_CONDITIONS = &quot;direct:aggregator/reload/patient/condition&quot;
+        private const val REQUEST_ALL_ENCOUNTERS = &quot;direct:aggregator/reload/patient/encounter&quot;
+        private const val REQUEST_ALL_MEDICATION_STATEMENTS = &quot;direct:aggregator/reload/patient/medicationStatement&quot;
+        private const val REQUEST_ALL_OBSERVATIONS = &quot;direct:aggregator/reload/patient/observation&quot;
+        private const val REQUEST_ALL_PERSONS = &quot;direct:aggregator/reload/patient/person&quot;
+
+<span class="pc" id="L64">        val clinicalResourceRoutes = arrayOf(</span>
+<span class="fc" id="L65">            REQUEST_ALL_ALLERGIES,</span>
+<span class="fc" id="L66">            REQUEST_ALL_APPOINTMENTS,</span>
+<span class="fc" id="L67">            REQUEST_ALL_CONDITIONS,</span>
+<span class="fc" id="L68">            REQUEST_ALL_ENCOUNTERS,</span>
+<span class="fc" id="L69">            REQUEST_ALL_MEDICATION_STATEMENTS,</span>
+<span class="fc" id="L70">            REQUEST_ALL_OBSERVATIONS,</span>
+<span class="fc" id="L71">            REQUEST_ALL_PERSONS,</span>
+        )
+
+<span class="pc" id="L74">        internal val propertyAggregationStrategy = PropertyMutableListAggregationStrategy(</span>
+            // We want to ignore patients when aggregating exchange properties because the patient resources have
+            // already been loaded beforehand, so copying them would just result in lots of duplicates by the end of
+            // the process
+<span class="fc" id="L78">            ignoredProperties = listOf(PATIENT_PROPERTY, UPSTREAM_IDENTIFIERS_PROPERTY)</span>
+        )
+    }
+
+    override fun configure() {
+
+<span class="fc" id="L84">        val upstreams = fhirConfiguration.upstream.endpoints</span>
+<span class="fc" id="L85">        val upstreamRoutes = upstreams.map { createFhirSearchRoute(it) }</span>
+<span class="fc" id="L86">        val pageSize = fhirConfiguration.upstream.pageSize</span>
+
+        // Register routes for loading patient resources from upstream (blocking and non-blocking)
+<span class="fc" id="L89">        requestPatient(upstreamRoutes)</span>
+
+        // Register routes for loading pages of clinical data for a patient
+<span class="fc" id="L92">        requestPaginatedResource(PaginatedResourceSpec(</span>
+<span class="fc" id="L93">            REQUEST_ALL_OBSERVATIONS,</span>
+<span class="fc" id="L94">            FHIR_TYPE_OBSERVATION,</span>
+<span class="fc" id="L95">            &quot;subject:$FHIR_TYPE_PATIENT.identifier=\${body}&amp;_count=$pageSize&amp;_sort=-date&quot;,</span>
+            ObservationSearch::class.java
+<span class="fc" id="L97">        ), upstreamRoutes)</span>
+
+<span class="fc" id="L99">        requestPaginatedResource(PaginatedResourceSpec(</span>
+<span class="fc" id="L100">            REQUEST_ALL_ENCOUNTERS,</span>
+<span class="fc" id="L101">            FHIR_TYPE_ENCOUNTER,</span>
+<span class="fc" id="L102">            &quot;subject:$FHIR_TYPE_PATIENT.identifier=\${body}&amp;_count=$pageSize&amp;_include=service-provider&amp;_include:iterate=participant&amp;_sort=-date&quot;,</span>
+            EncounterSearch::class.java
+<span class="fc" id="L104">        ), upstreamRoutes)</span>
+
+<span class="fc" id="L106">        requestPaginatedResource(PaginatedResourceSpec(</span>
+<span class="fc" id="L107">            REQUEST_ALL_MEDICATION_STATEMENTS,</span>
+<span class="fc" id="L108">            FHIR_TYPE_MEDICATION_STATEMENT,</span>
+<span class="fc" id="L109">            &quot;subject:$FHIR_TYPE_PATIENT.identifier=\${body}&amp;_count=$pageSize&amp;_sort=-effective&quot;,</span>
+            MedicationStatementSearch::class.java
+<span class="fc" id="L111">        ), upstreamRoutes)</span>
+
+<span class="fc" id="L113">        requestPaginatedResource(PaginatedResourceSpec(</span>
+<span class="fc" id="L114">            REQUEST_ALL_APPOINTMENTS,</span>
+<span class="fc" id="L115">            FHIR_TYPE_APPOINTMENT,</span>
+<span class="fc" id="L116">            &quot;actor:$FHIR_TYPE_PATIENT.identifier=\${body}&amp;_count=$pageSize&amp;_sort=-date&quot;,</span>
+            AppointmentSearch::class.java
+<span class="fc" id="L118">        ), upstreamRoutes)</span>
+
+<span class="fc" id="L120">        requestPaginatedResource(PaginatedResourceSpec(</span>
+<span class="fc" id="L121">            REQUEST_ALL_CONDITIONS,</span>
+<span class="fc" id="L122">            FHIR_TYPE_CONDITION,</span>
+<span class="fc" id="L123">            &quot;subject:$FHIR_TYPE_PATIENT.identifier=\${body}&amp;_count=$pageSize&amp;_sort=-onset-date&quot;,</span>
+            ConditionSearch::class.java
+<span class="fc" id="L125">        ), upstreamRoutes)</span>
+
+<span class="fc" id="L127">        requestPaginatedResource(PaginatedResourceSpec(</span>
+<span class="fc" id="L128">            REQUEST_ALL_ALLERGIES,</span>
+<span class="fc" id="L129">            FHIR_TYPE_ALLERGY_INTOLERANCE,</span>
+<span class="fc" id="L130">            &quot;patient:$FHIR_TYPE_PATIENT.identifier=\${body}&amp;_count=$pageSize&amp;_sort=-date&quot;,</span>
+            AllergySearch::class.java
+<span class="fc" id="L132">        ), upstreamRoutes)</span>
+
+<span class="fc" id="L134">        requestPaginatedResource(PaginatedResourceSpec(</span>
+<span class="fc" id="L135">            REQUEST_ALL_PERSONS,</span>
+<span class="fc" id="L136">            FHIR_TYPE_PERSON,</span>
+<span class="fc" id="L137">            &quot;patient:$FHIR_TYPE_PATIENT.identifier=\${body}&amp;_count=$pageSize&amp;_sort=name&quot;,</span>
+            PersonSearch::class.java
+<span class="fc" id="L139">        ), upstreamRoutes)</span>
+<span class="fc" id="L140">    }</span>
+
+    private fun requestPatient(upstreamRoutes: List&lt;String&gt;) {
+
+<span class="fc" id="L144">        from(REQUEST_PATIENT_RECORD_RELOAD).routeId(ROUTE_ID)</span>
+            // Construct search query from all known identifiers
+<span class="fc" id="L146">            .beanMethod(PatientSearch::createSearchUrl).id(&quot;$ROUTE_ID-identifier-search&quot;)</span>
+            // Perform patient search in parallel across all upstreams using criteria from previous step
+<span class="fc" id="L148">            .parallelFhirSearch(</span>
+<span class="fc" id="L149">                simple(&quot;$FHIR_TYPE_PATIENT?identifier=\${body}&amp;_sort=name&quot;),</span>
+<span class="fc" id="L150">                upstreamRoutes,</span>
+<span class="fc" id="L151">                bundleAggregationStrategy</span>
+<span class="fc" id="L152">            ).id(&quot;$ROUTE_ID-upstream-search&quot;)</span>
+            // Collate all responses into a property on the exchange
+<span class="fc" id="L154">            .beanMethod(PatientProcessor::processMultiple).id(&quot;$ROUTE_ID-process-patients&quot;)</span>
+            // Now load all clinical data types for the patient
+<span class="fc" id="L156">            .parallelMulticast(clinicalResourceRoutes, propertyAggregationStrategy).id(&quot;$ROUTE_ID-search-clinical-resources&quot;)</span>
+            // Aggregate all the information into a single bundle
+<span class="fc" id="L158">            .beanMethod(PatientProcessor::aggregate).id(&quot;$ROUTE_ID-aggregate&quot;)</span>
+            // Remove all data from downstream prior to writing the new info
+<span class="fc" id="L160">            .beanMethod(PatientDeleter::hardDelete).id(&quot;$ROUTE_ID-downstream-delete&quot;)</span>
+            // Post transaction bundle to downstream
+<span class="fc" id="L162">            .to(createFhirTransactionRoute(fhirConfiguration.downstream.endpoint)).id(&quot;$ROUTE_ID-downstream-push&quot;)</span>
+            // Log info
+<span class="fc" id="L164">            .beanMethod(PatientProcessor::logOutcome).id(&quot;$ROUTE_ID-log-outcome&quot;)</span>
+<span class="fc" id="L165">    }</span>
+
+    private fun &lt;T: PaginatedSearch&gt; requestPaginatedResource(
+        resource: PaginatedResourceSpec&lt;T&gt;,
+        upstreamRoutes: List&lt;String&gt;
+    ) {
+<span class="fc" id="L171">        val nodeIdPart = resource.resourceProperty.lowercase()</span>
+<span class="fc" id="L172">        from(resource.route).routeId(&quot;$ROUTE_ID-${resource.name.lowercase()}&quot;)</span>
+            // Set placeholder properties
+<span class="pc" id="L174">            .setProperty(resource.resourceProperty) { mutableListOf&lt;IAnyResource&gt;() }.id(&quot;create-$nodeIdPart-exchangeproperty&quot;)</span>
+<span class="pc" id="L175">            .setProperty(resource.pageLinksProperty) { mutableListOf&lt;String&gt;() }.id(&quot;create-$nodeIdPart-pagelinks-exchangeproperty&quot;)</span>
+            // Perform search and collate results into properties
+<span class="fc" id="L177">            .parallelFhirSearch(</span>
+<span class="fc" id="L178">                simple(&quot;${resource.name}?${resource.initialQueryParams}&quot;),</span>
+<span class="fc" id="L179">                upstreamRoutes,</span>
+<span class="fc" id="L180">                bundleAggregationStrategy</span>
+<span class="fc" id="L181">            ).id(&quot;upstream-$nodeIdPart-search&quot;)</span>
+            // Run pagination processor to get any additional pages (synchronous)
+<span class="fc" id="L183">            .dynamicRouter(method(resource.processorType, (PaginatedSearch::paginate).name)).id(&quot;upstream-$nodeIdPart-paginate&quot;)</span>
+<span class="fc" id="L184">    }</span>
+
+    /**
+     * PT = Processor Type. Service class which should process our resource.
+     */
+<span class="fc" id="L189">    data class PaginatedResourceSpec&lt;PT : PaginatedSearch&gt;(</span>
+<span class="fc" id="L190">        val route: String,</span>
+<span class="fc" id="L191">        val name: String,</span>
+<span class="fc" id="L192">        val initialQueryParams: String,</span>
+<span class="fc" id="L193">        val processorType: Class&lt;PT&gt;</span>
+    ) {
+<span class="fc" id="L195">        val resourceProperty get() = name</span>
+<span class="fc" id="L196">        val pageLinksProperty get() = &quot;${name}PageLinks&quot;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

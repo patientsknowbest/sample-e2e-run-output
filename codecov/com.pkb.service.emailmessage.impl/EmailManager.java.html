@@ -1,0 +1,507 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmailManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.emailmessage.impl</a> &gt; <span class="el_source">EmailManager.java</span></div><h1>EmailManager.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id:  EmailManager.java May 25, 2009 12:14:56 PM mahendera$
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.service.emailmessage.impl;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRRequestContext.AccountLinkType;
+import com.pkb.app.entity.ImmutableLoggedOutEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.Email;
+import com.pkb.document.entity.Attachment;
+import com.pkb.entities.enums.Message;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.emailmessage.sender.IMessageComposer;
+import com.pkb.service.emailmessage.sender.IMessageDispatcher;
+import com.pkb.service.emailmessage.sender.ITemplateDecider;
+import com.pkb.service.emailmessage.sender.impl.ChannelProfile;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.util.EmailUtil;
+import com.pkb.util.PKBConstants;
+import com.pkb.util.security.RelaxedHtmlMessageFilter;
+import io.prometheus.client.Counter;
+import io.vavr.collection.Stream;
+import org.apache.commons.collections4.CollectionUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.mail.internet.InternetAddress;
+import java.io.UnsupportedEncodingException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.BiPredicate;
+import java.util.function.Supplier;
+
+import static com.pkb.consent.model.AbstractConsentStatus.noConsentRequired;
+import static com.pkb.datamodel.ImmutableDisclosingEmail.disclosingEmail;
+import static com.pkb.entities.enums.UserType.INSTITUTE_ADMIN;
+import static com.pkb.entities.enums.UserType.PATIENT;
+import static com.pkb.entities.enums.UserType.REG_CLINICIAN;
+import static com.pkb.service.emailmessage.ITemplateParamsFactory.getCarerProps;
+import static com.pkb.util.EmailUtil.getCarerMessage;
+import static org.apache.commons.lang3.StringUtils.contains;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
+
+/**
+ * This class implements IEmailManager
+ *
+ * @author mahendera
+ */
+
+<span class="fc" id="L80">public class EmailManager {</span>
+
+<span class="fc" id="L82">    private static final Counter OUTGOING_EMAILS = Counter.build()</span>
+<span class="fc" id="L83">            .name(&quot;pkb_phr_email_outgoing&quot;)</span>
+<span class="fc" id="L84">            .labelNames(&quot;status&quot;)</span>
+<span class="fc" id="L85">            .help(&quot;Number of outgoing emails&quot;)</span>
+<span class="fc" id="L86">            .register();</span>
+
+<span class="fc" id="L88">    private static final Set&lt;UserType&gt; TEAM_SENDERS = Collections.unmodifiableSet(EnumSet.of(REG_CLINICIAN, INSTITUTE_ADMIN));</span>
+<span class="fc" id="L89">    private static final Set&lt;UserType&gt; TEAM_RECIPIENTS = Collections.unmodifiableSet(EnumSet.of(PATIENT, INSTITUTE_ADMIN, REG_CLINICIAN));</span>
+
+    public static boolean emailsDisabledForPerson(PKBPerson person) {
+<span class="fc bfc" id="L92" title="All 4 branches covered.">        return UserStatus.DEAD == person.getStatus() || person.isFrozenByTeam();</span>
+    }
+
+<span class="fc" id="L95">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String MESSAGE_TOADDRESS = &quot;MESSAGE_TOADDRESS&quot;;
+
+    private ITemplateDecider templateDecider;
+
+    private IMessageComposer messageComposer;
+    private IMessageDispatcher messageDispatcher;
+
+    private List&lt;String&gt; noValidationRequiredList;
+
+    private TeamUserManager teamUserManager;
+
+    private PersonContactManager personContactManager;
+
+    private UserManager userManager;
+
+    private PhrConfig config;
+
+    private RelaxedHtmlMessageFilter relaxedHtmlMessageFilter;
+
+    private DateTimeService dateTimeService;
+
+    /**
+     * @param message    is Message ENUM, message can be EMAIL,SMS (templateDecider uses message to select the template)
+     * @param sender     from Address
+     * @param receiver   receiver address
+     * @param properties key,value name pair to build actual message(Velocity or Freemarker template handler uses this properties to build message)
+     * @throws MailException thrown when failed to send email
+     */
+    private void sendMessage(Message message,
+                             ChannelProfile sender,
+                             ChannelProfile receiver,
+                             Collection&lt;ChannelProfile&gt; ccProfiles,
+                             Map&lt;String, Object&gt; properties,
+                             Locale locale)
+            throws MailException {
+
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">        if (config.isEmailLoggingEnabled()) {</span>
+<span class="nc" id="L134">            LOGGER.info(&quot;sendMessage - {}&quot;, message);</span>
+        }
+
+<span class="fc" id="L137">        String template = templateDecider.getTemplate(message, receiver.getChannel());</span>
+
+<span class="fc" id="L139">        addMessageProperties(receiver, properties);</span>
+<span class="fc" id="L140">        Map&lt;String, String&gt; subjectDecorator = getSubjectDecorator(properties);</span>
+<span class="fc" id="L141">        String actualMsg = null;</span>
+        try {
+<span class="fc" id="L143">            actualMsg = messageComposer.composeMessage(template, properties, locale);</span>
+
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">            if (config.isEmailLoggingEnabled()) {</span>
+<span class="nc" id="L146">                LOGGER.info(&quot;sendMessage about to send [{}]&quot;, actualMsg);</span>
+            }
+
+<span class="fc" id="L149">            List&lt;Attachment&gt; attachments = (List&lt;Attachment&gt;) properties.get(PKBConstants.MAIL_ATTACHMENTS);</span>
+<span class="fc" id="L150">            messageDispatcher.dispatchMessage(sender, receiver, ccProfiles, actualMsg, subjectDecorator, attachments);</span>
+<span class="fc" id="L151">        } catch (Exception cause) {</span>
+<span class="fc" id="L152">            String errorMessage = &quot;Unable to send message&quot;;</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">            if (contains(cause.getMessage(), &quot;SMTPAddressFailedException&quot;)) {</span>
+<span class="nc" id="L154">                errorMessage = &quot;Invalid email address&quot;;</span>
+            }
+<span class="fc" id="L156">            throw new MailException(errorMessage, cause);</span>
+<span class="fc" id="L157">        }</span>
+<span class="fc" id="L158">    }</span>
+
+    private Map&lt;String, String&gt; getSubjectDecorator(Map&lt;String, Object&gt; properties) {
+<span class="fc" id="L161">        Map&lt;String, String&gt; subjectDecorator = null;</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">        if (properties.get(PKBConstants.SUBJECT_PREFIX) != null) {</span>
+<span class="fc" id="L163">            subjectDecorator = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L164">            subjectDecorator.put(PKBConstants.SUBJECT_PREFIX, (String) properties.get(PKBConstants.SUBJECT_PREFIX));</span>
+        }
+<span class="fc" id="L166">        return subjectDecorator;</span>
+    }
+
+    private boolean isPatientViewSuspended(PKBPerson toPerson, Org org, boolean canBeSuppressed) {
+
+        // Looking up the code path, it seems that null org can be a valid use case
+<span class="pc bpc" id="L172" title="1 of 6 branches missed.">        if (org != null &amp;&amp; org.isPatientViewSuspended() &amp;&amp; canBeSuppressed) {</span>
+<span class="pc bpc" id="L173" title="2 of 3 branches missed.">            switch (toPerson.getUserType()) {</span>
+                case PATIENT:
+                    // suppress for patient and carer
+<span class="fc" id="L176">                    return true;</span>
+                case REG_CLINICIAN:
+<span class="nc bnc" id="L178" title="All 2 branches missed.">                    if (toPerson.getTeamLevelIds().isEmpty()) {</span>
+                        // suppress for indiv pro
+<span class="nc" id="L180">                        return true;</span>
+                    }
+                default:
+<span class="nc" id="L183">                    return false;</span>
+            }
+        }
+<span class="fc" id="L186">        return false;</span>
+    }
+
+    private boolean canBeSuppressed(Activity.Action action, String actorId) {
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">        if (action != null) {</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">            switch (action) {</span>
+                case SENT_MESSAGE:
+<span class="fc" id="L193">                    return isEmpty(actorId);</span>
+                default:
+<span class="fc" id="L195">                    return action.canBeSupressed();</span>
+            }
+        }
+<span class="nc" id="L198">        return false;</span>
+    }
+
+    private boolean canBeThrottled(@NotNull Message message, @Nullable Activity.Action action) {
+<span class="fc bfc" id="L202" title="All 6 branches covered.">        return message.canBeThrottled() &amp;&amp; (action == null || action.canBeThrottled());</span>
+    }
+
+    public void sendSystemMessage(Message message,
+                                  PKBPerson fromPerson,
+                                  AddressInfo toAddress,
+                                  @NotNull PKBPerson toPerson,
+                                  Map&lt;String, Object&gt; properties,
+                                  Locale locale,
+                                  Activity.Action action,
+                                  Org org,
+                                  Team team) throws MailException {
+<span class="fc" id="L214">        sendMessage(message, fromPerson, toAddress, toPerson, properties, locale, action, null, org, team);</span>
+<span class="fc" id="L215">    }</span>
+
+    public void sendMessage(Message message,
+                                  PKBPerson fromPerson,
+                                  AddressInfo toAddress,
+                                  @NotNull PKBPerson toPerson,
+                                  Map&lt;String, Object&gt; properties,
+                                  Locale locale,
+                                  Activity.Action action,
+                                  String actorId,
+                                  Org org,
+                                  Team team) throws MailException {
+<span class="fc bfc" id="L227" title="All 2 branches covered.">        if (emailsDisabledForPerson(toPerson)) {</span>
+<span class="fc" id="L228">            return;</span>
+        }
+
+<span class="fc" id="L231">        boolean messageCanBeThrottled = canBeThrottled(message, action);</span>
+<span class="fc bfc" id="L232" title="All 6 branches covered.">        if (messageCanBeThrottled &amp;&amp; toPerson.wantsOneEmailPerDay() &amp;&amp; toPerson.receivedEmailToday(dateTimeService)) {</span>
+<span class="fc" id="L233">            LOGGER.info(&quot;Throttleable email not sent: person {} already received an email today&quot;, toPerson.getId());</span>
+<span class="fc" id="L234">            return;</span>
+        }
+
+<span class="fc bfc" id="L237" title="All 4 branches covered.">        if (action != null &amp;&amp; isPatientViewSuspended(toPerson, org, canBeSuppressed(action, actorId))) {</span>
+<span class="fc" id="L238">            LOGGER.info(&quot;Email not sent for suspended org {} to person {}&quot;, org.getName(), toPerson.getId());</span>
+<span class="fc" id="L239">            return;</span>
+        }
+
+        // Adds properties used to generate conditional message content
+<span class="fc" id="L243">        properties.put(PKBConstants.MESSAGE_THROTTLEABLE, messageCanBeThrottled);</span>
+<span class="fc" id="L244">        properties.put(PKBConstants.PRIMARY_RECIPIENT_USER_TYPE, toPerson.getUserType().name());</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">        if (remindToRegister(toPerson, message)) {</span>
+<span class="fc" id="L246">            properties.put(PKBConstants.PRIMARY_RECIPIENT_REMIND_TO_REGISTER, true);</span>
+        }
+
+        try {
+<span class="fc" id="L250">            sendMessage(message, fromPerson, toAddress, properties, locale, team, org);</span>
+<span class="fc bfc" id="L251" title="All 2 branches covered.">            if (messageCanBeThrottled) {</span>
+<span class="fc" id="L252">                updatePersonsLastEmailSent(toPerson);</span>
+            }
+<span class="fc" id="L254">            OUTGOING_EMAILS.labels(&quot;success&quot;).inc();</span>
+<span class="fc" id="L255">        } catch (Exception cause) {</span>
+<span class="fc" id="L256">            OUTGOING_EMAILS.labels(&quot;failure&quot;).inc();</span>
+<span class="fc bfc" id="L257" title="All 2 branches covered.">            if (fromPerson == null) {</span>
+<span class="fc" id="L258">                LOGGER.error(&quot;Failed to dispatch message=[{}] to person=[{}]&quot;, message, toPerson.getId());</span>
+            } else {
+<span class="fc" id="L260">                LOGGER.error(&quot;Failed to dispatch message=[{}] from person=[{}] to person=[{}]&quot;, message, fromPerson.getId(), toPerson.getId());</span>
+            }
+<span class="fc" id="L262">            throw cause;</span>
+<span class="fc" id="L263">        }</span>
+<span class="fc" id="L264">    }</span>
+
+    private boolean remindToRegister(PKBPerson toPerson, Message message) {
+<span class="fc bfc" id="L267" title="All 2 branches covered.">        return UserStatus.PATIENT_NOT_REGISTERED.contains(toPerson.getStatus()) &amp;&amp;</span>
+<span class="fc bfc" id="L268" title="All 2 branches covered.">                !message.isRegistrationMessage();</span>
+    }
+
+    private void updatePersonsLastEmailSent(PKBPerson toPerson) {
+        try {
+<span class="fc" id="L273">            userManager.updateLastEmailSent(toPerson.getId());</span>
+<span class="fc" id="L274">            toPerson.setLastEmailSent(Date.from(dateTimeService.now()));</span>
+<span class="nc" id="L275">        } catch (PKBException e) {</span>
+<span class="nc" id="L276">            LOGGER.error(&quot;&quot;, e);</span>
+<span class="fc" id="L277">        }</span>
+<span class="fc" id="L278">    }</span>
+
+    private void sendMessage(Message message,
+                             @Nullable PKBPerson fromPerson,
+                             AddressInfo toAddress,
+                             Map&lt;String, Object&gt; properties,
+                             Locale locale,
+                             Team team,
+                             Org org) throws MailException {
+<span class="fc bfc" id="L287" title="All 2 branches covered.">        if (toAddress != null) {</span>
+            // this is the primary patient address
+<span class="fc" id="L289">            InternetAddress primaryAddress = toAddress.getPrimaryAddress();</span>
+<span class="fc bfc" id="L290" title="All 2 branches covered.">            if (primaryAddress != null) {</span>
+<span class="fc" id="L291">                String primaryAddressStr = primaryAddress.getAddress();</span>
+<span class="fc" id="L292">                properties.put(PKBConstants.LOGIN_EMAIL, primaryAddressStr);</span>
+<span class="fc" id="L293">                properties.put(&quot;ADDRESS_TYPE&quot;, &quot;PRIMARY&quot;);</span>
+<span class="fc" id="L294">                sendMessage(message, fromPerson, toAddress.getPrimaryAddress(), toAddress.getCcAddresses(), properties, locale, team, org);</span>
+                // used to append &quot;e=recipient@email.com&quot; to every URL, to pre-fill login username
+<span class="fc" id="L296">                properties.put(PKBConstants.SUBJECT_PREFIX, primaryAddress.toString());</span>
+<span class="fc" id="L297">            } else {</span>
+<span class="fc" id="L298">                LOGGER.warn(&quot;Omitting to send email, primaryAddress is empty. From person: {}&quot;, Optional.ofNullable(fromPerson).map(PKBPerson::getId).orElse(null));</span>
+            }
+
+            // Additional addresses (carers)
+<span class="fc bfc" id="L302" title="All 4 branches covered.">            BiPredicate&lt;PKBPerson, PKBPerson&gt; notSelf = (from, to) -&gt; from == null || !from.equals(to);</span>
+<span class="fc" id="L303">            Stream.ofAll(toAddress.getSecondaryAddressesAndPersons().entrySet())</span>
+<span class="fc" id="L304">                    .filter(entry -&gt; notSelf.test(fromPerson, entry.getValue()))</span>
+<span class="fc" id="L305">                    .toMap(Map.Entry::getKey, Map.Entry::getValue)</span>
+<span class="fc" id="L306">                    .forEach((address, carer) -&gt; {</span>
+<span class="fc" id="L307">                        Message carerMessage = getCarerMessage(message);</span>
+<span class="fc" id="L308">                        io.vavr.collection.Map&lt;String, Object&gt; props = io.vavr.collection.HashMap.ofAll(properties)</span>
+<span class="fc" id="L309">                                .put(PKBConstants.LOGIN_EMAIL, address.getAddress())</span>
+<span class="fc" id="L310">                                .put(&quot;ADDRESS_TYPE&quot;, &quot;SECONDARY&quot;)</span>
+<span class="fc bfc" id="L311" title="All 4 branches covered.">                                .filterKeys(key -&gt; carerMessage == message || !key.equals(PKBConstants.SUBJECT_PREFIX))</span>
+<span class="fc" id="L312">                                .merge(((Supplier&lt;io.vavr.collection.Map&lt;String, Object&gt;&gt;) () -&gt; {</span>
+<span class="fc bfc" id="L313" title="All 2 branches covered.">                                    if (carerMessage != message) {</span>
+<span class="fc" id="L314">                                        return io.vavr.collection.HashMap.ofAll(getCarerProps(carer));</span>
+                                    }
+<span class="fc" id="L316">                                    return io.vavr.collection.HashMap.empty();</span>
+<span class="fc" id="L317">                                }).get());</span>
+                        try {
+<span class="fc" id="L319">                            sendMessage(carerMessage, fromPerson, address, toAddress.getCcAddresses(), props.toJavaMap(), locale, team, org);</span>
+<span class="nc" id="L320">                        } catch (MailException e) {</span>
+<span class="nc" id="L321">                            throw new RuntimeException(&quot;Unable to send carer email&quot; + e);</span>
+<span class="fc" id="L322">                        }</span>
+<span class="fc" id="L323">                    });</span>
+<span class="fc" id="L324">        } else {</span>
+<span class="fc" id="L325">            LOGGER.warn(&quot;Omitting to send email, toAddress is empty. From person: {}&quot;, Optional.ofNullable(fromPerson).map(PKBPerson::getId).orElse(null));</span>
+        }
+<span class="fc" id="L327">    }</span>
+
+    private void sendMessage(Message message, PKBPerson fromPerson,
+                             InternetAddress toAddress,
+                             Collection&lt;InternetAddress&gt; ccAddr,
+                             Map&lt;String, Object&gt; properties,
+                             Locale locale,
+                             Team team,
+                             Org org) throws MailException {
+
+<span class="pc bpc" id="L337" title="3 of 6 branches missed.">        if ((toAddress != null) &amp;&amp; (toAddress.getAddress() != null) &amp;&amp; (!toAddress.getAddress().isEmpty())) {</span>
+<span class="fc" id="L338">            ChannelProfile sender = getChannelProfile(getGlobalFromAddress());</span>
+<span class="fc" id="L339">            ChannelProfile receiver = getChannelProfile(toAddress.toString());</span>
+<span class="fc" id="L340">            Collection&lt;ChannelProfile&gt; ccProfiles = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L341" title="1 of 2 branches missed.">            for (InternetAddress ccAddress : ccAddr) {</span>
+<span class="nc" id="L342">                ccProfiles.add(getChannelProfile(ccAddress.getAddress()));</span>
+<span class="nc" id="L343">            }</span>
+
+            //TODO: Lucian 2020/03/11 - this is wrong really, we shoudl be passing the outer request context in here, or at least
+            //constructing something more meaningful - or, even  better, farm this all out into a separate service that doesn't need a request context at all
+<span class="fc" id="L347">            EHRRequestContext requestContext = ImmutableLoggedOutEHRRequestContext.of(AccountLinkType.NO_LINK, Route.NOT_CAPTURED, noConsentRequired(), UUID.randomUUID());</span>
+<span class="fc" id="L348">            addEmailFooter(requestContext, fromPerson, disclosingEmail(toAddress.getAddress()), properties, team, org);</span>
+<span class="fc" id="L349">            sendMessage(message, sender, receiver, ccProfiles, properties, locale);</span>
+<span class="fc" id="L350">        } else {</span>
+<span class="nc" id="L351">            LOGGER.warn(&quot;Omitting to send email, toAddress is empty.&quot;);</span>
+        }
+
+<span class="fc" id="L354">    }</span>
+
+    private void addEmailFooter(EHRRequestContext requestContext,
+                                PKBPerson fromPerson,
+                                Email toAddress,
+                                Map&lt;String, Object&gt; properties,
+                                Team team,
+                                Org org) {
+<span class="fc" id="L362">        LOGGER.debug(&quot;Enter addEmailFooter&quot;);</span>
+        try {
+<span class="fc" id="L364">            Team actualTeam = team;</span>
+<span class="fc" id="L365">            List&lt;PersonContact&gt; receiverContacts = personContactManager.findPersonByConfirmedOrPrimaryEmail(toAddress, PersonContact.Lazy.PERSON);</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">            if (!CollectionUtils.isEmpty(receiverContacts)) {</span>
+<span class="fc bfc" id="L367" title="All 4 branches covered.">                if (fromPerson != null &amp;&amp; isTeamNotification(fromPerson, receiverContacts.get(0).getPerson())) {</span>
+<span class="fc" id="L368">                    List&lt;Team&gt; teams = teamUserManager.getUserTeams(requestContext, fromPerson.getId(), true /*activeOnly*/);</span>
+<span class="fc bfc" id="L369" title="All 2 branches covered.">                    if (!CollectionUtils.isEmpty(teams)) {</span>
+<span class="fc" id="L370">                        actualTeam = teams.get(0);</span>
+                    }
+                }
+<span class="fc bfc" id="L373" title="All 2 branches covered.">                EmailUtil.getOptionalFooterProperties(actualTeam, actualTeam != null ? actualTeam.getOrg() : org, relaxedHtmlMessageFilter)</span>
+<span class="fc" id="L374">                        .ifPresent(footerProps -&gt; footerProps.forEach(properties::putIfAbsent));</span>
+            }
+<span class="nc" id="L376">        } catch (PKBException e) {</span>
+<span class="nc" id="L377">            LOGGER.debug(&quot;PKBException thrown:{}&quot;, e.getMessage());</span>
+<span class="fc" id="L378">        }</span>
+<span class="fc" id="L379">        LOGGER.debug(&quot;Exit addEmailFooter&quot;);</span>
+<span class="fc" id="L380">    }</span>
+
+    private boolean isTeamNotification(PKBPerson sender, PKBPerson recipient) {
+<span class="fc bfc" id="L383" title="All 2 branches covered.">        return TEAM_SENDERS.contains(sender.getUserType()) &amp;&amp;</span>
+<span class="pc bpc" id="L384" title="1 of 2 branches missed.">                TEAM_RECIPIENTS.contains(recipient.getUserType());</span>
+    }
+
+    /**
+     * builds the ChannelProfile object using email(handle as emailId and Channel as EMAIL
+     *
+     * @param mailId mail address of the receiver
+     * @return ChannelProfile return channel profile object
+     */
+    private ChannelProfile getChannelProfile(String mailId) {
+<span class="fc" id="L394">        ChannelProfile profile = new ChannelProfile();</span>
+<span class="fc" id="L395">        profile.setChannel(&quot;EMAIL&quot;);</span>
+<span class="fc" id="L396">        profile.setHandle(mailId);</span>
+<span class="fc" id="L397">        return profile;</span>
+    }
+
+    /**
+     * Adds some common properties to properties map
+     *
+     * @param receiver   receiver mail address
+     * @param properties add the receiver property to properties object
+     */
+    private void addMessageProperties(ChannelProfile receiver,
+                                      Map&lt;String, Object&gt; properties) {
+<span class="fc" id="L408">        properties.put(MESSAGE_TOADDRESS, receiver.getHandle());</span>
+<span class="fc" id="L409">    }</span>
+
+    /**
+     * @return Returns the templateDecider.
+     */
+    public ITemplateDecider getTemplateDecider() {
+<span class="nc" id="L415">        return templateDecider;</span>
+    }
+
+    /**
+     * @return Returns the messageComposer.
+     */
+    public IMessageComposer getMessageComposer() {
+<span class="nc" id="L422">        return messageComposer;</span>
+    }
+
+    /**
+     * @param messageComposer The messageComposer to set.
+     */
+    public void setMessageComposer(IMessageComposer messageComposer) {
+<span class="fc" id="L429">        this.messageComposer = messageComposer;</span>
+<span class="fc" id="L430">    }</span>
+
+    /**
+     * @return Returns the messageDispatcher.
+     */
+    public IMessageDispatcher getMessageDispatcher() {
+<span class="nc" id="L436">        return messageDispatcher;</span>
+    }
+
+    /**
+     * @param messageDispatcher The messageDispatcher to set.
+     */
+    public void setMessageDispatcher(IMessageDispatcher messageDispatcher) {
+<span class="fc" id="L443">        this.messageDispatcher = messageDispatcher;</span>
+<span class="fc" id="L444">    }</span>
+
+    /**
+     * @param templateDecider The templateDecider to set.
+     */
+    public void setTemplateDecider(ITemplateDecider templateDecider) {
+<span class="fc" id="L450">        this.templateDecider = templateDecider;</span>
+<span class="fc" id="L451">    }</span>
+
+    /**
+     * This contains the list of messages which doesnot required validation i.e.
+     * whether the &lt;code&gt;ChannelProfile&lt;/code&gt; is confirmed or not.
+     *
+     * @return
+     */
+    public List&lt;String&gt; getNoValidationRequiredList() {
+<span class="nc" id="L460">        return noValidationRequiredList;</span>
+    }
+
+    /**
+     * @param noValidationRequiredList
+     */
+    public void setNoValidationRequiredList(
+            List&lt;String&gt; noValidationRequiredList) {
+<span class="nc" id="L468">        this.noValidationRequiredList = noValidationRequiredList;</span>
+<span class="nc" id="L469">    }</span>
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L472">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L473">    }</span>
+
+    public void setPersonContactManager(PersonContactManager personContactManager) {
+<span class="fc" id="L476">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L477">    }</span>
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L480">        this.userManager = userManager;</span>
+<span class="fc" id="L481">    }</span>
+
+    public void setConfig(PhrConfig config) {
+<span class="fc" id="L484">        this.config = config;</span>
+<span class="fc" id="L485">    }</span>
+
+    public void setRelaxedHtmlMessageFilter(RelaxedHtmlMessageFilter relaxedHtmlMessageFilter) {
+<span class="fc" id="L488">        this.relaxedHtmlMessageFilter = relaxedHtmlMessageFilter;</span>
+<span class="fc" id="L489">    }</span>
+
+    private String getGlobalFromAddress() {
+<span class="fc" id="L492">        InternetAddress internetAddress = new InternetAddress();</span>
+<span class="fc" id="L493">        internetAddress.setAddress(config.getFromEmailAddress());</span>
+        try {
+<span class="fc" id="L495">            internetAddress.setPersonal(config.getFromEmailName());</span>
+<span class="fc" id="L496">            return internetAddress.toString();</span>
+<span class="nc" id="L497">        } catch (UnsupportedEncodingException e) {</span>
+            // crash; this is important
+<span class="nc" id="L499">            throw new IllegalStateException(&quot;Error in Config.xml! from address cannot be formatted&quot;, e);</span>
+        }
+    }
+
+    public void setDateTimeService(DateTimeService dateTimeService) {
+<span class="fc" id="L504">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L505">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

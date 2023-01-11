@@ -1,0 +1,411 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InboxService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.message</a> &gt; <span class="el_source">InboxService.java</span></div><h1>InboxService.java</h1><pre class="source lang-java linenums">package com.pkb.action.message;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.pkb.action.message.workflow.ConversationWorkflowFlagService;
+import com.pkb.action.message.workflow.ConversationWorkflowFlags;
+import com.pkb.api.internal.messaging.MessagingPKBPersonDTO;
+import com.pkb.api.internal.messaging.PKBPersonToMessagingPKBPersonDTOConverter;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.bean.IMessageWebBean;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.DataModelStyle;
+import com.pkb.datamodel.ui.ResponseMeta;
+import com.pkb.encounter.entity.InboxConversationDTO;
+import com.pkb.institute.entity.Team;
+import com.pkb.messaging.workflow.ArchivedStatusFilter;
+import com.pkb.messaging.workflow.AssignStatusFilter;
+import com.pkb.messaging.workflow.ConversationWorkflowFilterDTO;
+import com.pkb.messaging.workflow.ImmutableConversationWorkflowFilterDTO;
+import com.pkb.questionnaireservice.modelv2.Questionnaire;
+import com.pkb.service.encounter.impl.tolven.EncounterManager;
+import com.pkb.service.questionnaire.QuestionnaireException;
+import com.pkb.service.questionnaire.QuestionnaireManager;
+import com.pkb.service.reference.ReferenceDataManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.PrivacyUtil;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Either;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.MessageSource;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.Month;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.TemporalAdjuster;
+import java.time.temporal.TemporalAdjusters;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.BiFunction;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import static com.pkb.entities.enums.ReferenceDataType.HOSPITAL_SERVICE;
+import static com.pkb.user.entity.PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS_DEEP;
+import static com.pkb.user.entity.PKBPerson.Lazy.PROPERTIES;
+import static io.vavr.control.Either.right;
+import static java.time.ZoneOffset.UTC;
+import static java.time.temporal.TemporalAdjusters.previousOrSame;
+import static java.time.temporal.WeekFields.ISO;
+import static java.util.Collections.emptyList;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+public class InboxService {
+
+<span class="fc" id="L73">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L74">    private static final DateTimeFormatter UK_MONTH_NAME_FORMATTER = DateTimeFormatter.ofPattern(&quot;MMMM&quot;).withLocale(Locale.UK);</span>
+
+<span class="fc" id="L76">    private static final ImmutableMap&lt;WorkflowFilter, Tuple2&lt;ArchivedStatusFilter, AssignStatusFilter&gt;&gt; WORKFLOW_MAPPINGS = Maps.immutableEnumMap(ImmutableMap.of(</span>
+<span class="fc" id="L77">            WorkflowFilter.ACTIVE, Tuple.of(ArchivedStatusFilter.UNARCHIVED, AssignStatusFilter.UNASSIGNED),</span>
+<span class="fc" id="L78">            WorkflowFilter.ARCHIVED, Tuple.of(ArchivedStatusFilter.ARCHIVED, AssignStatusFilter.BOTH),</span>
+<span class="fc" id="L79">            WorkflowFilter.ASSIGNED, Tuple.of(ArchivedStatusFilter.BOTH, AssignStatusFilter.ASSIGNED)));</span>
+
+<span class="fc" id="L81">    private static final Tuple2&lt;ArchivedStatusFilter, AssignStatusFilter&gt; NO_WORKFLOW_FILTERING = Tuple.of(ArchivedStatusFilter.BOTH, AssignStatusFilter.BOTH);</span>
+
+    private final UserManager userManager;
+    private final IMessageWebBean messageWebBean;
+    private final EncounterManager encounterManager;
+    private final PhrConfig config;
+    private final MessageSource messageSource;
+    private final DateTimeService dateTimeService;
+    private final ReferenceDataManager referenceDataManager;
+    private final PrivacyUtil privacyUtil;
+    private final TeamUserManager teamUserManager;
+    private final ConversationWorkflowFlagService conversationWorkflowFlagService;
+    private final QuestionnaireManager questionnaireManager;
+    private PKBPersonToMessagingPKBPersonDTOConverter pkbPersonDTOConverter;
+
+    public InboxService(UserManager userManager,
+                        PhrConfig config,
+                        IMessageWebBean messageWebBean,
+                        EncounterManager encounterManager,
+                        MessageSource messageSource,
+                        DateTimeService dateTimeService,
+                        ReferenceDataManager referenceDataManager,
+                        PrivacyUtil privacyUtil,
+                        TeamUserManager teamUserManager,
+                        ConversationWorkflowFlagService conversationWorkflowFlagService,
+                        QuestionnaireManager questionnaireManager,
+<span class="fc" id="L107">                        PKBPersonToMessagingPKBPersonDTOConverter pkbPersonDTOConverter) {</span>
+<span class="fc" id="L108">        this.userManager = userManager;</span>
+<span class="fc" id="L109">        this.config = config;</span>
+<span class="fc" id="L110">        this.messageWebBean = messageWebBean;</span>
+<span class="fc" id="L111">        this.encounterManager = encounterManager;</span>
+<span class="fc" id="L112">        this.messageSource = messageSource;</span>
+<span class="fc" id="L113">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L114">        this.referenceDataManager = referenceDataManager;</span>
+<span class="fc" id="L115">        this.privacyUtil = privacyUtil;</span>
+<span class="fc" id="L116">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L117">        this.conversationWorkflowFlagService = conversationWorkflowFlagService;</span>
+<span class="fc" id="L118">        this.questionnaireManager = questionnaireManager;</span>
+<span class="fc" id="L119">        this.pkbPersonDTOConverter = pkbPersonDTOConverter;</span>
+<span class="fc" id="L120">    }</span>
+
+    public InboxDto getInbox(@NotNull GetInboxRequest request, @Nullable BiFunction&lt;String, String[], String&gt; i18nMethod, Locale locale) {
+
+<span class="fc" id="L124">        LoggedInEHRRequestContext loggedInEHRRequestContext = request.getLoggedInEHRRequestContext();</span>
+
+<span class="fc" id="L126">        long accountId = Optional.ofNullable(userManager.getDefaultAccountId(loggedInEHRRequestContext.getContextOrAccessingUserId()))</span>
+<span class="pc" id="L127">                .orElseThrow(() -&gt; new IllegalStateException(&quot;Unable to get default account id.&quot;));</span>
+<span class="fc" id="L128">        ConversationWorkflowFlags workflowFlags = conversationWorkflowFlagService.getWorkflowFlags(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L130">        Tuple2&lt;ArchivedStatusFilter, AssignStatusFilter&gt; filters = getWorkflowFilters(request.getWorkflowFilter().orElse(null), loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L132">        ConversationWorkflowFilterDTO workflowFilterDTO = getWorkflowFilter(loggedInEHRRequestContext, workflowFlags, filters._1,</span>
+                filters._2);
+
+<span class="fc" id="L135">        String filterPatientId = request.getFilterPatientId().orElse(null);</span>
+<span class="fc" id="L136">        Instant filterFrom = request.getFilterFrom().orElse(null);</span>
+<span class="fc" id="L137">        Instant filterTo = request.getFilterTo().orElse(null);</span>
+<span class="fc" id="L138">        long inboxCount = messageWebBean.getInboxCount(loggedInEHRRequestContext, accountId, filterPatientId, filterFrom, filterTo, workflowFilterDTO);</span>
+
+<span class="fc" id="L140">        List&lt;InboxConversationDTO&gt; conversationList = encounterManager.getConversationListForInbox(loggedInEHRRequestContext,</span>
+<span class="fc" id="L141">                loggedInEHRRequestContext.getAccessingUserId(), accountId, config.getInboxPageSize(), request.getOffset() - 1, filterPatientId,</span>
+                filterFrom, filterTo, workflowFilterDTO, i18nMethod);
+
+        // logic for populating timeline graphic with [range] number of months data ending up until the end of the current month:
+<span class="fc" id="L145">        int range = config.getEncounterTimelineRangeMonths();</span>
+<span class="fc" id="L146">        int offsetToStartDate = (range - 1) * -1;</span>
+
+<span class="fc" id="L148">        EncounterTimelineDTO encounterTimelineDTO = prepareEncounterTimelineDTO(loggedInEHRRequestContext,</span>
+<span class="fc" id="L149">                dateTimeService.today(), offsetToStartDate, range, request.getLocale(), conversationList);</span>
+
+<span class="fc" id="L151">        List&lt;PKBPerson&gt; patientsForClinician = emptyList();</span>
+<span class="fc bfc" id="L152" title="All 4 branches covered.">        if (loggedInEHRRequestContext.isPro() &amp;&amp; loggedInEHRRequestContext.isUserInOwnAccount()) {</span>
+<span class="fc" id="L153">            patientsForClinician = teamUserManager.getAssignedPatients(loggedInEHRRequestContext.getAccessingUserId(), NATIONAL_AND_LOCAL_IDS_DEEP, PROPERTIES);</span>
+        }
+
+<span class="fc" id="L156">        List&lt;MessagingPKBPersonDTO&gt; patientDtosForClinician = patientsForClinician.stream().map(t -&gt; pkbPersonDTOConverter.convert(t)).collect(Collectors.toList());</span>
+
+<span class="fc" id="L158">        OffsetPagingInfo pageInfo = ImmutableOffsetPagingInfo.builder()</span>
+<span class="fc" id="L159">                .numberOfElements(inboxCount)</span>
+<span class="fc" id="L160">                .pageSize(config.getInboxPageSize())</span>
+<span class="fc" id="L161">                .offset(request.getOffset())</span>
+<span class="fc" id="L162">                .build();</span>
+
+<span class="fc" id="L164">        MessagingPKBPersonDTO accessingPersonDto = pkbPersonDTOConverter.convert(userManager.getPKBPerson(loggedInEHRRequestContext.getAccessingUserId()));</span>
+
+
+        String noMessagesTextKey =
+<span class="fc bfc" id="L168" title="All 2 branches covered.">                loggedInEHRRequestContext.isPro() ? &quot;listDiscussions.txt.no_messages_in_this_filter&quot;</span>
+<span class="fc" id="L169">                        : &quot;listDiscussions.txt.no_messages_found&quot;;</span>
+
+<span class="fc" id="L171">        String noMessagesText = messageSource.getMessage(noMessagesTextKey, null, locale);</span>
+
+<span class="fc" id="L173">        List&lt;QuestionnaireException&gt; questionnaireExceptions = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L174">        List&lt;Questionnaire&gt; questionnaires = getQuestionnaireListForCurrentUser(loggedInEHRRequestContext)</span>
+<span class="fc" id="L175">                .fold(err -&gt; {</span>
+<span class="fc" id="L176">                    questionnaireExceptions.add(err);</span>
+<span class="fc" id="L177">                    return emptyList();</span>
+<span class="fc" id="L178">                }, list -&gt; list);</span>
+
+<span class="fc bfc" id="L180" title="All 2 branches covered.">        boolean isAbleToStartQuestionnaire = isAccessingUserTeamPro(loggedInEHRRequestContext) ||</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">                isIdentityVerifiedPatientOrOnBehalfOfOne(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L183">        return ImmutableInboxDto.builder()</span>
+<span class="fc" id="L184">                .pageInfo(pageInfo)</span>
+<span class="fc" id="L185">                .encounterTimelineDTO(encounterTimelineDTO)</span>
+<span class="fc" id="L186">                .addAllPatientFilterElements(patientDtosForClinician)</span>
+<span class="fc" id="L187">                .loggedInPersonWithRole(accessingPersonDto)</span>
+<span class="fc" id="L188">                .workflowFlags(workflowFlags)</span>
+<span class="fc" id="L189">                .conversationList(conversationList)</span>
+<span class="fc" id="L190">                .canStartQuestionnaire(checkcanStartQuestionnaire(isAbleToStartQuestionnaire, isNotEmpty(questionnaires)))</span>
+<span class="fc" id="L191">                .questionnaires(questionnaires)</span>
+<span class="fc" id="L192">                .noMessagesText(noMessagesText)</span>
+<span class="fc" id="L193">                .responseMeta(ResponseMeta.ofActionErrors(questionnaireExceptions.stream()</span>
+<span class="fc" id="L194">                        .map(qe -&gt; i18nMethod.apply(qe.errorProperty, qe.getErrorTextParams()))</span>
+<span class="fc" id="L195">                        .collect(Collectors.toUnmodifiableList())))</span>
+<span class="fc" id="L196">                .build();</span>
+    }
+
+    private boolean isIdentityVerifiedPatientOrOnBehalfOfOne(LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc bfc" id="L200" title="All 4 branches covered.">        if (loggedInEHRRequestContext.isPatient() || !loggedInEHRRequestContext.isUserInOwnAccount()) {</span>
+<span class="fc" id="L201">            return isIdentityVerifiedPatient(loggedInEHRRequestContext.getContextOrAccessingUserId());</span>
+        }
+<span class="fc" id="L203">        return false;</span>
+    }
+
+    public boolean isIdentityVerifiedPatient(long personId) {
+<span class="fc" id="L207">        return userManager.findIdentityVerification(personId).isPresent();</span>
+    }
+
+    @VisibleForTesting
+    boolean checkcanStartQuestionnaire(boolean isAbleToStartQuestionnaire, boolean hasQuestionnaire) {
+<span class="fc bfc" id="L212" title="All 4 branches covered.">        return isAbleToStartQuestionnaire &amp;&amp; hasQuestionnaire;</span>
+    }
+
+    private Tuple2&lt;ArchivedStatusFilter, AssignStatusFilter&gt; getWorkflowFilters(WorkflowFilter filter, LoggedInEHRRequestContext loggedinContext) {
+<span class="fc" id="L216">        return WORKFLOW_MAPPINGS.getOrDefault(filter, getDefaultWorkflowFilter(loggedinContext));</span>
+    }
+
+    private Tuple2&lt;ArchivedStatusFilter, AssignStatusFilter&gt; getDefaultWorkflowFilter(LoggedInEHRRequestContext loggedinContext) {
+<span class="fc" id="L220">        ConversationWorkflowFlags workflowFlags = conversationWorkflowFlagService.getWorkflowFlags(loggedinContext);</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">        return workflowFlags.isWorkflowEnabled() ? WORKFLOW_MAPPINGS.get(WorkflowFilter.ACTIVE) : NO_WORKFLOW_FILTERING;</span>
+    }
+
+    private ConversationWorkflowFilterDTO getWorkflowFilter(LoggedInEHRRequestContext loggedInEHRRequestContext, ConversationWorkflowFlags workflowFlags,
+            ArchivedStatusFilter archivedFilter, AssignStatusFilter assignedFilter) {
+<span class="fc" id="L226">        return ImmutableConversationWorkflowFilterDTO.builder()</span>
+<span class="fc" id="L227">                .isArchivingEnabled(workflowFlags.isArchivingEnabled())</span>
+<span class="fc" id="L228">                .isAssigningEnabled(workflowFlags.isAssigningEnabled())</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">                .assignStatus(workflowFlags.isAssigningEnabled() ? assignedFilter : AssignStatusFilter.BOTH)</span>
+<span class="fc bfc" id="L230" title="All 2 branches covered.">                .archivedStatus(workflowFlags.isArchivingEnabled() ? archivedFilter : ArchivedStatusFilter.BOTH)</span>
+<span class="fc" id="L231">                .teamId(loggedInEHRRequestContext.getTeamId().orElse(null))</span>
+<span class="fc" id="L232">                .build();</span>
+    }
+
+    private boolean isAccessingUserTeamPro(LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc bfc" id="L236" title="All 2 branches covered.">        return loggedInEHRRequestContext.isPro() &amp;&amp;</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">                getOptionalLoggedInUserPrimaryTeam(loggedInEHRRequestContext).isPresent();</span>
+    }
+
+    private Optional&lt;Team&gt; getOptionalLoggedInUserPrimaryTeam(LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc" id="L241">        return teamUserManager.findPrimaryTeam(</span>
+<span class="fc" id="L242">                loggedInEHRRequestContext.withConsentNotRequired(),</span>
+<span class="fc" id="L243">                loggedInEHRRequestContext.getAccessingUserId());</span>
+    }
+
+    private Either&lt;QuestionnaireException,List&lt;Questionnaire&gt;&gt; getQuestionnaireListForCurrentUser(LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc bfc" id="L247" title="All 2 branches covered.">        if (loggedInEHRRequestContext.isPatient()) {</span>
+<span class="fc" id="L248">            return questionnaireManager.getQuestionnaireListForPatient(loggedInEHRRequestContext.getAccessingUserId());</span>
+        }
+<span class="fc" id="L250">        return getOptionalLoggedInUserPrimaryTeam(loggedInEHRRequestContext)</span>
+<span class="fc" id="L251">                .map(Team::getPublicId)</span>
+<span class="fc" id="L252">                .map(id -&gt; questionnaireManager.getQuestionnaireListForTeam(id, false))</span>
+<span class="fc" id="L253">                .orElse(right(emptyList()));</span>
+    }
+
+    /**
+     * Logic for populating timeline graphic DTO.
+     * &lt;p&gt;
+     * This will return [range] months of data from the data from the first day in the baseDate - offset months
+     *
+     * &lt;p&gt;
+     * Careful attention to date range inclusiveness
+     * &lt;a href=&quot;https://en.wikipedia.org/wiki/ISO_8601&quot;&gt;https://en.wikipedia.org/wiki/ISO_8601&lt;/a&gt;
+     * &lt;/p&gt;
+     * &lt;strong&gt;Example&lt;/strong&gt; - Get the previous 6 months date range:
+     * &lt;ul&gt;
+     * &lt;li&gt;baseDate = today's date&lt;/li&gt;
+     * &lt;li&gt;baseDateOffset = -5 (because we want to start 5 months before the month provided in baseDate&lt;/li&gt;
+     * &lt;li&gt;range = 6&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param baseDate
+     *            - The date from which offset and range are calculated
+     * @param baseDateOffset
+     *            - start date of the timeline will be the beginning of the month, [offset] number of months after the baseDate
+     * @param range
+     *            - the number of months data to include.
+     */
+    @VisibleForTesting
+    EncounterTimelineDTO prepareEncounterTimelineDTO(LoggedInEHRRequestContext loggedInEHRRequestContext, LocalDate baseDate, int baseDateOffset, int range, Locale locale, List&lt;InboxConversationDTO&gt; conversationList) {
+<span class="fc" id="L281">        LocalDate rangeStart = baseDate.plusMonths(baseDateOffset).with(TemporalAdjusters.firstDayOfMonth());</span>
+        //note range of 1 would be the data in the month of range start. So we have to subtract 1 from range
+<span class="fc" id="L283">        LocalDate rangeEnd = rangeStart.plusMonths(range - 1).with(TemporalAdjusters.lastDayOfMonth());</span>
+<span class="fc" id="L284">        return ImmutableEncounterTimelineDTO.builder()</span>
+<span class="fc" id="L285">                .rangeStart(Date.from(rangeStart.atStartOfDay().toInstant(UTC)))</span>
+<span class="fc" id="L286">                .rangeEnd(Date.from(rangeEnd.atStartOfDay().toInstant(UTC)))</span>
+<span class="fc" id="L287">                .monthColumnHeadings(prepareEncounterTimelineMonthRangeHeadings(rangeStart, range, locale))</span>
+<span class="fc" id="L288">                .timelineDataMap(prepareEncounterTimelineDataMap(loggedInEHRRequestContext, rangeStart, rangeEnd, conversationList))</span>
+<span class="fc" id="L289">                .build();</span>
+    }
+
+    /**
+     * Get an array of column headings for the timeline date range.
+     *
+     * @return String[] An array of the month names from the date range - internationalised.
+     */
+    private String[] prepareEncounterTimelineMonthRangeHeadings(LocalDate rangeStart, int range, Locale locale) {
+
+<span class="fc" id="L299">        String[] monthColumnHeadings = new String[range];</span>
+<span class="fc" id="L300">        IntStream.range(0, range)</span>
+<span class="fc" id="L301">                .forEach(i -&gt; monthColumnHeadings[i] = getMonthHeading(rangeStart.plusMonths(i).getMonth(), locale));</span>
+<span class="fc" id="L302">        return monthColumnHeadings;</span>
+    }
+
+    private String getMonthHeading(Month month, Locale locale) {
+<span class="fc" id="L306">        return messageSource.getMessage(&quot;global.txt.&quot; + UK_MONTH_NAME_FORMATTER.format(month).toLowerCase(), null, locale);</span>
+    }
+
+    /**
+     * This prepares the timeline data structure, pre-instantiating the slots
+     * so that we can simply add in records to their appropriate slot.
+     * &lt;p&gt;
+     * Hash keys are comprised of:
+     * YEAR:WEEK_OF_YEAR for a given message date
+     * &lt;p&gt;
+     * Allows for quick addition to the given week's list.
+     *
+     * @return A map pre-populated with the week slots for the timeline range
+     */
+    private Map&lt;String, List&lt;InboxConversationDTO&gt;&gt; prepareEncounterTimelineDataMap(LoggedInEHRRequestContext loggedInEHRRequestContext, LocalDate rangeStart, LocalDate rangeEnd, List&lt;InboxConversationDTO&gt; conversationList) {
+<span class="fc" id="L321">        Map&lt;InboxConversationDTO, ReferenceDataManager.RefDatumOrgAndData&gt; conversationsToRefDatumMap = referenceDataManager.getReferenceDatumMap(conversationList,</span>
+<span class="fc" id="L322">                InboxConversationDTO::getOriginalMessage, HOSPITAL_SERVICE, i -&gt; i.getOriginalMessage().getBaseFields().getHospitalServiceCode());</span>
+
+<span class="fc" id="L324">        Map&lt;ReferenceDataManager.RefDatumOrgAndData, String&gt; refDatumOrgAndDataStringMap = referenceDataManager.processReferenceDatumBatch(conversationsToRefDatumMap,</span>
+<span class="fc" id="L325">                Collections.singletonList(HOSPITAL_SERVICE));</span>
+
+<span class="fc" id="L327">        LocalDate weeklyIterator = rangeStart.with(startOfWeek());</span>
+<span class="fc" id="L328">        Map&lt;String, List&lt;InboxConversationDTO&gt;&gt; weekDTOs = new LinkedHashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L329" title="All 2 branches covered.">        while (!weeklyIterator.isAfter(rangeEnd)) {</span>
+<span class="fc" id="L330">            weekDTOs.put(calculateKey(weeklyIterator), new ArrayList&lt;&gt;());</span>
+<span class="fc" id="L331">            weeklyIterator = weeklyIterator.plusWeeks(1);</span>
+        }
+
+<span class="fc" id="L334">        populateInboxConversationDTO(loggedInEHRRequestContext, conversationsToRefDatumMap, refDatumOrgAndDataStringMap, weekDTOs);</span>
+
+<span class="fc" id="L336">        return weekDTOs;</span>
+    }
+
+    private TemporalAdjuster startOfWeek() {
+<span class="fc" id="L340">        return previousOrSame(ISO.getFirstDayOfWeek());</span>
+    }
+
+    /**
+     * &lt;pre&gt;
+     * We normalize keys to avoid some corner cases.
+     *
+     * E.g.:
+     * We want to display legacy timeline on the first week of 2019 and
+     * we have a Encounter that starts on 2st of Jan. In this case
+     * &quot;Encounter Timeline data map&quot; keys will look like:
+     * ... 2018:52, 2018:53, 2019:2, ...
+     *
+     * (2018:53 is expected as 2018/12/31 is/was Monday - start of a new week.)
+     *
+     * Any Encounter - wihtout normalization - that starts on this week after Monday,
+     * would be tried to be added the list of Encounters with a non existent key 2019:1.
+     * &lt;/pre&gt;
+     */
+    private String calculateKey(LocalDate messageDate) {
+<span class="fc" id="L360">        LocalDate previousOrSameMonday = messageDate.with(startOfWeek());</span>
+
+<span class="fc" id="L362">        return previousOrSameMonday.getYear() + &quot;:&quot; + previousOrSameMonday.get(ISO.weekOfYear());</span>
+    }
+
+    private void populateInboxConversationDTO(LoggedInEHRRequestContext loggedInEHRRequestContext, Map&lt;InboxConversationDTO, ReferenceDataManager.RefDatumOrgAndData&gt; conversationsToRefDatumMap,
+                                              Map&lt;ReferenceDataManager.RefDatumOrgAndData, String&gt; refDatumOrgAndDataStringMap, Map&lt;String, List&lt;InboxConversationDTO&gt;&gt; weekDTOs) {
+        LocalDate messageDate;
+<span class="fc bfc" id="L368" title="All 2 branches covered.">        for (Map.Entry&lt;InboxConversationDTO, ReferenceDataManager.RefDatumOrgAndData&gt; me : conversationsToRefDatumMap.entrySet()) {</span>
+<span class="fc" id="L369">            InboxConversationDTO i = me.getKey();</span>
+<span class="fc" id="L370">            Instant messageTimestamp = i.getLatestMessage().getMessageTimestamp();</span>
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">            if (messageTimestamp != null) {</span>
+<span class="fc" id="L372">                messageDate = ZonedDateTime.ofInstant(messageTimestamp, ZoneId.of(&quot;UTC&quot;)).toLocalDate();</span>
+            } else {
+<span class="nc" id="L374">                LOGGER.error(&quot;Message timestamp is null (msg id:{}), setting enteredDate&quot;, i.getLatestMessage().getId());</span>
+<span class="nc" id="L375">                messageDate = dateTimeService.convertToLocalDateAtUTC(i.getLatestMessage().getBaseFields().getEnteredDate());</span>
+            }
+
+<span class="fc" id="L378">            String searchString = calculateKey(messageDate);</span>
+<span class="fc" id="L379">            weekDTOs.computeIfPresent(searchString, (key, value) -&gt; {</span>
+<span class="fc" id="L380">                value.add(i);</span>
+<span class="fc" id="L381">                return value;</span>
+            });
+
+<span class="fc" id="L384">            String specialty = i.getOriginalMessage().getBaseFields().getHospitalServiceCode();</span>
+<span class="fc" id="L385">            Long orgId = i.getOriginalMessage().getSource().getOrgId();</span>
+<span class="fc bfc" id="L386" title="All 2 branches covered.">            if (orgId != null) {</span>
+<span class="fc" id="L387">                specialty = refDatumOrgAndDataStringMap.getOrDefault(me.getValue(), specialty);</span>
+            }
+<span class="fc" id="L389">            i.setSpecialty(specialty);</span>
+
+<span class="fc bfc" id="L391" title="All 2 branches covered.">            if (i.getPatient() != null) {</span>
+<span class="fc" id="L392">                i.setHidePrivacyLabels(privacyUtil.isConversationPrivacyLabelsHidden(i.getPatient().getId(), loggedInEHRRequestContext));</span>
+            }
+<span class="fc" id="L394">        }</span>
+<span class="fc" id="L395">    }</span>
+
+    @Value.Immutable
+    @DataModelStyle
+    public interface GetInboxRequest {
+
+        LoggedInEHRRequestContext getLoggedInEHRRequestContext();
+        Optional&lt;String&gt; getFilterPatientId();
+        Optional&lt;Instant&gt; getFilterFrom();
+        Optional&lt;Instant&gt; getFilterTo();
+        int getOffset();
+        Optional&lt;WorkflowFilter&gt; getWorkflowFilter();
+        Locale getLocale();
+        boolean isAbleToStartQuestionnaire();
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QuestionnaireResultsCsvExporter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.questionnaire</a> &gt; <span class="el_source">QuestionnaireResultsCsvExporter.java</span></div><h1>QuestionnaireResultsCsvExporter.java</h1><pre class="source lang-java linenums">package com.pkb.service.questionnaire;
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.entities.enums.Gender;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.institute.entity.Team;
+import com.pkb.questionnaireservice.client.QuestionnaireResponseClient;
+import com.pkb.questionnaireservice.client.QuestionnaireServiceClient;
+import com.pkb.questionnaireservice.modelv2.CsvHeaderVisitor;
+import com.pkb.questionnaireservice.modelv2.CsvValueVisitor;
+import com.pkb.questionnaireservice.modelv2.NonResponderCsvVisitor;
+import com.pkb.questionnaireservice.modelv2.Questionnaire;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireRequest;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireResponse;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireServiceError;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PKBPersonHelper;
+import com.pkb.util.Constants;
+import com.pkb.util.CorrelationIdUtil;
+import com.pkb.util.UncheckedCsvPrinter;
+import io.vavr.control.Either;
+import org.apache.commons.collections4.ListUtils;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.web.reactive.function.client.WebClientResponseException;
+import reactor.adapter.JdkFlowAdapter;
+import reactor.core.publisher.Flux;
+
+import java.io.Writer;
+import java.lang.invoke.MethodHandles;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.Flow.Publisher;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static java.util.Arrays.asList;
+
+/**
+ * This class builds a CSV download of the results of a single Questionnaire
+ * usng the new Questionnaire Service API. It uses the Spring Reactive Streams
+ * WebClient to stream the data being returned from the QS API, transform it
+ * into CSV rows and then write it directly to the HTTP output stream
+ */
+public class QuestionnaireResultsCsvExporter {
+
+<span class="fc" id="L57">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final String TITLE_ORG_ID = &quot;Organisation ID&quot;;
+
+    private static final String TITLE_AGE = &quot;Age&quot;;
+
+    private static final String TITLE_GENDER = &quot;Gender&quot;;
+
+    private static final String TITLE_DATE_COMPLETED = &quot;Date completed&quot;;
+
+    private static final String TITLE_DATE_REQUESTED = &quot;Date requested&quot;;
+
+    private static final String TITLE_REQUESTED_BY = &quot;Requested by&quot;;
+
+    private static final String TITLE_NATIONAL_ID = &quot;National ID&quot;;
+
+<span class="fc" id="L73">    private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern(&quot;yyyy MMM dd HH:mm:ss&quot;).withLocale(Locale.UK).withZone(Constants.APPLICATION_TZ);</span>
+
+    private final QuestionnaireServiceClient qsClient;
+    private final CorrelationIdUtil correlationIdUtil;
+    private final UserManager userManager;
+    private final PKBPersonHelper pkbPersonHelper;
+    private final QuestionnaireResponseClient qsResponseClient;
+    private final PhrConfig config;
+    private final UncheckedCsvPrinter.Factory printerFactory;
+
+    public QuestionnaireResultsCsvExporter(QuestionnaireServiceClient qsClient, CorrelationIdUtil correlationIdUtil, UserManager userManager, PKBPersonHelper pkbPersonHelper,
+<span class="fc" id="L84">                                           QuestionnaireResponseClient qsResponseClient, PhrConfig config, UncheckedCsvPrinter.Factory printerFactory) {</span>
+<span class="fc" id="L85">        this.qsClient = qsClient;</span>
+<span class="fc" id="L86">        this.correlationIdUtil = correlationIdUtil;</span>
+<span class="fc" id="L87">        this.userManager = userManager;</span>
+<span class="fc" id="L88">        this.pkbPersonHelper = pkbPersonHelper;</span>
+<span class="fc" id="L89">        this.qsResponseClient = qsResponseClient;</span>
+<span class="fc" id="L90">        this.config = config;</span>
+<span class="fc" id="L91">        this.printerFactory = printerFactory;</span>
+<span class="fc" id="L92">    }</span>
+
+    Either&lt;QuestionnaireServiceError,Void&gt; buildQuestionnaireResultsStreaming(UUID questionnaireId, Team team, QuestionnaireReportCsvExportFilter filter, Supplier&lt;Writer&gt; outputWriterSupplier, UUID loggedInPersonId) {
+<span class="fc" id="L95">        var requestId = correlationIdUtil.maybeGet().orElseGet(UUID::randomUUID);</span>
+<span class="fc" id="L96">        LOGGER.debug(&quot;Start building questionnaire results for questionnaire: {}&quot;, questionnaireId);</span>
+<span class="fc" id="L97">        return qsClient.getQuestionnaireById(requestId, questionnaireId)</span>
+<span class="fc" id="L98">                .map(questionnaire -&gt; {</span>
+<span class="fc" id="L99">                    var headers = getHeadersForQuestionnaire(questionnaire, team, filter);</span>
+<span class="fc" id="L100">                    var responses = getResponsesFluxForQuestionnaire(requestId, questionnaire, team, filter, loggedInPersonId);</span>
+<span class="fc" id="L101">                    var nonResponders = getNonRespondersFluxForQuestionnaire(requestId, questionnaire, team, filter);</span>
+
+<span class="fc" id="L103">                    LOGGER.debug(&quot;Preparing to stream results for questionnaire: {}&quot;, questionnaireId);</span>
+<span class="fc" id="L104">                    try (var printer = printerFactory.getPrinter(outputWriterSupplier.get(), headers)) {</span>
+<span class="fc" id="L105">                        responses.concatWith(nonResponders).onErrorResume(e -&gt; {</span>
+<span class="nc" id="L106">                            LOGGER.error(&quot;Error creating csv results for questionnaire {}&quot;, questionnaireId, e);</span>
+<span class="nc" id="L107">                            return Flux.just(List.of(&quot;Error with questionnaire &quot; + questionnaireId));</span>
+<span class="fc" id="L108">                        }).toStream().forEach(columns -&gt; {</span>
+<span class="fc" id="L109">                            columns.forEach(printer::print);</span>
+<span class="fc" id="L110">                            printer.println();</span>
+<span class="fc" id="L111">                        });</span>
+<span class="fc" id="L112">                        LOGGER.debug(&quot;Finished  streaming results for questionnaire: {}&quot;, questionnaireId);</span>
+                    }
+<span class="fc" id="L114">                    return null;</span>
+                });
+    }
+
+    private List&lt;String&gt; getHeadersForQuestionnaire(Questionnaire questionnaire, Team team, QuestionnaireReportCsvExportFilter filter) {
+<span class="fc" id="L119">        List&lt;String&gt; headers = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">        if (filter.includeNationalId()) {</span>
+<span class="fc" id="L121">            headers.add(NationalIdType.getPrimaryNationalIdTypeFromCountryCode(team.getCountry())</span>
+<span class="fc" id="L122">                    .map(NationalIdType::getName)</span>
+<span class="fc" id="L123">                    .orElse(TITLE_NATIONAL_ID));</span>
+        }
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        if (filter.includeOrgIds()) {</span>
+<span class="fc" id="L126">            headers.add(TITLE_ORG_ID);</span>
+        }
+<span class="fc" id="L128">        headers.addAll(asList(TITLE_AGE, TITLE_GENDER, TITLE_DATE_COMPLETED, TITLE_DATE_REQUESTED));</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        if (filter.includeRequestor()) {</span>
+<span class="fc" id="L130">            headers.add(TITLE_REQUESTED_BY);</span>
+        }
+<span class="fc" id="L132">        headers.addAll(questionnaire.accept(CsvHeaderVisitor.INSTANCE));</span>
+<span class="fc" id="L133">        return headers;</span>
+    }
+
+    private Flux&lt;List&lt;String&gt;&gt; getResponsesFluxForQuestionnaire(UUID requestId, Questionnaire questionnaire, Team team, QuestionnaireReportCsvExportFilter filter, UUID loggedInUserId) {
+<span class="fc" id="L137">        return getCSVRows(qsResponseClient.getResponsesForQuestionnaire(requestId, questionnaire.getId(), loggedInUserId),</span>
+                new QuestionnaireResponderAdapter(team, filter));
+    }
+
+    private Flux&lt;List&lt;String&gt;&gt; getNonRespondersFluxForQuestionnaire(UUID requestId, Questionnaire questionnaire, Team team, QuestionnaireReportCsvExportFilter filter) {
+<span class="fc" id="L142">        return getCSVRows(qsResponseClient.getNonRespondersForQuestionnaire(requestId, questionnaire.getId()), new QuestionnaireNonResponderAdapter(team, filter));</span>
+    }
+
+    private &lt;T&gt; Flux&lt;List&lt;String&gt;&gt; getCSVRows(Publisher&lt;T&gt; entityStream, CsvResultAdapter&lt;T&gt; adapter) {
+<span class="fc" id="L146">        return JdkFlowAdapter.flowPublisherToFlux(entityStream)</span>
+<span class="pc" id="L147">                .onErrorResume(WebClientResponseException.NotFound.class, notFound -&gt; Flux.empty())</span>
+<span class="fc" id="L148">                .window(config.getCsvDownloadGenerationBatchSize())</span>
+<span class="fc" id="L149">                .flatMap(adapter::processQuestionnaireEntityBatch);</span>
+    }
+
+    abstract class CsvResultAdapter&lt;T&gt; {
+
+        private final Team team;
+        private final QuestionnaireReportCsvExportFilter filter;
+
+<span class="fc" id="L157">        CsvResultAdapter(Team team, QuestionnaireReportCsvExportFilter filter) {</span>
+<span class="fc" id="L158">            this.team = team;</span>
+<span class="fc" id="L159">            this.filter = filter;</span>
+<span class="fc" id="L160">        }</span>
+
+        abstract QuestionnaireRequest getRequest(T source);
+
+        @Nullable
+        abstract Instant getResponseCreationDate(T source);
+
+        abstract List&lt;String&gt; getResponseColumns(T source);
+
+        private Flux&lt;List&lt;String&gt;&gt; processQuestionnaireEntityBatch(Flux&lt;T&gt; batch) {
+<span class="fc" id="L170">            return batch.collectList().flatMapMany(responseBatchList -&gt; {</span>
+<span class="fc" id="L171">                var personMap = getPersonMap(responseBatchList);</span>
+<span class="fc" id="L172">                return Flux.fromStream(responseBatchList.stream().map(source -&gt; getCsvColumns(personMap, source)));</span>
+            });
+        }
+
+        private Map&lt;UUID, PKBPerson&gt; getPersonMap(List&lt;T&gt; sourceEntities) {
+<span class="fc" id="L177">            var personIdSet = sourceEntities.stream().map(this::getRequest).flatMap(request -&gt; Stream.of(request.getRequestorPersonId(), request.getPatientId())).collect(Collectors.toSet());</span>
+<span class="fc" id="L178">            return userManager.getPKBPersonMapByPublicId(personIdSet);</span>
+        }
+
+        private List&lt;String&gt; getCsvColumns(Map&lt;UUID, PKBPerson&gt; personMap, T source) {
+<span class="fc" id="L182">            return ListUtils.union(getFixedColumns(personMap, source), getResponseColumns(source));</span>
+        }
+
+        private List&lt;String&gt; getFixedColumns(Map&lt;UUID, PKBPerson&gt; personMap, T source) {
+<span class="fc" id="L186">            QuestionnaireRequest request = getRequest(source);</span>
+<span class="fc" id="L187">            Instant responseCreatedDate = getResponseCreationDate(source);</span>
+<span class="fc" id="L188">            PKBPerson patient = personMap.get(request.getPatientId());</span>
+<span class="fc" id="L189">            PKBPerson requestor = personMap.get(request.getRequestorPersonId());</span>
+<span class="fc" id="L190">            List&lt;String&gt; columns = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">            if (filter.includeNationalId()) {</span>
+<span class="fc" id="L192">                columns.add(patient.getNationalIdByCountry(team.getCountry())</span>
+<span class="fc" id="L193">                        .map(NationalId::getValueFormatted)</span>
+<span class="fc" id="L194">                        .orElse(null));</span>
+            }
+            // no support for (sensitive) team-level IDs
+<span class="fc bfc" id="L197" title="All 2 branches covered.">            if (filter.includeOrgIds()) {</span>
+<span class="fc" id="L198">                columns.add(patient.getOrgLevelIdsByOrg(team.getOrg().getId()).stream().findFirst()</span>
+<span class="fc" id="L199">                        .map(OrgLevelId::getValue)</span>
+<span class="fc" id="L200">                        .orElse(null));</span>
+            }
+
+<span class="fc" id="L203">            columns.add(patient.findDateOfBirth().map(ld -&gt; Integer.toString(pkbPersonHelper.calculateAge(ld))).orElse(&quot;0&quot;));</span>
+<span class="fc" id="L204">            columns.add(Gender.toLetter(patient.getGender()));</span>
+
+<span class="fc bfc" id="L206" title="All 2 branches covered.">            columns.add(responseCreatedDate == null ? &quot;&quot; : FORMATTER.format(responseCreatedDate));</span>
+<span class="fc" id="L207">            columns.add(FORMATTER.format(request.getCreatedDate()));</span>
+<span class="fc bfc" id="L208" title="All 2 branches covered.">            if (filter.includeRequestor()) {</span>
+<span class="fc" id="L209">                columns.add(requestor.getFullName());</span>
+            }
+<span class="fc" id="L211">            return columns;</span>
+        }
+    }
+
+    class QuestionnaireResponderAdapter extends CsvResultAdapter&lt;QuestionnaireResponse&gt; {
+
+<span class="fc" id="L217">        QuestionnaireResponderAdapter(Team team, QuestionnaireReportCsvExportFilter filter) {</span>
+<span class="fc" id="L218">            super(team, filter);</span>
+<span class="fc" id="L219">        }</span>
+
+        @Override
+        QuestionnaireRequest getRequest(QuestionnaireResponse source) {
+<span class="fc" id="L223">            return source.getQuestionnaireRequest();</span>
+        }
+
+        @Override
+        Instant getResponseCreationDate(QuestionnaireResponse source) {
+<span class="fc" id="L228">            return source.getCreatedDate();</span>
+        }
+
+        @Override
+        List&lt;String&gt; getResponseColumns(QuestionnaireResponse source) {
+<span class="fc" id="L233">            return source.accept(CsvValueVisitor.INSTANCE);</span>
+        }
+    }
+
+    class QuestionnaireNonResponderAdapter extends CsvResultAdapter&lt;QuestionnaireRequest&gt; {
+
+<span class="fc" id="L239">        QuestionnaireNonResponderAdapter(Team team, QuestionnaireReportCsvExportFilter filter) {</span>
+<span class="fc" id="L240">            super(team, filter);</span>
+<span class="fc" id="L241">        }</span>
+
+        @Override
+        QuestionnaireRequest getRequest(QuestionnaireRequest source) {
+<span class="fc" id="L245">            return source;</span>
+        }
+
+        @Override
+        @Nullable
+        Instant getResponseCreationDate(QuestionnaireRequest source) {
+<span class="fc" id="L251">            return null;</span>
+        }
+
+        @Override
+        List&lt;String&gt; getResponseColumns(QuestionnaireRequest source) {
+<span class="fc" id="L256">            return source.getQuestionnaire().accept(NonResponderCsvVisitor.INSTANCE);</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

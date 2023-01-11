@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PkColumn.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.deletion.model</a> &gt; <span class="el_source">PkColumn.java</span></div><h1>PkColumn.java</h1><pre class="source lang-java linenums">package com.pkb.deletion.model;
+
+import com.pkb.deletion.model.errors.DeletionServiceError;
+import com.pkb.deletion.repository.DeleteOperationRepository;
+import io.vavr.collection.Stream;
+import io.vavr.control.Either;
+import org.immutables.value.Value;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+/**
+ * A primary key column on a table against which inbound foreign key references
+ * may be made.
+ */
+@Value.Immutable
+<span class="fc" id="L22">public abstract class PkColumn&lt;TYPE&gt; implements IdColumn&lt;TYPE, TYPE&gt; {</span>
+
+    @Override
+    @Value.Default
+    public String getName() {
+<span class="fc" id="L27">        return &quot;id&quot;;</span>
+    }
+
+    abstract List&lt;String&gt; getSelfReferenceColumnNames();
+
+
+
+    @Override
+    public Either&lt;DeletionServiceError, Integer&gt; expandSelfReferences(UUID operationId, String parentTableName, DeleteOperationRepository queryExecutor) {
+
+<span class="fc bfc" id="L37" title="All 2 branches covered.">        if (getSelfReferenceColumnNames().isEmpty()) {</span>
+<span class="fc" id="L38">            return Either.right(0);</span>
+        }
+
+<span class="fc" id="L41">        String schema = queryExecutor.getDeletionServiceSchema();</span>
+
+<span class="fc" id="L43">        String sqlPrefix = &quot;INSERT INTO &quot; + schema + &quot;.delete_operation_id SELECT :operationId, primary_table.&quot; + getName() + &quot;::text FROM &quot; + parentTableName + &quot; primary_table INNER JOIN &quot; + schema + &quot;.delete_operation_id doi ON doi.operation_id = :operationId AND (&quot;;</span>
+
+<span class="fc" id="L45">        String sqlSuffix = &quot;) LEFT OUTER JOIN &quot; + schema + &quot;.delete_operation_id doi_existing ON primary_table.&quot; + getName() + &quot; = doi_existing.id_to_delete&quot; + getColumnCast() + &quot; AND doi_existing.operation_id = :operationId WHERE doi_existing.id_to_delete IS NULL;&quot;;</span>
+<span class="fc" id="L46">        String sql = getSelfReferenceColumnNames().stream().map(selfRefColumn -&gt; &quot;primary_table.&quot; + selfRefColumn + &quot; = doi.id_to_delete&quot; + getColumnCast()).collect(Collectors.joining(&quot; OR &quot;, sqlPrefix, sqlSuffix));</span>
+
+
+<span class="fc" id="L49">        Function&lt;Integer, Either&lt;DeletionServiceError, Integer&gt;&gt; insertOperation = (prevCount) -&gt; queryExecutor.runUpdateDeleteQuery(sql, Map.of(&quot;operationId&quot;, operationId));</span>
+<span class="pc" id="L50">        Function&lt;DeletionServiceError, Either&lt;DeletionServiceError, Integer&gt;&gt; foldErrorToZeroCount = err -&gt; Either.right(0);</span>
+<span class="pc bpc" id="L51" title="1 of 2 branches missed.">        Predicate&lt;Either&lt;DeletionServiceError, Integer&gt;&gt; resultIsZeroCount = result -&gt; result.map(count -&gt; count == 0).getOrElse(false);</span>
+
+<span class="fc" id="L53">        var recursionStream = Stream.iterate(insertOperation.apply(0),</span>
+<span class="nc" id="L54">                (prev) -&gt; prev.fold(foldErrorToZeroCount, insertOperation)</span>
+        );
+
+<span class="fc" id="L57">        return Either.sequenceRight(recursionStream.takeUntil(resultIsZeroCount))</span>
+<span class="fc" id="L58">                .map(seq -&gt; seq.fold(0, Integer::sum));</span>
+    }
+
+
+    /**
+     * Not required. For the primary key the id values to be deleted are stored directly in
+     * delete_operation_id.id_to_delete, so we don't have to join against the original table when looking for
+     * dependent rows in referring tables, we can just join against delete_operation_id on its own.
+     */
+    @Override
+    public String getIdJoinTableClause(String parentTableName) {
+<span class="fc" id="L69">        return &quot;&quot;;</span>
+    }
+
+    @Override
+    public String buildFkReferenceWhereConditions(List&lt;String&gt; fkColumnNames, Optional&lt;Class&lt;?&gt;&gt; nonStandardForeignKeyDataType) {
+<span class="fc" id="L74">        return fkColumnNames.stream().map(fkColumnName -&gt; &quot;primary_table.&quot; + fkColumnName + &quot; = doi.id_to_delete&quot; + getColumnCast(nonStandardForeignKeyDataType)).collect(Collectors.joining(&quot; OR &quot;, &quot;(&quot;, &quot;)&quot;));</span>
+    }
+
+
+
+    public static PkColumn&lt;Long&gt; pk(List&lt;InboundForeignKeyReference&lt;?, Long&gt;&gt; inboundForeignKeyReferences) {
+<span class="fc" id="L80">        return pk(Long.class, inboundForeignKeyReferences);</span>
+    }
+
+    public static &lt;TYPE&gt; PkColumn&lt;TYPE&gt; pk(Class&lt;TYPE&gt; columnType, List&lt;InboundForeignKeyReference&lt;?, TYPE&gt;&gt; inboundForeignKeyReferences) {
+<span class="fc" id="L84">        return ImmutablePkColumn.&lt;TYPE&gt;builder().inboundForeignKeys(inboundForeignKeyReferences).columnTypeClass(columnType).build();</span>
+    }
+
+    public static PkColumn&lt;Long&gt; pk(List&lt;InboundForeignKeyReference&lt;?, Long&gt;&gt; inboundForeignKeyReferences, List&lt;String&gt; selfReferenceColumnNames) {
+<span class="fc" id="L88">        return pk(Long.class, inboundForeignKeyReferences, selfReferenceColumnNames);</span>
+    }
+
+    public static &lt;TYPE&gt; PkColumn&lt;TYPE&gt; pk(Class&lt;TYPE&gt; columnType, List&lt;InboundForeignKeyReference&lt;?, TYPE&gt;&gt; inboundForeignKeyReferences, List&lt;String&gt; selfReferenceColumnNames) {
+<span class="fc" id="L92">        return ImmutablePkColumn.&lt;TYPE&gt;builder().inboundForeignKeys(inboundForeignKeyReferences).selfReferenceColumnNames(selfReferenceColumnNames).columnTypeClass(columnType).build();</span>
+    }
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DeletionValidator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.deletion.model</a> &gt; <span class="el_source">DeletionValidator.java</span></div><h1>DeletionValidator.java</h1><pre class="source lang-java linenums">package com.pkb.deletion.model;
+
+import com.pkb.deletion.model.errors.GeneralValidationFailure;
+import com.pkb.deletion.model.errors.ImmutableGeneralValidationFailure;
+import com.pkb.deletion.model.errors.TableValidationFailure;
+import com.pkb.deletion.repository.DeleteOperationRepository;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.function.Predicate;
+
+import static java.util.Collections.emptyMap;
+
+/**
+ * Validates one group of records to be deleted from a specific table. After we've built up the tree
+ * of deletions, we walk over it, requesting validators for each DeletionOperation from the {@link DeletionRules }
+ * object, and then calling the {@link #validate(UUID, DeleteOperationRepository)} method. This allows business rules
+ * to be applied about when a deletion is or isn't safe to perform. For example, when deleting from menu_data, we might
+ * exclude rows that are messages that have been read by a clinician.
+ *
+ * As things stands, this is called relatively naively for each independent DeleteOperation in the tree. Since different
+ * rows in the same table may be reachable at different points in the tree, there is no guarantee that any specific validator
+ * will see _all_ the rows to be deleted from a specific table. If it turns out to be necessary to write such a validator
+ * then either the tree-walking code will have to be modified substantially to perform this aggregation first before passing
+ * the data to the validators, or - and I think this would be the simpler solution - the relevant validator could be made
+ * stateful, and could itself build up a list of all the rows each time it is called. We  could then introduce a final
+ * post-validation step on the DeletionRules object to trigger such stateful validators to actually perform their validation
+ * once the whole tree had been walked and the relevant rows collected togethter.
+ *
+ * @param &lt;PK_TYPE&gt; The type of the primary key column of the table from which rows are being deleted. Allows for
+ *                 type-safe queries during validation.
+ */
+public abstract class DeletionValidator&lt;PK_TYPE&gt; {
+
+    protected final DatabaseTable&lt;PK_TYPE&gt; table;
+
+<span class="fc" id="L40">    protected DeletionValidator(DatabaseTable&lt;PK_TYPE&gt; table) {</span>
+<span class="fc" id="L41">        this.table = table;</span>
+<span class="fc" id="L42">    }</span>
+
+    public abstract Either&lt;TableValidationFailure, Integer&gt; validate(UUID requestId, UUID operationId, DeleteOperationRepository queryExecutor);
+
+
+
+    public static &lt;T&gt; DeletionValidator&lt;T&gt; listNotBiggerThan(int size, String error, DatabaseTable&lt;T&gt; table) {
+<span class="pc bpc" id="L49" title="1 of 2 branches missed.">        return validateDeleteCount(error, count -&gt; count &lt;= size, table);</span>
+    }
+
+
+    public static &lt;T&gt; DeletionValidator&lt;T&gt; validateDeleteCount(String error, Predicate&lt;Integer&gt; resultTester, DatabaseTable&lt;T&gt; table) {
+<span class="fc" id="L54">        return validateFilteredCount(error, null, resultTester, emptyMap(), table);</span>
+    }
+
+    public static &lt;T&gt; DeletionValidator&lt;T&gt; acceptAll(DatabaseTable&lt;T&gt; table) {
+<span class="fc" id="L58">        return new DeletionValidator&lt;&gt;(table) {</span>
+            @Override
+            public Either&lt;TableValidationFailure, Integer&gt; validate(UUID requestId, UUID operationId, DeleteOperationRepository queryExecutor) {
+<span class="fc" id="L61">                return Either.right(0);</span>
+            }
+        };
+    }
+
+    public static &lt;T&gt; DeletionValidator&lt;T&gt; validateFilteredCount(String error, String sqlPredicate, Predicate&lt;Integer&gt; resultTester, Map&lt;String, Object&gt; parameters, DatabaseTable&lt;T&gt; table) {
+<span class="fc" id="L67">        return new DeletionValidator&lt;&gt;(table) {</span>
+            @Override
+            public Either&lt;TableValidationFailure, Integer&gt; validate(UUID requestId, UUID operationId, DeleteOperationRepository queryExecutor) {
+<span class="fc" id="L70">                String sql = &quot;SELECT id_to_delete from &quot; + queryExecutor.getDeletionServiceSchema() + &quot;.delete_operation_id WHERE operation_id = '&quot; + operationId + &quot;'&quot;;</span>
+<span class="fc bfc" id="L71" title="All 2 branches covered.">                if (sqlPredicate != null) {</span>
+<span class="fc" id="L72">                    sql = sql + &quot; AND &quot; + sqlPredicate;</span>
+                }
+<span class="fc" id="L74">                sql += &quot; ORDER BY id_to_delete;&quot;;</span>
+<span class="fc" id="L75">                List&lt;T&gt; ids = queryExecutor.selectList(sql, parameters, table.getPkClass());</span>
+<span class="fc bfc" id="L76" title="All 2 branches covered.">                if (resultTester.test(ids.size())) {</span>
+<span class="fc" id="L77">                    return Either.right(null);</span>
+                }
+<span class="fc" id="L79">                return Either.left(TableValidationFailure.of(requestId, operationId, error, table.getTableName(), ids));</span>
+            }
+        };
+    }
+
+    public static Either&lt;GeneralValidationFailure, Integer&gt; convertErrorList(UUID requestId, String messagePrefix, List&lt;String&gt; errors) {
+<span class="fc" id="L85">        return errors.stream()</span>
+<span class="pc" id="L86">                .reduce((acc, msg) -&gt; acc + &quot;\n&quot; + msg)</span>
+<span class="pc" id="L87">                .map(joinedErrors -&gt; messagePrefix + &quot;:\n&quot; + joinedErrors)</span>
+<span class="pc" id="L88">                .map(message -&gt; ImmutableGeneralValidationFailure.builder().requestId(requestId).message(message).build())</span>
+<span class="fc" id="L89">                .map(Either::&lt;GeneralValidationFailure, Integer&gt;left)</span>
+<span class="fc" id="L90">                .orElse(Either.right(0));</span>
+
+    }
+
+    public static &lt;T&gt; Either&lt;TableValidationFailure, Integer&gt; convertErrorIdList(UUID requestId, UUID operationId, String message, DatabaseTable&lt;T&gt; table, List&lt;T&gt; ids) {
+<span class="fc" id="L95">        return Option.when(ids.isEmpty(), 0)</span>
+<span class="fc" id="L96">                .toEither(TableValidationFailure.of(requestId, operationId, message, table.getTableName(), ids));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

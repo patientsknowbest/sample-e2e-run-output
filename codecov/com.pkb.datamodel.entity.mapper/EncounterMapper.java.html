@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EncounterMapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.datamodel.entity.mapper</a> &gt; <span class="el_source">EncounterMapper.java</span></div><h1>EncounterMapper.java</h1><pre class="source lang-java linenums">package com.pkb.datamodel.entity.mapper;
+
+import com.pkb.datamodel.AccountKeys;
+import com.pkb.datamodel.AppMenuDataWithSourceObjects;
+import com.pkb.datamodel.Encounter;
+import com.pkb.datamodel.EncounterEvent;
+import com.pkb.datamodel.ReferenceDatumCache;
+import com.pkb.datamodel.crypto.CryptoService;
+import com.pkb.datamodel.entity.ClinicalDataDeserializer;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.entities.app.AppMenuData;
+import com.pkb.entities.embeddables.SourceDetails;
+import com.pkb.entities.enums.EncounterClass;
+import com.pkb.entities.pub.PublicOrg;
+import io.prometheus.client.Histogram;
+import io.vavr.Function1;
+import io.vavr.Function4;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.mapstruct.Mapper;
+
+import javax.inject.Inject;
+import java.util.UUID;
+
+import static com.pkb.datamodel.ImmutableEncounter.encounter;
+import static com.pkb.datamodel.ImmutableEncounterEvent.encounterEvent;
+
+@Mapper
+<span class="fc" id="L31">public abstract class EncounterMapper implements StringFieldMapper, TimedMapper {</span>
+
+    @Inject
+    private SourceDetailsMapper sourceDetailsMapper;
+
+    @Inject
+    private PrivacyFlagsMapper privacyFlagsMapper;
+
+    @Inject
+    private LocationMapper locationMapper;
+
+    @Inject
+    private ParticipantMapper participantMapper;
+
+    @Inject
+    private CryptoService cryptoService;
+
+    @Inject
+    private ClinicalDataDeserializer dataDeserializer;
+
+    @Inject
+    private InstantMapper instantMapper;
+
+    public List&lt;Encounter&gt; menuDatasToEncounters(
+            @NotNull AccountKeys accountKeys,
+            @NotNull List&lt;AppMenuDataWithSourceObjects&gt; menuData,
+            @NotNull Patient patient,
+            @NotNull ReferenceDatumCache referenceDatumCache) {
+<span class="fc" id="L59">        Map&lt;Long, byte[]&gt; decryptedData = cryptoService.decrypt(accountKeys, menuData.map(AppMenuDataWithSourceObjects::getAppMenuData));</span>
+<span class="fc" id="L60">        return menuData</span>
+<span class="fc" id="L61">                .groupBy(wrapper -&gt; wrapper.getAppMenuData().getUuid01()).toList()</span>
+<span class="fc" id="L62">                .map(e -&gt; menuDatasToEncounter(e._1, e._2, patient, decryptedData, referenceDatumCache));</span>
+    }
+
+    private Encounter menuDatasToEncounter(
+            @NotNull UUID conversationId,
+            @NotNull List&lt;AppMenuDataWithSourceObjects&gt; mds,
+            @NotNull Patient patient,
+            @NotNull Map&lt;Long, byte[]&gt; decryptedData,
+            @NotNull ReferenceDatumCache referenceDatumCache) {
+
+<span class="fc" id="L72">        Function1&lt;AppMenuDataWithSourceObjects, EncounterEvent&gt; toEncounterEvent = Function4.of(this::menuDataToEncounterEvent)</span>
+<span class="fc" id="L73">                .apply(patient)</span>
+<span class="fc" id="L74">                .apply(decryptedData)</span>
+<span class="fc" id="L75">                .apply(referenceDatumCache);</span>
+
+<span class="fc" id="L77">        try (Histogram.Timer ignored = MAP_TIMER.labels(&quot;encounter&quot;, &quot;encounter&quot;).startTimer()) {</span>
+<span class="fc" id="L78">            return encounter()</span>
+<span class="fc" id="L79">                    .id(conversationId)</span>
+<span class="fc" id="L80">                    .addAllEvents(mds.map(toEncounterEvent).sortBy(EncounterEvent::timestamp))</span>
+<span class="fc" id="L81">                    .build();</span>
+        }
+    }
+
+    private EncounterEvent menuDataToEncounterEvent(
+            Patient patient,
+            Map&lt;Long, byte[]&gt; decryptedData,
+            ReferenceDatumCache referenceDatumCache,
+            AppMenuDataWithSourceObjects wrapper) {
+
+<span class="fc" id="L91">        AppMenuData md = wrapper.getAppMenuData();</span>
+
+<span class="fc" id="L93">        try (Histogram.Timer ignored = MAP_TIMER.labels(&quot;encounter&quot;, &quot;event&quot;).startTimer()) {</span>
+<span class="fc" id="L94">            byte[] plaintext = decryptedData.get(md.getId()).get();</span>
+<span class="fc" id="L95">            java.util.Map&lt;String, Object&gt; fields = dataDeserializer.deserialize(plaintext);</span>
+<span class="fc" id="L96">            java.util.Map&lt;String, Object&gt; location = (java.util.Map&lt;String, Object&gt;) fields.getOrDefault(&quot;location&quot;, null);</span>
+<span class="fc" id="L97">            java.util.List&lt;java.util.Map&lt;String, Object&gt;&gt; externalParticipants = (java.util.List&lt;java.util.Map&lt;String, Object&gt;&gt;) fields.getOrDefault(&quot;participantsNonPKB&quot;, null);</span>
+<span class="fc" id="L98">            Option&lt;PublicOrg&gt; org = Option.of(md.getSourceDetails()).map(SourceDetails::getOrg);</span>
+<span class="fc" id="L99">            return encounterEvent()</span>
+<span class="fc" id="L100">                    .id(md.getBaseFields().getUniqueId())</span>
+<span class="fc" id="L101">                    .patient(patient)</span>
+<span class="fc" id="L102">                    .persisted(instantMapper.mapToZonedDateTimeOption(md.getBaseFields().getPersistedDate()))</span>
+<span class="fc" id="L103">                    .timestamp(instantMapper.mapToZonedDateTime(md.getDate01()))</span>
+<span class="fc" id="L104">                    .accountId(md.getAccountId())</span>
+<span class="fc" id="L105">                    .privacyFlags(privacyFlagsMapper.entityToDataModel(md.getBaseFields()))</span>
+<span class="fc" id="L106">                    .source(sourceDetailsMapper.entityToDataModel(md.getSourceDetails(), wrapper.getSourcePerson().getOrNull()))</span>
+<span class="fc" id="L107">                    .encounterClass(EncounterClass.valueOf(md.getString09()))</span>
+<span class="fc" id="L108">                    .location(locationMapper.mapLocationFromFields(location))</span>
+<span class="fc" id="L109">                    .addAllExternalParticipants(participantMapper.mapExternalParticipants(externalParticipants))</span>
+<span class="fc" id="L110">                    .specialty(referenceDatumCache.lookup(org, Option.of((String)fields.get(&quot;hospitalServiceCode&quot;))))</span>
+<span class="fc" id="L111">                    .build();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

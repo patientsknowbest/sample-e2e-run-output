@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TestHistoryUtil.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.util</a> &gt; <span class="el_source">TestHistoryUtil.java</span></div><h1>TestHistoryUtil.java</h1><pre class="source lang-java linenums">package com.pkb.util;
+
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.encounter.entity.GeographicLocation;
+import com.pkb.entities.enums.Route;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.datapoint.DataWithUIPermissions;
+import com.pkb.service.datapoint.impl.DataPointManager;
+import com.pkb.service.file.FileManager;
+import com.pkb.test.entity.TestFormDTO;
+import com.pkb.test.entity.TestHistoryDTO;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.test.entity.TestResultType;
+import com.pkb.test.entity.TestsDTO;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.StringEscapeUtils;
+import org.jetbrains.annotations.NotNull;
+
+import java.text.DecimalFormat;
+import java.time.format.DateTimeFormatter;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+
+import static com.pkb.util.TestResultDTOMappers.getTestResultCommentDTO;
+import static com.pkb.util.TestResultDTOMappers.getTestResultDateDTO;
+import static com.pkb.util.TestResultDTOMappers.getTestResultPrivacyFlagsDTO;
+import static com.pkb.util.TestResultDTOMappers.getTestResultRangeDTO;
+import static com.pkb.util.TestResultDTOMappers.getTestResultSourceDTO;
+import static com.pkb.util.TestResultDTOMappers.getTestResultValueDTO;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.EMPTY;
+
+public class TestHistoryUtil {
+
+    private final LocalizedTextProvider localizedTextProvider;
+    private final LoggedInUserUtil loggedInUserUtil;
+    private final ContextUserUtil contextUserUtil;
+    private final DataDelayService delayService;
+    private final LabResultFormattingService labResultFormattingService;
+    private final DataPointManager dataPointManager;
+    private final FileManager fileManager;
+
+    public TestHistoryUtil(
+            LoggedInUserUtil loggedInUserUtil,
+            ContextUserUtil contextUserUtil,
+            LocalizedTextProvider localizedTextProvider,
+            DataDelayService delayService,
+            LabResultFormattingService labResultFormattingService,
+            DataPointManager dataPointManager,
+<span class="fc" id="L57">            FileManager fileManager) {</span>
+<span class="fc" id="L58">        this.localizedTextProvider = localizedTextProvider;</span>
+<span class="fc" id="L59">        this.contextUserUtil = contextUserUtil;</span>
+<span class="fc" id="L60">        this.loggedInUserUtil = loggedInUserUtil;</span>
+<span class="fc" id="L61">        this.delayService = delayService;</span>
+<span class="fc" id="L62">        this.labResultFormattingService = labResultFormattingService;</span>
+<span class="fc" id="L63">        this.dataPointManager = dataPointManager;</span>
+<span class="fc" id="L64">        this.fileManager = fileManager;</span>
+<span class="fc" id="L65">    }</span>
+
+    public TestsDTO getTestsDTO(LoggedInEHRRequestContext  requestContext,PKBPerson loggedInUser, Collection&lt;TestHistoryDTO&gt; historyList, Locale locale, Team callerTeam, @NotNull DecimalFormat decimalFormat) {
+<span class="fc" id="L68">        List&lt;TestFormDTO.TestHistoryMetadataDTO&gt; historyMetadataList = getTestHistoryMetadata(requestContext,loggedInUser, historyList, locale, callerTeam, decimalFormat);</span>
+<span class="fc" id="L69">        TestsDTO testsDTO = new TestsDTO();</span>
+<span class="fc" id="L70">        TestFormDTO testFormDTO = new TestFormDTO();</span>
+<span class="fc" id="L71">        testFormDTO.setTestHistoryMetadata(historyMetadataList);</span>
+<span class="fc" id="L72">        testsDTO.setTests(Collections.singletonList(testFormDTO));</span>
+<span class="fc" id="L73">        return setCountMinAndMaxDateValues(testsDTO, historyMetadataList);</span>
+    }
+
+    /**
+     * Returns a fully populated TestsDTO to be returned to the web UI. The provided formDTOs are the main content, but
+     * this method adds additional data such as calculating and setting the min and max date values.
+     *
+     * @param formDTOs The individual test history panels.
+     * @param overThreshold Whether or not the volume threshold was reached.
+     * @return A fully populated TestsDTO.
+     */
+    public TestsDTO getTestsDTO(List&lt;TestFormDTO&gt; formDTOs, boolean overThreshold) {
+<span class="fc" id="L85">        TestsDTO testsDTO = new TestsDTO();</span>
+<span class="fc" id="L86">        testsDTO.setTests(formDTOs);</span>
+<span class="fc" id="L87">        testsDTO.setOverThreshold(overThreshold);</span>
+<span class="fc" id="L88">        List&lt;TestFormDTO.TestHistoryMetadataDTO&gt; historyMetadataList = formDTOs.stream()</span>
+<span class="fc" id="L89">                .map(TestFormDTO::getTestHistoryMetadata)</span>
+<span class="fc" id="L90">                .flatMap(List::stream)</span>
+<span class="fc" id="L91">                .collect(toList());</span>
+<span class="fc" id="L92">        return setCountMinAndMaxDateValues(testsDTO, historyMetadataList);</span>
+    }
+
+    public List&lt;TestFormDTO.TestHistoryMetadataDTO&gt; getTestHistoryMetadata(LoggedInEHRRequestContext requestContext, PKBPerson loggedInUser, Collection&lt;TestHistoryDTO&gt; historyList, Locale locale, Team callerTeam,
+                                                                           DecimalFormat decimalFormat) {
+
+<span class="fc" id="L98">        DateTimeFormatter formatter = DateTimeFormatter.ofPattern(localizedTextProvider.getText(&quot;global.format.date_and_timestamp_output&quot;))</span>
+<span class="fc" id="L99">                .withLocale(locale)</span>
+<span class="fc" id="L100">                .withZone(loggedInUserUtil.getLoggedInUserZoneId());</span>
+
+<span class="fc" id="L102">        return historyList.stream()</span>
+<span class="fc" id="L103">                .map(history -&gt; {</span>
+<span class="fc" id="L104">                    String unit = StringUtils.trimToEmpty(history.getTestResultType().getUnit());</span>
+<span class="fc" id="L105">                    String onlineRefKey = &quot;&quot;;</span>
+<span class="fc" id="L106">                    TestResultType testResultType = history.getTestResultType();</span>
+
+<span class="fc bfc" id="L108" title="All 4 branches covered.">                    if (history.getLoincTest() != null &amp;&amp; history.getLoincTest().getOnlineRefKey() != null) {</span>
+<span class="fc" id="L109">                        onlineRefKey = history.getLoincTest().getOnlineRefKey();</span>
+                    }
+
+<span class="fc" id="L112">                    TestFormDTO.TestHistoryMetadataDTO metadataDTO = new TestFormDTO.TestHistoryMetadataDTO();</span>
+<span class="fc" id="L113">                    metadataDTO.setDataPoints(getHistoryDataPoints(requestContext, history, loggedInUser, formatter, unit, locale, callerTeam, decimalFormat));</span>
+<span class="fc" id="L114">                    metadataDTO.setName(getTestName(history));</span>
+<span class="fc" id="L115">                    metadataDTO.setOnlineRefKey(onlineRefKey);</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">                    metadataDTO.setTextualResultsOnly(!history.hasNumericValues());</span>
+<span class="fc" id="L117">                    metadataDTO.setTestResultType(testResultType.getIdSource());</span>
+<span class="fc" id="L118">                    metadataDTO.setTestResultTypeId(testResultType.getId());</span>
+<span class="fc" id="L119">                    metadataDTO.setUnit(unit);</span>
+<span class="fc" id="L120">                    metadataDTO.setUrl(history.getLinkForTest(getContextUserIdForViewingDatapoint()));</span>
+
+<span class="fc" id="L122">                    return metadataDTO;</span>
+                })
+<span class="fc" id="L124">                .collect(toList());</span>
+    }
+
+    private long getContextUserIdForViewingDatapoint() {
+<span class="fc" id="L128">        return contextUserUtil.getContextOrLoggedInUserId();</span>
+    }
+
+    private List&lt;TestFormDTO.TestResultDataPointDTO&gt; getHistoryDataPoints(LoggedInEHRRequestContext requestContext, TestHistoryDTO history, PKBPerson loggedInUser, DateTimeFormatter formatter, String unit, Locale locale,
+                                                                          Team callerTeam, DecimalFormat decimalFormat) {
+<span class="fc" id="L133">        List&lt;DataWithUIPermissions&lt;TestResultDTO&gt;&gt; testsWithPermissions = dataPointManager.getPermissions(history.getTestResultList(), loggedInUser, callerTeam);</span>
+
+<span class="fc" id="L135">        return testsWithPermissions</span>
+<span class="fc" id="L136">                .stream()</span>
+<span class="fc" id="L137">                .map(resultWithPermisions -&gt; {</span>
+<span class="fc" id="L138">                    TestResultDTO result = resultWithPermisions.getData();</span>
+<span class="fc" id="L139">                    boolean delayedDisplay = delayService.findWhenBecomesVisibleForUserType(result, loggedInUser.getUserType()).isPresent();</span>
+<span class="fc" id="L140">                    String delayedDisplayValue = labResultFormattingService.formattedLabResultWithoutName(loggedInUser.getUserType(), result, history.getTestResultType(),</span>
+<span class="fc" id="L141">                            loggedInUserUtil.getLoggedInUserZoneId(), locale, decimalFormat);</span>
+<span class="fc" id="L142">                    GeographicLocation location = result.getEntererLocation();</span>
+<span class="fc" id="L143">                    SourceDetails sourceDetails = result.getSource();</span>
+
+<span class="fc" id="L145">                    TestFormDTO.TestResultDataPointDTO dataPointDTO = new TestFormDTO.TestResultDataPointDTO();</span>
+<span class="fc" id="L146">                    dataPointDTO.setComment(getTestResultCommentDTO(result));</span>
+<span class="fc" id="L147">                    dataPointDTO.setDate(getTestResultDateDTO(result.getTestDate(), formatter));</span>
+<span class="fc" id="L148">                    dataPointDTO.setDelayedDisplay(delayedDisplay);</span>
+<span class="fc" id="L149">                    dataPointDTO.setDelayedValue(delayedDisplayValue);</span>
+<span class="fc" id="L150">                    dataPointDTO.setDeleted(result.getBaseFields().isDeleted());</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">                    dataPointDTO.setEnteredDate(getTestResultDateDTO(result.getBaseFields().getEnteredDate() == null ? null : result.getBaseFields().getEnteredDate().toInstant(), formatter));</span>
+<span class="fc" id="L152">                    dataPointDTO.setId(result.getId());</span>
+<span class="fc" id="L153">                    dataPointDTO.setLabOrderId(result.getLabOrderId());</span>
+<span class="fc" id="L154">                    dataPointDTO.setLabType(result.getLabDiscipline());</span>
+<span class="fc bfc" id="L155" title="All 2 branches covered.">                    dataPointDTO.setLocation(location != null ? location.getDescription() : EMPTY);</span>
+<span class="fc" id="L156">                    dataPointDTO.setPrivacyFlags(getTestResultPrivacyFlagsDTO(result));</span>
+<span class="fc" id="L157">                    dataPointDTO.setRange(getTestResultRangeDTO(result, delayedDisplay, unit, decimalFormat));</span>
+<span class="fc" id="L158">                    dataPointDTO.setReplaceDate(getTestResultDateDTO(result.getReplacementTimestamp(), formatter));</span>
+<span class="fc" id="L159">                    dataPointDTO.setSourceFileId(result.getSourceFileId());</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">                    if (dataPointDTO.getSourceFileId() != null) {</span>
+<span class="fc" id="L161">                        fileManager.getFile(requestContext, dataPointDTO.getSourceFileId(), false)</span>
+<span class="fc" id="L162">                            .ifPresent(fileDTO -&gt; {</span>
+<span class="fc" id="L163">                                dataPointDTO.setSourceFileName(fileDTO.getFileName());</span>
+<span class="fc" id="L164">                                dataPointDTO.setSourceFileMimeType(fileDTO.getMediaType());</span>
+<span class="fc" id="L165">                            });</span>
+                    }
+<span class="fc" id="L167">                    dataPointDTO.setSource(getTestResultSourceDTO(sourceDetails, this::routePrinter));</span>
+<span class="fc" id="L168">                    dataPointDTO.setSpecimenReceivedDate(getTestResultDateDTO(result.getSpecimenReceivedTimestamp(), formatter));</span>
+<span class="fc" id="L169">                    dataPointDTO.setValue(getTestResultValueDTO(result, delayedDisplay, delayedDisplayValue, unit, decimalFormat));</span>
+<span class="fc" id="L170">                    resultWithPermisions.copyPermissionsInto(dataPointDTO);</span>
+<span class="fc" id="L171">                    return dataPointDTO;</span>
+<span class="fc" id="L172">                }).collect(toList());</span>
+    }
+
+    private TestsDTO setCountMinAndMaxDateValues(TestsDTO testsDTO, List&lt;TestFormDTO.TestHistoryMetadataDTO&gt; historyList) {
+<span class="fc" id="L176">        List&lt;TestFormDTO.TestResultDataPointDTO&gt; dataPoints = historyList.stream()</span>
+<span class="fc" id="L177">                .map(TestFormDTO.TestHistoryMetadataDTO::getDataPoints)</span>
+<span class="fc" id="L178">                .flatMap(List::stream)</span>
+<span class="fc" id="L179">                .collect(toList());</span>
+
+<span class="fc" id="L181">        testsDTO.setCount((long) dataPoints.size());</span>
+
+<span class="fc" id="L183">        Tuple2&lt;Long, Long&gt; minAndMaxDates = dataPoints.stream()</span>
+<span class="fc" id="L184">                .map(dataPoint -&gt; dataPoint.getDate().getValue())</span>
+<span class="fc" id="L185">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L186">                .map(value -&gt; Tuple.of(value, value))</span>
+<span class="fc" id="L187">                .reduce(Tuple.of(Long.MAX_VALUE, Long.MIN_VALUE), (a, b) -&gt; {</span>
+<span class="fc" id="L188">                    Tuple2&lt;Long, Long&gt; reduced = a;</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">                    if (b._1 &lt; a._1) {</span>
+<span class="fc" id="L190">                        reduced = reduced.update1(b._1);</span>
+                    }
+
+<span class="fc bfc" id="L193" title="All 2 branches covered.">                    if (b._2 &gt; a._2) {</span>
+<span class="fc" id="L194">                        reduced = reduced.update2(b._2);</span>
+                    }
+
+<span class="fc" id="L197">                    return reduced;</span>
+                });
+<span class="fc" id="L199">        testsDTO.setMinDateValue(minAndMaxDates._1);</span>
+<span class="fc" id="L200">        testsDTO.setMaxDateValue(minAndMaxDates._2);</span>
+<span class="fc" id="L201">        return testsDTO;</span>
+    }
+
+    private String getTestName(TestHistoryDTO history) {
+<span class="fc" id="L205">        String name = history.getTestResultType().getNameForDisplay();</span>
+<span class="fc" id="L206">        String unicodeBasedName = StringUtil.getUnicodeCharacters(StringEscapeUtils.escapeJava(name));</span>
+<span class="fc" id="L207">        return StringUtil.replaceNbsp(unicodeBasedName);</span>
+    }
+
+    private String routePrinter(Route route) {
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">        if (route.isCaptured()) {</span>
+<span class="fc" id="L212">            String valueOfRoute = localizedTextProvider.getText(&quot;com.pkb.app.entity.Route.&quot; + route);</span>
+<span class="fc" id="L213">            return localizedTextProvider.getText(&quot;source.via&quot;, valueOfRoute);</span>
+        }
+
+<span class="nc" id="L216">        return EMPTY;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

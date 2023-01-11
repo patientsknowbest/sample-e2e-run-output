@@ -1,0 +1,1780 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UserManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.user.impl</a> &gt; <span class="el_source">UserManager.java</span></div><h1>UserManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.user.impl;
+
+import com.google.common.collect.Lists;
+import com.pkb.VersionDetails;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.UserPrivateKey;
+import com.pkb.crypto.UserPublicKey;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.IdentityVerification;
+import com.pkb.datamodel.ImmutableInvitationRepairJobNew;
+import com.pkb.datamodel.OutOfAreaRepairJob;
+import com.pkb.datamodel.PKBSpecialty;
+import com.pkb.datamodel.PersonSpecialty;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.domain.AccountService;
+import com.pkb.domain.AccountUserService;
+import com.pkb.domain.ApiAuthService;
+import com.pkb.domain.CryptoModelSynchronisationService;
+import com.pkb.domain.IdentityVerificationService;
+import com.pkb.domain.PkbPasswordRecoveryService;
+import com.pkb.domain.UserCredentialsService;
+import com.pkb.domain.duplicate.person.PersonService;
+import com.pkb.domain.provider.PKBSpecialtyService;
+import com.pkb.domain.provider.PersonSpecialtyService;
+import com.pkb.entities.core.CoreAccountUser;
+import com.pkb.entities.core.CorePasswordRecovery;
+import com.pkb.entities.core.CoreSecurityQuestion;
+import com.pkb.entities.enums.InvitationRepairJobStatus;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.PropertyName;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.entities.pub.PublicUserCredentials;
+import com.pkb.exception.ConflictingPatientIdentifiersException;
+import com.pkb.exception.IllegalReuseOfEmailAddressException;
+import com.pkb.exception.InvalidSecurityQuestionAnswerException;
+import com.pkb.exception.MultiplePatientSameIdentifierException;
+import com.pkb.exception.PKBException;
+import com.pkb.exception.PatientNotFoundException;
+import com.pkb.exception.PersonIsNotPatientException;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.integration.socialcare.PathfindersProxyClient;
+import com.pkb.integration.socialcare.model.SocialCareData;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.kms.shared.representation.AccountIds;
+import com.pkb.kms.shared.representation.GrantUserAccessToAccountRequest;
+import com.pkb.kms.shared.representation.KmsError;
+import com.pkb.kms.shared.representation.LoginRequest;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.model.PKBSecurityQuestion;
+import com.pkb.repository.legacy.LegacyTeamRepository;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.instituteuser.InstituteUserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.PKBPersonRemote;
+import com.pkb.user.entity.InvalidDeathTimestampException;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.PKBAccount;
+import com.pkb.user.entity.PKBAccountUser;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PKBPerson.Lazy;
+import com.pkb.user.entity.PKBPersonIdentifierPair;
+import com.pkb.user.entity.PasswordAccess;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.user.entity.PersonSecurePropertyDTO;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.util.PatientIdentifiers;
+import com.pkb.util.PersonAmbiguityHandler;
+import com.pkb.util.tolven.ConvertUtil;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.prometheus.client.Counter;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.Tuple3;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import io.vavr.control.Try;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.ejb.EJBException;
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.PropertyName.CONSENT_REVIEW_COMPLETED;
+import static com.pkb.entities.enums.PropertyName.INVITE_CLINICIAN_TERMS;
+import static com.pkb.entities.enums.SecurityQuestionPurpose.LOGIN_PASSWORD_RECOVERY;
+import static com.pkb.util.EncryptedDocumentMapperHelper.genericMetadata;
+import static java.lang.String.format;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptyMap;
+import static java.util.Collections.singletonList;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.mapping;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+/**
+ * This Manager class handles all Tolven specific operations on
+ * PKBuser/PKBPerson entity
+ */
+public class UserManager extends TransactionManager {
+
+<span class="fc" id="L140">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private static final String TEXT_PLAIN = &quot;text/plain&quot;;
+    private static final String PASSWORD_ACCESS = &quot;passwordAccess&quot;;
+
+    private final PersonService personService;
+    private final PersonContactManager personContactManager;
+    private final ConvertUtil convertUtil;
+    private final Kms kmsClient;
+    private final PathfindersProxyClient pathfindersClient;
+    private final PKBSpecialtyService pkbSpecialtyService;
+    private final PersonSpecialtyService personSpecialtyService;
+    private final AccountUserService accountUserService;
+    private final AccountService accountService;
+    private final PkbPasswordRecoveryService passwordRecoveryService;
+    private final UserCredentialsService userCredentialsService;
+    private final CryptoModelSynchronisationService cryptoModelSynchronisationService;
+    private final IdentityVerificationService identityVerificationService;
+    private final ApiAuthService apiAuthService;
+    private final InstituteUserManager instituteUserManager;
+    private final LegacyTeamRepository teamRepository;
+    private final DocumentManager documentManager;
+
+<span class="fc" id="L162">    private List&lt;Consumer&lt;Long&gt;&gt; logoutListeners = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L164">    private static final Counter NUMBER_OF_ENDPOINTS_WITH_SOCIAL_CARE_DATA = Counter.build()</span>
+<span class="fc" id="L165">            .name(&quot;phr_number_of_endpoints_with_social_care_data&quot;)</span>
+<span class="fc" id="L166">            .help(&quot;Count whether a patient has social care data at zero or more endpoints&quot;)</span>
+<span class="fc" id="L167">            .labelNames(&quot;count&quot;)</span>
+<span class="fc" id="L168">            .register();</span>
+
+    public UserManager(
+            PhrConfig config,
+            TolvenBeanFactory beanFactory,
+            DateTimeService dateTimeService,
+            UUIDProvider uuidProvider,
+            PersonService personService,
+            PersonContactManager personContactManager,
+            ConvertUtil convertUtil,
+            Kms kmsClient,
+            PathfindersProxyClient pathfindersClient,
+            PKBSpecialtyService pkbSpecialtyService,
+            PersonSpecialtyService personSpecialtyService,
+            AccountUserService accountUserService,
+            AccountService accountService,
+            PkbPasswordRecoveryService passwordRecoveryService,
+            UserCredentialsService userCredentialsService,
+            IdentityVerificationService identityVerificationService,
+            CryptoModelSynchronisationService cryptoModelSynchronisationService,
+            ApiAuthService apiAuthService,
+            InstituteUserManager instituteUserManager,
+            LegacyTeamRepository teamRepository,
+            DocumentManager documentManager) {
+
+<span class="fc" id="L193">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L194">        this.personService = personService;</span>
+<span class="fc" id="L195">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L196">        this.convertUtil = convertUtil;</span>
+<span class="fc" id="L197">        this.kmsClient = kmsClient;</span>
+<span class="fc" id="L198">        this.pathfindersClient = pathfindersClient;</span>
+<span class="fc" id="L199">        this.pkbSpecialtyService = pkbSpecialtyService;</span>
+<span class="fc" id="L200">        this.personSpecialtyService = personSpecialtyService;</span>
+<span class="fc" id="L201">        this.accountUserService = accountUserService;</span>
+<span class="fc" id="L202">        this.accountService = accountService;</span>
+<span class="fc" id="L203">        this.passwordRecoveryService = passwordRecoveryService;</span>
+<span class="fc" id="L204">        this.userCredentialsService = userCredentialsService;</span>
+<span class="fc" id="L205">        this.identityVerificationService = identityVerificationService;</span>
+<span class="fc" id="L206">        this.cryptoModelSynchronisationService = cryptoModelSynchronisationService;</span>
+<span class="fc" id="L207">        this.apiAuthService = apiAuthService;</span>
+<span class="fc" id="L208">        this.instituteUserManager = instituteUserManager;</span>
+<span class="fc" id="L209">        this.teamRepository = teamRepository;</span>
+<span class="fc" id="L210">        this.documentManager = documentManager;</span>
+<span class="fc" id="L211">    }</span>
+
+    public Map&lt;Integer, Integer&gt; findObsoleteToPrimaryIdMap(long orgId) {
+        try {
+<span class="fc" id="L215">            return instituteUserManager.findObsoleteToPrimaryIdMap(orgId);</span>
+<span class="nc" id="L216">        } catch (Exception e) {</span>
+<span class="nc" id="L217">            throw new RuntimeException(&quot;fail for orgId &quot; + orgId, e);</span>
+        }
+    }
+
+    public Long registerUserFull(EHRRequestContext requestContext, PKBPersonDTO personDto, Long teamId) {
+        // part 1
+<span class="fc" id="L223">        Instant registrationDate = dateTimeService.now();</span>
+<span class="fc" id="L224">        long newPersonId = registerUserFullSetupPerson(VersionDetails.of(requestContext, registrationDate), personDto, registrationDate);</span>
+
+        // part 2
+<span class="fc" id="L227">        AccountIds accountIds = registerUserFullSetupAccounts(requestContext, newPersonId, personDto.getPassword(), teamId);</span>
+
+        // part 3
+<span class="fc" id="L230">        PKBPerson person = registerUserFullPasswordAccessThenReturnThatUser(requestContext, newPersonId, accountIds.getId(), personDto.getPassword());</span>
+<span class="fc" id="L231">        person.setDefaultAccountId(accountIds.getId());</span>
+<span class="fc" id="L232">        updateUser(requestContext, person);</span>
+
+<span class="fc" id="L234">        return accountIds.getId();</span>
+    }
+
+    /**
+     * Part 1 of 3: set up the PKBPerson
+     */
+    public long registerUserFullSetupPerson(VersionDetails versionDetails, PKBPersonDTO personDto, Instant dateRegistered) {
+<span class="fc" id="L241">        PKBPerson person = convertUtil.getPKBPerson(versionDetails, personDto);</span>
+
+        // TODO: delete LDAP record if it exists (due to failed rollback)
+
+        try {
+            // first: if user exists in PKB, delete half-created user first.
+            // if there is already a non-inst invitation, note that the account has now been created
+
+            // If user exist in PKB system and not in Tolven : Delete the user from PKB
+<span class="fc" id="L250">            PersonAmbiguityHandler.getMaybePersonOrNone(personContactManager.findPKBPersonByConfirmedOrPrimaryEmail(personDto.getEmailId(), PersonContact.Lazy.PERSON), &quot;email&quot;)</span>
+<span class="fc" id="L251">                    .peek(personByEmail -&gt; {</span>
+<span class="pc bpc" id="L252" title="1 of 2 branches missed.">                        if (personByEmail.getStatus() == UserStatus.NEW) {</span>
+<span class="nc" id="L253">                            deleteUser(personByEmail);</span>
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">                        } else if (personByEmail.getStatus() == UserStatus.INVITED) {</span>
+<span class="nc" id="L255">                            personByEmail.setStatus(UserStatus.CREATED, dateRegistered);</span>
+                        }
+<span class="fc" id="L257">                    });</span>
+
+            // TODO: review: if we JUST have the LDAP record created?
+
+            // set up PKBPerson record, LDAP record, account, and link current user to account,
+            // then others as needed.
+            // UNlink current user when done if needed -- e.g., patient invites external clinician.
+            // end result will have team coord linked (or pkb admin if there's no team),
+            // the user linked to their own account as the default, and possibly a clinician linked as well.
+
+<span class="fc" id="L267">            Long personId = registerPKBPersonFull(versionDetails, person).getId();</span>
+<span class="fc" id="L268">            personDto.setId(personId);</span>
+<span class="fc" id="L269">            return personDto.getId(); // so the caller has it...</span>
+<span class="nc" id="L270">        } catch (Exception e) {</span>
+<span class="nc" id="L271">            throw new PKBException(&quot;failed full registration of user &quot; + personDto.getFirstName(), e);</span>
+        }
+    }
+
+    /**
+     * Part 2 of 3: set up accounts (including PKI), share with admins, and store password backup
+     */
+    public AccountIds registerUserFullSetupAccounts(EHRRequestContext requestContext,
+                                                    long newPersonId,
+                                                    String password,
+                                                    Long teamId) {
+
+<span class="pc" id="L283">        AccountIds accountIds = kmsClient.createAccount(requestContext.getCorrelationId().toString()).getOrElseThrow(e -&gt; new RuntimeException(e.toString()));</span>
+<span class="fc bfc" id="L284" title="All 2 branches covered.">        if (teamId != null) {</span>
+<span class="fc" id="L285">            ensureTeamLink(newPersonId, teamId);</span>
+        }
+
+<span class="fc" id="L288">        cryptoModelSynchronisationService.syncCryptoAccessForNewPerson(newPersonId, password);</span>
+<span class="fc" id="L289">        return accountIds;</span>
+    }
+
+    /**
+     * Part 3 of 3: set up password access
+     */
+    public PKBPerson registerUserFullPasswordAccessThenReturnThatUser(EHRRequestContext context, long userId, long accountId, String newPersonPassword) {
+        try {
+<span class="fc" id="L297">            PasswordAccess passwordAccess = new PasswordAccess();</span>
+<span class="fc" id="L298">            passwordAccess.setPassword(newPersonPassword);</span>
+<span class="fc" id="L299">            var doc = beanFactory.getEhrRemote().createDocument(</span>
+                    context,
+<span class="fc" id="L301">                    passwordAccess.getPassword().getBytes(),</span>
+<span class="fc" id="L302">                    accountId, genericMetadata(</span>
+                            TEXT_PLAIN,
+<span class="fc" id="L304">                            userId,</span>
+<span class="fc" id="L305">                            PASSWORD_ACCESS).toJavaMap());</span>
+<span class="fc" id="L306">            var docId = documentManager.create(doc);</span>
+<span class="fc" id="L307">            beanFactory.getPKBPersonBean().saveUserCredentials(userId, docId);</span>
+
+            //Reload patient to make sure that all properties are correctly poulated. Ideally we wouldn't have to do this
+            //but our use of hibernate is pretty broken, compounded by terrible method factoring in the registration code.
+<span class="fc" id="L311">            return getPKBPerson(userId, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS, PKBPerson.Lazy.CONTACTS);</span>
+<span class="nc" id="L312">        } catch (Exception e) {</span>
+<span class="nc" id="L313">            throw new PKBException(&quot;failed setting up password access with &quot; + userId + &quot;, &quot; + accountId, e);</span>
+        }
+    }
+
+    /**
+     * Register new user but without an acount
+     */
+    public void registerNewUser(EHRRequestContext requestContext, PKBPersonDTO user, Instant dateRegistered) {
+
+<span class="fc" id="L322">        PKBPerson person = convertUtil.getPKBPerson(VersionDetails.of(requestContext, dateRegistered), user);</span>
+
+
+        // TODO: delete LDAP record if it exists (due to failed rollback)
+
+        try {
+            // first: if user exists in PKB, delete half-created user first.
+
+            // If user exist in PKB system and not in Tolven : Delete the user from PKB
+<span class="fc" id="L331">            PersonAmbiguityHandler.getMaybePersonOrNone(personContactManager.findPKBPersonByConfirmedOrPrimaryEmail(user.getEmailId(), PersonContact.Lazy.PERSON), &quot;email&quot;)</span>
+<span class="fc" id="L332">                    .peek(personByEmail -&gt; {</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">                        if (personByEmail.getStatus() == UserStatus.NEW) {</span>
+<span class="nc" id="L334">                            deleteUser(personByEmail);</span>
+                        }
+<span class="nc" id="L336">                    });</span>
+
+            // TODO: review: if we JUST have the LDAP record created?
+            //beginTransaction(); manage from action
+            // set up PKBPerson record, LDAP record
+
+<span class="fc" id="L342">            PKBPerson pkbPerson = registerPKBPersonFull(VersionDetails.of(requestContext, dateRegistered), person);</span>
+<span class="fc" id="L343">            Long personId = pkbPerson.getId();</span>
+<span class="fc" id="L344">            person.setId(personId);</span>
+<span class="fc" id="L345">            user.setId(person.getId()); // so the caller has it...</span>
+<span class="nc" id="L346">        } catch (Exception e) {</span>
+<span class="nc" id="L347">            throw new PKBException(&quot;failed registration of new user &quot; + user, e);</span>
+<span class="fc" id="L348">        }</span>
+<span class="fc" id="L349">    }</span>
+
+    private PKBPerson registerPKBPersonFull(VersionDetails versionDetails, PKBPerson person) {
+<span class="fc" id="L352">        return transactional(() -&gt; {</span>
+<span class="fc" id="L353">            PKBPerson persistedPerson = null;</span>
+
+            try {
+                // NOTE: This method expects that person.status has been set by the caller
+
+<span class="fc" id="L358">                persistedPerson = beanFactory.getPKBPersonBean().createPKBPerson(person, versionDetails); // persist the entity</span>
+
+                // create the LDAP record in Tolven (including user private keys etc.)
+
+<span class="fc" id="L362">                userCredentialsService.saveCredential(userCredentialsService.createCredentials(persistedPerson.getId(), persistedPerson.getPassword().toCharArray()));</span>
+<span class="nc" id="L363">            } catch (Exception e) {</span>
+                // in the invoking code, be sure to rollback transaction if
+                // exception is thrown!
+                // we really don't want this to be completed only halfway
+<span class="nc" id="L367">                throw new RuntimeException(&quot;error registering user &quot;, e);</span>
+<span class="fc" id="L368">            }</span>
+<span class="fc" id="L369">            return persistedPerson;</span>
+        });
+    }
+
+    /**
+     * Create PKBPerson record and save user credentials based on a PKBPersonDTO
+     *
+     * @param requestContext {@link EHRRequestContext}
+     * @param user           {@link PKBPersonDTO}
+     */
+    public PKBPerson registerUser(EHRRequestContext requestContext, PKBPersonDTO user) {
+<span class="fc" id="L380">        VersionDetails versionDetails = VersionDetails.of(requestContext, dateTimeService.now());</span>
+<span class="fc" id="L381">        PKBPerson person = registerUser(versionDetails, convertUtil.getPKBPersonWithNationalIds(requestContext, user));</span>
+<span class="fc" id="L382">        user.setId(person.getId());</span>
+<span class="fc" id="L383">        return person;</span>
+    }
+
+    private PKBPerson registerUser(VersionDetails versionDetails, PKBPerson person) {
+<span class="fc" id="L387">        Instant registrationDate = dateTimeService.now();</span>
+<span class="fc" id="L388">        person.setRegisteredOn(Date.from(registrationDate));</span>
+        try {
+<span class="fc" id="L390">            person.setId(null);</span>
+<span class="fc" id="L391">            person.setStatus(UserStatus.NEW, registrationDate);</span>
+<span class="fc" id="L392">            person = registerPKBPersonFull(versionDetails, person);</span>
+<span class="nc" id="L393">        } catch (Exception e) {</span>
+<span class="nc" id="L394">            throw new PKBException(&quot;Exception while registering the user-&quot; + person.getEmail(), e);</span>
+<span class="fc" id="L395">        }</span>
+<span class="fc" id="L396">        return person;</span>
+    }
+
+    public void activatePerson(EHRRequestContext requestContext, PKBPerson person, Long teamId, String password) {
+
+<span class="fc" id="L401">        AccountIds accountIds = registerUserFullSetupAccounts(requestContext, person.getId(), password, teamId);</span>
+
+<span class="fc" id="L403">        PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L404">        person.setStatus(UserStatus.EMAIL_CONFIRMED, dateTimeService.now());</span>
+
+        // confirm the primary and the only contact
+<span class="fc" id="L407">        person.findPrimaryContact()</span>
+<span class="pc" id="L408">                .getOrElseThrow(() -&gt; new RuntimeException(&quot;No primary contact for person-&quot; + person.getId()))</span>
+<span class="fc" id="L409">                .setConfirmed(true);</span>
+<span class="fc" id="L410">        person.setDefaultAccountId(accountIds.getId());</span>
+<span class="fc" id="L411">        personRemote.updatePKBPerson(requestContext, person);</span>
+<span class="fc" id="L412">    }</span>
+
+    private void ensureTeamLink(long personId, long teamId) {
+<span class="fc bfc" id="L415" title="All 2 branches covered.">        if (instituteUserManager.getInstituteUser(teamId, personId) == null) {</span>
+            // initial status is SponsorshipStatus.INVITED
+<span class="fc" id="L417">            instituteUserManager.createInstituteUser(personId, teamId);</span>
+        }
+<span class="fc" id="L419">    }</span>
+
+    public PKBPerson beginNonInstRegistration(PKBPerson person) {
+<span class="fc" id="L422">        return beanFactory.getPKBPersonBean().beginNonInstRegistration(person);</span>
+
+    }
+
+    public PKBPerson completeNonInstRegistration(EHRRequestContext requestContext, PKBPerson person, String tempPassword) {
+        try {
+            // add the registration date
+<span class="fc" id="L429">            person.setRegisteredOn(Date.from(dateTimeService.now()));</span>
+
+<span class="fc" id="L431">            return transactional(() -&gt; {</span>
+<span class="pc" id="L432">                AccountIds accountIds = kmsClient.createAccount(requestContext.getCorrelationId().toString()).getOrElseThrow(e -&gt; new RuntimeException(e.toString()));</span>
+                // user pub key required to create the account keys
+<span class="fc" id="L434">                userCredentialsService.saveCredential(userCredentialsService.createCredentials(person.getId(), person.getPassword().toCharArray()));</span>
+
+<span class="fc" id="L436">                person.setDefaultAccountId(accountIds.getId());</span>
+<span class="fc" id="L437">                doUpdateRegistrationDetails(requestContext, person, tempPassword);</span>
+
+<span class="fc" id="L439">                cryptoModelSynchronisationService.syncCryptoAccessForNewPerson(person.getId(), person.getPassword());</span>
+<span class="fc" id="L440">                return person;</span>
+            });
+<span class="nc" id="L442">        } catch (Exception e) {</span>
+<span class="nc" id="L443">            throw new PKBException(&quot;Error while completing registration of user-&quot; + person.getId(), e);</span>
+        }
+    }
+
+    /**
+     * Get the list of Security questions
+     *
+     * @return List of {@link PKBSecurityQuestion} objects
+     */
+    public List&lt;PKBSecurityQuestion&gt; getSecurityQuestions() {
+        try {
+<span class="fc" id="L454">            List&lt;CoreSecurityQuestion&gt; list = passwordRecoveryService.findSecurityQuestions(LOGIN_PASSWORD_RECOVERY);</span>
+<span class="fc" id="L455">            List&lt;PKBSecurityQuestion&gt; pkbQuestionList = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L456" title="1 of 2 branches missed.">            if (list != null) {</span>
+<span class="fc" id="L457">                pkbQuestionList = convertUtil.getPKbSecurityQuestions(list);</span>
+            }
+<span class="fc" id="L459">            return pkbQuestionList;</span>
+
+<span class="nc" id="L461">        } catch (Exception e) {</span>
+<span class="nc" id="L462">            throw new PKBException(&quot;Error while getting security questions&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Authenticate user password and log into PKB system
+     *
+     * @param userId          user id
+     * @param password        password
+     * @return {@link PersonAuthInfo} object
+     */
+    public @NotNull PersonAuthInfo authenticateUser(long userId, String password) {
+<span class="fc" id="L474">        PersonAuthInfo user = null;</span>
+
+        // Perform login
+<span class="fc" id="L477">        LOGGER.debug(&quot;loginUser with userId: {}&quot;, userId);</span>
+<span class="pc bpc" id="L478" title="1 of 2 branches missed.">        if (isBlank(password)) {</span>
+<span class="nc" id="L479">            throw new PKBException(&quot;cannot authenticate with blank password&quot;);</span>
+        }
+
+<span class="fc" id="L482">        Tuple3&lt;UserPrivateKey, UserPublicKey, X509Certificate&gt; keyRing = userCredentialsService.findUserKeyRing(userId, password.toCharArray())</span>
+<span class="fc" id="L483">                .getOrElseThrow(msg -&gt; new PKBException(&quot;Error while authenticating user-&quot; + userId));</span>
+
+        //This is the wrong place for this - it should be handled by a listener from Spring Security, but
+        //as things stands right now too many things depend on being able to call this method without the
+        //various additional complexities of Spring Security and still have the KMS logged in. We need to
+        //redesign the way we handle authentication, making use of Spring Security AuthenticationProviders,
+        // and make everything in the app go through that mechanism rather than hacking around it doing
+        //pseudo-logins all over the place. lucian - 2020-02-18
+<span class="fc" id="L491">        PKBPersonIdentifierPair publicId = beanFactory.getPKBPersonBean().getIdentifierPair(userId);</span>
+<span class="fc" id="L492">        kmsClient.login(null, new LoginRequest(publicId.getUuid(), password.toCharArray(), false));</span>
+
+        // Load person record
+<span class="fc" id="L495">        PKBPerson person = beanFactory.getPKBPersonBean().getPKBPerson(userId, PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L496">        user = PersonAuthInfo.of(person);</span>
+
+<span class="fc" id="L498">        return user;</span>
+    }
+
+    public PersonAuthInfo authenticateNHSUser(long userId, UserPrivateKey userPrivateKey) {
+<span class="fc" id="L502">        PKBPerson person = beanFactory.getPKBPersonBean().getPKBPerson(userId, PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L503">        return PersonAuthInfo.of(person);</span>
+    }
+
+    public void triggerCryptoSync(long personId) {
+<span class="fc" id="L507">        cryptoModelSynchronisationService.syncCryptoAccessForPerson(personId);</span>
+<span class="fc" id="L508">    }</span>
+
+    static public class RecreateOwnerAccessToAccountResult {
+        private Either&lt;KmsError, Void&gt; kmsResult;
+
+<span class="fc" id="L513">        public RecreateOwnerAccessToAccountResult(Either&lt;KmsError, Void&gt; kmsResult) {</span>
+<span class="fc" id="L514">            this.kmsResult = kmsResult;</span>
+<span class="fc" id="L515">        }</span>
+
+        public boolean succesfullyRecreated() {
+<span class="pc bpc" id="L518" title="1 of 4 branches missed.">            return kmsResult != null &amp;&amp; kmsResult.isRight();</span>
+        }
+
+        public void throwIfFailed() throws Exception {
+<span class="pc bpc" id="L522" title="1 of 2 branches missed.">            if (kmsResult != null) {</span>
+<span class="pc" id="L523">                kmsResult.getOrElseThrow(error -&gt; new Exception(error));</span>
+            }
+<span class="fc" id="L525">        }</span>
+
+        static public class Exception extends java.lang.Exception {
+            private KmsError kmsError;
+
+<span class="nc" id="L530">            public Exception(KmsError kmsError) {</span>
+<span class="nc" id="L531">                this.kmsError = kmsError;</span>
+<span class="nc" id="L532">            }</span>
+        }
+    }
+
+    public RecreateOwnerAccessToAccountResult recreateOwnerAccessToAccount(String requestId, UUID accountPublicId, UUID personPublicId) {
+<span class="fc" id="L537">        return new RecreateOwnerAccessToAccountResult(kmsClient.grantAccessToAccountOwner(requestId, new GrantUserAccessToAccountRequest(accountPublicId, personPublicId)));</span>
+    }
+
+    public OutOfAreaRepairJob recordOutOfAreaRepairJob(Patient patient) {
+<span class="fc" id="L541">        return personService.addOutOfAreaRepairJob(patient);</span>
+    }
+
+
+    /**
+     * Logout user form tolven system
+     *
+     * @param pkbUser {@link PersonAuthInfo} object
+     */
+    public void logoutUser(long userId) {
+<span class="fc" id="L551">        logoutListeners.forEach(listener -&gt; listener.accept(userId));</span>
+<span class="fc" id="L552">        LOGGER.info(&quot;User-{} logged out&quot;, userId);</span>
+<span class="fc" id="L553">    }</span>
+
+    /**
+     * Change user password &amp; back it up using security question and answer
+     *
+     * @param user             user id
+     * @param oldPassword      old user password
+     * @param newPassword      new user password
+     * @param securityQuestion security question text
+     * @param answer           answer to the question
+     */
+    public void changePassword(long userId, String oldPassword, String newPassword, String securityQuestion, String answer) {
+        try {
+<span class="fc" id="L566">            transactional(() -&gt; doChangePassword(userId, oldPassword, newPassword, securityQuestion, answer));</span>
+<span class="nc" id="L567">        } catch (Exception e) {</span>
+<span class="nc" id="L568">            throw new PKBException(&quot;Error while changing password for user-&quot; + userId, e);</span>
+<span class="fc" id="L569">        }</span>
+<span class="fc" id="L570">    }</span>
+
+    private void doChangePassword(long userId, String oldPassword, String newPassword, String securityQuestion, String answer) {
+        try {
+            // need to expire API sessions for this user (if any)
+<span class="fc" id="L575">            apiAuthService.expireSessionsForUser(userId);</span>
+<span class="fc" id="L576">            changeUserLoginPassword(userId, oldPassword.toCharArray(), newPassword.toCharArray(), securityQuestion, answer);</span>
+<span class="nc" id="L577">        } catch (Exception e) {</span>
+<span class="nc" id="L578">            throw new RuntimeException(&quot;Exception while changing the password for user-&quot; + userId, e);</span>
+<span class="fc" id="L579">        }</span>
+<span class="fc" id="L580">    }</span>
+
+    private void changeUserLoginPassword(long userId,
+                                         char[] oldPassword,
+                                         char[] newPassword,
+                                         String securityQuestion,
+                                         String securityQuestionAnswer) throws GeneralSecurityException, IOException {
+
+<span class="fc" id="L588">        userCredentialsService.authenticate(userId, oldPassword);</span>
+
+<span class="fc" id="L590">        PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L591">        PKBPerson pkbPerson = personBean.getPKBPerson(userId);</span>
+
+<span class="fc bfc" id="L593" title="All 2 branches covered.">        if (pkbPerson.getHumanUUID() == null) {</span>
+<span class="fc" id="L594">            userCredentialsService.changeUserPassword(userId, pkbPerson.getPublicId(), oldPassword, newPassword);</span>
+<span class="fc" id="L595">            passwordRecoveryService.backupPassword(userId, newPassword, LOGIN_PASSWORD_RECOVERY, securityQuestion, securityQuestionAnswer);</span>
+        } else {
+<span class="fc" id="L597">            List&lt;PKBPerson&gt; personas = personBean.getPKBPersonListByHumanUUID(pkbPerson.getHumanUUID(), PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc bfc" id="L598" title="All 2 branches covered.">            for (PKBPerson persona : personas) {</span>
+<span class="fc" id="L599">                userCredentialsService.changeUserPassword(persona.getId(), persona.getPublicId(), oldPassword, newPassword);</span>
+<span class="fc" id="L600">                passwordRecoveryService.backupPassword(persona.getId(), newPassword, LOGIN_PASSWORD_RECOVERY, securityQuestion, securityQuestionAnswer);</span>
+<span class="fc" id="L601">            }</span>
+        }
+<span class="fc" id="L603">    }</span>
+
+    public void replacePasswordBackupWithClone(long sourcePersonId, long targetPersonId) {
+        try {
+<span class="fc" id="L607">            passwordRecoveryService.replacePasswordBackupWithClone(sourcePersonId, targetPersonId);</span>
+<span class="nc" id="L608">        } catch (Exception e) {</span>
+<span class="nc" id="L609">            throw new PKBException(&quot;Exception while cloning security answer for-&quot; + sourcePersonId, e);</span>
+<span class="fc" id="L610">        }</span>
+
+<span class="fc" id="L612">    }</span>
+
+    /**
+     * Back up the password with the help of security questions
+     *
+     * @param userId           user id
+     * @param password         user password
+     * @param securityQuestion security question
+     * @param answer           answer entered by the user
+     */
+    public void backUpPassword(long userId, String password, String securityQuestion, String answer) {
+        try {
+            try {
+<span class="fc" id="L625">                PublicUserCredentials userCredential = userCredentialsService.findUserCredential(userId)</span>
+<span class="pc" id="L626">                        .orElseThrow(() -&gt; new RuntimeException(&quot;Missing credential for user: &quot; + userId));</span>
+<span class="fc" id="L627">                passwordRecoveryService.backupLoginPassword(userCredential.getUserId(), password.toCharArray(), securityQuestion, answer);</span>
+<span class="nc" id="L628">            } catch (Exception e) {</span>
+<span class="nc" id="L629">                throw new RuntimeException(&quot;Exception while backing up the password for user-&quot; + userId, e);</span>
+<span class="fc" id="L630">            }</span>
+<span class="nc" id="L631">        } catch (Exception e) {</span>
+<span class="nc" id="L632">            throw new PKBException(&quot;Error while backing up password for user-&quot; + userId, e);</span>
+<span class="fc" id="L633">        }</span>
+
+<span class="fc" id="L635">    }</span>
+
+    /**
+     * Get security question for a user
+     *
+     * @param userId user id
+     * @return security question text
+     */
+    public Optional&lt;String&gt; getSecurityQuestion(long userId) {
+        try {
+<span class="fc" id="L645">            return passwordRecoveryService.findActivePasswordRecovery(userId, LOGIN_PASSWORD_RECOVERY)</span>
+<span class="fc" id="L646">                    .map(CorePasswordRecovery::getSecurityQuestion);</span>
+<span class="nc" id="L647">        } catch (Exception e) {</span>
+<span class="nc" id="L648">            throw new PKBException(&quot;Error while getting security question for user-&quot; + userId, e);</span>
+        }
+    }
+
+    /**
+     * Reset a user password with new password
+     *
+     * @param userId           user id
+     * @param securityQuestion security question text
+     * @param answer           answer to security question
+     * @param password         user password
+     */
+    public void resetPassword(long userId, String securityQuestion, String securityQuestionAnswer, String newPassword) throws InvalidSecurityQuestionAnswerException {
+        try {
+<span class="fc" id="L662">            doResetPassword(userId, securityQuestion, securityQuestionAnswer, newPassword);</span>
+<span class="nc" id="L663">        } catch (RuntimeException gse) {</span>
+<span class="nc" id="L664">            throw new InvalidSecurityQuestionAnswerException(userId, gse);</span>
+<span class="nc" id="L665">        } catch (Exception e) {</span>
+<span class="nc" id="L666">            throw new PKBException(&quot;Error while resetting password for user-&quot; + userId, e);</span>
+<span class="fc" id="L667">        }</span>
+<span class="fc" id="L668">    }</span>
+
+    private void doResetPassword(long userId, String securityQuestion, String securityQuestionAnswer, String newPassword) throws GeneralSecurityException {
+<span class="fc" id="L671">        transactional(() -&gt; {</span>
+            try {
+                // need to expire API sessions for this user (if any)
+<span class="fc" id="L674">                apiAuthService.expireSessionsForUser(userId);</span>
+<span class="fc" id="L675">                char[] recoveredPassword = passwordRecoveryService.recoverPassword(LOGIN_PASSWORD_RECOVERY, userId, securityQuestion, securityQuestionAnswer)</span>
+<span class="pc" id="L676">                        .orElseThrow(() -&gt; new RuntimeException(&quot;Invalid user name or security answer.&quot;));</span>
+<span class="fc" id="L677">                changeUserLoginPassword(userId, recoveredPassword, newPassword.toCharArray(), securityQuestion, securityQuestionAnswer);</span>
+<span class="nc" id="L678">            } catch (IOException | GeneralSecurityException e) {</span>
+<span class="nc" id="L679">                throw new RuntimeException(&quot;Error resetting password for &quot; + userId, e);</span>
+<span class="fc" id="L680">            }</span>
+<span class="fc" id="L681">        });</span>
+
+<span class="fc" id="L683">    }</span>
+
+    /**
+     * Reset a user password using recovery credentials.
+     *
+     * @param requestId the ID of the request aka correlation ID
+     * @param password  the new user password to reset to
+     * @param userId    the ID of the user we are resetting the password of
+     */
+    public void resetPasswordUsingExternalRecovery(@NotNull UUID requestId, long userId, String newPassword) {
+<span class="fc" id="L693">        transactional(() -&gt; {</span>
+            try {
+                // need to expire API sessions for this user (if any)
+<span class="fc" id="L696">                apiAuthService.expireSessionsForUser(userId);</span>
+<span class="fc" id="L697">                userCredentialsService.changeUserPasswordUsingExternalRecovery(</span>
+                        requestId,
+<span class="fc" id="L699">                        userId,</span>
+<span class="fc" id="L700">                        beanFactory.getPKBPersonBean().getPKBPerson(userId).getPublicId(),</span>
+<span class="fc" id="L701">                        newPassword.toCharArray());</span>
+<span class="nc" id="L702">            } catch (Exception e) {</span>
+<span class="nc" id="L703">                throw new RuntimeException(&quot;Error while resetting password for user-&quot; + userId, e);</span>
+<span class="fc" id="L704">            }</span>
+<span class="fc" id="L705">        });</span>
+<span class="fc" id="L706">    }</span>
+
+    /**
+     * Update a user profile
+     *
+     * @param requestContext {@link EHRRequestContext}
+     * @param person         {@link PKBPerson}
+     */
+    public PKBPerson updateUser(EHRRequestContext requestContext, PKBPerson person) {
+<span class="fc" id="L715">        return updateUser(person, VersionDetails.of(requestContext, dateTimeService.now()));</span>
+    }
+
+    /**
+     * Update a user profile
+     *
+     * @param person         {@link PKBPerson}
+     * @param versionDetails {@link VersionDetails}
+     */
+    public PKBPerson updateUser(PKBPerson person, VersionDetails versionDetails) {
+        try {
+<span class="fc" id="L726">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="pc bpc" id="L727" title="1 of 4 branches missed.">            if (person.hasTeamLevelIdsLoaded() &amp;&amp; person.getTeamLevelIds() != null) {</span>
+<span class="fc" id="L728">                SortedSet&lt;TeamLevelId&gt; teamLevelIds = person.getTeamLevelIds();</span>
+<span class="fc" id="L729">                List&lt;TeamLevelId&gt; unassignedTeamLevelIds = teamLevelIds.stream()</span>
+<span class="fc bfc" id="L730" title="All 2 branches covered.">                        .filter(tlid -&gt; tlid.getPersonId() == null)</span>
+<span class="fc" id="L731">                        .collect(toList());</span>
+<span class="fc bfc" id="L732" title="All 2 branches covered.">                if (!unassignedTeamLevelIds.isEmpty()) {</span>
+<span class="fc" id="L733">                    teamLevelIds.removeAll(unassignedTeamLevelIds);</span>
+<span class="fc" id="L734">                    personRemote.unassignTeamLevelIds(unassignedTeamLevelIds);</span>
+                }
+            }
+<span class="fc" id="L737">            return personRemote.updatePKBPerson(person, versionDetails);</span>
+<span class="nc" id="L738">        } catch (Exception e) {</span>
+<span class="nc" id="L739">            throw new PKBException(&quot;Error while updating user-&quot; + person.getId(), e);</span>
+        }
+    }
+
+    public List&lt;PKBSpecialty&gt; getSpecialties() {
+        try {
+<span class="fc" id="L745">            return pkbSpecialtyService.findAllPKBSpecialties();</span>
+<span class="nc" id="L746">        } catch (Exception e) {</span>
+<span class="nc" id="L747">            throw new PKBException(&quot;Error while getting specialties&quot;, e);</span>
+        }
+    }
+
+    public @Nullable Long getClinicianSpecialty(long clinicianId) {
+<span class="fc" id="L752">        Optional&lt;PersonSpecialty&gt; providerSpecialty = personSpecialtyService.findPersonSpecialtyByPersonId(clinicianId);</span>
+<span class="fc" id="L753">        return providerSpecialty</span>
+<span class="fc" id="L754">                .map(PersonSpecialty::getSpecialtyId)</span>
+<span class="fc" id="L755">                .orElseGet(() -&gt; {</span>
+<span class="nc" id="L756">                    LOGGER.error(&quot;No provider specialty found for clinician {}; returning null&quot;, clinicianId);</span>
+<span class="nc" id="L757">                    return null;</span>
+                });
+    }
+
+    public void saveClinicianSpecialty(long clinicianId, Long specialtyId) {
+<span class="fc" id="L762">        transactional(() -&gt; personSpecialtyService.updatePersonSpecialties(clinicianId, specialtyId));</span>
+<span class="fc" id="L763">    }</span>
+
+    /**
+     * Get PKBPerson object by email
+     */
+    public @NotNull List&lt;PKBPerson&gt; getPKBPersonByConfirmedOrPrimaryEmail(Email email, PersonContact.Lazy... fields) {
+        // We always want PERSON
+<span class="fc bfc" id="L770" title="All 2 branches covered.">        if (email == null) {</span>
+<span class="fc" id="L771">            return Collections.emptyList();</span>
+        }
+
+<span class="fc" id="L774">        int nfields = fields.length;</span>
+<span class="fc" id="L775">        PersonContact.Lazy[] extendedFields = new PersonContact.Lazy[nfields + 1];</span>
+<span class="fc bfc" id="L776" title="All 2 branches covered.">        if (nfields &gt; 0) {</span>
+<span class="fc" id="L777">            System.arraycopy(fields, 0, extendedFields, 0, fields.length);</span>
+        }
+<span class="fc" id="L779">        extendedFields[nfields] = PersonContact.Lazy.PERSON;</span>
+
+<span class="fc" id="L781">        return personContactManager.findPersonByConfirmedOrPrimaryEmail(email, extendedFields).stream()</span>
+<span class="fc" id="L782">                .map(PersonContact::getPerson)</span>
+<span class="fc" id="L783">                .collect(Collectors.toList());</span>
+    }
+
+    /**
+     * Get {@link PKBPerson}s by their email address.
+     * Key is the email address in lower case, value is the {@link List} of {@link PKBPerson} found for that address.
+     *
+     * @param emails to search for, will be used in lower case form as keys in the {@link Map}.
+     * @return {@link Map} of {@link PKBPerson} lists.
+     */
+    public Map&lt;Email, List&lt;PKBPerson&gt;&gt; getPKBPersonsByConfirmedOrPrimaryEmails(Collection&lt;Email&gt; emails, com.pkb.user.entity.PersonContact.Lazy... fields) {
+<span class="pc bpc" id="L794" title="1 of 2 branches missed.">        if (isEmpty(emails)) {</span>
+<span class="fc" id="L795">            return emptyMap();</span>
+        }
+<span class="nc" id="L797">        return convertToPersonMap(personContactManager.getPersonsByConfirmedOrPrimaryEmails(emails, fields));</span>
+    }
+
+    private Map&lt;Email, List&lt;PKBPerson&gt;&gt; convertToPersonMap(List&lt;PersonContact&gt; contacts) {
+<span class="nc" id="L801">        return contacts.stream()</span>
+<span class="nc" id="L802">                .flatMap(pc -&gt; pc.getContactIfEmail().map(email -&gt; Tuple.of(email, pc.getPerson())).toJavaStream())</span>
+<span class="nc" id="L803">                .collect(groupingBy(Tuple2::_1, mapping(Tuple2::_2, toList())));</span>
+    }
+
+    /**
+     * This is a convenience method for accessing a PKBPerson by email when it is not
+     * legal for the email to be associated with multiple records. Currently only
+     * clinicians may have multiple accounts with the same email, though soon coords
+     * will too.
+     *
+     * @param email  The email address to search for
+     * @param fields Lazies
+     * @return A PKBPerson
+     */
+    @Nullable
+    public PKBPerson getSinglePersonByEmail(Email email, PersonContact.Lazy... fields) {
+<span class="fc" id="L818">        List&lt;PKBPerson&gt; persons = getPKBPersonByConfirmedOrPrimaryEmail(email, fields);</span>
+<span class="fc bfc" id="L819" title="All 2 branches covered.">        if (!persons.isEmpty()) {</span>
+<span class="pc bpc" id="L820" title="1 of 2 branches missed.">            if (persons.size() &gt; 1) {</span>
+<span class="nc" id="L821">                throw new IllegalReuseOfEmailAddressException(&quot;email &quot; + email + &quot; is associated with multiple persons!&quot;);</span>
+            }
+
+<span class="fc" id="L824">            return persons.get(0);</span>
+        }
+
+<span class="fc" id="L827">        return null;</span>
+    }
+
+    /**
+     * Get the PKBPerson linked to this national id (if any)
+     */
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; getPKBPersonByNationalId(ValidNationalId nationalId, PKBPerson.Lazy... fields) {
+        try {
+<span class="fc" id="L835">            return beanFactory.getPKBPersonBean().findPKBPersonByNationalId(nationalId, fields);</span>
+<span class="nc" id="L836">        } catch (Exception e) {</span>
+<span class="nc" id="L837">            throw new RuntimeException(&quot;Error while getting user for nationalId &quot; + nationalId.value() + &quot;, type &quot; + nationalId.type(), e);</span>
+        }
+    }
+
+    /**
+     * Get the PKBPerson linked to this national id (if any)
+     */
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; getPKBPersonByNationalId(NationalId nationalId, PKBPerson.Lazy... fields) {
+        try {
+<span class="fc" id="L846">            return beanFactory.getPKBPersonBean().findPKBPersonByNationalId(nationalId, fields);</span>
+<span class="nc" id="L847">        } catch (Exception e) {</span>
+<span class="nc" id="L848">            throw new RuntimeException(&quot;Error while getting user for nationalId &quot; + nationalId.getValue() + &quot;, type &quot; + nationalId.getType(), e);</span>
+        }
+    }
+
+    /**
+     * An org-level ID is usually a hospital ID.
+     */
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; getPKBPersonByOrgLevelId(OrgLevelId orgLevelId, PKBPerson.Lazy... fields) {
+<span class="pc bpc" id="L856" title="1 of 2 branches missed.">        if (orgLevelId == null) {</span>
+<span class="nc" id="L857">            return Either.left(Option.none());</span>
+        }
+        try {
+<span class="fc" id="L860">            return beanFactory.getPKBPersonBean().findPKBPersonByOrgLevelId(orgLevelId, fields);</span>
+<span class="nc" id="L861">        } catch (Exception e) {</span>
+<span class="nc" id="L862">            throw new PKBException(&quot;Error while getting user for org-level ID &quot; + orgLevelId</span>
+<span class="nc" id="L863">                    + &quot;, org &quot; + orgLevelId.getOrg().getId()</span>
+<span class="nc" id="L864">                    + &quot;, type &quot; + orgLevelId.getType().getId(), e);</span>
+        }
+    }
+
+    /**
+     * A team-level ID is usually specific to a department. For example, a GUM
+     * identifier for HIV clinic patients.
+     */
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; getPKBPersonByTeamLevelId(TeamLevelId teamLevelId, PKBPerson.Lazy... fields) {
+<span class="pc bpc" id="L873" title="1 of 2 branches missed.">        if (teamLevelId == null) {</span>
+<span class="nc" id="L874">            return Either.left(Option.none());</span>
+        }
+        try {
+<span class="fc" id="L877">            return beanFactory.getPKBPersonBean().findPKBPersonByTeamLevelId(teamLevelId, fields);</span>
+<span class="nc" id="L878">        } catch (Exception e) {</span>
+<span class="nc" id="L879">            throw new PKBException(&quot;Error while getting user for team-level ID &quot; + teamLevelId</span>
+<span class="nc" id="L880">                    + &quot;, team &quot; + teamLevelId.getTeam().getId()</span>
+<span class="nc" id="L881">                    + &quot;, type &quot; + teamLevelId.getType().getId(), e);</span>
+        }
+    }
+
+    /**
+     * Return a list of patients who have a CHI_NUMBER but not a SCISTORE_ID
+     */
+    public List&lt;PKBPerson&gt; findUnsyncedSciStorePatients(int maxResults) {
+        try {
+<span class="fc" id="L890">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L891">            return personRemote.findUnsyncedSciStorePatients(maxResults);</span>
+<span class="nc" id="L892">        } catch (Exception e) {</span>
+<span class="nc" id="L893">            throw new PKBException(&quot;Error while finding unsynced SciStore patients&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Return a list of orgs for the given patient
+     */
+    public List&lt;Org&gt; findOrgsForPatient(long patientId, Org.Lazy... fields) {
+<span class="fc" id="L901">        return beanFactory.getPKBPersonBean().findOrgsForPatient(patientId, fields);</span>
+    }
+
+    /**
+     * Return a list of org coords for the given org
+     *
+     * @param orgId
+     */
+    public List&lt;PKBPerson&gt; findOrgCoords(long orgId) {
+        try {
+<span class="fc" id="L911">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L912">            return personRemote.findOrgCoords(orgId);</span>
+<span class="nc" id="L913">        } catch (Exception e) {</span>
+<span class="nc" id="L914">            throw new PKBException(&quot;Error while finding org coords for org-&quot; + orgId, e);</span>
+        }
+    }
+
+    public List&lt;PKBPerson&gt; findPrivacyOfficers(Org org) {
+        try {
+<span class="fc" id="L920">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L921">            return personRemote.findPrivacyOfficers(org);</span>
+<span class="nc" id="L922">        } catch (Exception e) {</span>
+<span class="nc" id="L923">            throw new PKBException(&quot;Error while finding privacy officers for org-&quot; + org.getId(), e);</span>
+        }
+    }
+
+    /**
+     * Check if the user name already exists
+     *
+     * @param userName user name
+     * @return true if the PKBPerson exists and is status INVITED or EMAIL_CONFIRMED
+     */
+    public boolean pkbPersonUsernameExists(Email userName) {
+<span class="fc" id="L934">        boolean exists = false;</span>
+
+<span class="fc" id="L936">        List&lt;PKBPerson&gt; persons = getPKBPersonByConfirmedOrPrimaryEmail(userName, PersonContact.Lazy.PERSON);</span>
+<span class="fc bfc" id="L937" title="All 2 branches covered.">        if (!persons.isEmpty()) {</span>
+
+            // Check for at least one user with appropriate status
+<span class="pc bpc" id="L940" title="1 of 2 branches missed.">            for (PKBPerson person : persons) {</span>
+
+<span class="fc" id="L942">                UserStatus status = person.getStatus();</span>
+                // these are the statuses where we don't want to just overwrite it...
+<span class="pc bpc" id="L944" title="4 of 8 branches missed.">                exists = status == UserStatus.EMAIL_CONFIRMED</span>
+                        || status == UserStatus.INVITED
+                        || status == UserStatus.CREATED
+                        || status == UserStatus.NOCONTACT;
+
+<span class="pc bpc" id="L949" title="1 of 2 branches missed.">                if (exists) {</span>
+<span class="fc" id="L950">                    break;</span>
+                }
+<span class="nc" id="L952">            }</span>
+        }
+
+<span class="fc" id="L955">        return exists;</span>
+    }
+
+    /**
+     * Delete the PKBperson from DB
+     *
+     * @param person {@link PKBPerson} object
+     */
+    public void deleteUser(PKBPerson person) {
+        PKBPersonRemote personRemote;
+        try {
+<span class="nc" id="L966">            personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="nc" id="L967">            personRemote.deletePKBPerson(person);</span>
+<span class="nc" id="L968">        } catch (Exception e) {</span>
+<span class="nc" id="L969">            throw new PKBException(&quot;Error while deleting user-&quot;</span>
+<span class="nc" id="L970">                    + person.getId(), e);</span>
+<span class="nc" id="L971">        }</span>
+<span class="nc" id="L972">    }</span>
+
+    /**
+     * Checks user has accepted invite clinician terms or not
+     *
+     * @param userId user id
+     * @return true if the user has accepted the terms
+     */
+    public boolean isUserAcceptedInviteClinicanTerms(long userId) {
+<span class="nc" id="L981">        PKBPerson person = getPKBPerson(userId);</span>
+<span class="nc" id="L982">        return person.isUserAcceptedInviteClinicianTerms();</span>
+    }
+
+    /**
+     * sets the invite clinician terms acceptance false (that sounds counterintuitive..)
+     *
+     * @param userId user id
+     */
+    public void setUserAcceptedInviteClinicianTerms(EHRRequestContext requestContext, long userId) {
+<span class="nc" id="L991">        PKBPerson person = getPKBPerson(userId);</span>
+
+<span class="nc" id="L993">        boolean changed = person.setProperty(INVITE_CLINICIAN_TERMS, Boolean.TRUE.toString());</span>
+<span class="nc bnc" id="L994" title="All 2 branches missed.">        if (changed) {</span>
+<span class="nc" id="L995">            updateUser(person, VersionDetails.of(requestContext, dateTimeService.now()));</span>
+        }
+<span class="nc" id="L997">    }</span>
+
+    public void setUserConsentReviewed(EHRRequestContext requestContext, long userId) {
+<span class="fc" id="L1000">        PKBPerson person = getPKBPerson(userId, Lazy.PROPERTIES);</span>
+
+<span class="fc" id="L1002">        boolean changed = person.setProperty(CONSENT_REVIEW_COMPLETED, Boolean.TRUE.toString());</span>
+<span class="pc bpc" id="L1003" title="1 of 2 branches missed.">        if (changed) {</span>
+<span class="fc" id="L1004">            updateUser(person, VersionDetails.of(requestContext, dateTimeService.now()));</span>
+        }
+<span class="fc" id="L1006">    }</span>
+
+    public boolean isUserConsentReviewed(long userId) {
+<span class="fc" id="L1009">        PKBPerson person = getPKBPerson(userId, Lazy.PROPERTIES);</span>
+<span class="fc" id="L1010">        return person.checkPropertyFlag(CONSENT_REVIEW_COMPLETED);</span>
+    }
+
+    /**
+     * Check user's password without logging them in
+     */
+    public boolean verifySecurityQuestionAnswer(long userId, String securityQuestion, String securityQuestionAnswer) {
+        try {
+<span class="fc" id="L1018">            return passwordRecoveryService.verifySecurityQuestionAnswer(userId, securityQuestion, securityQuestionAnswer);</span>
+<span class="nc" id="L1019">        } catch (Exception e) {</span>
+<span class="nc" id="L1020">            LOGGER.info(&quot;Error while verifying security answer for user-{}&quot;, userId, e);</span>
+<span class="nc" id="L1021">            return false;</span>
+        }
+    }
+
+    /**
+     * Get the AccountUser details for the default account
+     *
+     * @param userId user id
+     * @return {@link PKBAccountUser}
+     */
+    public PKBAccountUser getDefaultAccountUser(long userId) {
+        PKBPersonRemote personRemote;
+
+        try {
+<span class="fc" id="L1035">            personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1036">            return personRemote.getDefaultPKBAccountUser(userId);</span>
+<span class="nc" id="L1037">        } catch (Exception e) {</span>
+<span class="nc" id="L1038">            throw new PKBException(&quot;Exception while getting user account-&quot;</span>
+                    + userId, e);
+        }
+    }
+
+    /**
+     * Get the default account of this user. If more than one is found this error is logged silently
+     * and the first is returned.
+     *
+     * @return PKBAccount representative of the user's default Tolven account.
+     * @deprecated This goes via account_user and filters to ensure the account is active.
+     * This won't work with e.g. out-of-area patients.
+     * We should just go via defaultaccountid on person instead, please fix.
+     */
+    @Deprecated
+    @Nullable
+    public PKBAccount getDefaultAccountWithActiveAccountUser(long userId) {
+<span class="fc" id="L1055">        PKBAccountUser accountUser = getDefaultAccountUser(userId);</span>
+<span class="pc bpc" id="L1056" title="1 of 2 branches missed.">        if (accountUser != null) {</span>
+<span class="fc" id="L1057">            return accountUser.getAccount();</span>
+        } else {
+<span class="nc" id="L1059">            return null;</span>
+        }
+    }
+
+    @Nullable
+    public Long getDefaultAccountId(long personId) {
+<span class="fc" id="L1065">        return beanFactory.getPKBPersonBean().getDefaultAccountId(personId);</span>
+    }
+
+    /**
+     * Get just the default account ID
+     *
+     * @param personId
+     */
+    public Map&lt;Long, Long&gt; getDefaultAccountId(Collection&lt;Long&gt; personId) {
+<span class="fc" id="L1074">        return beanFactory.getPKBPersonBean().getDefaultAccountIds(personId);</span>
+    }
+
+    /*
+     * Get the default account public ID
+     *
+     * @param personIds
+     */
+    public UUID getDefaultAccountPublicId(Long personId) {
+<span class="fc" id="L1083">        return accountService.getAccountPublicId(personService.getDefaultAccountIdByPersonId(personId));</span>
+    }
+
+    /**
+     * Gets the user who has a &quot;defaultaccount&quot; AccountUser link to this account
+     */
+    public PKBPerson getAccountOwner(long accountId, PKBPerson.Lazy... lazies) {
+        PKBPersonRemote personRemote;
+
+        try {
+<span class="fc" id="L1093">            personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1094">            return personRemote.getAccountOwner(accountId, lazies);</span>
+<span class="nc" id="L1095">        } catch (Exception e) {</span>
+<span class="nc" id="L1096">            throw new PKBException(&quot;failed finding owner of account &quot;</span>
+                    + accountId, e);
+        }
+    }
+
+    public Map&lt;Long, PKBPerson&gt; getAccountOwners(Set&lt;Long&gt; accountIds, PKBPerson.Lazy... lazies) {
+<span class="fc" id="L1102">        List&lt;CoreAccountUser&gt; accountUsers = accountUserService.getOwnerAccountUsers(accountIds);</span>
+<span class="fc" id="L1103">        Set&lt;Long&gt; personIds = accountUsers.stream().map(CoreAccountUser::getUserPersonId).collect(Collectors.toSet());</span>
+<span class="fc" id="L1104">        Map&lt;Long, PKBPerson&gt; personIdToPKBPerson = beanFactory.getPKBPersonBean().findPKBPersonList(personIds, lazies).stream().collect(toMap(PKBPerson::getId, identity()));</span>
+<span class="fc" id="L1105">        return accountUsers.stream().collect(toMap(CoreAccountUser::getAccountId, au -&gt; personIdToPKBPerson.get(au.getUserPersonId())));</span>
+    }
+
+    /**
+     * Get the PKBPerson object by Id
+     */
+    public PKBPerson getPKBPerson(long userId, PKBPerson.Lazy... fields) {
+        try {
+<span class="fc" id="L1113">            return beanFactory.getPKBPersonBean().getPKBPerson(userId, fields);</span>
+<span class="fc" id="L1114">        } catch (Exception exception) {</span>
+<span class="fc" id="L1115">            throw new PKBException(&quot;Exception while finding the user-&quot;</span>
+                    + userId, exception);
+        }
+    }
+
+    public Option&lt;PKBPerson&gt; findPKBPerson(long userId, PKBPerson.Lazy... fields) {
+<span class="fc" id="L1121">        return beanFactory.getPKBPersonBean().findPKBPerson(userId, fields);</span>
+    }
+
+    public PKBPerson getPKBPersonByPublicId(UUID personPublicId) {
+<span class="nc" id="L1125">        return Try.of(() -&gt; getPKBPersonListByPublicId(singletonList(personPublicId)).get(0))</span>
+<span class="nc" id="L1126">                .getOrElseThrow(ex -&gt; new PatientNotFoundException(&quot;Could not find user &quot; + personPublicId, ex));</span>
+    }
+
+    /**
+     * Get a map of id -&gt; PKBPerson
+     */
+    public Map&lt;Long, PKBPerson&gt; getPKBPersonMapById(Collection&lt;Long&gt; userIds, Lazy... fields) {
+<span class="fc" id="L1133">        return getPKBPersonList(userIds, fields).stream().collect(Collectors.toMap(PKBPerson::getId, identity()));</span>
+    }
+
+    /**
+     * Get a map of id -&gt; PKBPerson
+     */
+    public Map&lt;UUID, PKBPerson&gt; getPKBPersonMapByPublicId(Collection&lt;UUID&gt; userIds) {
+<span class="fc" id="L1140">        return getPKBPersonListByPublicId(userIds).stream().collect(Collectors.toMap(PKBPerson::getPublicId, identity()));</span>
+    }
+
+    /**
+     * Get the list of PKBPerson objects by id
+     */
+    public List&lt;PKBPerson&gt; getPKBPersonListByPublicId(Collection&lt;UUID&gt; userPublicIds) {
+        try {
+<span class="pc bpc" id="L1148" title="1 of 2 branches missed.">            if (isEmpty(userPublicIds)) {</span>
+<span class="nc" id="L1149">                return emptyList();</span>
+            }
+<span class="fc" id="L1151">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1152">            return personRemote.findPKBPersonsByPublicId(userPublicIds);</span>
+<span class="nc" id="L1153">        } catch (Exception exception) {</span>
+<span class="nc" id="L1154">            throw new RuntimeException(&quot;Exception while finding the users-&quot;</span>
+                    + userPublicIds, exception);
+        }
+    }
+
+    /**
+     * Get the list of PKBPerson objects by id
+     */
+    public List&lt;PKBPerson&gt; getPKBPersonList(Collection&lt;Long&gt; userIds, Lazy... fields) {
+        try {
+<span class="fc bfc" id="L1164" title="All 2 branches covered.">            if (isEmpty(userIds)) {</span>
+<span class="fc" id="L1165">                return emptyList();</span>
+            }
+<span class="fc" id="L1167">            return beanFactory.getPKBPersonBean().findPKBPersonList(Lists.newArrayList(userIds), fields);</span>
+<span class="nc" id="L1168">        } catch (Exception exception) {</span>
+<span class="nc" id="L1169">            throw new RuntimeException(&quot;Exception while finding the users-&quot; + userIds, exception);</span>
+        }
+    }
+
+    /**
+     * Update registration details of the user; demographics, address and password
+     *
+     * @param tempPassword new user's temporary password included in the invitation
+     *                     this will change the password only if tempPassword is provided -- if not, assuming we just created this account
+     */
+    public void updateRegistrationDetails(EHRRequestContext requestContext, PKBPerson person, String tempPassword) {
+        try {
+            // add the registration date
+<span class="fc" id="L1182">            person.setRegisteredOn(Date.from(dateTimeService.now()));</span>
+
+<span class="fc" id="L1184">            doUpdateRegistrationDetails(requestContext, person, tempPassword);</span>
+<span class="nc" id="L1185">        } catch (Exception exception) {</span>
+<span class="nc" id="L1186">            throw new PKBException(</span>
+<span class="nc" id="L1187">                    &quot;Exception while updating registration details for user-&quot; + person.getId(), exception);</span>
+<span class="fc" id="L1188">        }</span>
+<span class="fc" id="L1189">    }</span>
+
+    private void doUpdateRegistrationDetails(EHRRequestContext requestContext, PKBPerson person, String tempPassword) {
+<span class="fc" id="L1192">        transactional(() -&gt; {</span>
+            // sanity check
+<span class="pc bpc" id="L1194" title="1 of 4 branches missed.">            if (StringUtils.isNotBlank(tempPassword) &amp;&amp; StringUtils.isBlank(person.getPassword())) {</span>
+<span class="nc" id="L1195">                throw new IllegalArgumentException(&quot;person.password required to change from temp password&quot;);</span>
+            }
+
+<span class="fc" id="L1198">            beanFactory.getPKBPersonBean().updatePKBPerson(requestContext, person);</span>
+
+<span class="pc bpc" id="L1200" title="1 of 2 branches missed.">            if (!userCredentialsService.entryExists(person.getId())) {</span>
+                // Don't overwrite the existing record if it already exists
+<span class="nc" id="L1202">                userCredentialsService.saveCredential(userCredentialsService.createCredentials(person.getId(), person.getPassword().toCharArray()));</span>
+            }
+            /*
+             * // for patient-invited-clinician, LDAP record will already be here,
+             * with temp password // but patient-invited-carer must come here too
+             * despite not having a tempPassword if
+             * (userCredentialBean.entryExists(person.getIdString()) &amp;&amp;
+             * StringUtils.isNotBlank(tempPassword)) {
+             * userCredentialBean.changeUserPassword(person.getIdString(),
+             * tempPassword.toCharArray(), person.getPassword().toCharArray());
+             * userCredentialBean.updatePerson(tolvenPerson); } else { // Create user
+             * certificates userCredentialBean.createCredentials(tolvenPerson); // Add the
+             * person to ldap userCredentialBean.savePerson(tolvenPerson); }
+             */
+
+<span class="fc bfc" id="L1217" title="All 2 branches covered.">            if (StringUtils.isNotBlank(tempPassword)) {</span>
+                try {
+<span class="fc" id="L1219">                    userCredentialsService.changeUserPassword(person.getId(), person.getPublicId(), tempPassword.toCharArray(),</span>
+<span class="fc" id="L1220">                            person.getPassword().toCharArray());</span>
+<span class="nc" id="L1221">                } catch (IOException | GeneralSecurityException e) {</span>
+<span class="nc" id="L1222">                    throw new RuntimeException(e.getMessage(), e);</span>
+<span class="fc" id="L1223">                }</span>
+            }
+<span class="fc" id="L1225">        });</span>
+<span class="fc" id="L1226">    }</span>
+
+    /**
+     * Find the identity verification information for the person
+     *
+     * @return
+     */
+    public Optional&lt;IdentityVerification&gt; findIdentityVerification(long userId) {
+        try {
+<span class="fc" id="L1235">            return identityVerificationService.getIdentityVerification(userId);</span>
+<span class="nc" id="L1236">        } catch (Exception exception) {</span>
+<span class="nc" id="L1237">            throw new PKBException(&quot;Exception while gettting identity verfication details for user-&quot;</span>
+                    + userId, exception);
+        }
+    }
+
+
+    /**
+     * Add or update secure properties. This can include country-specific properties
+     * &lt;p&gt;
+     * Note that country is optional
+     * &lt;p&gt;
+     * For each property:
+     * Will add an entry if there is no other entry for that name (and, if country is provided, for that country)
+     * If there is no country and an existing element for that name, it will update. Or if there is a country
+     * and an existing entry for that name and country.
+     */
+    public void saveSecureProperties(@NotNull LoggedInEHRRequestContext requestContext, List&lt;PersonSecurePropertyDTO&gt; properties, long userId) {
+<span class="fc" id="L1254">        Long accountId = getDefaultAccountId(userId);</span>
+<span class="pc bpc" id="L1255" title="1 of 2 branches missed.">        if (accountId != null) {</span>
+<span class="fc" id="L1256">            List&lt;PersonSecurePropertyDTO&gt; existingProperties = getAllSecureProperties(requestContext, accountId);</span>
+
+<span class="fc bfc" id="L1258" title="All 2 branches covered.">            for (PersonSecurePropertyDTO dto : properties) {</span>
+<span class="fc" id="L1259">                Set&lt;Long&gt; ehrDataIdsToDelete = new HashSet&lt;&gt;();</span>
+<span class="pc bpc" id="L1260" title="1 of 2 branches missed.">                for (PersonSecurePropertyDTO existingProperty : existingProperties) {</span>
+<span class="nc bnc" id="L1261" title="All 2 branches missed.">                    if (existingProperty.getPropertyName() == dto.getPropertyName() &amp;&amp;</span>
+<span class="nc bnc" id="L1262" title="All 2 branches missed.">                            ((existingProperty.getCountryOrNull() == null)</span>
+<span class="nc bnc" id="L1263" title="All 2 branches missed.">                                    || existingProperty.getCountryOrNull().equals(dto.getCountryOrNull()))) {</span>
+<span class="nc" id="L1264">                        ehrDataIdsToDelete.add(existingProperty.getId());</span>
+                    }
+<span class="nc" id="L1266">                }</span>
+<span class="fc" id="L1267">                beanFactory.getEhrRemote().deleteEHRData(ehrDataIdsToDelete);</span>
+<span class="fc" id="L1268">                EHRData ehrData = beanFactory.getEhrRemote().populateEHRData(dto, accountId, MenuDataType.personSecureProperty, requestContext);</span>
+<span class="fc" id="L1269">                beanFactory.getEhrRemote().saveEHRData(requestContext, ehrData);</span>
+<span class="fc" id="L1270">            }</span>
+        }
+<span class="fc" id="L1272">    }</span>
+
+    /**
+     * Return all the secure properties for the given user/account
+     */
+    public List&lt;PersonSecurePropertyDTO&gt; getAllSecureProperties(@NotNull LoggedInEHRRequestContext requestContext, long userId) {
+<span class="fc" id="L1278">        List&lt;PersonSecurePropertyDTO&gt; ret = new LinkedList&lt;&gt;();</span>
+        try {
+<span class="fc" id="L1280">            Long accountId = getDefaultAccountId(userId);</span>
+<span class="fc bfc" id="L1281" title="All 2 branches covered.">            if (accountId != null) {</span>
+<span class="fc" id="L1282">                List&lt;PersonSecurePropertyDTO&gt; props = beanFactory.getEhrRemote().queryAndDecryptTypedData(</span>
+<span class="fc" id="L1283">                        new EHRSearch&lt;&gt;(accountId, PersonSecurePropertyDTO.class, MenuDataType.personSecureProperty),</span>
+                        requestContext);
+
+<span class="fc bfc" id="L1286" title="All 2 branches covered.">                for (PersonSecurePropertyDTO p : props) {</span>
+<span class="pc bpc" id="L1287" title="1 of 2 branches missed.">                    if (p.getPropertyName() != null) {</span>
+<span class="fc" id="L1288">                        ret.add(p);</span>
+                    } else {
+<span class="nc" id="L1290">                        LOGGER.warn(&quot;Corrupt data: secureProperty has null name, id={}&quot;, p.getId());</span>
+                    }
+<span class="fc" id="L1292">                }</span>
+            }
+<span class="nc" id="L1294">        } catch (Exception e) {</span>
+<span class="nc" id="L1295">            throw new RuntimeException(&quot;Faled to get secure properties&quot;, e);</span>
+<span class="fc" id="L1296">        }</span>
+<span class="fc" id="L1297">        return ret;</span>
+    }
+
+    /**
+     * Get the map of PKBPerson object for given list of ids
+     */
+    public Map&lt;String, PKBPerson&gt; getPKBPersonMap(List&lt;String&gt; userIdList, Lazy... fields) {
+        try {
+<span class="fc" id="L1305">            Map&lt;String, PKBPerson&gt; personMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L1306">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1307">            List&lt;Long&gt; userIds = new ArrayList&lt;&gt;();</span>
+            Long userId;
+<span class="fc bfc" id="L1309" title="All 2 branches covered.">            for (String id : userIdList) {</span>
+<span class="fc" id="L1310">                userId = Long.parseLong(id);</span>
+<span class="fc" id="L1311">                userIds.add(userId);</span>
+<span class="fc" id="L1312">            }</span>
+<span class="fc" id="L1313">            List&lt;PKBPerson&gt; list = personRemote.findPKBPersonList(userIds, fields);</span>
+<span class="fc bfc" id="L1314" title="All 2 branches covered.">            for (PKBPerson person : list) {</span>
+<span class="fc" id="L1315">                personMap.put(person.getIdString(), person);</span>
+<span class="fc" id="L1316">            }</span>
+<span class="fc" id="L1317">            return personMap;</span>
+<span class="nc" id="L1318">        } catch (Exception e) {</span>
+<span class="nc" id="L1319">            throw new PKBException(&quot;Exception getting PKBPerson map&quot;, e);</span>
+
+        }
+    }
+
+    /**
+     * Update user status
+     *
+     * @param userId PKBPerson id
+     * @param status {@link UserStatus}
+     */
+    public void updateUserStatus(long userId, UserStatus status) {
+        try {
+<span class="fc" id="L1332">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1333">            personRemote.updateUserStatus(userId, status);</span>
+<span class="nc" id="L1334">        } catch (Exception e) {</span>
+<span class="nc" id="L1335">            throw new PKBException(&quot;Exception getting upating status for user-&quot; + userId, e);</span>
+
+<span class="fc" id="L1337">        }</span>
+<span class="fc" id="L1338">    }</span>
+
+    /**
+     * Update user primary contact
+     */
+    public void updateUserPrimaryContact(long personId, Email contact) {
+        try {
+<span class="fc" id="L1345">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1346">            personRemote.updateUserPrimaryContact(personId, contact);</span>
+<span class="nc" id="L1347">        } catch (Exception e) {</span>
+<span class="nc" id="L1348">            throw new PKBException(&quot;Exception getting upating primary contact for user-&quot; + personId, e);</span>
+
+<span class="fc" id="L1350">        }</span>
+<span class="fc" id="L1351">    }</span>
+
+    public void updateLastEmailSent(Long id) {
+
+<span class="fc" id="L1355">        Instant lastEmailSent = dateTimeService.now();</span>
+
+        try {
+
+<span class="fc" id="L1359">            PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1360">            personRemote.updateLastEmailSent(id, Date.from(lastEmailSent));</span>
+
+<span class="nc" id="L1362">        } catch (Exception e) {</span>
+<span class="nc" id="L1363">            throw new PKBException(&quot;Exception updating user email date&quot;, e);</span>
+<span class="fc" id="L1364">        }</span>
+<span class="fc" id="L1365">    }</span>
+
+    /**
+     * @throws InvalidDeathTimestampException if {@code deathTimestamp} is a future time or if before the DoB of {@code patient}
+     * @throws IllegalStateException          if the person is already in {@link UserStatus#DEAD} status
+     */
+    public void markAsDeceased(PKBPerson patient, Instant deathTimestamp) {
+        try {
+<span class="fc" id="L1373">            beanFactory.getPKBPersonBean().markAsDeceased(patient, deathTimestamp);</span>
+<span class="nc" id="L1374">        } catch (EJBException e) {</span>
+<span class="nc" id="L1375">            Throwable cause = e.getCause();</span>
+<span class="nc bnc" id="L1376" title="All 2 branches missed.">            if (cause instanceof InvalidDeathTimestampException) {</span>
+<span class="nc" id="L1377">                throw (InvalidDeathTimestampException) cause;</span>
+<span class="nc bnc" id="L1378" title="All 2 branches missed.">            } else if (cause instanceof IllegalStateException) {</span>
+                //noinspection ThrowInsideCatchBlockWhichIgnoresCaughtException
+<span class="nc" id="L1380">                throw (IllegalStateException) cause;</span>
+            } else {
+<span class="nc" id="L1382">                throw e;</span>
+            }
+<span class="fc" id="L1384">        }</span>
+<span class="fc" id="L1385">    }</span>
+
+    /**
+     * @throws IllegalStateException if the {@code patient} is not in {@link UserStatus#DEAD} status
+     */
+    public void markNotDeceased(PKBPerson patient) {
+<span class="fc" id="L1391">        beanFactory.getPKBPersonBean().markNotDeceased(patient);</span>
+<span class="fc" id="L1392">    }</span>
+
+    public Map&lt;PatientIdentifiers, Either&lt;RuntimeException, Optional&lt;PKBPerson&gt;&gt;&gt; lookupSinglePatients(Collection&lt;PatientIdentifiers&gt; idents) {
+<span class="fc" id="L1395">        Set&lt;Long&gt; personIds = new HashSet&lt;&gt;(idents.size());</span>
+<span class="fc" id="L1396">        Set&lt;Email&gt; emails = new HashSet&lt;&gt;(idents.size());</span>
+<span class="fc" id="L1397">        Set&lt;NationalId&gt; nationalIds = new HashSet&lt;&gt;(idents.size());</span>
+<span class="fc" id="L1398">        Set&lt;OrgLevelId&gt; orgLevelIds = new HashSet&lt;&gt;(idents.size());</span>
+<span class="fc" id="L1399">        Set&lt;TeamLevelId&gt; teamLevelIds = new HashSet&lt;&gt;(idents.size());</span>
+<span class="fc" id="L1400">        Set&lt;UUID&gt; publicIds = new HashSet&lt;&gt;(idents.size());</span>
+<span class="fc" id="L1401">        Set&lt;String&gt; emisPersonGuids = new HashSet&lt;&gt;(idents.size());</span>
+<span class="fc bfc" id="L1402" title="All 2 branches covered.">        for (PatientIdentifiers actual : idents) {</span>
+<span class="fc" id="L1403">            personIds.add(actual.getPkbId());</span>
+<span class="fc" id="L1404">            emails.addAll(actual.getEmailAddresses());</span>
+<span class="fc" id="L1405">            nationalIds.addAll(actual.getNationalIds());</span>
+<span class="fc" id="L1406">            orgLevelIds.addAll(actual.getOrgLeveIds());</span>
+<span class="fc" id="L1407">            teamLevelIds.addAll(actual.getTeamLevelIds());</span>
+<span class="fc" id="L1408">            publicIds.add(actual.getPublicId());</span>
+<span class="fc" id="L1409">            emisPersonGuids.add(actual.getEmisEsPersonGuid());</span>
+<span class="fc" id="L1410">        }</span>
+
+<span class="fc" id="L1412">        PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1413">        Map&lt;Long, PKBPerson&gt; personByIdMap = personRemote.findPKBPersonList(personIds, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS).stream()</span>
+<span class="fc" id="L1414">                .collect(toMap(PKBPerson::getId, identity()));</span>
+
+<span class="fc" id="L1416">        var personByConfirmedOrPrimaryEmailMap = getPKBPersonsByConfirmedOrPrimaryEmails(emails, PersonContact.Lazy.PERSON_W_CONTACTS, PersonContact.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+
+<span class="fc" id="L1418">        var personByNationalIds = personRemote.findPKBPersonByNationalIds(nationalIds, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+
+<span class="fc" id="L1420">        var personByOrgLevelIds = personRemote.findPKBPersonByOrgLevelIds(orgLevelIds, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+
+<span class="fc" id="L1422">        var personByTeamLevelIds = personRemote.findPKBPersonByTeamLevelIds(teamLevelIds, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+
+<span class="fc" id="L1424">        var personByPublicIds = personRemote.findPKBPersonsByPublicIds(publicIds).stream().collect(toMap(PKBPerson::getPublicId, identity()));</span>
+
+<span class="fc" id="L1426">        var personByEmisEsPersonGuids = personRemote.findPKBPersonByEmisPersonGuid(emisPersonGuids, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS).stream()</span>
+<span class="fc" id="L1427">                .collect(toMap(p -&gt; p.getEmisEsPersonGuid().getValue(), identity()));</span>
+
+<span class="fc" id="L1429">        Idlookups batchedIdLookups = new Idlookups() {</span>
+            @Override
+            public Option&lt;PKBPerson&gt; findByPersonId(Long personId) {
+<span class="nc" id="L1432">                return getMaybeResultFromMap(personByIdMap, personId);</span>
+            }
+
+            @Override
+            public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByConfirmedOrPrimaryEmail(Email email) {
+<span class="nc" id="L1437">                var emails = personByConfirmedOrPrimaryEmailMap.get(email);</span>
+<span class="nc bnc" id="L1438" title="All 2 branches missed.">                if (isNotEmpty(emails)) {</span>
+                    //Choosing the first as it works like this at the moment...
+<span class="nc" id="L1440">                    return Either.left(Option.of(emails.get(0)));</span>
+                }
+<span class="nc" id="L1442">                return Either.left(Option.none());</span>
+            }
+
+            @Override
+            public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByNationalId(NationalId nationalId) {
+<span class="fc" id="L1447">                return getEitherResultFromMap(personByNationalIds, nationalId);</span>
+            }
+
+            @Override
+            public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByOrgLevellId(OrgLevelId orgLevelId) {
+<span class="fc" id="L1452">                return getEitherResultFromMap(personByOrgLevelIds, Tuple.of(orgLevelId.getType().getId(), orgLevelId.getValue()));</span>
+            }
+
+            @Override
+            public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByTeamLevellId(TeamLevelId teamLevelId) {
+<span class="nc" id="L1457">                return getEitherResultFromMap(personByTeamLevelIds, Tuple.of(teamLevelId.getType().getId(), teamLevelId.getValue()));</span>
+            }
+
+            @Override
+            public Option&lt;PKBPerson&gt; findByPublicId(UUID personPublicId) {
+<span class="nc" id="L1462">                return getMaybeResultFromMap(personByPublicIds, personPublicId);</span>
+            }
+
+            @Override
+            public Option&lt;PKBPerson&gt; findByEmisPersonGuid(String personPublicId) {
+<span class="fc" id="L1467">                return getMaybeResultFromMap(personByEmisEsPersonGuids, personPublicId);</span>
+            }
+
+            private &lt;K, V&gt; Either&lt;Option&lt;V&gt;, List&lt;V&gt;&gt; getEitherResultFromMap(Map&lt;K, Either&lt;V, List&lt;V&gt;&gt;&gt; inputMap, K key) {
+<span class="fc" id="L1471">                var maybeResult = inputMap.get(key);</span>
+<span class="fc bfc" id="L1472" title="All 2 branches covered.">                if (maybeResult == null) {</span>
+<span class="fc" id="L1473">                    return Either.left(Option.none());</span>
+                }
+<span class="fc" id="L1475">                return maybeResult.bimap(Option::of, identity());</span>
+            }
+
+            private &lt;K, V&gt; Option&lt;V&gt; getMaybeResultFromMap(Map&lt;K, V&gt; inputMap, K key) {
+<span class="fc" id="L1479">                var maybeResult = inputMap.get(key);</span>
+<span class="fc bfc" id="L1480" title="All 2 branches covered.">                if (maybeResult == null) {</span>
+<span class="fc" id="L1481">                    return Option.none();</span>
+                }
+<span class="fc" id="L1483">                return Option.of(maybeResult);</span>
+            }
+        };
+
+<span class="fc" id="L1487">        return idents.stream().collect(toMap(identity(), i -&gt; doLookupSinglePatient(i, batchedIdLookups)));</span>
+    }
+
+    /**
+     * Attempt to lookup the patient represented by the provided identifiers. This will return the single matching patient, if found, or
+     * else empty will be returned.
+     *
+     * @param idents The identifiers to use when looking for the patient
+     * @return The single PKBPerson for the patient represented by the provided identifiers, or else Optional.empty()
+     * @throws ConflictingPatientIdentifiersException If identifiers are provided which match more than one medical record
+     * @throws PatientNotFoundException               If a PKB ID was provided but no medical record was found
+     */
+    public Optional&lt;PKBPerson&gt; lookupSinglePatient(PatientIdentifiers idents) {
+<span class="fc" id="L1500">        return findSinglePatient(idents).getOrElseGet(e -&gt; {</span>
+<span class="fc" id="L1501">            throw e;</span>
+        });
+    }
+
+    public Either&lt;RuntimeException, Optional&lt;PKBPerson&gt;&gt; findSinglePatient(PatientIdentifiers idents) {
+<span class="fc" id="L1506">        return doLookupSinglePatient(idents, singleValueLookups);</span>
+    }
+
+<span class="fc" id="L1509">    private Idlookups singleValueLookups = new Idlookups() {</span>
+
+        private Supplier&lt;PKBPersonRemote&gt; getPKBPersonRemote() {
+<span class="fc" id="L1512">            return beanFactory::getPKBPersonBean;</span>
+        }
+
+        @Override
+        public Option&lt;PKBPerson&gt; findByPersonId(Long personId) {
+<span class="nc" id="L1517">            return getPKBPersonRemote().get().findPKBPerson(personId, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+        }
+
+        @Override
+        public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByConfirmedOrPrimaryEmail(Email email) {
+<span class="fc" id="L1522">            return personContactManager.findPKBPersonByConfirmedOrPrimaryEmail(email, PersonContact.Lazy.PERSON_W_CONTACTS, PersonContact.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+        }
+
+        @Override
+        public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByNationalId(NationalId nationalId) {
+<span class="fc" id="L1527">            return getPKBPersonRemote().get().findPKBPersonByNationalId(nationalId, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+        }
+
+        @Override
+        public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByOrgLevellId(OrgLevelId orgLevelId) {
+<span class="fc" id="L1532">            return getPKBPersonRemote().get().findPKBPersonByOrgLevelId(orgLevelId, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+        }
+
+        @Override
+        public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByTeamLevellId(TeamLevelId teamLevelId) {
+<span class="fc" id="L1537">            return getPKBPersonRemote().get().findPKBPersonByTeamLevelId(teamLevelId, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+        }
+
+        @Override
+        public Option&lt;PKBPerson&gt; findByPublicId(UUID personPublicId) {
+<span class="fc" id="L1542">            return getPKBPersonRemote().get().findPKBPersonByPublicId(personPublicId);</span>
+        }
+
+        @Override
+        public Option&lt;PKBPerson&gt; findByEmisPersonGuid(String personPublicId) {
+<span class="fc" id="L1547">            return getPKBPersonRemote().get().findPKBPersonByEmisPersonGuid(personPublicId, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+        }
+    };
+
+    private interface Idlookups{
+
+        Option&lt;PKBPerson&gt; findByPersonId(Long personId);
+
+        Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByConfirmedOrPrimaryEmail(Email email);
+
+        Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByNationalId(NationalId nationalId);
+
+        Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByOrgLevellId(OrgLevelId orgLevelId);
+
+        Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByTeamLevellId(TeamLevelId teamLevelId);
+
+        Option&lt;PKBPerson&gt; findByPublicId(UUID personPublicId);
+
+        Option&lt;PKBPerson&gt; findByEmisPersonGuid(String personPublicId);
+    }
+
+    private Either&lt;RuntimeException, Optional&lt;PKBPerson&gt;&gt; doLookupSinglePatient(PatientIdentifiers idents, Idlookups idlookups) {
+
+<span class="fc" id="L1570">        PKBPerson matchedPatient = null;</span>
+
+<span class="pc bpc" id="L1572" title="1 of 2 branches missed.">        if (idents.isEmpty()) {</span>
+<span class="nc" id="L1573">            return Either.left(new IllegalArgumentException(&quot;Lookup single patient must be provided with at least one identifier&quot;));</span>
+        }
+
+<span class="fc" id="L1576">        Optional&lt;IllegalArgumentException&gt; maybeNationalIdError = ensureOnlyOneNationalIdPerType(idents);</span>
+<span class="pc bpc" id="L1577" title="1 of 2 branches missed.">        if (maybeNationalIdError.isPresent()) {</span>
+<span class="nc" id="L1578">            return Either.left(maybeNationalIdError.get());</span>
+        }
+
+<span class="pc bpc" id="L1581" title="1 of 2 branches missed.">        if (idents.getPkbId() != null) {</span>
+<span class="nc" id="L1582">            Option&lt;PKBPerson&gt; existingPerson = idlookups.findByPersonId(idents.getPkbId());</span>
+<span class="nc bnc" id="L1583" title="All 2 branches missed.">            if (existingPerson.isEmpty()) {</span>
+                // If a PKB ID was provided, it is always an error that we didn't find them. The rationale for this is that a PKB ID is an
+                // internal ID only, so for a caller to have provided that information we can assume they had reason to believe the patient
+                // exists. Otherwise, how would they have known what PKB ID to provide?
+<span class="nc" id="L1587">                return Either.left(new PatientNotFoundException(&quot;Lookup single patient failed to find provided PKB ID: &quot; + idents.getPkbId()));</span>
+            }
+<span class="nc" id="L1589">            var maybePatient = processSinglePatientLookupMatch(null, existingPerson);</span>
+<span class="nc bnc" id="L1590" title="All 2 branches missed.">            if (maybePatient.isLeft()) {</span>
+<span class="nc" id="L1591">                return Either.left(maybePatient.getLeft());</span>
+            }
+<span class="nc" id="L1593">            matchedPatient = maybePatient.get();</span>
+        }
+
+<span class="fc bfc" id="L1596" title="All 2 branches covered.">        for (Email emailAddress : idents.getEmailAddresses()) {</span>
+<span class="fc" id="L1597">            var maybePatient = processSinglePatientLookupMatch(matchedPatient, idlookups.findByConfirmedOrPrimaryEmail(emailAddress), &quot;email&quot;);</span>
+<span class="fc bfc" id="L1598" title="All 2 branches covered.">            if (maybePatient.isLeft()) {</span>
+<span class="fc" id="L1599">                return Either.left(maybePatient.getLeft());</span>
+            }
+<span class="fc" id="L1601">            matchedPatient = maybePatient.get();</span>
+<span class="fc" id="L1602">        }</span>
+
+<span class="fc bfc" id="L1604" title="All 2 branches covered.">        for (NationalId nid : idents.getNationalIds()) {</span>
+<span class="fc" id="L1605">            var maybePatient = processSinglePatientLookupMatch(matchedPatient, idlookups.findByNationalId(nid), &quot;nationalId&quot;);</span>
+<span class="fc bfc" id="L1606" title="All 2 branches covered.">            if (maybePatient.isLeft()) {</span>
+<span class="fc" id="L1607">                return Either.left(maybePatient.getLeft());</span>
+            }
+<span class="fc" id="L1609">            matchedPatient = maybePatient.get();</span>
+<span class="fc" id="L1610">        }</span>
+
+<span class="fc bfc" id="L1612" title="All 2 branches covered.">        for (OrgLevelId olid : idents.getOrgLeveIds()) {</span>
+<span class="fc" id="L1613">            var maybePatient = processSinglePatientLookupMatch(matchedPatient, idlookups.findByOrgLevellId(olid), &quot;orgLevelId&quot;);</span>
+<span class="fc bfc" id="L1614" title="All 2 branches covered.">            if (maybePatient.isLeft()) {</span>
+<span class="fc" id="L1615">                return Either.left(maybePatient.getLeft());</span>
+            }
+<span class="fc" id="L1617">            matchedPatient = maybePatient.get();</span>
+<span class="fc" id="L1618">        }</span>
+
+<span class="fc bfc" id="L1620" title="All 2 branches covered.">        for (TeamLevelId tlid : idents.getTeamLevelIds()) {</span>
+<span class="fc" id="L1621">            var maybePatient = processSinglePatientLookupMatch(matchedPatient, idlookups.findByTeamLevellId(tlid), &quot;teamLevelId&quot;);</span>
+<span class="pc bpc" id="L1622" title="1 of 2 branches missed.">            if (maybePatient.isLeft()) {</span>
+<span class="nc" id="L1623">                return Either.left(maybePatient.getLeft());</span>
+            }
+<span class="fc" id="L1625">            matchedPatient = maybePatient.get();</span>
+<span class="fc" id="L1626">        }</span>
+
+<span class="fc bfc" id="L1628" title="All 2 branches covered.">        if (idents.getPublicId() != null) {</span>
+<span class="fc" id="L1629">            var maybePatient = processSinglePatientLookupMatch(matchedPatient, idlookups.findByPublicId(idents.getPublicId()));</span>
+<span class="fc bfc" id="L1630" title="All 2 branches covered.">            if (maybePatient.isLeft()) {</span>
+<span class="fc" id="L1631">                return Either.left(maybePatient.getLeft());</span>
+            }
+<span class="fc" id="L1633">            matchedPatient = maybePatient.get();</span>
+        }
+
+<span class="fc bfc" id="L1636" title="All 2 branches covered.">        if (idents.getEmisEsPersonGuid() != null) {</span>
+<span class="fc" id="L1637">            var maybePatient = processSinglePatientLookupMatch(matchedPatient, idlookups.findByEmisPersonGuid(idents.getEmisEsPersonGuid()));</span>
+<span class="fc bfc" id="L1638" title="All 2 branches covered.">            if (maybePatient.isLeft()) {</span>
+<span class="fc" id="L1639">                return Either.left(maybePatient.getLeft());</span>
+            }
+<span class="fc" id="L1641">            matchedPatient = maybePatient.get();</span>
+        }
+
+<span class="fc" id="L1644">        return Either.right(Optional.ofNullable(matchedPatient));</span>
+    }
+
+    private Optional&lt;IllegalArgumentException&gt; ensureOnlyOneNationalIdPerType(PatientIdentifiers idents) {
+<span class="fc" id="L1648">        Map&lt;NationalIdType, NationalId&gt; nidMap = new EnumMap&lt;&gt;(NationalIdType.class);</span>
+<span class="fc bfc" id="L1649" title="All 2 branches covered.">        for (NationalId nid : idents.getNationalIds()) {</span>
+<span class="pc bpc" id="L1650" title="1 of 2 branches missed.">            if (nidMap.put(nid.getType(), nid) != null) {</span>
+<span class="nc" id="L1651">                return Optional.of(new IllegalArgumentException(&quot;Lookup single patient was provided with more than one instance of National ID Type: &quot; + nid.getType()));</span>
+            }
+<span class="fc" id="L1653">        }</span>
+<span class="fc" id="L1654">        return Optional.empty();</span>
+    }
+
+    private Either&lt;RuntimeException, PKBPerson&gt; processSinglePatientLookupMatch(PKBPerson currentMatchedPatient, Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; maybeExistingPersons, String lookupType) {
+<span class="pc bpc" id="L1658" title="1 of 2 branches missed.">        if (maybeExistingPersons.isRight()) {</span>
+<span class="nc" id="L1659">            var personIds = maybeExistingPersons.get().stream().map(PKBPerson::getId).collect(toList());</span>
+<span class="nc" id="L1660">            return Either.left(new MultiplePatientSameIdentifierException(&quot;Lookup single patient found more than one match by &quot; + lookupType + &quot; matches: &quot; + personIds, lookupType, personIds));</span>
+        }
+<span class="fc" id="L1662">        return processSinglePatientLookupMatch(currentMatchedPatient, maybeExistingPersons.getLeft());</span>
+    }
+
+    private Either&lt;RuntimeException, PKBPerson&gt; processSinglePatientLookupMatch(PKBPerson currentMatchedPatient, Option&lt;PKBPerson&gt; maybeExistingPerson) {
+<span class="fc" id="L1666">        PKBPerson matchedPatient = currentMatchedPatient;</span>
+<span class="fc bfc" id="L1667" title="All 2 branches covered.">        if (maybeExistingPerson.isDefined()) {</span>
+<span class="fc" id="L1668">            var existingPerson = maybeExistingPerson.get();</span>
+<span class="fc bfc" id="L1669" title="All 2 branches covered.">            if (!existingPerson.isPatient()) {</span>
+<span class="fc" id="L1670">                return Either.left(new PersonIsNotPatientException(&quot;Lookup single patient found user of type &quot; + existingPerson.getUserType(), existingPerson.getId()));</span>
+<span class="fc bfc" id="L1671" title="All 2 branches covered.">            } else if (matchedPatient == null) {</span>
+<span class="fc" id="L1672">                matchedPatient = existingPerson;</span>
+<span class="fc bfc" id="L1673" title="All 2 branches covered.">            } else if (!matchedPatient.getId().equals(existingPerson.getId())) {</span>
+<span class="fc" id="L1674">                return Either.left(new ConflictingPatientIdentifiersException(&quot;Lookup single patient found more than one match. Matched patientId &quot; + matchedPatient.getId() + &quot; existingPersonId &quot; + existingPerson.getId(), matchedPatient.getId(), existingPerson.getId()));</span>
+            }
+        }
+<span class="fc" id="L1677">        return Either.right(matchedPatient);</span>
+    }
+
+    /**
+     * Return a list of PKBPerson instances which have a matching given {@code humanUuid}, and therefore are known to be the same human.
+     * &lt;p&gt;
+     * If a blank search parameter is given, an empty list will be returned rather than all PKBPersons which do not have a humanUuid.
+     *
+     * @param humanUuid The humanUuid which groups multiple PKBPerson instances together
+     * @param fields    Which lazies to fetch
+     * @return The list of matching PKBPerson instances. May be empty. Will not be null.
+     */
+    public List&lt;PKBPerson&gt; getPersonsByHumanUuid(String humanUuid, PKBPerson.Lazy... fields) {
+<span class="fc" id="L1690">        PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1691">        return personRemote.getPKBPersonListByHumanUUID(humanUuid, fields);</span>
+    }
+
+    /**
+     * DO NOT USE THIS METHOD.
+     * &lt;p&gt;
+     *
+     * @deprecated Temporary hack to make the GDE patient banner work.
+     */
+    @Deprecated
+    public PKBPersonIdentifierPair getIdentifierPair(long internalPersonId) {
+<span class="fc" id="L1702">        return beanFactory.getPKBPersonBean().getIdentifierPair(internalPersonId);</span>
+    }
+
+    /**
+     * Any ACTIVE user session or OTP will become EXPIRED
+     *
+     * @param personId person id
+     */
+    public void expireUserSessionAndWebappOTP(long personId) {
+<span class="fc" id="L1711">        apiAuthService.expireSessionsForUser(personId);</span>
+<span class="fc" id="L1712">        apiAuthService.expireWebAppOtpForUser(personId);</span>
+<span class="fc" id="L1713">    }</span>
+
+    public void addLogoutListener(Consumer&lt;Long&gt; listener) {
+<span class="fc" id="L1716">        logoutListeners.add(listener);</span>
+<span class="fc" id="L1717">    }</span>
+
+    public List&lt;SocialCareData&gt; getPathfindersData(String nhsNumber, UUID userPublicId, Email userEmail) throws IOException {
+<span class="fc" id="L1720">        List&lt;SocialCareData&gt; socialCareData = pathfindersClient</span>
+<span class="fc" id="L1721">                .getSocialCareData(nhsNumber, userPublicId.toString(), Option.of(userEmail).map(Email::address).getOrNull())</span>
+<span class="fc" id="L1722">                .execute()</span>
+<span class="fc" id="L1723">                .body();</span>
+
+<span class="fc" id="L1725">        NUMBER_OF_ENDPOINTS_WITH_SOCIAL_CARE_DATA.labels(countResponsesWithData(socialCareData)).inc();</span>
+
+<span class="fc" id="L1727">        return socialCareData;</span>
+    }
+
+    public boolean canViewSocialCareData(PKBPerson pkbPerson) {
+<span class="fc" id="L1731">        List&lt;Long&gt; orgIds = config.getSocialCareOrgIds();</span>
+<span class="fc" id="L1732">        List&lt;Long&gt; orgNetworkIds = config.getSocialCareOrgNetworkIds();</span>
+
+<span class="fc" id="L1734">        PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+
+<span class="fc" id="L1736">        return personRemote.isMemberOfAnyOrgOrOrgnetwork(orgIds, orgNetworkIds, pkbPerson);</span>
+    }
+
+    private String countResponsesWithData(List&lt;SocialCareData&gt; socialCareData) {
+<span class="pc bpc" id="L1740" title="1 of 2 branches missed.">        if (socialCareData != null) {</span>
+<span class="fc" id="L1741">            return Long.toString(socialCareData.stream().filter(SocialCareData::hasData).count());</span>
+        }
+
+<span class="nc" id="L1744">        return &quot;0&quot;;</span>
+    }
+
+    public void recordInvitationRepairJob(PKBPerson patient, UUID accountPublicId, Team team) {
+<span class="fc" id="L1748">        ImmutableInvitationRepairJobNew job = ImmutableInvitationRepairJobNew.builder()</span>
+<span class="fc" id="L1749">                .patientId(patient.getId())</span>
+<span class="fc" id="L1750">                .patientAccountPublicId(accountPublicId)</span>
+<span class="fc" id="L1751">                .patientPublicId(patient.getPublicId())</span>
+<span class="fc" id="L1752">                .teamId(team.getId())</span>
+<span class="fc" id="L1753">                .status(InvitationRepairJobStatus.NEW)</span>
+<span class="fc" id="L1754">                .build();</span>
+
+<span class="fc" id="L1756">        personService.addInvitationRepairJob(job);</span>
+<span class="fc" id="L1757">    }</span>
+
+    public Map&lt;UUID, Long&gt; getPersonIdsByPublicIds(Collection&lt;UUID&gt; publicIds) {
+<span class="fc" id="L1760">        return personService.findPersonIdsByListOfPublicIds(publicIds);</span>
+    }
+    
+    public Optional&lt;Long&gt; findPersonIdByPublicId(UUID publicId){
+<span class="fc" id="L1764">        return personService.findPersonIdByPublicId(publicId);</span>
+    }
+    
+    public Long getPersonIdByPublicId(UUID publicId){
+<span class="fc" id="L1768">        return findPersonIdByPublicId(publicId)</span>
+<span class="pc" id="L1769">                .orElseThrow(() -&gt; new RuntimeException(format(&quot;No user matches person public id %s&quot;, publicId)));</span>
+    }
+
+    public Map&lt;ValidNationalId, Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt;&gt; findPKBPersonByValidNationalIds(Set&lt;ValidNationalId&gt; nationalIds, Lazy... fields) {
+<span class="fc" id="L1773">        return beanFactory.getPKBPersonBean().findPKBPersonByValidNationalIds(nationalIds, fields);</span>
+    }
+
+    public void setBirthdayProperty(PKBPerson person, PropertyName propertyName) {
+<span class="fc" id="L1777">        beanFactory.getPKBPersonBean().setChildBirthdayEmailProperty(person, propertyName);</span>
+<span class="fc" id="L1778">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

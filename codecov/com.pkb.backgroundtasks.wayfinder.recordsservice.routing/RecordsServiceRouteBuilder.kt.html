@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RecordsServiceRouteBuilder.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.backgroundtasks.wayfinder.recordsservice.routing</a> &gt; <span class="el_source">RecordsServiceRouteBuilder.kt</span></div><h1>RecordsServiceRouteBuilder.kt</h1><pre class="source lang-java linenums">package com.pkb.backgroundtasks.wayfinder.recordsservice.routing
+
+import com.pkb.backgroundtasks.config.BackgroundTasksProperties
+import com.pkb.backgroundtasks.config.WayfinderRecordsServiceProperties
+import com.pkb.backgroundtasks.routing.DownstreamChangeNotification
+import com.pkb.backgroundtasks.wayfinder.recordsservice.service.RecordsServiceNotifierService
+import com.pkb.common.testcontrol.camel.route.AbstractNamespaceAwareRouteBuilder
+import com.pkb.common.testcontrol.services.PubSubNamespaceService
+import io.micrometer.core.instrument.MeterRegistry
+import org.apache.camel.Exchange
+import org.apache.camel.component.jackson.JacksonDataFormat
+import org.springframework.stereotype.Component
+
+/**
+ * We must nofify the Wayfinder Records Service when we receive appointments for a patient.
+ * We'll send them a notification with the NHS number of the patient if we detected a new appointment in our downstream
+ * / aggregated FHIR storage.
+ *
+ * https://pkbdev.atlassian.net/browse/PHR-9944
+ */
+@Component
+<span class="fc" id="L22">class RecordsServiceRouteBuilder(</span>
+        backgroundTasksProperties: BackgroundTasksProperties,
+<span class="fc" id="L24">        private val pubSubNamespaceService: PubSubNamespaceService,</span>
+<span class="fc" id="L25">        private val recordsServiceNotifierService: RecordsServiceNotifierService,</span>
+<span class="fc" id="L26">        private val meterRegistry: MeterRegistry</span>
+<span class="fc" id="L27">) : AbstractNamespaceAwareRouteBuilder() {</span>
+    companion object {
+        const val INBOUND_NEW_APPOINTMENT = &quot;direct:handleNewAppointment&quot;
+        const val ROUTE_ID = &quot;new-appointment&quot;
+    }
+
+<span class="fc" id="L33">    private val properties: WayfinderRecordsServiceProperties = backgroundTasksProperties.recordsService</span>
+
+    override fun configure() {
+<span class="fc" id="L36">        onException(Exception::class.java)</span>
+<span class="fc" id="L37">                .process { logFailure(it) }</span>
+<span class="fc" id="L38">                .handled(false)</span>
+
+<span class="fc" id="L40">        from(INBOUND_NEW_APPOINTMENT)</span>
+<span class="fc" id="L41">                .routeId(ROUTE_ID)</span>
+<span class="pc bpc" id="L42" title="1 of 2 branches missed.">                .process { if (!properties.enabled) it.isRouteStop = true }</span>
+<span class="fc" id="L43">                .filter { hasNewAppointment(it) }</span>
+<span class="fc" id="L44">                .filter { isForOnboardedTrust(it) }</span>
+<span class="fc" id="L45">                .bean(recordsServiceNotifierService, &quot;findNhsNumber&quot;).id(&quot;$ROUTE_ID-find-nhs-number&quot;)</span>
+<span class="fc" id="L46">                .bean(recordsServiceNotifierService, &quot;buildHttpMessage&quot;).id(&quot;$ROUTE_ID-build-http-message&quot;)</span>
+<span class="fc" id="L47">                .marshal(JacksonDataFormat(RecordsServiceNotifierService.NotificationRequest::class.java))</span>
+<span class="fc" id="L48">                .to(&quot;netty-http:${properties.requestUrl}&quot;).id(&quot;$ROUTE_ID-http-records-service&quot;)</span>
+<span class="fc" id="L49">                .process { logSuccess(it) }</span>
+<span class="fc" id="L50">    }</span>
+
+<span class="nc" id="L52">    override fun camelNamespaceService(): PubSubNamespaceService = pubSubNamespaceService</span>
+
+<span class="nc" id="L54">    override fun throwExceptionForNamespaceMismatch(): Boolean = false</span>
+
+    private fun hasNewAppointment(exchange: Exchange): Boolean {
+<span class="fc" id="L57">        val notification = exchange.message.body as DownstreamChangeNotification</span>
+<span class="fc" id="L58">        val action = notification.attributes[&quot;action&quot;]</span>
+<span class="fc" id="L59">        val resourceType = notification.attributes[&quot;resourceType&quot;]</span>
+<span class="pc bpc" id="L60" title="1 of 4 branches missed.">        return action.equals(&quot;CreateResource&quot;) &amp;&amp; resourceType.equals(&quot;Appointment&quot;)</span>
+    }
+
+    private fun isForOnboardedTrust(exchange: Exchange): Boolean {
+<span class="fc" id="L64">        val odsCode = recordsServiceNotifierService.findOdsCode(exchange.message.body as DownstreamChangeNotification, exchange)</span>
+        //If the ods code is empty, and we haven't thrown an exception, that means we didn't have a source org, and
+        // this is a patient-entered appointment. These DO NOT come across
+<span class="pc bpc" id="L67" title="1 of 8 branches missed.">        return !odsCode.isNullOrEmpty() &amp;&amp; properties.wayfinderOnboardedTrustOdsCodes.contains(odsCode)</span>
+    }
+
+    private fun logSuccess(exchange: Exchange) {
+<span class="fc" id="L71">        meterRegistry.counter(&quot;wayfinder_appointment_records_service_notification_success&quot;).increment()</span>
+<span class="fc" id="L72">        log.info(&quot;NHS number sent to Wayfinder Appointment Records Service for ${exchange.properties[&quot;resourceId&quot;]}&quot;)</span>
+<span class="fc" id="L73">    }</span>
+
+    private fun logFailure(exchange: Exchange) {
+<span class="fc" id="L76">        meterRegistry.counter(&quot;wayfinder_appointment_records_service_notification_error&quot;).increment()</span>
+<span class="fc" id="L77">        log.error(&quot;Failed to send NHS number to Wayfinder Appointment Records Service&quot;, exchange.exception)</span>
+<span class="fc" id="L78">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

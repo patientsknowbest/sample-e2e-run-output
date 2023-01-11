@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PatientIdentifierService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.service</a> &gt; <span class="el_source">PatientIdentifierService.kt</span></div><h1>PatientIdentifierService.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.service
+
+import com.pkb.aggregator.R4Identifier
+import com.pkb.aggregator.R4Patient
+import com.pkb.aggregator.extension.simpleResourceId
+import com.pkb.aggregator.persistence.entity.PatientIdentifierMapEntry
+import com.pkb.aggregator.persistence.entity.embeddable.MapEntryKey
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamIdentifier
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamResource
+import com.pkb.aggregator.persistence.repository.DatabaseStateClearer
+import com.pkb.aggregator.persistence.repository.PatientIdentifierMapRepository
+import com.pkb.aggregator.service.aggregation.toMapEntryKeys
+import org.hl7.fhir.instance.model.api.IDomainResource
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+import java.util.UUID
+import javax.transaction.Transactional
+
+const val NHS_NUMBER_IDENTIFIER_SYSTEM = &quot;https://fhir.nhs.uk/Id/nhs-number&quot;
+
+@Service
+<span class="fc" id="L24">class PatientIdentifierService(</span>
+<span class="fc" id="L25">    private val patientIdentifierMapRepository: PatientIdentifierMapRepository,</span>
+<span class="fc" id="L26">    private val stateClearer: DatabaseStateClearer,</span>
+<span class="fc" id="L27">) : AbstractIdentifierService&lt;R4Patient, PatientIdentifierMapEntry&gt;() {</span>
+
+<span class="fc" id="L29">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    override fun deriveDownstreamResourceId(baseResources: List&lt;IDomainResource&gt;): String {
+
+<span class="pc bpc" id="L33" title="1 of 2 branches missed.">        val resources = baseResources.mapNotNull { it as? R4Patient }</span>
+<span class="pc bpc" id="L34" title="1 of 4 branches missed.">        return deriveDownstreamIdFromNHSNumberIdentifier(resources)</span>
+<span class="fc" id="L35">            ?: deriveDownstreamIdFromUpstreamSource(resources)</span>
+<span class="nc" id="L36">            ?: throw RuntimeException(&quot;No NHS number or source tag in $resources&quot;)</span>
+    }
+
+    fun findByUpstreamResourceIdIn(upstreamResourceIds: Collection&lt;UpstreamResource&gt;) =
+<span class="fc" id="L40">        patientIdentifierMapRepository.findByMapEntryKeyUpstreamResourceIn(</span>
+<span class="fc" id="L41">            upstreamResourceIds.toSet(),</span>
+<span class="fc" id="L42">            PatientIdentifierMapEntry::class.java)</span>
+
+    override fun findMapEntryKeysDownstreamResourceId(downstreamResourceId: String) =
+<span class="fc" id="L45">        patientIdentifierMapRepository.findByDownstreamResourceId(</span>
+<span class="fc" id="L46">            downstreamResourceId,</span>
+            PatientIdentifierMapEntry::class.java
+<span class="fc" id="L48">        ).map { it.mapEntryKey }</span>
+
+<span class="fc" id="L50">    override fun clearState() = stateClearer.invoke {</span>
+<span class="nc" id="L51">        patientIdentifierMapRepository.deleteAll()</span>
+<span class="pc" id="L52">    }</span>
+
+    @Transactional
+    override fun mergeIdentifiers(resource: R4Patient): Int {
+<span class="fc" id="L56">        val downstreamResourceId = resource.simpleResourceId()</span>
+<span class="fc" id="L57">        val newIdentifiers = findNewIdentifiers(downstreamResourceId, resource)</span>
+<span class="fc" id="L58">        return newIdentifiers</span>
+<span class="fc" id="L59">            .map { PatientIdentifierMapEntry(it, downstreamResourceId) }</span>
+<span class="fc bfc" id="L60" title="All 2 branches covered.">            .sumOf {</span>
+<span class="fc" id="L61">                val changed = patientIdentifierMapRepository.safeInsertIdentifier(</span>
+<span class="fc" id="L62">                    it.mapEntryKey.identifier.upstreamIdentifierSystem,</span>
+<span class="fc" id="L63">                    it.mapEntryKey.identifier.upstreamIdentifierValue,</span>
+<span class="fc" id="L64">                    it.mapEntryKey.upstreamResource.upstreamSource,</span>
+<span class="fc" id="L65">                    it.mapEntryKey.upstreamResource.upstreamResourceId,</span>
+<span class="fc" id="L66">                    it.downstreamResourceId,</span>
+                )
+<span class="fc bfc" id="L68" title="All 2 branches covered.">                if (changed == 0) {</span>
+<span class="fc" id="L69">                    log.info(&quot;Skipped inserting identifier of system {} for downstream resource {}&quot;,</span>
+<span class="fc" id="L70">                        it.mapEntryKey.identifier.upstreamIdentifierSystem, it.downstreamResourceId)</span>
+                }
+<span class="fc" id="L72">                changed</span>
+            }
+    }
+
+    override fun findMapEntryKeys(resource: R4Patient): List&lt;MapEntryKey&gt; {
+<span class="fc" id="L77">        return resource.identifier.flatMap { it.toMapEntryKeys() }</span>
+    }
+
+    fun findByUpstreamIdentifierIn(identifiers: List&lt;R4Identifier&gt;) =
+<span class="fc" id="L81">        patientIdentifierMapRepository.findByMapEntryKeyIdentifierIn(</span>
+<span class="fc" id="L82">            identifiers.map { UpstreamIdentifier(it.system, it.value) },</span>
+            PatientIdentifierMapEntry::class.java
+<span class="fc" id="L84">        )</span>
+
+    fun findSearchIdentifiers(upstreamSystem: String, upstreamValue: String): List&lt;PatientIdentifierMapEntry&gt; {
+<span class="nc" id="L87">        return patientIdentifierMapRepository.findAllByUpstreamIdentifiers(</span>
+<span class="nc" id="L88">            listOf(UpstreamIdentifier(upstreamSystem, upstreamValue)), PatientIdentifierMapEntry::class.java)</span>
+    }
+
+    private fun deriveDownstreamIdFromNHSNumberIdentifier(baseResources: List&lt;R4Patient&gt;) =
+<span class="fc" id="L92">        baseResources</span>
+<span class="fc" id="L93">            .flatMap { it.identifier }</span>
+<span class="fc bfc" id="L94" title="All 4 branches covered.">            .find { it.system == NHS_NUMBER_IDENTIFIER_SYSTEM }</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">            ?.let { UUID.nameUUIDFromBytes(&quot;pkb-internal-${it.system}/${it.value}&quot;.toByteArray()) }</span>
+<span class="pc bpc" id="L96" title="1 of 2 branches missed.">            ?.let { &quot;$FHIR_TYPE_PATIENT/$it&quot; }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

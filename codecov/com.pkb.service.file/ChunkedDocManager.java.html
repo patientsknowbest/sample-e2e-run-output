@@ -1,0 +1,401 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ChunkedDocManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.file</a> &gt; <span class="el_source">ChunkedDocManager.java</span></div><h1>ChunkedDocManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.file;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.document.Document;
+import com.pkb.document.entity.Attachment;
+import com.pkb.document.entity.ChunkedDocDTO;
+import com.pkb.document.entity.DocAttach;
+import com.pkb.document.entity.DocumentMetadata;
+import com.pkb.document.entity.DocumentsByIdAndAccount;
+import com.pkb.document.entity.EncryptionMetadata;
+import com.pkb.document.entity.EncryptionMetadataWithAlgorithm;
+import com.pkb.document.entity.UploadInProgress;
+import com.pkb.exception.PKBPluginException;
+import com.pkb.mappers.DocAttachToAttachmentMapper;
+import com.pkb.repository.legacy.LegacyDocAttachRepository;
+import com.pkb.repository.legacy.LegacyUploadInProgressRepository;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.DbUtil;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.persistence.NonUniqueResultException;
+import java.lang.invoke.MethodHandles;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.util.EncryptedDocumentMapperHelper.MEDIA_TYPE_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.genericMetadata;
+import static java.util.Collections.singleton;
+import static java.util.Collections.singletonList;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.mapping;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+/**
+ * Manager class for basic operations on documents which are uploaded/downloaded in chunks
+ *
+ * @author pravina
+ */
+@SuppressWarnings(&quot;ClassWithTooManyMethods&quot;)
+public class ChunkedDocManager extends TransactionManager {
+
+<span class="fc" id="L61">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+    private static final String CHUNKED_DOC = &quot;chunkedDoc&quot;;
+
+    private final LegacyDocAttachRepository docAttachRepository;
+    private final LegacyUploadInProgressRepository uploadInProgressRepository;
+    private final DocAttachToAttachmentMapper attachmentMapper;
+    private final DocumentManager documentManager;
+
+    public ChunkedDocManager(PhrConfig config,
+                             TolvenBeanFactory beanFactory,
+                             DateTimeService dateTimeService,
+                             UUIDProvider uuidProvider,
+                             LegacyDocAttachRepository docAttachRepository,
+                             LegacyUploadInProgressRepository uploadInProgressRepository,
+                             DocAttachToAttachmentMapper attachmentMapper,
+                             DocumentManager documentManager) {
+<span class="fc" id="L77">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L78">        this.docAttachRepository = docAttachRepository;</span>
+<span class="fc" id="L79">        this.uploadInProgressRepository = uploadInProgressRepository;</span>
+<span class="fc" id="L80">        this.attachmentMapper = attachmentMapper;</span>
+<span class="fc" id="L81">        this.documentManager = documentManager;</span>
+<span class="fc" id="L82">    }</span>
+
+    /**
+     * Get chunk of the document
+     */
+    public ChunkedDocDTO getChunk(@NotNull LoggedInEHRRequestContext context, UUID chunkId) {
+<span class="fc" id="L88">        Document document = documentManager.retrieve(chunkId)</span>
+<span class="pc" id="L89">                .orElseThrow(() -&gt; new RuntimeException(&quot;Error while getting chunk contents for id-&quot; + chunkId));</span>
+
+        // throws DecryptionFailedException if we can't decrypt it
+<span class="fc" id="L92">        byte[] content = beanFactory.getEhrRemote().decryptDoc(document, context).plainText();</span>
+
+<span class="fc" id="L94">        ChunkedDocDTO chunkedDocDTO = new ChunkedDocDTO();</span>
+<span class="fc" id="L95">        chunkedDocDTO.setMetadataId(chunkId);</span>
+<span class="fc" id="L96">        chunkedDocDTO.setMediaType(MEDIA_TYPE_PROVIDER.apply(document));</span>
+<span class="fc" id="L97">        chunkedDocDTO.setContent(content);</span>
+<span class="fc" id="L98">        return chunkedDocDTO;</span>
+    }
+
+    public Optional&lt;DocumentMetadata&gt; getMetadata(UUID id) {
+<span class="fc" id="L102">        return documentManager.getMetadata(id);</span>
+    }
+
+    public Map&lt;UUID, DocumentMetadata&gt; getMetadata(Collection&lt;UUID&gt; ids) {
+<span class="fc" id="L106">        return documentManager.getMetadata(ids);</span>
+    }
+
+    /**
+     * Add chunk of data. This version of the addChunk method allows the
+     * caller to specify the user Id and the account Id. This is helpful
+     * for HL7UploadAction, where there is no active AccountUser
+     * associated with the activity. In this instance, HL7UploadAction can
+     * pass in the userId of the target person instead of the sending user.
+     *
+     * @param requestContext context for logging, decryption, etc
+     * @param chunkedDocDTO  The data to add.
+     * @param userId         The user Id of the person who's account the data should
+     *                       be added to.
+     * @param accountId      The account Id of the person who's account the data
+     *                       should be added to.
+     * @return The Id of the chunked document.
+     */
+    public UUID addChunk(EHRRequestContext requestContext, ChunkedDocDTO chunkedDocDTO, Long userId, Long accountId) {
+<span class="fc" id="L125">        var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L126">        return transactional(() -&gt; {</span>
+            UUID documentId;
+            try {
+<span class="fc" id="L129">                var maybeParentId = Optional.ofNullable(chunkedDocDTO.getParentMetadataId());</span>
+<span class="fc" id="L130">                var maybeParentPartialMetadata = maybeParentId.flatMap(documentManager::getDatapointLevelEncryptionMetadata);</span>
+
+                Document document;
+<span class="fc bfc" id="L133" title="All 4 branches covered.">                if (maybeParentPartialMetadata.map(EncryptionMetadataWithAlgorithm::isDatapointLevelEncrypted).orElse(false) &amp;&amp; requestContext instanceof LoggedInEHRRequestContext) {</span>
+<span class="fc" id="L134">                    var parentPartialMetadata = maybeParentPartialMetadata.get();</span>
+<span class="fc" id="L135">                    document = ehrBean.createEncryptedDocument(</span>
+                            (LoggedInEHRRequestContext) requestContext,
+<span class="fc" id="L137">                            chunkedDocDTO.getContent(),</span>
+<span class="fc" id="L138">                            accountId,</span>
+<span class="fc" id="L139">                            genericMetadata(chunkedDocDTO.getMediaType(), userId, CHUNKED_DOC).toJavaMap(),</span>
+<span class="fc" id="L140">                            parentPartialMetadata.datapointLevelKeyId(),</span>
+<span class="fc" id="L141">                            parentPartialMetadata.algorithm());</span>
+<span class="fc" id="L142">                } else {</span>
+<span class="fc" id="L143">                    document = ehrBean.createDocument(</span>
+                            requestContext,
+<span class="fc" id="L145">                            chunkedDocDTO.getContent(),</span>
+<span class="fc" id="L146">                            accountId,</span>
+<span class="fc" id="L147">                            genericMetadata(chunkedDocDTO.getMediaType(), userId, CHUNKED_DOC).toJavaMap());</span>
+                }
+
+<span class="fc" id="L150">                documentId = documentManager.create(document);</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">                if (maybeParentId.isPresent()) {</span>
+<span class="fc" id="L152">                    var parentId = maybeParentId.get();</span>
+                    // create attachment link
+<span class="fc" id="L154">                    Instant now = dateTimeService.now();</span>
+<span class="fc" id="L155">                    DocAttach docAttach = new DocAttach(accountId, Long.toString(userId), parentId, /*parentEHRDataId*/null, documentId, chunkedDocDTO.getMediaType(), now);</span>
+<span class="fc" id="L156">                    docAttach.setUploadTime(Date.from(now));</span>
+<span class="fc" id="L157">                    docAttachRepository.save(docAttach);</span>
+<span class="fc" id="L158">                    updateUploadInProgress(parentId);</span>
+<span class="fc" id="L159">                } else {</span>
+<span class="fc" id="L160">                    addUploadInProgress(documentId, accountId);</span>
+                }
+<span class="nc" id="L162">            } catch (Exception e) {</span>
+<span class="nc" id="L163">                throw new PKBPluginException(&quot;failed adding chunk for person &quot; + userId + &quot;, account &quot; + accountId, e);</span>
+<span class="fc" id="L164">            }</span>
+<span class="fc" id="L165">            return documentId;</span>
+        });
+    }
+
+    /**
+     * Add chunk for a given menu_data item or independent
+     *
+     * @param requestContext context for logging, decryption, etc
+     * @param chunkedDocDTO  the chunk to add
+     * @return id of the chunked document
+     */
+    public UUID addChunk(LoggedInEHRRequestContext requestContext, ChunkedDocDTO chunkedDocDTO, Long accountId) {
+<span class="fc" id="L177">        return addChunk(requestContext, chunkedDocDTO, requestContext.getAccessingUserId(), accountId);</span>
+    }
+
+    /**
+     * Get all the chunks of the parent document id
+     *
+     * @param parentDocId document id of the parent document
+     * @return List of chunk document ids
+     */
+    public List&lt;UUID&gt; getChunkIds(UUID parentDocId) {
+        try {
+<span class="fc" id="L188">            List&lt;UUID&gt; chunkIds = findAttachmentIds(List.of(parentDocId)).collect(toList());</span>
+<span class="fc" id="L189">            LOGGER.info(&quot;Total chunks-{}&quot;, chunkIds.size());</span>
+<span class="fc" id="L190">            return chunkIds;</span>
+<span class="nc" id="L191">        } catch (Exception e) {</span>
+<span class="nc" id="L192">            throw new PKBPluginException(&quot;Exception while gettig chunk ids for parent doc id&quot; + parentDocId, e);</span>
+        }
+    }
+
+    /**
+     * Delete the chunk of the document
+     *
+     * @param chunkId the {@link UUID} of the chunk to delete
+     */
+    public void deleteDoc(UUID chunkId) {
+<span class="nc" id="L202">        List&lt;UUID&gt; idsToDelete = new LinkedList&lt;&gt;();</span>
+<span class="nc" id="L203">        idsToDelete.add(chunkId);</span>
+<span class="nc" id="L204">        findAttachmentIds(singletonList(chunkId)).forEach(idsToDelete::add);</span>
+<span class="nc" id="L205">        documentManager.delete(idsToDelete);</span>
+<span class="nc" id="L206">    }</span>
+
+    /**
+     * Get attachment details.
+     *
+     * @param docAttachId The attachment id to get
+     * @return {@link DocAttach} if exists, {@link Optional#empty()} otherwise.
+     */
+    public Optional&lt;DocAttach&gt; getAttachmentDetails(Long docAttachId) {
+<span class="fc" id="L215">        return docAttachRepository.findById(docAttachId);</span>
+    }
+
+    /**
+     * Remove an attachment details.
+     */
+    public void deleteAttachmentDetails(Long docAttachId) {
+<span class="nc" id="L222">        docAttachRepository.deleteById(docAttachId);</span>
+<span class="nc" id="L223">    }</span>
+
+    /**
+     * @return new parent document IDs mapped to target account IDs, mapped to original parent document IDs
+     */
+    public DocumentsByIdAndAccount copyDocuments(@NotNull LoggedInEHRRequestContext context, Collection&lt;UUID&gt; parentDocumentIds, long currentUserId, Set&lt;Long&gt; targetAccountIds, boolean onlyDplEncrypted) {
+<span class="fc" id="L229">        DocumentsByIdAndAccount.Builder builder = DocumentsByIdAndAccount.builder();</span>
+<span class="fc" id="L230">        Map&lt;UUID, EncryptionMetadata&gt; parents = documentManager.findEncryptionMetadata(parentDocumentIds);</span>
+
+<span class="fc" id="L232">        Set&lt;UUID&gt; dplEncryptedParentIds = parents.entrySet().stream()</span>
+<span class="fc" id="L233">                .filter(e -&gt; e.getValue().isDatapointLevelEncrypted())</span>
+<span class="fc" id="L234">                .map(Map.Entry::getKey)</span>
+<span class="fc" id="L235">                .collect(Collectors.toSet());</span>
+
+<span class="fc" id="L237">        List&lt;UUID&gt; dplKeyIds = documentManager.findDplKeyIds(dplEncryptedParentIds);</span>
+<span class="fc" id="L238">        beanFactory.getEhrRemote().shareEncryptedDocument(context, dplKeyIds, targetAccountIds);</span>
+<span class="fc" id="L239">        dplEncryptedParentIds.forEach(docId -&gt; targetAccountIds.forEach(accountId -&gt; builder.add(docId, accountId, docId)));</span>
+
+<span class="fc bfc" id="L241" title="All 2 branches covered.">        if (!onlyDplEncrypted) {</span>
+<span class="fc" id="L242">            parents.entrySet().stream()</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">                    .filter(e -&gt; !e.getValue().isDatapointLevelEncrypted())</span>
+<span class="fc" id="L244">                    .filter(e -&gt; e.getValue().isEncrypted())</span>
+<span class="fc" id="L245">                    .forEach(e -&gt; {</span>
+<span class="fc" id="L246">                        UUID parentDocId = e.getKey();</span>
+<span class="fc" id="L247">                        List&lt;UUID&gt; chunkIds = getChunkIds(parentDocId);</span>
+<span class="fc" id="L248">                        targetAccountIds.forEach(targetAccountId -&gt; {</span>
+<span class="fc" id="L249">                            UUID parentId = copyChunkOldMethod(context, parentDocId, currentUserId, targetAccountId, null);</span>
+<span class="fc" id="L250">                            chunkIds.forEach(chunkId -&gt; copyChunkOldMethod(context, chunkId, currentUserId, targetAccountId, parentId));</span>
+<span class="fc" id="L251">                            builder.add(parentDocId, targetAccountId, parentId);</span>
+<span class="fc" id="L252">                        });</span>
+<span class="fc" id="L253">                    });</span>
+        }
+
+<span class="fc" id="L256">        return builder.build();</span>
+    }
+
+    public List&lt;Attachment&gt; findAttachmentsAsAttachment(long ehrDataId) {
+<span class="fc" id="L260">        return doFindAttachments(singleton(ehrDataId))</span>
+<span class="fc" id="L261">                .map(attachmentMapper::map)</span>
+<span class="fc" id="L262">                .collect(toList());</span>
+    }
+
+    public Map&lt;Long, List&lt;Attachment&gt;&gt; findAttachmentsAsAttachment(Collection&lt;Long&gt; ehrDataIds) {
+<span class="fc" id="L266">        return doFindAttachments(ehrDataIds).collect(groupingBy(DocAttach::getMenuDataId, mapping(attachmentMapper::map, toList())));</span>
+    }
+
+    public Long getAttachmentCount(long menuDataId) {
+<span class="fc" id="L270">        return docAttachRepository.countByMenuDataId(menuDataId);</span>
+    }
+
+    public long createAttachment(long ehrDataId, UUID attachedDocumentId, Attachment attachment, long currentUserUid, long accountId) {
+<span class="fc" id="L274">        var docAttach = new DocAttach(accountId,</span>
+<span class="fc" id="L275">                Long.toString(currentUserUid),</span>
+                null,
+<span class="fc" id="L277">                ehrDataId,</span>
+                attachedDocumentId,
+<span class="fc" id="L279">                attachment.getMediaType(),</span>
+<span class="fc" id="L280">                dateTimeService.now());</span>
+<span class="fc" id="L281">        docAttach.setDescription(attachment.getFilename());</span>
+<span class="fc" id="L282">        return transactional(() -&gt; {</span>
+<span class="fc" id="L283">            var id = docAttachRepository.save(docAttach).getId();</span>
+            // the link to menu_data and document has been formed so remove the document id from upload in progress table
+<span class="fc" id="L285">            deleteUploadInProgress(attachedDocumentId);</span>
+<span class="fc" id="L286">            return id;</span>
+        });
+    }
+
+    public void createAttachments(long ehrDataId, Collection&lt;Attachment&gt; attachments, long currentUserUid, long accountId) {
+<span class="fc bfc" id="L291" title="All 2 branches covered.">        if (isEmpty(attachments)) {</span>
+<span class="fc" id="L292">            return;</span>
+        }
+<span class="fc" id="L294">        var now = dateTimeService.now();</span>
+<span class="fc" id="L295">        var currentUserIdString = Long.toString(currentUserUid);</span>
+<span class="fc" id="L296">        var attachedDocumentMetadataIds = new ArrayList&lt;UUID&gt;();</span>
+<span class="fc" id="L297">        transactional(() -&gt; {</span>
+<span class="fc" id="L298">            attachments.forEach(attachment -&gt; {</span>
+<span class="fc" id="L299">                var docMetadataId = attachment.getDocMetadataId();</span>
+<span class="fc" id="L300">                attachedDocumentMetadataIds.add(docMetadataId);</span>
+<span class="fc" id="L301">                var docAttach = new DocAttach(accountId, currentUserIdString, null, ehrDataId,</span>
+<span class="fc" id="L302">                        docMetadataId, attachment.getMediaType(), now);</span>
+<span class="fc" id="L303">                docAttach.setDescription(attachment.getFilename());</span>
+<span class="fc" id="L304">                docAttachRepository.save(docAttach);</span>
+<span class="fc" id="L305">            });</span>
+<span class="fc" id="L306">            deleteUploadInProgress(attachedDocumentMetadataIds);</span>
+<span class="fc" id="L307">        });</span>
+<span class="fc" id="L308">    }</span>
+
+    /**
+     * Delete the upload in progress record corresponding to the document id
+     */
+    public void deleteUploadInProgress(UUID documentId) {
+<span class="fc" id="L314">        var uploadInProgresses = uploadInProgressRepository.findUploadInProgressesByDocumentMetadataId(documentId);</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">        if (isEmpty(uploadInProgresses)) {</span>
+<span class="fc" id="L316">            return;</span>
+        }
+<span class="fc" id="L318">        uploadInProgressRepository.delete(uploadInProgresses.get(0));</span>
+<span class="fc" id="L319">    }</span>
+
+    public UUID copyDocument(@NotNull LoggedInEHRRequestContext context, UUID documentId, long currentUserId, long targetAccountId) {
+<span class="fc" id="L322">        Map&lt;UUID, EncryptionMetadata&gt; chunksWithMetadata = documentManager.findChunksWithEncryptionMetadata(documentId);</span>
+
+<span class="fc" id="L324">        List&lt;Map.Entry&lt;UUID, EncryptionMetadata&gt;&gt; parentDocMetadata = chunksWithMetadata.entrySet().stream()</span>
+<span class="fc" id="L325">                .filter(e -&gt; e.getKey().equals(documentId))</span>
+<span class="fc" id="L326">                .collect(toList());</span>
+
+<span class="pc bpc" id="L328" title="1 of 2 branches missed.">        if (parentDocMetadata.size() &gt; 1) {</span>
+<span class="nc" id="L329">            throw new RuntimeException(&quot;Error while getting chunk contents for id-&quot; + documentId + &quot;: multiple chunks found with parent document ID&quot;);</span>
+        }
+
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">        if (parentDocMetadata.isEmpty()) {</span>
+<span class="nc" id="L333">            throw new RuntimeException(&quot;Error while getting chunk contents for id-&quot; + documentId + &quot;: no chunks found with parent document ID&quot;);</span>
+        }
+
+<span class="fc bfc" id="L336" title="All 2 branches covered.">        if (parentDocMetadata.get(0).getValue().isEncrypted()) {</span>
+<span class="fc bfc" id="L337" title="All 2 branches covered.">            if (parentDocMetadata.get(0).getValue().isDatapointLevelEncrypted()) {</span>
+<span class="fc" id="L338">                List&lt;UUID&gt; dplKeyIds = chunksWithMetadata.values().stream()</span>
+<span class="fc" id="L339">                        .map(EncryptionMetadata::datapointLevelKeyId)</span>
+<span class="fc" id="L340">                        .collect(toList());</span>
+<span class="fc" id="L341">                beanFactory.getEhrRemote().shareEncryptedDocument(context, dplKeyIds, singleton(targetAccountId));</span>
+<span class="fc" id="L342">                return documentId;</span>
+            } else {
+<span class="fc" id="L344">                List&lt;UUID&gt; chunkIds = getChunkIds(documentId);</span>
+<span class="fc" id="L345">                UUID parentId = copyChunkOldMethod(context, documentId, currentUserId, targetAccountId, null);</span>
+<span class="fc" id="L346">                chunkIds.forEach(chunkId -&gt; copyChunkOldMethod(context, chunkId, currentUserId, targetAccountId, parentId));</span>
+<span class="fc" id="L347">                return parentId;</span>
+            }
+        }
+
+<span class="fc" id="L351">        return documentId;</span>
+    }
+
+    public List&lt;UUID&gt; getAttachedDocumentIds(Collection&lt;Long&gt; messageIds) {
+<span class="fc" id="L355">        return docAttachRepository.getAttachedDocumentIds(messageIds);</span>
+    }
+
+    private void deleteUploadInProgress(Collection&lt;UUID&gt; documentIds) {
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">        if (isEmpty(documentIds)) {</span>
+<span class="nc" id="L360">            return;</span>
+        }
+<span class="fc" id="L362">        DbUtil.executeInBatches(documentIds, uploadInProgressRepository::deleteUploadInProgressByDocumentMetadataIdIn);</span>
+<span class="fc" id="L363">    }</span>
+
+    private UUID copyChunkOldMethod(@NotNull LoggedInEHRRequestContext context, UUID documentId, long currentUserId, long targetAccountId, UUID parentId) {
+<span class="fc" id="L366">        ChunkedDocDTO chunkedDocDTO = getChunk(context, documentId);</span>
+<span class="fc" id="L367">        chunkedDocDTO.setMetadataId(null);</span>
+<span class="fc" id="L368">        chunkedDocDTO.setParentMetadataId(parentId);</span>
+<span class="fc" id="L369">        return addChunk(context, chunkedDocDTO, currentUserId, targetAccountId);</span>
+    }
+
+    private Stream&lt;UUID&gt; findAttachmentIds(Collection&lt;UUID&gt; parentDocumentIds) {
+<span class="fc" id="L373">        return DbUtil.getInStreamOfBatches(parentDocumentIds, docAttachRepository::findUuidsByParentDocumentMetadataIdIn);</span>
+    }
+
+    private Stream&lt;DocAttach&gt; doFindAttachments(Collection&lt;Long&gt; ehrDataIds) {
+<span class="fc" id="L377">        return DbUtil.getInStreamOfBatches(ehrDataIds, docAttachRepository::findDocAttachesByMenuDataIdIn);</span>
+    }
+
+    private void addUploadInProgress(UUID documentId, Long accountId) {
+<span class="fc" id="L381">        var inProgress = new UploadInProgress();</span>
+<span class="fc" id="L382">        inProgress.setAccountId(accountId);</span>
+<span class="fc" id="L383">        inProgress.setDocumentMetadataId(documentId);</span>
+<span class="fc" id="L384">        inProgress.setLastUploadedAt(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L385">        uploadInProgressRepository.save(inProgress);</span>
+<span class="fc" id="L386">    }</span>
+
+    private void updateUploadInProgress(UUID documentId) {
+<span class="fc" id="L389">        var uploadInProgresses = uploadInProgressRepository.findUploadInProgressesByDocumentMetadataId(documentId);</span>
+<span class="fc bfc" id="L390" title="All 2 branches covered.">        if (isEmpty(uploadInProgresses)) {</span>
+<span class="fc" id="L391">            return;</span>
+        }
+<span class="pc bpc" id="L393" title="1 of 2 branches missed.">        if (uploadInProgresses.size() &gt; 1) {</span>
+<span class="nc" id="L394">            throw new NonUniqueResultException(&quot;More than one upload in progress for &quot; + documentId.toString());</span>
+        }
+<span class="fc" id="L396">        var inProgress = uploadInProgresses.get(0);</span>
+<span class="fc" id="L397">        inProgress.setLastUploadedAt(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L398">        uploadInProgressRepository.save(inProgress);</span>
+<span class="fc" id="L399">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

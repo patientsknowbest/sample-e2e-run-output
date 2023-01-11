@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MedicationMigrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.medication.entity</a> &gt; <span class="el_source">MedicationMigrator.java</span></div><h1>MedicationMigrator.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: MedicationMigrator.java 03-Feb-2015 5:43:38 pm pravina$
+//
+//---------------------------------------------------------------------------
+
+package com.pkb.medication.entity;
+
+import com.pkb.PrivateIdMigrator;
+import com.pkb.annotation.EHRMigratorBase;
+import com.pkb.annotation.EHRVersionMigrator;
+import com.pkb.app.entity.DTOMapping;
+import com.pkb.app.entity.EHRData;
+import com.pkb.coding.entity.CodeableConcept;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.util.Constants;
+import com.pkb.util.ValueMappingUtil;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.Date;
+import java.util.Locale;
+import java.util.Map;
+
+import static org.apache.commons.lang3.StringUtils.isNotEmpty;
+
+/**
+ * version 1 : migrate the startDate , event Date , order Date of Medication which is an encrypted string to encrypted date
+ * version 2 : migrate editor id to source.personId
+ * version 3 : migrate encrypted doseUnit as doseUnitsId
+ * version 4 : migrate end Date which were stored as encrypted in date02
+ * version 5 : migrate to coded data (medication and dose unit)
+ *
+ * @author pravina
+ */
+<span class="fc" id="L41">public class MedicationMigrator extends EHRMigratorBase {</span>
+
+<span class="fc" id="L43">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String EDITOR_ID = &quot;editorId&quot;;
+
+    private static final String DOSE_UNIT = &quot;doseUnit&quot;;
+    private static final String DOSE_UNITS_ID = &quot;doseUnitsId&quot;;
+    private static final String DOSE_UNIT_PKB_ID = &quot;doseUnitPkbId&quot;;
+
+    private static final String ORDER_DATE = &quot;orderDate&quot;;
+    private static final String EVENT_DATE = &quot;eventDate&quot;;
+    private static final String START_DATE = &quot;startDate&quot;;
+    private static final String END_DATE = &quot;endDate&quot;;
+
+    private static final String DESCRIPTION = &quot;description&quot;;
+    private static final String MEDICATION = &quot;medication&quot;;
+
+    private static final String DOSE_UNIT_DISPLAY_STR = &quot;doseUnitDisplayStr&quot;;
+
+    private static final String STATUS = &quot;status&quot;;
+<span class="fc" id="L62">    private static final Map&lt;String, String&gt; STATUS_MAP = Map.of(</span>
+            &quot;PENDING&quot;, &quot;ACTIVE&quot;,
+            &quot;NOTED&quot;, &quot;ACTIVE&quot;,
+            &quot;APPROVED&quot;, &quot;ACTIVE&quot;,
+            &quot;EDITED&quot;, &quot;ACTIVE&quot;,
+            &quot;DELETED&quot;, &quot;INACTIVE&quot;
+    );
+
+    // Format used for storing dates in menuData as strings, otherwise
+    // tolven calls deprecated and dangerous Date.toString() as dates come in
+<span class="fc" id="L72">    private static final DateTimeFormatter FORMATTER = DateTimeFormatter.ofPattern(&quot;yyyy-MM-dd'T'HH:mm:ss&quot;).withLocale(Locale.UK).withZone(Constants.APPLICATION_TZ);</span>
+
+
+<span class="fc" id="L75">    private static final Migrators MIGRATORS = Migrators.of(</span>
+<span class="fc" id="L76">            EHRVersionMigrator.of(MedicationMigrator::migrateDates, 1),</span>
+<span class="fc" id="L77">            EHRVersionMigrator.of(MedicationMigrator::migrateSource, 2),</span>
+<span class="fc" id="L78">            EHRVersionMigrator.of(MedicationMigrator::migrateDoseUnit, 3),</span>
+<span class="fc" id="L79">            EHRVersionMigrator.of(MedicationMigrator::migrateEncryptedEndDate, 4),</span>
+<span class="fc" id="L80">            EHRVersionMigrator.of(MedicationMigrator::migrateToCodedData, 5),</span>
+<span class="fc" id="L81">            PrivateIdMigrator.migratorFor(Medication.class, &quot;medicationCodingReceivedId&quot;,  &quot;string05&quot;, 6)</span>
+    );
+
+    @Override
+    public Migrators getMigrators() {
+<span class="fc" id="L86">        return MIGRATORS;</span>
+    }
+
+
+    private static void migrateDates(EHRData ehr) {
+<span class="nc" id="L91">        migrateEncrStringToDate(ehr, START_DATE);</span>
+<span class="nc" id="L92">        migrateEncrStringToDate(ehr, EVENT_DATE);</span>
+<span class="nc" id="L93">        Date eventDate = (Date) ehr.getEncryptedField(EVENT_DATE);</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">        if (eventDate != null) {</span>
+<span class="nc" id="L95">            ehr.setEnteredDate((Date) ehr.getEncryptedField(EVENT_DATE));</span>
+        }
+<span class="nc" id="L97">        migrateEncrStringToDate(ehr, ORDER_DATE);</span>
+<span class="nc" id="L98">    }</span>
+
+    private static void migrateEncrStringToDate(EHRData ehr, String fieldName) {
+<span class="nc" id="L101">        Object obj = ehr.getEncryptedField(fieldName);</span>
+        // migrate only if it is a String
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        if (obj instanceof String) {</span>
+<span class="nc" id="L104">            String dateStr = (String) obj;</span>
+<span class="nc" id="L105">            Instant date = null;</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">            if (isNotEmpty(dateStr)) {</span>
+                try {
+<span class="nc" id="L108">                    date = DateTimeService.parseToInstantBackwardCompatibleWayStatic(dateStr, FORMATTER)._1;</span>
+<span class="nc" id="L109">                } catch (Exception e) {</span>
+<span class="nc" id="L110">                    LOGGER.error(&quot;Couldn't migrate string {} to date!&quot;, fieldName, e);</span>
+<span class="nc" id="L111">                }</span>
+            }
+<span class="nc bnc" id="L113" title="All 2 branches missed.">            ehr.setEncryptedField(fieldName, date == null ? null : Date.from(date));</span>
+        }
+<span class="nc" id="L115">    }</span>
+
+    private static void migrateSource(EHRData ehr) {
+<span class="nc" id="L118">        Object obj = ehr.getEncryptedField(EDITOR_ID);</span>
+        // migrate only if it is a String
+<span class="nc bnc" id="L120" title="All 2 branches missed.">        if (obj instanceof String) {</span>
+<span class="nc" id="L121">            String editorId = (String) obj;</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">            if (!StringUtils.isEmpty(editorId)) {</span>
+<span class="nc" id="L123">                ehr.setSourcePersonId(Long.parseLong(editorId));</span>
+            }
+        }
+<span class="nc" id="L126">    }</span>
+
+    private static void migrateDoseUnit(EHRData ehr) {
+<span class="nc" id="L129">        Object obj = ehr.getEncryptedField(DOSE_UNIT);</span>
+        // migrate only if it is a String
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        if (obj instanceof String) {</span>
+<span class="nc" id="L132">            String doseUnitIdStr = (String) obj;</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">            if (!StringUtils.isEmpty(doseUnitIdStr)) {</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">                if (StringUtils.isNumeric(doseUnitIdStr)) {</span>
+<span class="nc" id="L135">                    ehr.setEncryptedField(DOSE_UNITS_ID, Long.parseLong(doseUnitIdStr));</span>
+                } else {
+                    // This conversion is for very old records where the doseUnitId was a string not an Id (Long)
+<span class="nc" id="L138">                    Long doseUnitId = null;</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">                    if (doseUnitIdStr.equals(&quot;mg&quot;)) {</span>
+<span class="nc" id="L140">                        doseUnitId = 1L;//1,mg</span>
+                    }
+<span class="nc bnc" id="L142" title="All 2 branches missed.">                    if (doseUnitIdStr.equals(&quot;ml&quot;)) {</span>
+<span class="nc" id="L143">                        doseUnitId = 2L;//2,ml</span>
+                    }
+<span class="nc bnc" id="L145" title="All 2 branches missed.">                    if (doseUnitIdStr.equals(&quot;units&quot;)) {</span>
+<span class="nc" id="L146">                        doseUnitId = 3L;//3,units</span>
+                    }
+<span class="nc bnc" id="L148" title="All 2 branches missed.">                    if (doseUnitIdStr.equals(&quot;tablets&quot;)) {</span>
+<span class="nc" id="L149">                        doseUnitId = 4L;//4,tablets</span>
+                    }
+<span class="nc bnc" id="L151" title="All 2 branches missed.">                    if (doseUnitIdStr.equals(&quot;mcg&quot;)) {</span>
+<span class="nc" id="L152">                        doseUnitId = 5L;//1,mcg</span>
+                    }
+
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                    if (doseUnitId != null) {</span>
+<span class="nc" id="L156">                        ehr.setEncryptedField(DOSE_UNITS_ID, doseUnitId);</span>
+                    } else {
+<span class="nc" id="L158">                        LOGGER.info(&quot;Medication migration : could not convert doseUnit {}&quot;, doseUnitIdStr);</span>
+                    }
+                }
+            }
+        }
+<span class="nc" id="L163">    }</span>
+
+    private static void migrateEncryptedEndDate(EHRData ehr) {
+<span class="nc" id="L166">        Object obj = ehr.getEncryptedField(END_DATE);</span>
+        // migrate only if it is a String
+<span class="nc bnc" id="L168" title="All 2 branches missed.">        if (obj instanceof String) {</span>
+<span class="nc" id="L169">            String dateStr = (String) obj;</span>
+<span class="nc" id="L170">            Instant date = null;</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">            if (isNotEmpty(dateStr)) {</span>
+                try {
+<span class="nc" id="L173">                    date = DateTimeService.parseToInstantBackwardCompatibleWayStatic(dateStr, FORMATTER)._1;</span>
+<span class="nc" id="L174">                } catch (Exception e) {</span>
+<span class="nc" id="L175">                    LOGGER.error(&quot;Couldn't migrate string end date to date!&quot;, e);</span>
+<span class="nc" id="L176">                }</span>
+            }
+<span class="nc bnc" id="L178" title="All 2 branches missed.">            ehr.setDate02(date == null ? null : Date.from(date));// end date is now mapped to unencrypted field date02</span>
+        }
+<span class="nc" id="L180">    }</span>
+
+    private static void migrateToCodedData(EHRData ehr) {
+        // String description -&gt; CodeableConcept medication
+        // String doseUnit (old junk data, already migrated out, but String left in field...) -&gt; null
+        // Long doseUnitsId &amp; String doseUnitDisplayStr -&gt; CodeableConcept doseUnit
+        //    doseUnitId is actually PKB-internal, not meaningful. We use it for i18n only...
+        //    save this, discard it?  store it separately?
+        //    going with &quot;store separately&quot; for now; renaming the field to doseUnitPkbId
+
+        // cleanup any junk data left here
+<span class="nc" id="L191">        ehr.setEncryptedField(DOSE_UNIT, null);</span>
+
+        // also some old data had status info; migrate it to new enum values
+        // we've seen: NOTED, DELETED, PENDING
+<span class="nc" id="L195">        Object statusObj = ehr.getEncryptedField(STATUS);</span>
+        // migrate only if it is a String
+<span class="nc bnc" id="L197" title="All 4 branches missed.">        if (statusObj instanceof String &amp;&amp; STATUS_MAP.containsKey(statusObj)) {</span>
+<span class="nc" id="L198">            ehr.setEncryptedField(STATUS, STATUS_MAP.get(statusObj));</span>
+        }
+
+<span class="nc" id="L201">        Object doseUnitsId = ehr.getEncryptedField(DOSE_UNITS_ID);</span>
+<span class="nc bnc" id="L202" title="All 2 branches missed.">        if (doseUnitsId instanceof Long) {</span>
+<span class="nc" id="L203">            ehr.setEncryptedField(DOSE_UNIT_PKB_ID, doseUnitsId);</span>
+        }
+
+<span class="nc" id="L206">        migrateStringFieldToCodeableConcept(ehr, DESCRIPTION, MEDICATION);</span>
+<span class="nc" id="L207">        migrateStringFieldToCodeableConcept(ehr, DOSE_UNIT_DISPLAY_STR, DOSE_UNIT);</span>
+<span class="nc" id="L208">    }</span>
+
+    // TODO generalize this func; needs DTOMapping tweaks
+
+    /**
+     * current encrypted value for fieldName must be String or null
+     * convert to CodeableConcept with string value as display text
+     */
+    private static void migrateStringFieldToCodeableConcept(EHRData ehr, String fromFieldName, String toFieldName) {
+<span class="nc" id="L217">        Object valueObj = ehr.getEncryptedField(fromFieldName);</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">        if (valueObj == null) {</span>
+<span class="nc" id="L219">            return;</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">        } else if (!(valueObj instanceof String)) {</span>
+<span class="nc" id="L221">            throw new IllegalStateException(&quot;Encrypted value for &quot; + fromFieldName + &quot;: expected String, found &quot; + valueObj.getClass());</span>
+        }
+
+<span class="nc" id="L224">        CodeableConcept cc = new CodeableConcept();</span>
+<span class="nc" id="L225">        cc.setDisplayText((String) valueObj);</span>
+<span class="nc" id="L226">        ehr.setEncryptedField(toFieldName, toMap(cc));</span>
+<span class="nc" id="L227">    }</span>
+
+    private static Object toMap(CodeableConcept cc) {
+<span class="nc" id="L230">        DTOMapping&lt;Medication&gt; medicationMapping = DTOMapping.get(Medication.class);</span>
+<span class="nc" id="L231">        DTOMapping&lt;?&gt; dtoMapping = medicationMapping.getNestedDtoMapping(Medication.MEDICATION);</span>
+<span class="nc" id="L232">        return ValueMappingUtil.prepValueForEHRData(cc, dtoMapping);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

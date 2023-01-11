@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FhirStoreSyncRunnerService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration</a> &gt; <span class="el_source">FhirStoreSyncRunnerService.java</span></div><h1>FhirStoreSyncRunnerService.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.common.ClearableInternalState;
+import com.pkb.entities.enums.FhirStoreSyncSourceTable;
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.fhir.common.configuration.EhrmigratorConfig;
+import com.pkb.fhir.migration.migrators.BaseFhirMigrator;
+import com.pkb.fhir.migration.migrators.MigrationManager;
+import com.pkb.fhir.migration.service.FhirStoreSyncService;
+import com.pkb.fhir.migration.service.RetryManager;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import static com.pkb.entities.enums.FhirStoreSyncStatus.ERROR;
+import static com.pkb.entities.enums.FhirStoreSyncStatus.ERROR_SILENTLY;
+import static com.pkb.entities.enums.FhirStoreSyncStatus.SKIPPED;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * This runner goes constantly, and polls for changes to designated tables in order to pass them to migrators which
+ * are the subclasses of {@link BaseFhirMigrator}. These changes are detected by postgres
+ * triggers and capture details about the table sufficient to be able to propagate state over to a designated FHIR
+ * store which is kept in sync with the existing PKB database.
+ * 
+ * This runner is relatively basic, the only subtlety is in the basic de-duplication it performs (see the comment on
+ * canSkipSync() for more info) and the conditions under which it will perform multi-threading.
+ */
+// Beans injected with @Bean methods aren't traced by glowroot. https://github.com/glowroot/glowroot/issues/955
+@Service
+public class FhirStoreSyncRunnerService implements ClearableInternalState {
+
+<span class="fc" id="L49">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+    //A counter is inappropriate as this value will go up and down
+    // See https://prometheus.io/docs/concepts/metric_types/#gauge
+
+
+    private final FhirStoreSyncService fhirStoreSyncService;
+    private final EhrmigratorConfig config;
+    private final MigrationManager migrationManager;
+    private final ExecutorService executor;
+    private final MeterRegistry meterRegistry;
+    private final RetryManager&lt;Boolean, RuntimeException&gt; retryManager;
+
+    private final Timer.Builder batchTiming;
+
+    private final Timer.Builder individualTiming;
+
+    public FhirStoreSyncRunnerService(FhirStoreSyncService fhirStoreSyncService, EhrmigratorConfig config,
+                                      MigrationManager migrationManager, RetryManager&lt;Boolean, RuntimeException&gt; retryManager,
+<span class="fc" id="L68">                                      MeterRegistry meterRegistry) {</span>
+<span class="fc" id="L69">        this.fhirStoreSyncService = fhirStoreSyncService;</span>
+<span class="fc" id="L70">        this.config = config;</span>
+<span class="fc" id="L71">        this.migrationManager = migrationManager;</span>
+<span class="fc" id="L72">        this.retryManager = retryManager;</span>
+<span class="fc" id="L73">        this.meterRegistry = meterRegistry;</span>
+        //Creating as fixed because these jobs are like ~10-100ms each which is not quite quick enough to use a cached
+        // thread pool, which would probably expand to the size of the batch.
+<span class="fc" id="L76">        this.executor = Executors.newFixedThreadPool(config.getSyncRunnerThreadCount());</span>
+
+        //Capture the queue size so we can alert if it's too high. This is run frequently, but the table should never
+        // get to a size where running a count query over it is anything other than near-instantaneous, otherwise we've
+        // got a problem the metric should probably be spotting in the first place :)
+<span class="fc" id="L81">        Gauge.builder(&quot;pkb_phr_fhir_store_sync_count&quot;, fhirStoreSyncService::getCountUnsyncedFhirStoreSyncs)</span>
+<span class="fc" id="L82">                .description(&quot;Number of rows in the fhir_store_sync table&quot;)</span>
+<span class="fc" id="L83">                .register(meterRegistry);</span>
+<span class="fc" id="L84">        batchTiming = Timer.builder(&quot;pkb_phr_fhir_store_sync_batch_histo&quot;)</span>
+<span class="fc" id="L85">                .publishPercentileHistogram()</span>
+<span class="fc" id="L86">                .publishPercentiles(0.5, 0.75, 0.9, 0.95, 0.99, 0.999)</span>
+<span class="fc" id="L87">                .description(&quot;Histogram of sync runner batch durations&quot;);</span>
+
+<span class="fc" id="L89">        individualTiming = Timer.builder(&quot;pkb_phr_fhir_store_sync_individual_histo&quot;)</span>
+<span class="fc" id="L90">                .tags(&quot;multithread&quot;, &quot;datatype&quot;, &quot;retry&quot;, &quot;outcome&quot;)</span>
+<span class="fc" id="L91">                .publishPercentileHistogram()</span>
+<span class="fc" id="L92">                .publishPercentiles(0.5, 0.75, 0.9, 0.95, 0.99, 0.999)</span>
+<span class="fc" id="L93">                .description(&quot;Histogram of sync runner individual migration durations&quot;);</span>
+<span class="fc" id="L94">    }</span>
+
+    @Scheduled(fixedDelay = 100)
+    public void run() {
+<span class="fc bfc" id="L98" title="All 2 branches covered.">        if (!config.isSyncToFhirStoreEnabled()) {</span>
+<span class="fc" id="L99">            return;</span>
+        }
+
+<span class="fc" id="L102">        var timer = Timer.start(meterRegistry);</span>
+<span class="fc" id="L103">        boolean canMultithread = false;</span>
+        try {
+<span class="fc" id="L105">            List&lt;PublicFhirStoreSync&gt; unsyncedBatch = removeSyncsWhichCanBeSkipped(fhirStoreSyncService.getUnsyncedBatch());</span>
+<span class="fc" id="L106">            canMultithread = canMultithread(unsyncedBatch);</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">            if (canMultithread) {</span>
+                //Hand out lots of jobs at once where order is not important
+<span class="fc" id="L109">                Set&lt;Callable&lt;Boolean&gt;&gt; tasks = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L110">                unsyncedBatch.forEach(sync -&gt; tasks.add(() -&gt; performSync(sync, true)));</span>
+
+                try {
+<span class="fc" id="L113">                    executor.invokeAll(tasks);</span>
+<span class="nc" id="L114">                } catch (InterruptedException e) {</span>
+<span class="nc" id="L115">                    LOGGER.error(&quot;Interrupted ExecutorService when performing fhir store sync&quot;, e);</span>
+<span class="fc" id="L116">                }</span>
+<span class="fc" id="L117">            } else {</span>
+                //Single thread the entire batch to ensure order
+<span class="fc" id="L119">                unsyncedBatch.forEach(sync -&gt; performSync(sync, false));</span>
+            }
+        } finally {
+<span class="fc" id="L122">            timer.stop(batchTiming.tags(&quot;multithread&quot;, &quot;&quot; + canMultithread).register(meterRegistry));</span>
+        }
+<span class="fc" id="L124">    }</span>
+
+    /**
+     * We migrate based on current state, and we're not interested in a perfect recreation of history: you can use
+     * change_history.generic_history for this. See the following link for more info:
+     * https://pkbdev.atlassian.net/wiki/spaces/TECHNOLOGY/pages/3107979305/How+to+migrate+non-clinical+data+to+FHIR+storage#Version-history
+     */
+    private List&lt;PublicFhirStoreSync&gt; removeSyncsWhichCanBeSkipped(List&lt;PublicFhirStoreSync&gt; unsyncedBatch) {
+<span class="fc" id="L132">        Set&lt;SyncedEntity&gt; alreadyProcessed = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L133">        List&lt;PublicFhirStoreSync&gt; syncsToProcess = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L134">        unsyncedBatch.forEach(fhirStoreSync -&gt; {</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">            if (canSkipSync(fhirStoreSync, alreadyProcessed)) {</span>
+<span class="fc" id="L136">                fhirStoreSyncService.completeFhirStoreSync(fhirStoreSync, SKIPPED, &quot;Skipped due to duplicate in batch, or malformed resource links&quot;);</span>
+            } else {
+<span class="fc" id="L138">                syncsToProcess.add(fhirStoreSync);</span>
+            }
+<span class="fc" id="L140">        });</span>
+
+<span class="fc" id="L142">        return syncsToProcess;</span>
+    }
+
+    /**
+     * An error in a resource being migrated can cascade very easily. If e.g. an org fails to sync then
+     * any teams at that org will fail, then any practitioners at those teams, then any data entered by
+     * those practitioners...
+     *
+     * The failure could be transitory, such as a keycloak node upgrade, or permanent, such as a data form problem.
+     * The cheapest and safest thing to do is to halt the entire process and keep retrying. The former will
+     * (eventually) be resolved; the latter will require manual intervention.
+     *
+     * We'll have visibility of this through the backed up queue in fhir_store_sync, and the errors this will log
+     * out every time until it succeeds.
+     *
+     * This method performs a single sync at a time: canMultithread is passed in purely for metric purposes
+     */
+    private boolean performSync(PublicFhirStoreSync fhirStoreSync, boolean canMultithread) {
+        //Initialise timer here to include all retries in a single metric capture
+<span class="fc" id="L161">        var timer = Timer.start(meterRegistry);</span>
+<span class="fc" id="L162">        return retryManager.doWithRetry(retryContext -&gt; {</span>
+<span class="fc" id="L163">            MigrationManager.MigrationOutcome status = migrationManager.migrateEntity(fhirStoreSync);</span>
+<span class="pc bpc" id="L164" title="1 of 4 branches missed.">            if (status.status() == ERROR || status.status() == ERROR_SILENTLY) {</span>
+<span class="fc" id="L165">                throw new RuntimeException(&quot;Failed to sync entity to FHIR store; retrying&quot;);</span>
+            }
+<span class="fc" id="L167">            fhirStoreSyncService.completeFhirStoreSync(fhirStoreSync, status.status(),</span>
+<span class="fc" id="L168">                    status.exception()</span>
+<span class="fc" id="L169">                            .map(Exception::getMessage)</span>
+<span class="fc" id="L170">                            .orElse(&quot;&quot;));</span>
+
+<span class="fc" id="L172">            timer.stop(individualTiming.tags(&quot;multithread&quot;, &quot;&quot; + canMultithread,</span>
+<span class="fc" id="L173">                                             &quot;datatype&quot;, fhirStoreSync.getSyncDetails().getSourceTable().name(),</span>
+<span class="fc" id="L174">                                             &quot;retry&quot;, &quot;&quot; + retryManager.getRetryCount(),</span>
+<span class="fc" id="L175">                                             &quot;outcome&quot;, status.status().name())</span>
+<span class="fc" id="L176">                    .register(meterRegistry));</span>
+<span class="fc" id="L177">            return true;</span>
+        });
+    }
+
+    /**
+     * We will attempt to multithread if the batch is made entirely of updates, which is the more typical case.
+     * If there are any CREATES or DELETES for resources which are referenced by other resources, then we have to
+     * process the syncs in order, as otherwise we may have references in an update we can't satisfy.
+     *
+     * Examples
+     *
+     *  a. CREATE organization
+     *  b. UPDATE patient to point at organization
+     *  You cannot multithread this batch, as at that point you have no guarantees that (a) will occur before (b).
+     *  If (b) occurs first, you will have an unsatisifed reference to an organization which does not yet exist, and
+     *  (b) will be rejected.
+     *
+     *  Deletes are the inverse, they must be completed after everything else:
+     *  a. UPDATE patient to unlink from organization
+     *  b. DELETE organization
+     *  In this scenario (a) must complete before (b).
+     *
+     * As mentioned, this is only relevant if the CREATE or DELETE is for a resource which can be referenced by other
+     * resources. If it can't, as is the case with most clinical data points, you don't need to single-thread.
+     */
+    private boolean canMultithread(List&lt;PublicFhirStoreSync&gt; batch) {
+<span class="fc" id="L203">        return batch.stream()</span>
+<span class="fc bfc" id="L204" title="All 4 branches covered.">                .noneMatch(sync -&gt; (sync.isDeleteOperation() || sync.isCreateOperation())</span>
+<span class="fc bfc" id="L205" title="All 2 branches covered.">                        &amp;&amp; sync.getSyncDetails().getSourceTable().isReferencedResource());</span>
+    }
+
+    /**
+     * Our db interaction is highly inefficient. For a given save, especially for &quot;complex&quot; entities like
+     * pkbperson, the object can actually be merged to the db, and therefore fire off update trigger events, multiple times.
+     * Do some basic de-duplication to try and avoid the worst of this.
+     *
+     * You can only skip updates, never creates or deletes.
+     * Creates should be before anything else so should be impossible to have anything before them in a batch, but let's be safe.
+     * Deletes may come after multiple updates in a batch and must always be run.
+     * However you can add creates or deletes to the list of ones we've processed so we skip any updates that come after.
+     */
+    private boolean canSkipSync(PublicFhirStoreSync fhirStoreSync, Set&lt;SyncedEntity&gt; alreadyProcessed) {
+<span class="fc bfc" id="L219" title="All 4 branches covered.">        return shouldSkipProcessingFhirStoreSyncForRow(fhirStoreSync, alreadyProcessed) &amp;&amp; fhirStoreSync.isUpdateOperation();</span>
+    }
+
+    private boolean shouldSkipProcessingFhirStoreSyncForRow(PublicFhirStoreSync fhirStoreSync, Set&lt;SyncedEntity&gt; alreadyProcessed) {
+<span class="fc" id="L223">        return getSyncedEntity(fhirStoreSync).map(syncedEntity -&gt; {</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">            if (alreadyProcessed.contains(syncedEntity)) {</span>
+<span class="fc" id="L225">                return true;</span>
+            }
+<span class="fc" id="L227">            alreadyProcessed.add(syncedEntity);</span>
+<span class="fc" id="L228">            return false;</span>
+<span class="fc" id="L229">        }).orElse(true); //This represents two categories of nonsense: child entities without parent entity links, or unhandled tables.</span>
+    }
+
+    /**
+     * Several tables in the current PHR database actually collapse into a single FHIR resource.
+     * So if I have updates for a nationalid, personcontact and a pkbperson and they're all ultimately
+     * going to be the same Patient resource, I'm wasting my time to construct updates for each of them.
+     *
+     * For tables with a 1:1, it's much more straightforward.
+     */
+    @NotNull
+    @VisibleForTesting
+    Optional&lt;SyncedEntity&gt; getSyncedEntity(PublicFhirStoreSync fhirStoreSync) {
+<span class="pc bpc" id="L242" title="2 of 5 branches missed.">        switch (fhirStoreSync.getSyncDetails().getSourceTable()) {</span>
+            case ORG:
+            case TEAM:
+            case PKBPERSON:
+            case INSTITUTEUSER:
+            case PATIENTOPTOUT:
+            case PATIENTCONSENT:
+            case MENU_DATA:
+            case REFERENCEDATUM:
+                //These are 1:1 entities, so it's simple
+<span class="fc" id="L252">                return Optional.of(ImmutableSyncedEntity.syncedEntity(fhirStoreSync.getSyncDetails().getSourceTable(),</span>
+<span class="fc" id="L253">                        fhirStoreSync.getSyncDetails().getSourceTableId()));</span>
+            case PERSONCONTACT:
+            case PERSON_GUID:
+            case NATIONALID:
+            case TEAMLEVELID:
+            case ORGLEVELID:
+                //All child entities of PKBPerson, collapsing into a Patient resource
+<span class="fc" id="L260">                return Optional.ofNullable(fhirStoreSync.getSyncDetails().getSourceTableParentId())</span>
+<span class="fc" id="L261">                        .map(sourceTableParentId -&gt;</span>
+<span class="fc" id="L262">                                ImmutableSyncedEntity.syncedEntity(FhirStoreSyncSourceTable.PKBPERSON, sourceTableParentId));</span>
+            case ORGEXTERNALID:
+                //A child entity of org, collapsing into an Organization resource
+<span class="fc" id="L265">                return Optional.ofNullable(fhirStoreSync.getSyncDetails().getSourceTableParentId())</span>
+<span class="fc" id="L266">                        .map(sourceTableParentId -&gt;</span>
+<span class="fc" id="L267">                                ImmutableSyncedEntity.syncedEntity(FhirStoreSyncSourceTable.ORG, sourceTableParentId));</span>
+            case PRIVACY_FLAGS:
+                //A child entity of menu_data, collapsing into the relevant clinical resource
+<span class="nc" id="L270">                return Optional.ofNullable(fhirStoreSync.getSyncDetails().getSourceTableParentId())</span>
+<span class="nc" id="L271">                        .map(sourceTableParentId -&gt;</span>
+<span class="nc" id="L272">                                ImmutableSyncedEntity.syncedEntity(FhirStoreSyncSourceTable.MENU_DATA, sourceTableParentId));</span>
+            default:
+                //This will be marked as an error in the fhir_store_sync_completed table when we tried to migrate it so just carry on here
+<span class="nc" id="L275">                LOGGER.error(&quot;Unhandled source table {} when trying to construct SyncedEntity&quot;, fhirStoreSync.getSyncDetails().getSourceTable());</span>
+<span class="nc" id="L276">                return Optional.empty();</span>
+        }
+    }
+
+    @Override
+    public void clearState() {
+<span class="nc" id="L282">        executor.shutdownNow();</span>
+<span class="nc" id="L283">    }</span>
+
+    @Value.Immutable
+    @Value.Style(allParameters = true, of = &quot;syncedEntity&quot;)
+    interface SyncedEntity {
+        FhirStoreSyncSourceTable sourceTable();
+        long sourceTableId();
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

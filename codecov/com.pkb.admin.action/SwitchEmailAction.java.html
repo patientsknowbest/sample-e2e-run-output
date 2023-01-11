@@ -1,0 +1,410 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SwitchEmailAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.admin.action</a> &gt; <span class="el_source">SwitchEmailAction.java</span></div><h1>SwitchEmailAction.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: SwitchEmailAction.java Sep 6, 2013 5:17:22 PM pravina$
+//
+//---------------------------------------------------------------------------
+package com.pkb.admin.action;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.bean.IUserWebBean;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.datamodel.Email;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.entities.enums.InvitationType;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.invitation.impl.InvitationManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PKBPerson.Lazy;
+import com.pkb.user.entity.PersonContact;
+import org.apache.struts2.interceptor.validation.SkipValidation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.EnumSet;
+import java.util.List;
+
+/**
+ * Switch email of an activated patient to a caregiver
+ *
+ * @author pravina
+ */
+<span class="fc" id="L43">public class SwitchEmailAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L47">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private InvitationManager invitationManager;
+
+    private TeamUserManager teamUserManager;
+
+    private TeamManager teamManager;
+
+    private PersonContactManager personContactManager;
+
+    private UserAccessManager userAccessManager;
+
+    private IUserWebBean userWebBean;
+
+    private long instituteId;
+
+    private int pageSize;
+
+    private int offset;
+
+    private Team institute;
+
+    private Long userId;
+
+    //Teams from the same institute
+    private List&lt;Team&gt; teamList;
+
+    //Teams from the same institute
+    private Org org;
+
+    private Email email;
+
+    private String title;
+
+    private String firstName;
+
+    private String lastName;
+
+    private Long permissionButtonId;
+
+    private String message;
+
+    // For activatedPatients.jsp after error
+    private String searchString;
+    private String searchIdType; // national/org/team
+    private String searchId;
+    private String searchName;
+    private String searchDobYear;
+    private String searchDobMonth;
+    private String searchDobDay;
+    private String searchLevel;
+
+    @Override
+    public String input() {
+        try {
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">            if (userId == null) {</span>
+<span class="nc" id="L103">                addActionError(getText(&quot;select.user.message&quot;));</span>
+<span class="nc" id="L104">                return Action.ERROR;</span>
+            }
+<span class="fc" id="L106">            PKBPerson patient = userManager.getPKBPerson(userId, Lazy.CONTACTS_DEEP);</span>
+
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">            if (patient.getStatus() == UserStatus.NOCONTACT) {</span>
+<span class="nc" id="L109">                addActionError(getText(&quot;select.user.with.contact&quot;));</span>
+<span class="nc" id="L110">                return Action.ERROR;</span>
+            }
+<span class="fc" id="L112">            email = patient.getEmail();</span>
+<span class="nc" id="L113">        } catch (Exception e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L115">            addActionError(getText(&quot;invite.caregiver.error.find.message&quot;));</span>
+<span class="nc" id="L116">            LOGGER.error(&quot;Error while switching the email to a caregiver for patient-{}&quot;, userId, e);</span>
+<span class="nc" id="L117">            return Action.INPUT;</span>
+<span class="fc" id="L118">        }</span>
+<span class="fc" id="L119">        return Action.SUCCESS;</span>
+    }
+
+    @Override
+    public String execute() {
+        try {
+<span class="fc" id="L125">            Long defaultAccountId = userManager.getDefaultAccountId(userId);</span>
+<span class="fc" id="L126">            PKBPerson inviterUser = userManager.getPKBPerson(userId, Lazy.CONTACTS_DEEP);</span>
+<span class="fc" id="L127">            userManager.transactional(() -&gt; {</span>
+                // Save the  primary email to be used for inviting caregiver
+<span class="fc" id="L129">                Email caregiverEmail = inviterUser.getEmail();</span>
+
+                // Remove all the contacts from the patient's account
+                // and change the patient's status to NO_CONTACT
+<span class="fc" id="L133">                personContactManager.deleteAllContacts(userId);</span>
+<span class="fc" id="L134">                userManager.updateUserStatus(userId, UserStatus.NOCONTACT);</span>
+
+                //Reset the patient's password to a random one
+<span class="fc" id="L137">                PKBPerson adminUser = userManager.getPKBPerson(loggedInUserUtil.getLoggedInUserId());</span>
+<span class="fc" id="L138">                Team adminTeam = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="fc" id="L139">                Long adminOrgId = null;</span>
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">                if (adminTeam != null) {</span>
+<span class="fc" id="L141">                    adminOrgId = adminTeam.getOrg().getId();</span>
+                }
+
+<span class="fc" id="L144">                teamUserManager.resetAndSaveUserCredentials(getLoggedInEHRRequestContext(), userId, adminUser.getId(),</span>
+                        adminOrgId);
+
+<span class="fc" id="L147">                PKBPerson inviteePatient = userWebBean.populateInvitee(getEHRRequestContext(),</span>
+                        firstName, lastName, caregiverEmail, title,
+<span class="fc" id="L149">                        inviterUser.getLanguageCode());</span>
+<span class="fc" id="L150">                PersonContact inviteeContact = userWebBean.populateContact(caregiverEmail, true);</span>
+<span class="fc" id="L151">                inviteeContact.setPerson(inviteePatient);</span>
+<span class="fc" id="L152">                inviteePatient.setContacts(null);</span>
+<span class="fc" id="L153">                inviteePatient.getContacts().add(inviteeContact);</span>
+
+<span class="fc" id="L155">                var requestContext = getLoggedInEHRRequestContext();</span>
+                // Send invitation to caregiver
+<span class="fc" id="L157">                PKBInvitation invitation = userWebBean.populateInvitation(/*no message*/&quot;&quot;,</span>
+<span class="fc" id="L158">                        userId, defaultAccountId, InvitationType.PATIENT_INVITATION_AS_CAREGIVER, EnumSet.of(PrivacyFlag.GENERAL), requestContext);</span>
+
+<span class="fc" id="L160">                invitationManager.invitePatient(requestContext, inviteePatient, invitation, userId, true);</span>
+<span class="fc" id="L161">                logActivity(Activity.Action.CREATED_DEPENDENT_ACCOUNT, dateTimeService.now(), adminUser.getId(), true, new NoConsentsRequired());</span>
+<span class="fc" id="L162">            });</span>
+<span class="fc" id="L163">            return Action.SUCCESS;</span>
+<span class="nc" id="L164">        } catch (Exception e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L166">            addActionError(getText(&quot;invite.caregiver.error.message&quot;));</span>
+<span class="nc" id="L167">            LOGGER.error(&quot;Error while switching the email to a caregiver for patient-{}&quot;, userId, e);</span>
+<span class="nc" id="L168">            return Action.INPUT;</span>
+        }
+    }
+
+    @SkipValidation
+    public String cancelSwitch() {
+<span class="fc" id="L174">        return Action.ERROR;</span>
+    }
+
+    public TeamUserManager getTeamUserManager() {
+<span class="nc" id="L178">        return teamUserManager;</span>
+    }
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L182">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L183">    }</span>
+
+    public int getPageSize() {
+<span class="nc" id="L186">        return pageSize;</span>
+    }
+
+    public void setPageSize(int pageSize) {
+<span class="nc" id="L190">        this.pageSize = pageSize;</span>
+<span class="nc" id="L191">    }</span>
+
+    public int getOffset() {
+<span class="nc" id="L194">        return offset;</span>
+    }
+
+    public void setOffset(int offset) {
+<span class="nc" id="L198">        this.offset = offset;</span>
+<span class="nc" id="L199">    }</span>
+
+    public long getInstituteId() {
+<span class="nc" id="L202">        return instituteId;</span>
+    }
+
+    public void setInstituteId(long instituteId) {
+<span class="nc" id="L206">        this.instituteId = instituteId;</span>
+<span class="nc" id="L207">    }</span>
+
+    public TeamManager getTeamManager() {
+<span class="nc" id="L210">        return teamManager;</span>
+    }
+
+    public void setTeamManager(TeamManager teamManager) {
+<span class="fc" id="L214">        this.teamManager = teamManager;</span>
+<span class="fc" id="L215">    }</span>
+
+    public IUserWebBean getUserWebBean() {
+<span class="nc" id="L218">        return userWebBean;</span>
+    }
+
+    public void setUserWebBean(IUserWebBean userWebBean) {
+<span class="fc" id="L222">        this.userWebBean = userWebBean;</span>
+<span class="fc" id="L223">    }</span>
+
+    public Team getInstitute() {
+<span class="nc" id="L226">        return institute;</span>
+    }
+
+    public void setInstitute(Team institute) {
+<span class="nc" id="L230">        this.institute = institute;</span>
+<span class="nc" id="L231">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L234">        return &quot;patients&quot;;</span>
+    }
+
+    public String getSubTab() {
+<span class="fc" id="L238">        return &quot;activatedPatients&quot;;</span>
+    }
+
+    public InvitationManager getInvitationManager() {
+<span class="nc" id="L242">        return invitationManager;</span>
+    }
+
+    public void setInvitationManager(InvitationManager invitationManager) {
+<span class="fc" id="L246">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L247">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L250">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L254">        this.userManager = userManager;</span>
+<span class="fc" id="L255">    }</span>
+
+    public PersonContactManager getPersonContactManager() {
+<span class="nc" id="L258">        return personContactManager;</span>
+    }
+
+    public void setPersonContactManager(PersonContactManager personContactManager) {
+<span class="fc" id="L262">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L263">    }</span>
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L266">        return userAccessManager;</span>
+    }
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L270">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L271">    }</span>
+
+    public Long getUserId() {
+<span class="fc" id="L274">        return userId;</span>
+    }
+
+    public void setUserId(Long userId) {
+<span class="fc" id="L278">        this.userId = userId;</span>
+<span class="fc" id="L279">    }</span>
+
+    public List&lt;Team&gt; getTeamList() {
+<span class="nc" id="L282">        return teamList;</span>
+    }
+
+    public void setTeamList(List&lt;Team&gt; teamList) {
+<span class="nc" id="L286">        this.teamList = teamList;</span>
+<span class="nc" id="L287">    }</span>
+
+    public Org getOrg() {
+<span class="fc" id="L290">        return org;</span>
+    }
+
+    public void setOrg(Org org) {
+<span class="nc" id="L294">        this.org = org;</span>
+<span class="nc" id="L295">    }</span>
+
+    public Email getEmail() {
+<span class="fc" id="L298">        return email;</span>
+    }
+
+    public void setEmail(Email email) {
+<span class="fc" id="L302">        this.email = email;</span>
+<span class="fc" id="L303">    }</span>
+
+    public String getTitle() {
+<span class="fc" id="L306">        return title;</span>
+    }
+
+    public void setTitle(String title) {
+<span class="fc" id="L310">        this.title = title;</span>
+<span class="fc" id="L311">    }</span>
+
+    public String getFirstName() {
+<span class="fc" id="L314">        return firstName;</span>
+    }
+
+    public void setFirstName(String firstName) {
+<span class="fc" id="L318">        this.firstName = firstName;</span>
+<span class="fc" id="L319">    }</span>
+
+    public String getLastName() {
+<span class="fc" id="L322">        return lastName;</span>
+    }
+
+    public void setLastName(String lastName) {
+<span class="fc" id="L326">        this.lastName = lastName;</span>
+<span class="fc" id="L327">    }</span>
+
+    public Long getPermissionButtonId() {
+<span class="nc" id="L330">        return permissionButtonId;</span>
+    }
+
+    public void setPermissionButtonId(Long permissionButtonId) {
+<span class="nc" id="L334">        this.permissionButtonId = permissionButtonId;</span>
+<span class="nc" id="L335">    }</span>
+
+    public String getMessage() {
+<span class="fc" id="L338">        return message;</span>
+    }
+
+    public void setMessage(String message) {
+<span class="fc" id="L342">        this.message = message;</span>
+<span class="fc" id="L343">    }</span>
+
+    public String getSearchString() {
+<span class="fc" id="L346">        return searchString;</span>
+    }
+
+    public void setSearchString(String searchString) {
+<span class="fc" id="L350">        this.searchString = searchString;</span>
+<span class="fc" id="L351">    }</span>
+
+    public String getSearchIdType() {
+<span class="fc" id="L354">        return searchIdType;</span>
+    }
+
+    public void setSearchIdType(String searchIdType) {
+<span class="fc" id="L358">        this.searchIdType = searchIdType;</span>
+<span class="fc" id="L359">    }</span>
+
+    public String getSearchId() {
+<span class="fc" id="L362">        return searchId;</span>
+    }
+
+    public void setSearchId(String searchId) {
+<span class="fc" id="L366">        this.searchId = searchId;</span>
+<span class="fc" id="L367">    }</span>
+
+    public String getSearchName() {
+<span class="fc" id="L370">        return searchName;</span>
+    }
+
+    public void setSearchName(String searchName) {
+<span class="fc" id="L374">        this.searchName = searchName;</span>
+<span class="fc" id="L375">    }</span>
+
+    public String getSearchDobYear() {
+<span class="fc" id="L378">        return searchDobYear;</span>
+    }
+
+    public void setSearchDobYear(String searchDobYear) {
+<span class="fc" id="L382">        this.searchDobYear = searchDobYear;</span>
+<span class="fc" id="L383">    }</span>
+
+    public String getSearchDobMonth() {
+<span class="fc" id="L386">        return searchDobMonth;</span>
+    }
+
+    public void setSearchDobMonth(String searchDobMonth) {
+<span class="fc" id="L390">        this.searchDobMonth = searchDobMonth;</span>
+<span class="fc" id="L391">    }</span>
+
+    public String getSearchDobDay() {
+<span class="fc" id="L394">        return searchDobDay;</span>
+    }
+
+    public void setSearchDobDay(String searchDobDay) {
+<span class="fc" id="L398">        this.searchDobDay = searchDobDay;</span>
+<span class="fc" id="L399">    }</span>
+
+    public String getSearchLevel() {
+<span class="fc" id="L402">        return searchLevel;</span>
+    }
+
+    public void setSearchLevel(String searchLevel) {
+<span class="fc" id="L406">        this.searchLevel = searchLevel;</span>
+<span class="fc" id="L407">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

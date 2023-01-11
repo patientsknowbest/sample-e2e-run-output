@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HL7SoftMatchService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.hl7</a> &gt; <span class="el_source">HL7SoftMatchService.java</span></div><h1>HL7SoftMatchService.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.hl7;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.dataupload.entity.FieldMismatch;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+import java.util.stream.Collectors;
+
+import static com.pkb.dataupload.entity.UploadedData.Destination;
+import static com.pkb.dataupload.entity.UploadedData.Status.NEW;
+import static com.pkb.dataupload.entity.UploadedData.Status.PATIENT_INFO_MISMATCH;
+import static com.pkb.dataupload.entity.UploadedData.Status.REJECTED;
+import static com.pkb.service.dataupload.hl7.HL7SoftMatchService.ProcessingDecision.CONTINUE;
+import static com.pkb.service.dataupload.hl7.HL7SoftMatchService.ProcessingDecision.FORCE_NEW;
+import static com.pkb.service.dataupload.hl7.HL7SoftMatchService.ProcessingDecision.QUARANTINE;
+import static com.pkb.service.dataupload.hl7.HL7SoftMatchService.ProcessingDecision.REJECT;
+
+/**
+ * When an HL7 message is received PKB searches for an existing medical record for the specified patient based on the
+ * provided identifiers, such as their NHS number. This is known as &quot;hard matching&quot;. There won't always be an existing
+ * patient, for example if a new record is being created.
+ *
+ * Even if the hard matching does find an existing medical record, some customers ask us to double check we have the
+ * correct patient by comparing the demographic information provided in the HL7 message with the demographic information
+ * stored in PKB. This is known as &quot;soft matching&quot;. A typical setup might be to configure date of birth as the only
+ * field to be checked (other fields are supported by the code, but no longer recommended).
+ *
+ * Soft matching only applies to the HL7 interface.
+ *
+ * In classic soft matching, any demographic mismatches (for a field that has been enabled for soft matching) will
+ * trigger PKB to quarantine the message. In smart soft matching, a message that contains an update for data which has
+ * already been added to, or rejected from, the target patient's medical record will be accepted or rejected
+ * respectively, regardless of whether there were any demographic mismatches. Demographic mismatches are only checked if
+ * neither of those two special conditions apply. This is safer because it ensures a data point is either entirely
+ * accepted or entirely rejected, but a patient should never receive just _some_ updates to a particular data point.
+ *
+ * For example: if some test results are added to a patient's record with Filler Order Number 1, then a subsequent
+ * correction to Filler Order Number 1 (from the same source organisation) will be accepted even if the message
+ * contained demographic mismatches. The fact that some data for the same lab order has already been accepted takes
+ * precedence over any (possibly temporary) errors with the demographic information.
+ *
+ * Likewise, it's possible that the failures could occur in the other order. For example, message 1 for Filler Order
+ * Number 1 might be quarantined because the demographics do not match, but message 2 for the same Filler Order Number
+ * might not have any demographic mismatches (e.g. because the patient's information has been corrected in the interim).
+ * As such, whenever smart matching logic accepts or rejects a message, any quarantined messages with matching external
+ * data IDs (from the same source organisation) will be approved or rejected as appropriate. Finally, in order to ensure
+ * the incoming message does not get processed ahead of messages automatically released in this way, the incoming
+ * message will be forced to the NEW state to ensure the message group is processed in the correct order when the data
+ * is accessed in the future.
+ *
+ * See https://dev.patientsknowbest.com/home/hl7-api/identifiers for more information.
+ */
+@Component
+public class HL7SoftMatchService {
+
+    @Autowired
+    private DataUploadManager dataUploadManager;
+
+<span class="fc" id="L65">    public HL7SoftMatchService() {</span>
+<span class="fc" id="L66">    }</span>
+
+    public ProcessingDecision getProcessingDecision(@NotNull Destination destination, long sourceOrgId, String externalDataId, long patientId, @NotNull List&lt;FieldMismatch&gt; pidMismatches) {
+        // Smart soft matching can only be performed when we have a non-blank external data ID.
+<span class="fc bfc" id="L70" title="All 2 branches covered.">        if (StringUtils.isBlank(externalDataId)) {</span>
+<span class="fc" id="L71">            return classicSoftMatch(pidMismatches);</span>
+        } else {
+<span class="fc" id="L73">            return smartSoftMatch(destination, sourceOrgId, externalDataId, patientId, pidMismatches);</span>
+        }
+    }
+
+    @VisibleForTesting
+    ProcessingDecision classicSoftMatch(@NotNull List&lt;FieldMismatch&gt; pidMismatches) {
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        if (pidMismatches.isEmpty()) {</span>
+<span class="fc" id="L80">            return CONTINUE;</span>
+        } else {
+<span class="fc" id="L82">            return QUARANTINE;</span>
+        }
+    }
+
+    @VisibleForTesting
+    ProcessingDecision smartSoftMatch(@NotNull UploadedData.Destination destination, long sourceOrgId, @NotNull String externalDataId, long patientId, @NotNull List&lt;FieldMismatch&gt; pidMismatches) {
+<span class="fc" id="L88">        List&lt;UploadedData&gt; previousMessagesForThisExternalDataPoint = dataUploadManager.searchHl7UploadedData(destination, sourceOrgId, externalDataId, patientId);</span>
+<span class="fc" id="L89">        List&lt;Long&gt; previouslyQuarantinedIds = getPreviouslyQuarantinedIds(previousMessagesForThisExternalDataPoint);</span>
+
+        // If we have previously rejected this data point, then the current message should also be rejected
+<span class="fc bfc" id="L92" title="All 2 branches covered.">        if (isExternalDataPointAlreadyRejectedFromRecord(previousMessagesForThisExternalDataPoint)) {</span>
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">            if (!previouslyQuarantinedIds.isEmpty()) {</span>
+                // Since there are some previously quarantined messages we should first of all reject those.
+<span class="nc" id="L95">                dataUploadManager.updateUploadedDataStatus(previouslyQuarantinedIds, REJECTED);</span>
+            }
+<span class="fc" id="L97">            return REJECT;</span>
+        }
+        // Else if there are no soft match failures, or there are failures but previous messages relating to this
+        // external data point have already been added to the patient's medical record, then this message should be
+        // accepted - we just need to check whether to continue or force the message to be queued
+<span class="fc bfc" id="L102" title="All 4 branches covered.">        else if (pidMismatches.isEmpty() || isExternalDataPointAlreadyAcceptedIntoRecord(previousMessagesForThisExternalDataPoint)) {</span>
+<span class="fc bfc" id="L103" title="All 2 branches covered.">            if (!previouslyQuarantinedIds.isEmpty()) {</span>
+                // Since there are some previously quarantined messages we should first of all release those.
+<span class="fc" id="L105">                dataUploadManager.updateUploadedDataStatus(previouslyQuarantinedIds, NEW);</span>
+                // We then also need to make sure the current message is put into the NEW state so that it does not
+                // get processed before the other messages we have just released.
+<span class="fc" id="L108">                return FORCE_NEW;</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">            } else if (isExternalDataPointPendingProcessing(previousMessagesForThisExternalDataPoint)) {</span>
+                // Regardless of demographic mismatches, if any existing message for this data point is in the NEW state
+                // (i.e. not yet processed) then the current message must be forced to NEW also to ensure it does not
+                // leapfrog the pending data.
+<span class="fc" id="L113">                return FORCE_NEW;</span>
+            }
+            // With no previously quarantined or queued data, processing can simply continue.
+<span class="fc" id="L116">            return CONTINUE;</span>
+        }
+        // Finally, if we have no previous record of this data point and there are PID mismatches, then quarantine
+        else {
+<span class="fc" id="L120">            return QUARANTINE;</span>
+        }
+    }
+
+    @VisibleForTesting
+    boolean isExternalDataPointAlreadyRejectedFromRecord(@NotNull List&lt;UploadedData&gt; uploadedDataList) {
+<span class="fc" id="L126">        return uploadedDataList.stream().anyMatch(ud -&gt;</span>
+<span class="fc bfc" id="L127" title="All 2 branches covered.">                REJECTED == ud.getStatus()</span>
+        );
+    }
+
+    @VisibleForTesting
+    boolean isExternalDataPointAlreadyAcceptedIntoRecord(@NotNull List&lt;UploadedData&gt; uploadedDataList) {
+<span class="fc" id="L133">        return uploadedDataList.stream().anyMatch(ud -&gt;</span>
+<span class="pc bpc" id="L134" title="2 of 4 branches missed.">                (PATIENT_INFO_MISMATCH != ud.getStatus() &amp;&amp; REJECTED != ud.getStatus())</span>
+        );
+    }
+
+    @VisibleForTesting
+    boolean isExternalDataPointPendingProcessing(@NotNull List&lt;UploadedData&gt; uploadedDataList) {
+<span class="fc" id="L140">        return uploadedDataList.stream().anyMatch(ud -&gt;</span>
+<span class="fc bfc" id="L141" title="All 2 branches covered.">                NEW == ud.getStatus()</span>
+        );
+    }
+
+    @VisibleForTesting
+    List&lt;Long&gt; getPreviouslyQuarantinedIds(@NotNull List&lt;UploadedData&gt; uploadedDataList) {
+<span class="fc" id="L147">        return uploadedDataList.stream().filter(ud -&gt;</span>
+<span class="fc bfc" id="L148" title="All 2 branches covered.">                PATIENT_INFO_MISMATCH == ud.getStatus()</span>
+<span class="fc" id="L149">        ).map(UploadedData::getId).collect(Collectors.toList());</span>
+    }
+
+<span class="fc" id="L152">    public enum ProcessingDecision {</span>
+        /**
+         * The caller is free to add the data to the medical record. Alternatively, they might choose to queue it, e.g.
+         * if the message cannot be processed until the decryption key is available.
+         */
+<span class="fc" id="L157">        CONTINUE,</span>
+        /**
+         * The caller must place the message into the NEW state. This is used when the soft matching has released other
+         * messages from the queue and needs to make sure the current message is not processed out of order.
+         */
+<span class="fc" id="L162">        FORCE_NEW,</span>
+        /** The caller must place the message into the PATIENT_INFO_MISMATCH state. */
+<span class="fc" id="L164">        QUARANTINE,</span>
+        /** The caller must place the message into the REJECTED state. */
+<span class="fc" id="L166">        REJECT</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

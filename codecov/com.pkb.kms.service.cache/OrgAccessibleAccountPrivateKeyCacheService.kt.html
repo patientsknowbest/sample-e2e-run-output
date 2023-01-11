@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OrgAccessibleAccountPrivateKeyCacheService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.kms.service.cache</a> &gt; <span class="el_source">OrgAccessibleAccountPrivateKeyCacheService.kt</span></div><h1>OrgAccessibleAccountPrivateKeyCacheService.kt</h1><pre class="source lang-java linenums">package com.pkb.kms.service.cache
+
+import com.pkb.common.ClearableInternalState
+import com.pkb.crypto.AccountPrivateKey
+import com.pkb.crypto.UserPrivateKey
+import com.pkb.crypto.dto.AccountKeysDTO
+import com.pkb.crypto.dto.AccountPrivateKeyDTO
+import com.pkb.crypto.dto.AccountPrivateKeyDTO.accountPrivateKeyDTO
+import com.pkb.kms.service.AccountPath
+import com.pkb.kms.service.AccountPrivateKeyDecryptorService
+import com.pkb.kms.service.MetricsHelper
+import com.pkb.kms.service.OrgAccountKey
+import com.pkb.kms.shared.KMS_CACHE_PREFIX
+import com.pkb.kms.shared.representation.AccountPublicId
+import com.pkb.kms.shared.representation.KmsError
+import com.pkb.kms.shared.representation.OrgPrivateId
+import io.vavr.control.Either
+import io.vavr.kotlin.right
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.cache.annotation.CacheEvict
+import org.springframework.cache.annotation.CachePut
+import org.springframework.cache.annotation.Cacheable
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+
+<span class="fc" id="L27">@Service</span>
+<span class="fc" id="L28">class OrgAccessibleAccountPrivateKeyCacheService(private val orgAccountKeyCacheService: OrgAccountKeyCacheService,</span>
+<span class="fc" id="L29">                                                 private val decryptorService: AccountPrivateKeyDecryptorService,</span>
+                                                 metricsHelper: MetricsHelper) : ClearableInternalState,
+                                                                                 IsAccountKeyCache {
+
+<span class="fc" id="L33">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+<span class="fc" id="L35">    init {</span>
+<span class="fc" id="L36">        metricsHelper.registerCaches(ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME)</span>
+<span class="fc" id="L37">    }</span>
+
+    /**
+     * Returns plaintext key for an account. Will use cached copy if available.
+     *
+     * If not cached, will retrieve the org key (either plaintext from cache, or encrypted from database and then
+     * decrypted with the user key) and use that to decrypt the account key
+     */
+    @Cacheable(
+            ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME,
+            key = &quot;#accountPath.accountPublicId&quot;,
+            unless = &quot;#result.isLeft()&quot;)
+    fun getAccountPrivateKeyInPath(userPrivateKey: UserPrivateKey,
+                                   accountPath: AccountPath): Either&lt;KmsError, AccountPrivateKeyDTO&gt; =
+<span class="fc" id="L51">        orgAccountKeyCacheService.getOrDecryptOrgAccountKey(userPrivateKey, accountPath)</span>
+<span class="fc" id="L52">                .map { it.accountPrivateKey.decryptAccountPrivateKey(accountPath.encryptedAccountPrivateKey) }</span>
+<span class="fc" id="L53">                .map { accountPrivateKeyDTO(it) }</span>
+
+    /**
+     * Returns plaintext key for an account. Will use cached copy if available.
+     *
+     * If not cached, will try to find a plaintext copy of the org key in the path and use that to decrypt the account
+     * key. If the org key is not cached return an error because we have no way to get to it without a user key
+     */
+    @Cacheable(
+            ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME,
+            key = &quot;#accountPath.accountPublicId&quot;,
+            unless = &quot;#result.isLeft()&quot;)
+    fun getAccountPrivateKeyInPathNoUser(accountPath: AccountPath): Either&lt;KmsError, AccountPrivateKeyDTO&gt; =
+<span class="fc" id="L66">        decryptorService.decryptAccountPrivateKeyNoUser(accountPath)</span>
+<span class="fc" id="L67">                .map { accountPrivateKeyDTO(it) }</span>
+
+    /**
+     * Returns plaintext key for an account. Will use cached copy if available.
+     *
+     * If not cached, will look for cached org keys that can be used to reach the key and use the first one it finds.
+     */
+    @Cacheable(
+            ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME,
+            key = &quot;#accountPublicId&quot;,
+            unless = &quot;#result.isLeft()&quot;)
+    fun getAccountPrivateKeyViaAnyOrgKey(accountPublicId: AccountPublicId): Either&lt;KmsError, AccountPrivateKeyDTO&gt; =
+<span class="fc" id="L79">        decryptAccountPrivateKeyWithAnyCachedOrgKey(accountPublicId)</span>
+<span class="fc" id="L80">                .map { accountPrivateKeyDTO(it) }</span>
+
+    /**
+     * Stores an account private key in the cache with no further processing (mainly used when migrating keys from the
+     * legacy cache)
+     */
+    @CachePut(
+            ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME,
+            key = &quot;#accountKeysDTO.accountPublicId&quot;,
+            unless = &quot;#result.isLeft()&quot;)
+    fun addToCache(accountKeysDTO: AccountKeysDTO): Either&lt;KmsError, AccountPrivateKeyDTO&gt; =
+<span class="fc" id="L91">        right(accountKeysDTO.privateKey)</span>
+
+    @CacheEvict(cacheNames = [ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME], key = &quot;#accountPublicId&quot;)
+    override fun evictKeysForAccount(accountPublicId: AccountPublicId) {
+<span class="nc" id="L95">        log.debug(&quot;Evicted keys for account $accountPublicId from cache&quot;)</span>
+<span class="nc" id="L96">    }</span>
+
+    @CacheEvict(cacheNames = [ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME], allEntries = true)
+    override fun clearState() {
+<span class="fc" id="L100">        log.warn(&quot;Cache cleared&quot;)</span>
+<span class="fc" id="L101">    }</span>
+
+    /**
+     * Looks for any cached org account key that can decrypt the [accountPublicId]'s account key, and if found will
+     * return a plaintext [AccountPrivateKey]
+     */
+    private fun decryptAccountPrivateKeyWithAnyCachedOrgKey(accountPublicId: AccountPublicId): Either&lt;KmsError, AccountPrivateKey&gt; =
+<span class="fc" id="L108">            findAnyAvailableOrgAccountKey(accountPublicId)</span>
+<span class="fc" id="L109">                    .peek { log.debug(&quot;Accessing account key for $accountPublicId via org account key from org ${it.orgId}&quot;) }</span>
+<span class="fc" id="L110">                    .flatMap { orgAccountKeyCacheService.findAndDecryptAccountKey(it, accountPublicId) }</span>
+
+    fun accountsAccessibleViaCachedOrgKeys(accountPublicIds: List&lt;AccountPublicId&gt;): List&lt;AccountPublicId&gt; {
+        // Find the orgs who can access each account, discard the keys just keep the IDs
+<span class="fc" id="L114">        val accountIdsByOrgsWhoCanAccess: Map&lt;AccountPublicId, List&lt;OrgPrivateId&gt;&gt; =</span>
+<span class="fc" id="L115">                orgAccountKeyCacheService.findOrgIdsWithAccessToAccounts(accountPublicIds)</span>
+        // Out of all these orgs, which are cached (again, discard the keys just get the IDs)
+<span class="fc" id="L117">        val cachedOrgs = orgAccountKeyCacheService.getCachedOrgAccountKeys(accountIdsByOrgsWhoCanAccess.flatMap { it.value })</span>
+<span class="fc" id="L118">                .map { it.orgId }.toSet()</span>
+        // Go back through the original map, remove any where none of the org keys are cached.
+<span class="fc" id="L120">        return accountIdsByOrgsWhoCanAccess</span>
+<span class="fc" id="L121">                .filter { accountWithAccessingOrgs -&gt; accountWithAccessingOrgs.value.any { orgId -&gt; orgId in cachedOrgs } }</span>
+<span class="fc" id="L122">                .keys.toList()</span>
+    }
+
+    /**
+     * Looks for any org that has a copy of the private key for [accountPublicId] where the org account key is currently
+     * in the cache, and returns it
+     */
+    private fun findAnyAvailableOrgAccountKey(accountPublicId: AccountPublicId): Either&lt;KmsError, OrgAccountKey&gt; {
+<span class="fc" id="L130">        val orgsWithAccessToKey = orgAccountKeyCacheService.findOrgKeysWithAccessToAccountKey(accountPublicId)</span>
+<span class="fc" id="L131">                .map { it.orgId }</span>
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        return orgAccountKeyCacheService.getCachedOrgAccountKeys(orgsWithAccessToKey)</span>
+<span class="fc" id="L133">                .firstOrNull()</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">                ?.let { Either.right(it) }</span>
+<span class="fc" id="L135">                ?: Either.left(KmsError.accountPrivateKeyNotCached(accountPublicId))</span>
+    }
+
+    fun getAccountPrivateKeysViaAnyOrgKey(accountPublicIds: List&lt;AccountPublicId&gt;): Map&lt;AccountPublicId, AccountPrivateKeyDTO&gt; =
+<span class="fc" id="L139">            orgAccountKeyCacheService.findOrgIdsWithAccessToAccounts(accountPublicIds)</span>
+<span class="fc" id="L140">                .mapNotNull { (accountPublicId, orgIdsWithAccess) -&gt;</span>
+<span class="fc" id="L141">                    orgAccountKeyCacheService.getCachedOrgAccountKeys(orgIdsWithAccess)</span>
+<span class="fc" id="L142">                        .firstOrNull()</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">                        ?.let {  accountPublicId to it }</span>
+                }
+<span class="fc" id="L145">                .let { orgAccessible -&gt;</span>
+<span class="fc" id="L146">                    orgAccessible</span>
+<span class="fc" id="L147">                        .groupBy({ it.second }, { it.first })</span>
+<span class="fc" id="L148">                        .flatMap { (orgAccountKey, accountPublicIds) -&gt;</span>
+<span class="fc" id="L149">                            orgAccountKeyCacheService.findAndDecryptAccountKeys(orgAccountKey, accountPublicIds).entries</span>
+                        }
+<span class="fc" id="L151">                        .associate { it.key to accountPrivateKeyDTO(it.value) }</span>
+<span class="fc" id="L152">                }</span>
+
+
+    companion object {
+        const val ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME = &quot;${KMS_CACHE_PREFIX}_orgAccessibleAccountPrivateKey&quot;
+    }
+}
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

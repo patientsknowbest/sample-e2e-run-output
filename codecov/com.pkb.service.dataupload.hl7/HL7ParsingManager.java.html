@@ -1,0 +1,646 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HL7ParsingManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.hl7</a> &gt; <span class="el_source">HL7ParsingManager.java</span></div><h1>HL7ParsingManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.hl7;
+
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
+import com.google.common.collect.Table;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.Hl7Partner;
+import com.pkb.datamodel.Hl7PartnerGrant;
+import com.pkb.domain.Hl7PartnerService;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.model.RecordWithId;
+import com.pkb.service.team.TeamManager;
+import com.pkb.util.IpFilterUtil;
+import com.pkb.util.security.FileSecurityHandler;
+import io.vavr.API;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.math.NumberUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.util.Assert;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+import static com.pkb.service.dataupload.hl7.HL7ParsingManager.OrgTeamPartnerResult.ResultType.ORG;
+import static com.pkb.service.dataupload.hl7.HL7ParsingManager.OrgTeamPartnerResult.ResultType.PARTNER;
+import static com.pkb.service.dataupload.hl7.HL7ParsingManager.OrgTeamPartnerResult.ResultType.TEAM_WITH_ORG;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static java.util.Collections.emptySet;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.apache.commons.lang3.StringUtils.substringBefore;
+
+/**
+ * Contain the logic for parsing HL7 XML into the relevant post-parsing entities.
+ * Have this contained within a manager class rather than accessed statically on the wrapper itself.
+ */
+public class HL7ParsingManager {
+
+    private static final String ORG_PREFIX = &quot;org&quot;;
+    private static final String LEGACY_ORG_PREFIX = &quot;oid&quot;;
+    private static final String PARTNER_PREFIX = &quot;partner&quot;;
+    private static final String TEAM_PREFIX = &quot;team&quot;;
+    private final PhrConfig config;
+    private final TeamManager teamManager;
+    private final Hl7PartnerService hl7PartnerService;
+    private final DateTimeService dateTimeService;
+    private final FileSecurityHandler fileSecurityHandler;
+
+<span class="fc" id="L76">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    public HL7ParsingManager(PhrConfig config, TeamManager teamManager, Hl7PartnerService hl7PartnerService,
+<span class="fc" id="L79">                             DateTimeService dateTimeService, FileSecurityHandler fileSecurityHandler) {</span>
+<span class="fc" id="L80">        this.config = config;</span>
+<span class="fc" id="L81">        this.teamManager = teamManager;</span>
+<span class="fc" id="L82">        this.hl7PartnerService = hl7PartnerService;</span>
+<span class="fc" id="L83">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L84">        this.fileSecurityHandler = fileSecurityHandler;</span>
+<span class="fc" id="L85">    }</span>
+
+    /**
+     * Entry point to process HL7 XML. The xml will be converted to an
+     * {@code HL7XmlDoc}, then the corresponding {@code OrgTeam} is extracted
+     * and any whitelisting of sources is processed. Finally, any bespoke
+     * mappings for the data are applied to the xml object, before the whole
+     * {@code HL7Wrapper} is returned.
+     *
+     * @param xml         The raw HL7 XML data.
+     * @param teamManager Required to lookup source whitelisting.
+     * @return A {@code HL7Wrapper}.
+     */
+    public HL7Wrapper processXmlData(@NotNull String xml, @NotNull EHRRequestContext requestContext) {
+        // Create the xml object
+<span class="fc" id="L100">        HL7XmlDoc hl7Xml = new HL7XmlDoc(xml, config, fileSecurityHandler, dateTimeService);</span>
+
+        // Retrieve details of the connecting entity (and process whitelisting)
+<span class="fc" id="L103">        HL7ConnContext hl7ConnContext = parseValidHL7ConnContext(hl7Xml, requestContext);</span>
+
+<span class="fc" id="L105">        return createHl7Wrapper(hl7Xml, hl7ConnContext);</span>
+    }
+
+    private HL7Wrapper createHl7Wrapper(HL7XmlDoc hl7Xml, HL7ConnContext hl7ConnContext) {
+<span class="fc" id="L109">        LOGGER.info(&quot;processing message {} from {}&quot;, hl7Xml.getMessageIdString(), hl7ConnContext);</span>
+
+<span class="pc bpc" id="L111" title="1 of 2 branches missed.">        if (isNotBlank(hl7ConnContext.getTimeZoneId())) {</span>
+            // note: timezone ID defaults to UTC if String does not resolve to a valid timezone
+<span class="fc" id="L113">            hl7Xml.getMessageProperties().setSenderTimeZone(TimeZone.getTimeZone(hl7ConnContext.getTimeZoneId()));</span>
+        }
+
+<span class="fc" id="L116">        HL7Wrapper wrapper = new HL7Wrapper();</span>
+<span class="fc" id="L117">        wrapper.setHL7Xml(hl7Xml);</span>
+<span class="fc" id="L118">        wrapper.setHl7ConnContext(hl7ConnContext);</span>
+<span class="fc" id="L119">        return wrapper;</span>
+    }
+
+    public &lt;ID&gt; Stream&lt;RecordWithId&lt;ID, HL7Wrapper&gt;&gt; processXmls(@NotNull Collection&lt;RecordWithId&lt;ID, String&gt;&gt; xmls, @NotNull EHRRequestContext requestContext) {
+<span class="fc bfc" id="L123" title="All 2 branches covered.">        if (isEmpty(xmls)) {</span>
+<span class="fc" id="L124">            return Stream.empty();</span>
+        }
+<span class="fc" id="L126">        List&lt;RecordWithId&lt;ID, HL7XmlDoc&gt;&gt; xmlDocs = new ArrayList&lt;&gt;(xmls.size());</span>
+<span class="fc" id="L127">        Map&lt;ID, HL7XmlDoc&gt; xmlDocMap = new HashMap&lt;&gt;(xmls.size());</span>
+
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        for (RecordWithId&lt;ID, String&gt; r : xmls) {</span>
+<span class="fc" id="L130">            RecordWithId&lt;ID, HL7XmlDoc&gt; xmlDoc = r.switchRecord(new HL7XmlDoc(r.record(), config, fileSecurityHandler, dateTimeService));</span>
+<span class="fc" id="L131">            xmlDocs.add(xmlDoc);</span>
+<span class="fc" id="L132">            xmlDocMap.put(r.id(), xmlDoc.record());</span>
+<span class="fc" id="L133">        }</span>
+
+<span class="fc" id="L135">        Map&lt;ID, HL7ConnContext&gt; hl7ConnContextMap = parseValidHL7ConnContext(xmlDocs, requestContext)</span>
+<span class="fc" id="L136">                .collect(toMap(RecordWithId::id, RecordWithId::record));</span>
+
+<span class="fc" id="L138">        return xmls.stream().map(rwxml -&gt; rwxml.switchRecord(createHl7Wrapper(xmlDocMap.get(rwxml.id()), hl7ConnContextMap.get(rwxml.id()))));</span>
+    }
+
+    /**
+     * The sending facility field (MSH-4) has the original value from the sender,
+     * PLUS the authentication username and IP address (added in by PIE), like this:
+     * &lt;p&gt;
+     * OriginalSendingFacility:team_smoketest@123.45.67.89
+     * &lt;p&gt;
+     * First get the authentication principal and source IP address. Principal may be
+     * - an org code, in format org_abcdef, or in format oid_1234 (old)
+     * - a team code, in format team_abcdef, or by itself (old)
+     * In progress: migrate everyone to using either team_abcdef or org_abcdef
+     * &lt;p&gt;
+     * We fetch the org/team in the auth principal, and make sure this IP address is whitelisted.
+     * &lt;p&gt;
+     * Then we have special handling for the original sending facility value:
+     * If the org has a whitelisted map of source aliases, this value must be a listed alias.
+     */
+    private HL7ConnContext parseValidHL7ConnContext(HL7XmlDoc hl7, @NotNull EHRRequestContext requestContext) {
+<span class="fc" id="L158">        String authPrincipal = hl7.parseAuthPrincipal();</span>
+<span class="fc" id="L159">        OrgTeamPartnerResult connectingOrgTeamPartner = lookupOrgOrTeamOrPartnerFromUsername(authPrincipal)</span>
+<span class="fc" id="L160">                .getOrElseThrow(ApiCallMalformedException::new);</span>
+
+<span class="fc" id="L162">        Optional&lt;OrgTeamPartnerResult&gt; sourceOrgTeamOverride = getSourceOrgTeamOverride(connectingOrgTeamPartner, hl7);</span>
+
+<span class="fc" id="L164">        Optional&lt;String&gt; maybeResponsibleOrganisationIdentifier = Optional.ofNullable(hl7.getHL7MessageHeader().getResponsibleOrganisationIdentifier().getString());</span>
+
+<span class="fc" id="L166">        return initAndValidateContext(authPrincipal, hl7, connectingOrgTeamPartner, sourceOrgTeamOverride, maybeResponsibleOrganisationIdentifier, requestContext);</span>
+    }
+
+<span class="fc" id="L169">    private static final Set&lt;OrgTeamPartnerResult.ResultType&gt; TEAM_USERNAME_NEEDED = Sets.immutableEnumSet(EnumSet.complementOf(EnumSet.of(PARTNER, TEAM_WITH_ORG)));</span>
+
+    private &lt;ID&gt; Stream&lt;RecordWithId&lt;ID, HL7ConnContext&gt;&gt; parseValidHL7ConnContext(Collection&lt;RecordWithId&lt;ID, HL7XmlDoc&gt;&gt; recordWithHl7s, @NotNull EHRRequestContext requestContext) {
+<span class="fc" id="L172">        Map&lt;ID, String&gt; userNames = recordWithHl7s.stream().map(r -&gt; r.switchRecord(r.record().parseAuthPrincipal())).collect(toMap(RecordWithId::id, RecordWithId::record));</span>
+<span class="fc" id="L173">        Set&lt;String&gt; userNameSet = ImmutableSet.copyOf(userNames.values());</span>
+<span class="fc" id="L174">        Map&lt;String, HL7ParsingManager.OrgTeamPartnerResult&gt; connectingOrgTeamPartners = orgOrTeamOrPartnerFromUserNameMap(userNameSet)</span>
+<span class="fc" id="L175">                .collect(toMap(RecordWithId::id, RecordWithId::record));</span>
+
+<span class="fc" id="L177">        Set&lt;String&gt; teamUsernamesFromAliases = recordWithHl7s.stream()</span>
+<span class="fc" id="L178">                .map(rwhl7 -&gt; {</span>
+<span class="fc" id="L179">                    String authPrincipal = userNames.get(rwhl7.id());</span>
+<span class="fc" id="L180">                    OrgTeamPartnerResult otpr = connectingOrgTeamPartners.get(authPrincipal);</span>
+<span class="fc" id="L181">                    String sendingFacility = getSendingFacility(rwhl7.record());</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">                    if (TEAM_USERNAME_NEEDED.contains(otpr.getResultType())) {</span>
+<span class="fc" id="L183">                        return getOrgTeamUserNameFromAlias(sendingFacility, otpr.getAliasWhitelist());</span>
+                    }
+<span class="fc" id="L185">                    Optional&lt;String&gt; result = Optional.empty();</span>
+<span class="fc" id="L186">                    return result;</span>
+                })
+<span class="fc" id="L188">                .flatMap(Optional::stream)</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">                .filter(s -&gt; !userNameSet.contains(s))</span>
+<span class="fc" id="L190">                .collect(toSet());</span>
+
+<span class="fc" id="L192">        orgOrTeamOrPartnerFromUserNameMap(teamUsernamesFromAliases).forEach(r -&gt; connectingOrgTeamPartners.put(r.id(), r.record()));</span>
+
+<span class="fc" id="L194">        Map&lt;ID, Optional&lt;HL7ParsingManager.OrgTeamPartnerResult&gt;&gt; sourceOrgTeamOverridesMap = getSourceOrgTeamOverride(recordWithHl7s, userNames, connectingOrgTeamPartners)</span>
+<span class="fc" id="L195">                .collect(toMap(RecordWithId::id, RecordWithId::record));</span>
+
+<span class="fc" id="L197">        return recordWithHl7s.stream().map(rwhl7 -&gt; {</span>
+<span class="fc" id="L198">            String authPrincipal = userNames.get(rwhl7.id());</span>
+<span class="fc" id="L199">            OrgTeamPartnerResult otpr = connectingOrgTeamPartners.get(authPrincipal);</span>
+<span class="fc" id="L200">            var sourceOrgOrTeamOverride = sourceOrgTeamOverridesMap.get(rwhl7.id());</span>
+<span class="fc" id="L201">            Optional&lt;String&gt; maybeResponsibleOrganisationIdentifier = Optional.ofNullable(rwhl7.record().getHL7MessageHeader().getResponsibleOrganisationIdentifier().getString());</span>
+<span class="fc" id="L202">            HL7ConnContext result = initAndValidateContext(authPrincipal, rwhl7.record(), otpr, sourceOrgOrTeamOverride, maybeResponsibleOrganisationIdentifier, requestContext);</span>
+<span class="fc" id="L203">            return rwhl7.switchRecord(result);</span>
+        });
+    }
+
+    private HL7ConnContext initAndValidateContext(String authPrincipal, HL7XmlDoc hl7, OrgTeamPartnerResult connectingOrgTeamPartner, Optional&lt;OrgTeamPartnerResult&gt; sourceOrgTeamOverride,
+                                                  @NotNull Optional&lt;String&gt; maybeResponsibleOrganisationIdentifier, @NotNull EHRRequestContext requestContext) {
+<span class="fc" id="L209">        HL7ConnContext hl7ConnContext = initHL7ConnContext(connectingOrgTeamPartner, sourceOrgTeamOverride, maybeResponsibleOrganisationIdentifier, requestContext);</span>
+<span class="fc" id="L210">        checkIpWhitelisting(authPrincipal, hl7.parseSenderIp(), hl7ConnContext.dataUploadIpWhitelist());</span>
+<span class="fc" id="L211">        return hl7ConnContext;</span>
+    }
+
+    private &lt;ID&gt; Stream&lt;RecordWithId&lt;ID, Optional&lt;HL7ParsingManager.OrgTeamPartnerResult&gt;&gt;&gt; getSourceOrgTeamOverride(Collection&lt;RecordWithId&lt;ID, HL7XmlDoc&gt;&gt; recordWithHl7s, Map&lt;ID, String&gt; userNames, Map&lt;String, HL7ParsingManager.OrgTeamPartnerResult&gt; connectingOrgTeamPartners) {
+<span class="fc" id="L215">        Map&lt;ID, String&gt; sendingFacilities = new HashMap&lt;&gt;(recordWithHl7s.size());</span>
+<span class="fc" id="L216">        Map&lt;ID, String&gt; orgAliases = new HashMap&lt;&gt;(recordWithHl7s.size());</span>
+
+<span class="fc bfc" id="L218" title="All 2 branches covered.">        for (RecordWithId&lt;ID, HL7XmlDoc&gt; recordWithHl7 : recordWithHl7s) {</span>
+<span class="fc" id="L219">            String sendingFacility = getSendingFacility(recordWithHl7.record());</span>
+<span class="fc" id="L220">            sendingFacilities.put(recordWithHl7.id(), sendingFacility);</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">            if (connectingOrgTeamPartners.get(userNames.get(recordWithHl7.id())).getResultType() == PARTNER) {</span>
+<span class="fc" id="L222">                orgAliases.put(recordWithHl7.id(), getOrgAlias(sendingFacility));</span>
+            }
+<span class="fc" id="L224">        }</span>
+
+<span class="fc" id="L226">        Set&lt;Long&gt; partnerIds = connectingOrgTeamPartners.values().stream()</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">                .filter(otpr -&gt; otpr.getResultType() == PARTNER)</span>
+<span class="fc" id="L228">                .map(otpr -&gt; otpr.getPartner().getId().getOrNull())</span>
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">                .filter(e -&gt; e != null)</span>
+<span class="fc" id="L230">                .collect(toSet());</span>
+<span class="fc" id="L231">        Table&lt;String, Long, Hl7PartnerGrant&gt; grantTable = hl7PartnerService.findPartnerGrantsBySourceAliasAndPartnerIds(new HashSet&lt;&gt;(orgAliases.values()), partnerIds);</span>
+
+<span class="fc" id="L233">        Set&lt;Long&gt; orgIds = grantTable.values().stream().map(hl7pg -&gt; hl7pg.getOrg().getId()).collect(toSet());</span>
+<span class="fc" id="L234">        Map&lt;Long, Org&gt; orgMap = teamManager.getOrgs(orgIds, Org.Lazy.TEAMS, Org.Lazy.EXTERNAL_IDS).stream()</span>
+<span class="pc" id="L235">                .collect(toMap(Org::getId, identity(), (o1, o2) -&gt; o1));</span>
+
+<span class="fc" id="L237">        BiFunction&lt;String, Hl7Partner, OrgTeamPartnerResult&gt; partnerOrOrgGrantProvider = (sf, hl7p) -&gt; lookupPartnerOrgGrant(sf, hl7p, (orgAlias, partnerId) -&gt; Optional.ofNullable(grantTable.get(orgAlias, partnerId)), orgMap::get);</span>
+<span class="pc bpc" id="L238" title="1 of 2 branches missed.">        BiFunction&lt;String, Set&lt;String&gt;, Optional&lt;OrgTeamPartnerResult&gt;&gt; lookupOrgOrTeamFromAliasProvider = (sf, wl) -&gt; getOrgTeamUserNameFromAlias(sf, wl).map(u -&gt; connectingOrgTeamPartners.get(u)).filter(o -&gt; o != null);</span>
+
+<span class="fc" id="L240">        return recordWithHl7s.stream()</span>
+<span class="fc" id="L241">                .map(r -&gt; {</span>
+<span class="fc" id="L242">                    String sendingFacility = sendingFacilities.get(r.id());</span>
+<span class="fc" id="L243">                    OrgTeamPartnerResult otpr = connectingOrgTeamPartners.get(userNames.get(r.id()));</span>
+<span class="fc" id="L244">                    Optional&lt;OrgTeamPartnerResult&gt; result = getSourceOrgTeamOverride(sendingFacility, otpr, r.record(), partnerOrOrgGrantProvider, lookupOrgOrTeamFromAliasProvider);</span>
+<span class="fc" id="L245">                    return r.switchRecord(result);</span>
+                });
+    }
+
+    private Optional&lt;OrgTeamPartnerResult&gt; getSourceOrgTeamOverride(OrgTeamPartnerResult input, HL7XmlDoc hl7) {
+<span class="fc" id="L250">        String sendingFacility = getSendingFacility(hl7);</span>
+<span class="fc" id="L251">        return getSourceOrgTeamOverride(sendingFacility, input, hl7, (sf, hl7p) -&gt; lookupPartnerOrgGrant(sf, hl7p), (sf, wl) -&gt; lookupOrgOrTeamFromAlias(sf, wl));</span>
+    }
+
+    private Optional&lt;OrgTeamPartnerResult&gt; getSourceOrgTeamOverride(String sendingFacility, OrgTeamPartnerResult input, HL7XmlDoc hl7, BiFunction&lt;String, Hl7Partner, OrgTeamPartnerResult&gt; partnerOrOrgGrantProvider, BiFunction&lt;String, Set&lt;String&gt;, Optional&lt;OrgTeamPartnerResult&gt;&gt; lookupOrgOrTeamFromAliasProvider) {
+        Optional&lt;OrgTeamPartnerResult&gt; sourceOrgTeamOverride;
+<span class="fc bfc" id="L256" title="All 3 branches covered.">        switch (input.getResultType()) {</span>
+            case PARTNER:
+<span class="fc" id="L258">                sourceOrgTeamOverride = Optional.of(partnerOrOrgGrantProvider.apply(sendingFacility, input.getPartner()));</span>
+<span class="fc" id="L259">                break;</span>
+            case TEAM_WITH_ORG: // Source override is not supported for teams
+<span class="fc bfc" id="L261" title="All 2 branches covered.">                if (hl7.hasZtmSegment()) {</span>
+<span class="fc" id="L262">                    throw new ApiCallMalformedException(&quot;Team level connections do not support ZTM segments&quot;);</span>
+                }
+<span class="fc" id="L264">                sourceOrgTeamOverride = Optional.empty();</span>
+<span class="fc" id="L265">                break;</span>
+            default:
+<span class="fc" id="L267">                sourceOrgTeamOverride = lookupOrgOrTeamFromAliasProvider.apply(sendingFacility, input.getAliasWhitelist());</span>
+        }
+
+<span class="fc" id="L270">        return sourceOrgTeamOverride;</span>
+    }
+
+    private String getSendingFacility(HL7XmlDoc hl7) {
+        // is there an override for the source org/team?
+<span class="fc" id="L275">        String sendingFacility = hl7.getSendingFacility().toLowerCase(); // never null; may be empty</span>
+<span class="pc bpc" id="L276" title="1 of 2 branches missed.">        if (sendingFacility.indexOf('^') &gt; -1) {</span>
+<span class="nc" id="L277">            sendingFacility = sendingFacility.substring(0, sendingFacility.indexOf('^'));</span>
+        }
+<span class="fc" id="L279">        return sendingFacility;</span>
+    }
+
+    public Map&lt;String, OrgTeamPartnerResult&gt; getOrgOrTeamFromAliasMap(Collection&lt;String&gt; aliases, Set&lt;String&gt; aliasMappings) {
+<span class="fc" id="L283">        Map&lt;String, String&gt; aliasMap = aliases.stream()</span>
+<span class="fc" id="L284">                .map(alias -&gt; getOrgTeamUserNameFromAlias(alias, aliasMappings).map(e -&gt; Tuple.of(alias, e)))</span>
+<span class="fc" id="L285">                .flatMap(Optional::stream)</span>
+<span class="pc" id="L286">                .collect(toMap(t -&gt; t._2, t -&gt; t._1, (t1, t2) -&gt; t1));</span>
+
+<span class="fc" id="L288">        return orgOrTeamOrPartnerFromUserNameMap(aliasMap.keySet())</span>
+<span class="fc" id="L289">                .collect(toMap(r -&gt; aliasMap.get(r.id()), r -&gt; r.record()));</span>
+    }
+
+    public Optional&lt;OrgTeamPartnerResult&gt; lookupOrgOrTeamFromAlias(String requestedAlias, Set&lt;String&gt; aliasMappings) {
+<span class="fc" id="L293">        return getOrgTeamUserNameFromAlias(requestedAlias, aliasMappings)</span>
+<span class="fc" id="L294">                .map(alias -&gt; lookupOrgOrTeamOrPartnerFromUsername(alias).getOrElseThrow(ApiCallMalformedException::new));</span>
+    }
+
+    public Optional&lt;String&gt; getOrgTeamUserNameFromAlias(String requestedAlias, Set&lt;String&gt; aliasMappings) {
+<span class="pc bpc" id="L298" title="1 of 4 branches missed.">        if (StringUtils.isBlank(requestedAlias) || aliasMappings.isEmpty()) {</span>
+<span class="fc" id="L299">            return Optional.empty();</span>
+        }
+
+<span class="fc" id="L302">        Map&lt;String, String&gt; aliasToUsernameMap = mapSourceAliases(aliasMappings);</span>
+<span class="fc" id="L303">        String orgTeamUsername = aliasToUsernameMap.get(requestedAlias);</span>
+<span class="fc bfc" id="L304" title="All 2 branches covered.">        if (orgTeamUsername == null) {</span>
+<span class="fc" id="L305">            LOGGER.warn(&quot;'{}' is not a whitelisted facility. Falling back to originating facility&quot;, requestedAlias);</span>
+<span class="fc" id="L306">            return Optional.empty();</span>
+        }
+<span class="fc" id="L308">        return Optional.of(orgTeamUsername);</span>
+    }
+
+    /**
+     * Alias format for HL7 Partner: sourceOrgAlias{connectingOrgAlias} ...but initial these org values must be the same value
+     */
+    OrgTeamPartnerResult lookupPartnerOrgGrant(String sendingFacility, Hl7Partner partner) {
+<span class="fc" id="L315">        return lookupPartnerOrgGrant(sendingFacility, partner, (orgAlias, partnerId) -&gt; hl7PartnerService.findPartnerGrantBySourceAliasAndPartnerId(orgAlias, partnerId), orgId -&gt; teamManager.getOrg(orgId, Org.Lazy.TEAMS, Org.Lazy.EXTERNAL_IDS).orElse(null));</span>
+    }
+
+    private OrgTeamPartnerResult lookupPartnerOrgGrant(String sendingFacility, Hl7Partner partner, BiFunction&lt;String, Long, Optional&lt;Hl7PartnerGrant&gt;&gt; partnerGrantSupplier, Function&lt;Long, Org&gt; orgByIdProvider) {
+<span class="fc" id="L319">        String orgAlias = getOrgAlias(sendingFacility);</span>
+<span class="fc" id="L320">        return partner.getId()</span>
+<span class="fc" id="L321">                .toJavaOptional()</span>
+<span class="fc" id="L322">                .flatMap(partnerId -&gt; partnerGrantSupplier.apply(orgAlias, partnerId))</span>
+<span class="fc" id="L323">                .map(g -&gt; new OrgTeamPartnerResult(g, orgByIdProvider.apply(g.getOrg().getId())))</span>
+<span class="fc" id="L324">                .orElseThrow(() -&gt; new ApiCallMalformedException(&quot;HL7 Partner org grant not found for alias &quot; + orgAlias));</span>
+    }
+
+    private String getOrgAlias(String sendingFacility) {
+<span class="fc" id="L328">        int openBracket = sendingFacility.indexOf('{');</span>
+<span class="fc bfc" id="L329" title="All 2 branches covered.">        if (openBracket &lt; 0) {</span>
+<span class="fc" id="L330">            throw new ApiCallMalformedException(&quot;MSH-4 Sending Facility value required in format orgAlias{orgAlias}. Received: &quot; + sendingFacility);</span>
+        }
+<span class="fc" id="L332">        String orgAlias = sendingFacility.substring(0, openBracket);</span>
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">        if (!sendingFacility.equals(orgAlias + &quot;{&quot; + orgAlias + &quot;}&quot;)) {</span>
+<span class="nc" id="L334">            throw new ApiCallMalformedException(&quot;MSH-4 Sending Facility value required in format orgAlias{orgAlias}. Received: &quot; + sendingFacility);</span>
+        }
+<span class="fc" id="L336">        return orgAlias;</span>
+    }
+
+    /**
+     * Not building a full context - this is only to go from an org_imperial or team_renal type username to the Org/Team
+     *
+     * @param teamManager Manager required for DB lookups.
+     * @return Either&lt;detail of problem String, found OrgTeamPartnerResult&gt;
+     */
+    public Either&lt;String, OrgTeamPartnerResult&gt; lookupOrgOrTeamOrPartnerFromUsername(String username) {
+<span class="fc" id="L346">        return lookupOrgOrTeamOrPartnerFromUsername(username,</span>
+<span class="fc" id="L347">                orgCode -&gt; teamManager.getOrgByCode(orgCode, Org.Lazy.TEAMS, Org.Lazy.EXTERNAL_IDS).orElse(null),</span>
+<span class="nc" id="L348">                orgId -&gt; teamManager.getOrg(orgId, Org.Lazy.TEAMS, Org.Lazy.EXTERNAL_IDS).orElse(null),</span>
+<span class="fc" id="L349">                hl7PartnerService::findPartnerByCode,</span>
+<span class="fc" id="L350">                teamCode -&gt; teamManager.getTeamByCode(teamCode, Team.Lazy.ORG_EXT_IDS));</span>
+    }
+
+    public Stream&lt;RecordWithId&lt;String, OrgTeamPartnerResult&gt;&gt; orgOrTeamOrPartnerFromUserNameMap(Collection&lt;String&gt; userNames) {
+<span class="fc" id="L354">        return lookupOrgOrTeamOrPartnerFromUsername(userNames)</span>
+<span class="fc" id="L355">                .map(r -&gt; r.switchRecord(r.record().getOrElseThrow(ApiCallMalformedException::new)));</span>
+    }
+
+    public Stream&lt;RecordWithId&lt;String, Either&lt;String, OrgTeamPartnerResult&gt;&gt;&gt; lookupOrgOrTeamOrPartnerFromUsername(Collection&lt;String&gt; userNames) {
+<span class="fc bfc" id="L359" title="All 2 branches covered.">        if (isEmpty(userNames)) {</span>
+<span class="fc" id="L360">            return Stream.empty();</span>
+        }
+<span class="fc" id="L362">        Set&lt;String&gt; orgCodes = new HashSet&lt;&gt;(userNames.size());</span>
+<span class="fc" id="L363">        Set&lt;Long&gt; orgIds = new HashSet&lt;&gt;(userNames.size());</span>
+<span class="fc" id="L364">        Set&lt;String&gt; teamCodes = new HashSet&lt;&gt;(userNames.size());</span>
+<span class="fc" id="L365">        Set&lt;String&gt; partnerCodes = new HashSet&lt;&gt;(userNames.size());</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">        for (String userName : userNames) {</span>
+<span class="fc" id="L367">            String prefix = substringBefore(userName, &quot;_&quot;);</span>
+<span class="pc bpc" id="L368" title="2 of 5 branches missed.">            switch (prefix) {</span>
+                case ORG_PREFIX:
+<span class="fc" id="L370">                    orgCodes.add(getOrgCodeFromUserName(userName));</span>
+<span class="fc" id="L371">                    break;</span>
+                case LEGACY_ORG_PREFIX:
+<span class="nc" id="L373">                    orgIds.add(getOrgIdFromUserName(userName));</span>
+<span class="nc" id="L374">                    break;</span>
+                case PARTNER_PREFIX:
+<span class="fc" id="L376">                    partnerCodes.add(getPartnerCode(userName));</span>
+<span class="fc" id="L377">                    break;</span>
+                case TEAM_PREFIX:
+<span class="fc" id="L379">                    teamCodes.add(getTeamCode(userName));</span>
+<span class="fc" id="L380">                    break;</span>
+                default:
+                    // Assume it's a plain team code... deprecated format
+<span class="nc" id="L383">                    teamCodes.add(userName);</span>
+            }
+<span class="fc" id="L385">        }</span>
+
+<span class="pc" id="L387">        Map&lt;Long, Org&gt; orgByIdMap = teamManager.getOrgs(orgIds, Org.Lazy.TEAMS, Org.Lazy.EXTERNAL_IDS).stream().collect(toMap(Org::getId, identity(), (o1, o2) -&gt; o1));</span>
+<span class="fc" id="L388">        Map&lt;String, Hl7Partner&gt; hl7PartnersByCode = hl7PartnerService.findPartnerByCodes(partnerCodes);</span>
+
+<span class="fc" id="L390">        List&lt;Team&gt; teamList = teamManager.getTeamsByCode(teamCodes, Team.Lazy.ORG_EXT_IDS);</span>
+<span class="fc" id="L391">        teamList.stream()</span>
+<span class="fc" id="L392">                .map(t -&gt; t.getOrg().getCode())</span>
+<span class="fc" id="L393">                .forEach(orgCodes::add);</span>
+<span class="pc" id="L394">        Map&lt;String, Team&gt; teamByCodesMap = teamList.stream().collect(toMap(Team::getCode, identity(), (t1, t2) -&gt; t1));</span>
+
+<span class="fc" id="L396">        Map&lt;String, Org&gt; orgByCodesMap = teamManager.getOrgByCodes(orgCodes, Org.Lazy.TEAMS, Org.Lazy.EXTERNAL_IDS)</span>
+<span class="fc" id="L397">                .stream()</span>
+<span class="pc" id="L398">                .collect(toMap(Org::getCode, identity(), (o1, o2) -&gt; o1));</span>
+
+
+<span class="fc" id="L401">        return userNames.stream()</span>
+<span class="fc" id="L402">                .map(userName -&gt; RecordWithId.of(userName, lookupOrgOrTeamOrPartnerFromUsername(userName, orgByCodesMap::get, orgByIdMap::get, code -&gt; Optional.ofNullable(hl7PartnersByCode.get(code)), teamByCodesMap::get)));</span>
+    }
+
+    private String getOrgCodeFromUserName(String input) {
+<span class="fc" id="L406">        return input.substring(&quot;org_&quot;.length());</span>
+    }
+
+    private Long getOrgIdFromUserName(String input) {
+<span class="nc" id="L410">        return NumberUtils.toLong(input.substring(&quot;oid_&quot;.length()));</span>
+    }
+
+    private String getPartnerCode(String input) {
+<span class="fc" id="L414">        return input.substring(&quot;partner_&quot;.length());</span>
+    }
+
+    private String getTeamCode(String input) {
+<span class="fc" id="L418">        return input.substring(&quot;team_&quot;.length());</span>
+    }
+
+    private Either&lt;String, OrgTeamPartnerResult&gt; lookupOrgOrTeamOrPartnerFromUsername(String username, Function&lt;String, Org&gt; orgByCodeProvider, Function&lt;Long, Org&gt; orgByIdProvider, Function&lt;String, Optional&lt;Hl7Partner&gt;&gt; partnerProvider, Function&lt;String, Team&gt; teamProvider) {
+        // 2017-02-13 Tom - Whilst it would be tidier to delete the code which handles deprecated username formats (those beginning with
+        // &quot;oid&quot; or those without a prefix at all), remember that the username is stored with the data, so any unprocessed/queued HL7
+        // messages will fail if/when they do finally get processed if we've removed the corresponding username handler.
+        // Note: stmarksgastro was an active username up until Feb 2017.
+<span class="fc" id="L426">        String prefix = substringBefore(username, &quot;_&quot;);</span>
+<span class="pc bpc" id="L427" title="2 of 5 branches missed.">        switch (prefix) {</span>
+            case ORG_PREFIX:
+<span class="fc" id="L429">                String orgCode = getOrgCodeFromUserName(username);</span>
+<span class="fc" id="L430">                return getOrgPartnerResult(orgByCodeProvider.apply(orgCode), username);</span>
+            case LEGACY_ORG_PREFIX:
+<span class="nc" id="L432">                LOGGER.warn(&quot;Unsupported HL7 username provided: {}&quot;, username);</span>
+<span class="nc" id="L433">                long orgId = getOrgIdFromUserName(username);</span>
+<span class="nc" id="L434">                return getOrgPartnerResult(orgByIdProvider.apply(orgId), username);</span>
+            case PARTNER_PREFIX:
+<span class="fc" id="L436">                String partnerCode = getPartnerCode(username);</span>
+<span class="fc" id="L437">                return partnerProvider.apply(partnerCode)</span>
+<span class="fc" id="L438">                        .map(p -&gt; Either.&lt;String, OrgTeamPartnerResult&gt;right(new OrgTeamPartnerResult(p)))</span>
+<span class="fc" id="L439">                        .orElse(Either.left(&quot;HL7 Partner not found for username &quot; + username));</span>
+            case TEAM_PREFIX:
+<span class="fc" id="L441">                String teamCode = getTeamCode(username);</span>
+<span class="fc" id="L442">                return getOrgTeamPartnerResult(teamProvider.apply(teamCode), teamCode, orgByCodeProvider, username);</span>
+            default:
+                // Assume it's a plain team code... deprecated format
+<span class="nc" id="L445">                LOGGER.warn(&quot;Unsupported HL7 username provided: {}&quot;, username);</span>
+<span class="nc" id="L446">                return getOrgTeamPartnerResult(teamProvider.apply(username), username, orgByCodeProvider, username);</span>
+        }
+    }
+
+    private Either&lt;String, OrgTeamPartnerResult&gt; getOrgTeamPartnerResult(@Nullable Team team, String teamCode, Function&lt;String, Org&gt; orgByCodeProvider, String username) {
+<span class="pc bpc" id="L451" title="1 of 2 branches missed.">        if (team == null) {</span>
+<span class="nc" id="L452">            return Either.left(&quot;team not found for team code &quot; + teamCode + &quot;; from username &quot; + username);</span>
+        }
+<span class="fc" id="L454">        Org org = orgByCodeProvider.apply(team.getOrg().getCode());</span>
+<span class="fc" id="L455">        return Either.right(</span>
+                new OrgTeamPartnerResult(team, org));
+    }
+
+    private Either&lt;String, OrgTeamPartnerResult&gt; getOrgPartnerResult(@Nullable Org org, String username) {
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">        if (org == null) {</span>
+<span class="nc" id="L461">            return Either.left(&quot;org not found for username &quot; + username);</span>
+        }
+<span class="fc" id="L463">        return Either.right(new OrgTeamPartnerResult(org));</span>
+    }
+
+    /**
+     * Converts the authenticated entity plus alias into the corresponding {@code HL7ConnContext}.
+     */
+    private HL7ConnContext initHL7ConnContext(OrgTeamPartnerResult connectingOrgTeamPartner, Optional&lt;OrgTeamPartnerResult&gt; sourceOrgOrTeamOverride,
+                                              @NotNull Optional&lt;String&gt; maybeResponsibleOrganisationIdentifier, @NotNull EHRRequestContext requestContext) {
+
+<span class="fc bfc" id="L472" title="All 2 branches covered.">        if (sourceOrgOrTeamOverride.isPresent()) {</span>
+<span class="fc" id="L473">            OrgTeamPartnerResult.ResultType overrideType = sourceOrgOrTeamOverride.get().resultType;</span>
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">            if (connectingOrgTeamPartner.resultType == OrgTeamPartnerResult.ResultType.TEAM_WITH_ORG) {</span>
+<span class="nc" id="L475">                throw new ApiCallMalformedException(&quot;MSH-4 override of source org/team is only permitted for an org-level connection&quot;);</span>
+            }
+
+<span class="fc bfc" id="L478" title="All 2 branches covered.">            if (overrideType == OrgTeamPartnerResult.ResultType.ORG) {</span>
+<span class="pc bpc" id="L479" title="1 of 2 branches missed.">                switch (connectingOrgTeamPartner.resultType) {</span>
+                    case ORG:
+<span class="fc" id="L481">                        return HL7ConnContextFactory.create(connectingOrgTeamPartner.org, sourceOrgOrTeamOverride.get().org, requestContext.getCorrelationId(), maybeResponsibleOrganisationIdentifier);</span>
+                    default:
+<span class="nc" id="L483">                        throw new IllegalStateException(&quot;Unexpected resultType &quot; + connectingOrgTeamPartner.resultType);</span>
+                }
+<span class="fc bfc" id="L485" title="All 2 branches covered.">            } else if (sourceOrgOrTeamOverride.get().resultType == OrgTeamPartnerResult.ResultType.TEAM_WITH_ORG) {</span>
+<span class="pc bpc" id="L486" title="1 of 2 branches missed.">                switch (connectingOrgTeamPartner.resultType) {</span>
+                    case ORG:
+<span class="fc" id="L488">                        return HL7ConnContextFactory.create(connectingOrgTeamPartner.org, sourceOrgOrTeamOverride.get().teamWithOrg._2(),</span>
+<span class="fc" id="L489">                                sourceOrgOrTeamOverride.get().teamWithOrg._1(), requestContext.getCorrelationId(), maybeResponsibleOrganisationIdentifier);</span>
+                    default:
+<span class="nc" id="L491">                        throw new IllegalStateException(&quot;Unexpected resultType &quot; + connectingOrgTeamPartner.resultType);</span>
+                }
+<span class="pc bpc" id="L493" title="1 of 2 branches missed.">            } else if (sourceOrgOrTeamOverride.get().resultType == OrgTeamPartnerResult.ResultType.PARTNER_GRANT_WITH_ORG) {</span>
+<span class="pc bpc" id="L494" title="1 of 2 branches missed.">                switch (connectingOrgTeamPartner.resultType) {</span>
+                    case PARTNER:
+<span class="fc" id="L496">                        return HL7ConnContextFactory.create(sourceOrgOrTeamOverride.get().partnerGrantWithOrg._1(), sourceOrgOrTeamOverride.get().partnerGrantWithOrg._2(),</span>
+<span class="fc" id="L497">                                requestContext.getCorrelationId(), maybeResponsibleOrganisationIdentifier);</span>
+                    default:
+<span class="nc" id="L499">                        throw new IllegalStateException(&quot;Unexpected resultType &quot; + connectingOrgTeamPartner.resultType);</span>
+                }
+            } else {
+<span class="nc" id="L502">                throw new IllegalStateException(&quot;Unexpected override alias type &quot; + sourceOrgOrTeamOverride.get().resultType);</span>
+            }
+        } else { // no override
+<span class="pc bpc" id="L505" title="2 of 4 branches missed.">            switch (connectingOrgTeamPartner.resultType) {</span>
+                case ORG:
+<span class="fc" id="L507">                    return HL7ConnContextFactory.create(connectingOrgTeamPartner.org, requestContext.getCorrelationId(), maybeResponsibleOrganisationIdentifier);</span>
+                case TEAM_WITH_ORG:
+<span class="fc" id="L509">                    return HL7ConnContextFactory.create(connectingOrgTeamPartner.teamWithOrg._2(), connectingOrgTeamPartner.teamWithOrg._1(), requestContext.getCorrelationId(), maybeResponsibleOrganisationIdentifier);</span>
+                case PARTNER:
+<span class="nc" id="L511">                    throw new ApiCallMalformedException(&quot;An HL7 Partner connection must use an alias in MSH-4 to set the source org&quot;);</span>
+                default:
+<span class="nc" id="L513">                    throw new IllegalStateException(&quot;Unexpected connecting type &quot; + connectingOrgTeamPartner.resultType);</span>
+            }
+        }
+    }
+
+    /**
+     * Converts a CSV representation of org/team mappings to a {@code Map}.
+     * CSV value is in the form &lt;alias&gt;:&lt;org_or_team_username&gt;,&lt;alias&gt;:&lt;org_or_team_username&gt; etc.
+     * &lt;p&gt;
+     * Note: the mappings are not case sensitive; all key values are stored as
+     * lowercase.
+     * &lt;p&gt;
+     * See database [team].[hl7uploadsourcewhitelist] for examples.
+     *
+     * @param csv The mappings.
+     * @return A {@code Map} representation.
+     */
+    Map&lt;String, String&gt; mapSourceAliases(Set&lt;String&gt; mappings) {
+<span class="fc" id="L531">        Map&lt;String, String&gt; map = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L532" title="All 2 branches covered.">        for (String mapping : mappings) {</span>
+<span class="fc" id="L533">            String[] aliasToSource = StringUtils.split(mapping, ':');</span>
+<span class="fc" id="L534">            map.put(aliasToSource[0].toLowerCase(), aliasToSource[1]);</span>
+<span class="fc" id="L535">        }</span>
+<span class="fc" id="L536">        return map;</span>
+    }
+
+    private void checkIpWhitelisting(String authPrincipal, String parsedIp, Set&lt;String&gt; ipWhitelist) {
+<span class="fc bfc" id="L540" title="All 2 branches covered.">        if (ipWhitelist.isEmpty()) {</span>
+<span class="pc bpc" id="L541" title="1 of 2 branches missed.">            if (config.isHL7IpWhitelistEnabled()) {</span>
+<span class="nc" id="L542">                LOGGER.error(&quot;IP whitelist not configured for principal {}; handling sender IP {}&quot;, authPrincipal, parsedIp);</span>
+<span class="nc" id="L543">                throw new IllegalStateException(&quot;IP whitelist not configured for this sender&quot;);</span>
+            }
+        }
+<span class="fc bfc" id="L546" title="All 2 branches covered.">        if (!IpFilterUtil.isIpAllowed(parsedIp, ipWhitelist)) {</span>
+<span class="pc bpc" id="L547" title="1 of 2 branches missed.">            if (config.isHL7IpWhitelistEnabled()) {</span>
+<span class="nc" id="L548">                LOGGER.error(&quot;incoming HL7 IP ({}) doesn't match {} whitelist: {}&quot;, parsedIp, authPrincipal, ipWhitelist);</span>
+<span class="nc" id="L549">                throw new ApiCallMalformedException(&quot;sender security check failed&quot;);</span>
+            }
+        }
+<span class="fc" id="L552">    }</span>
+
+
+    /**
+     * Simplify chaining username &amp; alias lookups
+     */
+    public static class OrgTeamPartnerResult {
+        // track a result type; not null based on type
+<span class="fc" id="L560">        public enum ResultType {</span>
+<span class="fc" id="L561">            PARTNER, PARTNER_GRANT_WITH_ORG, ORG, TEAM_WITH_ORG</span>
+        }
+
+        ResultType resultType;
+        // only one of these is non-null
+        Org org;
+        Tuple2&lt;Team, Org&gt; teamWithOrg;
+        Hl7Partner partner;
+        Tuple2&lt;Hl7PartnerGrant, Org&gt; partnerGrantWithOrg;
+
+<span class="fc" id="L571">        public OrgTeamPartnerResult(Org org) {</span>
+<span class="fc" id="L572">            this.resultType = ResultType.ORG;</span>
+<span class="fc" id="L573">            this.org = org;</span>
+<span class="fc" id="L574">        }</span>
+
+<span class="fc" id="L576">        public OrgTeamPartnerResult(Team team, Org org) {</span>
+<span class="fc" id="L577">            this.resultType = ResultType.TEAM_WITH_ORG;</span>
+<span class="fc" id="L578">            this.teamWithOrg = Tuple.of(team, org);</span>
+<span class="fc" id="L579">        }</span>
+
+<span class="fc" id="L581">        OrgTeamPartnerResult(Hl7Partner partner) {</span>
+<span class="fc" id="L582">            this.resultType = PARTNER;</span>
+<span class="fc" id="L583">            this.partner = partner;</span>
+<span class="fc" id="L584">        }</span>
+
+<span class="fc" id="L586">        OrgTeamPartnerResult(Hl7PartnerGrant partnerOrgGrant, Org org) {</span>
+<span class="fc" id="L587">            this.resultType = ResultType.PARTNER_GRANT_WITH_ORG;</span>
+<span class="fc" id="L588">            this.partnerGrantWithOrg = Tuple.of(partnerOrgGrant, org);</span>
+<span class="fc" id="L589">        }</span>
+
+        public Set&lt;String&gt; getAliasWhitelist() {
+<span class="pc bpc" id="L592" title="3 of 4 branches missed.">            switch (resultType) {</span>
+                case PARTNER:
+                case PARTNER_GRANT_WITH_ORG:
+<span class="nc" id="L595">                    return emptySet();</span>
+                case ORG:
+<span class="fc" id="L597">                    return HL7ConnContextFactory.splitCsv(org.getHl7UploadSourceWhitelist());</span>
+                case TEAM_WITH_ORG:
+<span class="nc" id="L599">                    throw new IllegalStateException(&quot;Team can't have alias whitelist!&quot;);</span>
+                default:
+<span class="nc" id="L601">                    throw new IllegalStateException(&quot;Unexpected resultType &quot; + resultType);</span>
+            }
+        }
+
+        public boolean isOrg() {
+<span class="fc bfc" id="L606" title="All 2 branches covered.">            return getResultType() == ORG;</span>
+        }
+
+        public boolean isTeam() {
+<span class="fc bfc" id="L610" title="All 2 branches covered.">            return getResultType() == TEAM_WITH_ORG;</span>
+        }
+
+        public ResultType getResultType() {
+<span class="fc" id="L614">            return resultType;</span>
+        }
+
+        public Org getOrg() {
+<span class="pc bpc" id="L618" title="1 of 2 branches missed.">            Assert.isTrue(resultType == ResultType.ORG);</span>
+<span class="fc" id="L619">            return org;</span>
+        }
+
+        public Tuple2&lt;Team, Org&gt; getTeamWithOrg() {
+<span class="pc bpc" id="L623" title="1 of 2 branches missed.">            Assert.isTrue(resultType == ResultType.TEAM_WITH_ORG);</span>
+<span class="fc" id="L624">            return teamWithOrg;</span>
+        }
+
+        public Hl7Partner getPartner() {
+<span class="pc bpc" id="L628" title="1 of 2 branches missed.">            Assert.isTrue(resultType == PARTNER);</span>
+<span class="fc" id="L629">            return partner;</span>
+        }
+
+        public Tuple2&lt;Hl7PartnerGrant, Org&gt; getPartnerGrantWithOrg() {
+<span class="nc bnc" id="L633" title="All 2 branches missed.">            Assert.isTrue(resultType == ResultType.PARTNER_GRANT_WITH_ORG);</span>
+<span class="nc" id="L634">            return partnerGrantWithOrg;</span>
+        }
+
+        public Option&lt;String&gt; getHl7PasswordHash() {
+<span class="fc" id="L638">            return Match(resultType)</span>
+<span class="fc" id="L639">                    .of(Case($(PARTNER), () -&gt; partner.getHl7PasswordHash()),</span>
+<span class="pc" id="L640">                            Case($(ResultType.PARTNER_GRANT_WITH_ORG), () -&gt; partner.getHl7PasswordHash()),</span>
+<span class="fc" id="L641">                            Case($(ResultType.ORG), () -&gt; API.Option(org.getHl7PasswordHash())),</span>
+<span class="fc" id="L642">                            Case($(ResultType.TEAM_WITH_ORG), () -&gt; API.Option(teamWithOrg._1.getHl7PasswordHash())));</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,245 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SSOService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain</a> &gt; <span class="el_source">SSOService.java</span></div><h1>SSOService.java</h1><pre class="source lang-java linenums">package com.pkb.domain;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.ImmutableSSOParameterEncryptionDetailsNew;
+import com.pkb.datamodel.SSOIdLink;
+import com.pkb.datamodel.SSOParameterEncryptionDetails;
+import com.pkb.datamodel.SSOParameterEncryptionDetailsNew;
+import com.pkb.datamodel.entity.mapper.SSOIdLinkMapper;
+import com.pkb.datamodel.entity.mapper.SSOParameterEncryptionDetailsMapper;
+import com.pkb.entities.enums.SSOType;
+import com.pkb.entities.pub.PublicEMISSSORequestLog;
+import com.pkb.entities.pub.PublicSSOIdLink;
+import com.pkb.entities.pub.PublicSSOParameterEncryptionDetails;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.kms.shared.representation.KmsError;
+import com.pkb.kms.shared.representation.SSOLoginRequest;
+import com.pkb.kms.shared.representation.SsoCredentialsCreateRequest;
+import com.pkb.repository.EMISSSORequestLogRepository;
+import com.pkb.repository.SSOIdLinkRepository;
+import com.pkb.repository.SSOParameterEncryptionDetailsRepository;
+import com.pkb.util.CorrelationIdUtil;
+import io.vavr.control.Either;
+import org.apache.commons.codec.DecoderException;
+import org.apache.commons.codec.binary.Hex;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+
+import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import javax.transaction.Transactional;
+import java.security.GeneralSecurityException;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+
+import static com.pkb.crypto.CryptoConstants.AES_SHORT_NAME;
+
+/**
+ * See  &lt;a href=&quot;https://pkbdev.atlassian.net/wiki/spaces/TECHNOLOGY/pages/1253113992/SystmOne+SSO+Project&quot;&gt;SystmOne Workflow&lt;/a&gt;
+ *  * and &lt;a href=&quot;https://pkbdev.atlassian.net/wiki/spaces/TECHNOLOGY/pages/2825184/EMIS+SSO+Workflows&quot;&gt;EMIS Workflow&lt;/a&gt;
+ *
+ *  for more details of the specifications this service supports.
+ *
+ *  Note that for reasons that have been lost in the mists of history, it was decided that these implementations should
+ *  use dynamically generated usernames, which rather needlessly complicates the implementation. Although the majority
+ *  of the actual crypto work has now been moved to the KMS, the responsibility for translating these usernames into
+ *  person (public) ids remains in PHR to avoid polluting KMS with any more of this cruft than strictly necessary.
+ */
+public class SSOService {
+
+<span class="fc" id="L56">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L58">    public enum DecryptionError {</span>
+<span class="fc" id="L59">        FAIL_NO_DECRYPTION_KEY(&quot;ssoSystmOneError.err.no_decryption_key&quot;),</span>
+<span class="fc" id="L60">        FAIL_GENERAL_DECRYPTION_ERROR(&quot;sso.err.general_authentication_error&quot;);</span>
+
+        private final String messageKey;
+
+<span class="fc" id="L64">        DecryptionError(String messageKey) {</span>
+<span class="fc" id="L65">            this.messageKey = messageKey;</span>
+<span class="fc" id="L66">        }</span>
+
+        public String getMessageKey() {
+<span class="fc" id="L69">            return messageKey;</span>
+        }
+    }
+
+    private final Kms kms;
+    private final CorrelationIdUtil correlationIdUtil;
+
+    private final DateTimeService dateTimeService;
+    private final SSOIdLinkRepository ssoIdLinkRepository;
+
+    private final SSOParameterEncryptionDetailsRepository ssoParameterEncryptionDetailsRepository;
+    private final SSOParameterEncryptionDetailsMapper ssoParameterEncryptionDetailsMapper;
+    private final SSOIdLinkMapper ssoIdLinkMapper;
+    private final EMISSSORequestLogRepository emisssoRequestLogRepository;
+
+    public SSOService(DateTimeService dateTimeService,
+                      SSOIdLinkRepository ssoIdLinkRepository,
+                      SSOParameterEncryptionDetailsRepository ssoParameterEncryptionDetailsRepository,
+                      SSOParameterEncryptionDetailsMapper ssoParameterEncryptionDetailsMapper,
+                      SSOIdLinkMapper ssoIdLinkMapper,
+                      EMISSSORequestLogRepository emisssoRequestLogRepository,
+                      Kms kms,
+<span class="fc" id="L91">                      CorrelationIdUtil correlationIdUtil) {</span>
+<span class="fc" id="L92">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L93">        this.ssoIdLinkRepository = ssoIdLinkRepository;</span>
+<span class="fc" id="L94">        this.ssoParameterEncryptionDetailsRepository = ssoParameterEncryptionDetailsRepository;</span>
+<span class="fc" id="L95">        this.ssoParameterEncryptionDetailsMapper = ssoParameterEncryptionDetailsMapper;</span>
+<span class="fc" id="L96">        this.ssoIdLinkMapper = ssoIdLinkMapper;</span>
+<span class="fc" id="L97">        this.emisssoRequestLogRepository = emisssoRequestLogRepository;</span>
+
+<span class="fc" id="L99">        this.kms = kms;</span>
+<span class="fc" id="L100">        this.correlationIdUtil = correlationIdUtil;</span>
+<span class="fc" id="L101">    }</span>
+
+    public Set&lt;SSOType&gt; getCredentialStatus(UUID personPublicId) {
+<span class="pc" id="L104">        return kms.getSSOCredentialStatus(correlationIdUtil.getAsString(), personPublicId).getOrElseThrow(err -&gt; new RuntimeException(err.toString()));</span>
+    }
+
+
+    public Optional&lt;SSOIdLink&gt; getSSOIdLinkForSSOUsernameAndSSOType(@NotNull String ssoUsername, @NotNull SSOType ssoType) {
+<span class="fc" id="L109">        return ssoIdLinkRepository.getSSOIdLinkForSSOUsernameAndSSOType(ssoUsername, ssoType)</span>
+<span class="fc" id="L110">                .map(ssoIdLinkMapper::entityToDataModel);</span>
+    }
+
+    public Optional&lt;SSOIdLink&gt; getSSOIdLinkForPersonIdAndSSOType(long personId, @NotNull SSOType ssoType) {
+<span class="nc" id="L114">        return ssoIdLinkRepository.getSSOIdLinkByPersonIdAndSSOType(personId, ssoType)</span>
+<span class="nc" id="L115">                .map(ssoIdLinkMapper::entityToDataModel);</span>
+    }
+
+    private PublicSSOIdLink createSSOIdLink(long personId, @NotNull String ssoUsername, @NotNull SSOType ssoType) {
+<span class="fc" id="L119">        var link = new PublicSSOIdLink();</span>
+
+<span class="fc" id="L121">        link.setPersonId(personId);</span>
+<span class="fc" id="L122">        link.setCreatedOn(dateTimeService.now());</span>
+<span class="fc" id="L123">        link.setSsoUsername(ssoUsername);</span>
+<span class="fc" id="L124">        link.setSsoType(ssoType);</span>
+
+<span class="fc" id="L126">        return ssoIdLinkRepository.save(link);</span>
+    }
+
+    /**
+     * Validate if the password configured in EMIS client is same as that was generated from PKB UI
+     */
+    public boolean isEmisKeyValid(UUID personPublicId, @NotNull String passwordHash) {
+<span class="fc" id="L133">        return kms.emisKeyValid(correlationIdUtil.getAsString(), personPublicId, passwordHash)</span>
+<span class="pc" id="L134">                .getOrElseThrow(err -&gt; new RuntimeException(err.toString()));</span>
+    }
+
+    @Transactional
+    public void createRequiredSSOInfo(@NotNull UUID personPublicId, long personId, @NotNull String ssoUsername, @NotNull String ssoPassword,
+                                      @NotNull SSOType ssoType) {
+
+<span class="fc" id="L141">        ssoIdLinkRepository.deleteOldSSOIdLink(personId, ssoType);</span>
+<span class="fc" id="L142">        createSSOIdLink(personId, ssoUsername, ssoType);</span>
+<span class="fc" id="L143">        var credentialsCreator = getCredentialCreator(personPublicId, ssoPassword, ssoType);</span>
+
+<span class="fc" id="L145">        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {</span>
+            @Override
+            public void afterCommit() {
+<span class="fc" id="L148">                credentialsCreator.run();</span>
+<span class="fc" id="L149">            }</span>
+        });
+<span class="fc" id="L151">    }</span>
+
+    private Runnable getCredentialCreator(@NotNull UUID personPublicId, @NotNull String ssoPassword,
+                                          @NotNull SSOType ssoType) {
+<span class="fc" id="L155">        var request = new SsoCredentialsCreateRequest(personPublicId, ssoPassword, ssoType);</span>
+<span class="pc bpc" id="L156" title="1 of 3 branches missed.">        switch (ssoType) {</span>
+            case EMIS:
+<span class="pc" id="L158">                return () -&gt; kms.createSSOCredential(correlationIdUtil.getAsString(), request).getOrElseThrow(err -&gt; new RuntimeException(err.toString()));</span>
+            case SYSTMONE:
+<span class="pc" id="L160">                return () -&gt; kms.createSSOAuthRecord(correlationIdUtil.getAsString(), request).getOrElseThrow(err -&gt; new RuntimeException(err.toString()));</span>
+            default:
+<span class="nc" id="L162">                throw new RuntimeException(&quot;Unsupported SSOType &quot; + ssoType);</span>
+        }
+
+    }
+
+    public boolean authRecordExists(@NotNull String ssoUsername, @NotNull SSOType ssoType) {
+<span class="fc" id="L168">        return ssoIdLinkRepository.getPersonPublicIdForSSOUsernameAndSSOType(ssoUsername, ssoType)</span>
+<span class="fc" id="L169">                .map(personPublicId -&gt;</span>
+<span class="fc" id="L170">                        kms.ssoAuthRecordExists(correlationIdUtil.getAsString(), personPublicId, ssoType)</span>
+<span class="pc" id="L171">                            .getOrElseThrow(err -&gt; new RuntimeException(err.toString()))</span>
+                )
+<span class="fc" id="L173">                .orElse(false);</span>
+    }
+
+
+    public void createSsoAuthRecord(@NotNull String ssoKey, @NotNull UUID userPublicId, @NotNull SSOType ssoType) {
+<span class="fc" id="L178">        kms.createSSOAuthRecord(correlationIdUtil.getAsString(), new SsoCredentialsCreateRequest(userPublicId, ssoKey, ssoType))</span>
+<span class="pc" id="L179">                .getOrElseThrow(err -&gt; new RuntimeException(err.toString()));</span>
+<span class="fc" id="L180">    }</span>
+
+
+    Optional&lt;SSOParameterEncryptionDetails&gt; getSSOParameterEncryptionDetailsForExternalId(@NotNull String externalId) {
+<span class="fc" id="L184">        return ssoParameterEncryptionDetailsRepository.getSSOParameterEncryptionDetailsForExternalId(externalId)</span>
+<span class="fc" id="L185">                .map(ssoParameterEncryptionDetailsMapper::entityToDataModel);</span>
+    }
+
+    @Transactional
+    public SSOParameterEncryptionDetails createSSOParameterEncryptionDetails(@NotNull String externalId, @NotNull String encryptionKey,
+                                                                             @NotNull String initialisationVector) {
+<span class="fc" id="L191">        SSOParameterEncryptionDetailsNew newSsoParameterEncryptionDetails = ImmutableSSOParameterEncryptionDetailsNew.builder()</span>
+<span class="fc" id="L192">                .createdOn(dateTimeService.now())</span>
+<span class="fc" id="L193">                .externalId(externalId)</span>
+<span class="fc" id="L194">                .encryptionKey(encryptionKey)</span>
+<span class="fc" id="L195">                .initialisationVector(initialisationVector)</span>
+<span class="fc" id="L196">                .build();</span>
+
+<span class="fc" id="L198">        PublicSSOParameterEncryptionDetails publicSsoParameterEncryptionDetails = ssoParameterEncryptionDetailsMapper.newDataModelToNewEntity(newSsoParameterEncryptionDetails);</span>
+<span class="fc" id="L199">        publicSsoParameterEncryptionDetails = ssoParameterEncryptionDetailsRepository.save(publicSsoParameterEncryptionDetails);</span>
+<span class="fc" id="L200">        return ssoParameterEncryptionDetailsMapper.entityToDataModel(publicSsoParameterEncryptionDetails);</span>
+    }
+
+    public Either&lt;DecryptionError, String&gt; decryptUrlContent(@NotNull String externalId, @NotNull String content) {
+<span class="fc" id="L204">        return getSSOParameterEncryptionDetailsForExternalId(externalId)</span>
+<span class="fc" id="L205">                .map(encryptionDetails -&gt; decrypt(content, encryptionDetails))</span>
+<span class="fc" id="L206">                .orElse(Either.left(DecryptionError.FAIL_NO_DECRYPTION_KEY));</span>
+    }
+
+    @VisibleForTesting
+    @NotNull
+    Either&lt;DecryptionError, String&gt; decrypt(@NotNull String content, @NotNull SSOParameterEncryptionDetails encryptionDetails) {
+        try {
+<span class="fc" id="L213">            IvParameterSpec ivSpec = new IvParameterSpec(Hex.decodeHex(encryptionDetails.getInitialisationVector().toCharArray()));</span>
+<span class="fc" id="L214">            Cipher cipher = Cipher.getInstance(&quot;AES/CBC/PKCS5Padding&quot;);</span>
+<span class="fc" id="L215">            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(Hex.decodeHex(encryptionDetails.getEncryptionKey().toCharArray()), AES_SHORT_NAME), ivSpec);</span>
+<span class="fc" id="L216">            byte[] original = cipher.doFinal(Hex.decodeHex(content.toCharArray()));</span>
+<span class="fc" id="L217">            return Either.right(new String(original));</span>
+<span class="fc" id="L218">        } catch (DecoderException | GeneralSecurityException e) {</span>
+<span class="fc" id="L219">            LOGGER.error(&quot;Error decrypting content for SSO&quot;, e);</span>
+<span class="fc" id="L220">            return Either.left(DecryptionError.FAIL_GENERAL_DECRYPTION_ERROR);</span>
+        }
+    }
+
+
+    public Either&lt;KmsError, Void&gt; authenticateSsoUser(@NotNull UUID personPublicId, @NotNull String ssoKey, @NotNull SSOType ssoType) {
+<span class="fc" id="L226">        return kms.ssoLogin(correlationIdUtil.getAsString(), new SSOLoginRequest(personPublicId, ssoKey, ssoType))</span>
+<span class="fc" id="L227">                .map(it -&gt; null);</span>
+    }
+
+
+    public String encryptSystmOneUrlContent(String urlContent, String key, String iv) throws Exception {
+<span class="fc" id="L232">        IvParameterSpec ivSpec = new IvParameterSpec(Hex.decodeHex(iv.toCharArray()));</span>
+<span class="fc" id="L233">        Cipher cipher = Cipher.getInstance(&quot;AES/CBC/PKCS5Padding&quot;);</span>
+<span class="fc" id="L234">        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(Hex.decodeHex(key.toCharArray()), &quot;AES&quot;), ivSpec);</span>
+<span class="fc" id="L235">        byte[] original = cipher.doFinal(urlContent.getBytes());</span>
+<span class="fc" id="L236">        return new String(Hex.encodeHex(original));</span>
+    }
+
+
+    @Transactional
+    public void saveEMISSSORequestLog(PublicEMISSSORequestLog emisssoRequestLog) {
+<span class="fc" id="L242">        emisssoRequestLogRepository.save(emisssoRequestLog);</span>
+<span class="fc" id="L243">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

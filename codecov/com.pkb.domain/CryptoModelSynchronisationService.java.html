@@ -1,0 +1,473 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CryptoModelSynchronisationService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain</a> &gt; <span class="el_source">CryptoModelSynchronisationService.java</span></div><h1>CryptoModelSynchronisationService.java</h1><pre class="source lang-java linenums">package com.pkb.domain;
+
+import com.google.common.base.Stopwatch;
+import com.google.common.collect.Streams;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.datamodel.consent.PatientConsentDTO;
+import com.pkb.domain.consent.ConsentService;
+import com.pkb.domain.pubsub.payload.GrantAccessToOrgRequest;
+import com.pkb.domain.pubsub.payload.GrantOrgAccessRequest;
+import com.pkb.domain.routing.CryptoAccessGrantRequestRouteBuilder;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.pub.PublicNationalId;
+import com.pkb.entities.pub.PublicOrg;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.kms.client.reactive.ReactiveKmsClient;
+import com.pkb.kms.shared.representation.GrantUserAccessToAccountRequest;
+import com.pkb.kms.shared.representation.LoginRequest;
+import com.pkb.repository.AccountRepository;
+import com.pkb.repository.InstituteUserRepository;
+import com.pkb.repository.OrgRepository;
+import com.pkb.repository.PersonRepository;
+import com.pkb.repository.ReactiveAccountRepository;
+import com.pkb.util.CorrelationIdUtil;
+import io.vavr.Function2;
+import org.apache.camel.ProducerTemplate;
+import org.apache.camel.util.function.Predicates;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Mono;
+
+import javax.naming.InitialContext;
+import javax.transaction.Status;
+import javax.transaction.Synchronization;
+import javax.transaction.Transaction;
+import javax.transaction.TransactionManager;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.pkb.entities.enums.UserType.INSTITUTE_ADMIN;
+import static com.pkb.entities.enums.UserType.ORG_COORD;
+import static com.pkb.entities.enums.UserType.PRIVACY_OFFICER;
+import static com.pkb.entities.enums.UserType.REG_CLINICIAN;
+
+/**
+ * This class ensures that the crypto key graph reflects the connections between the various domain entities. This
+ * allows managmenent of the crypto key graph to remain decoupled from the core business logic of the system. A person
+ * (be they patient, pro or coord) can be added to a team/org by PHR, and then this class will use the KMS to ensure that
+ * the appropriate keys are copied around so that the right people can decrypt the right accounts based on the state of
+ * the team/org relationships. For example, when a Pro is added to a team, this class will ensure both that the Pro can
+ * access the org account key and that the org has a copy of the pro's account key.
+ * &lt;p&gt;
+ * It is somewhat more complicated than it ought to be because:
+ * &lt;ol&gt;
+ *     &lt;li&gt;
+ *         The KMS does not participate in PHR transactions so it can't see newly created accounts until after the PHR
+ *         transaction commits and also can't rollback if the PHR transaction fails. As a result we have to hook into transaction
+ *         synchronisation and only call the KMS when the PHR transaction commits
+ *     &lt;/li&gt;
+ *     &lt;li&gt;
+ *         We cannot use Spring's nice friendly transaction synchronisation because it doesn't work with J2EE transaction
+ *         management. Until we remove all the legacy J2EE from the app we have to use the J2A native sync code, which
+ *         is a lot nastier.
+ *     &lt;/li&gt;
+ * &lt;/ol&gt;
+ */
+public class CryptoModelSynchronisationService {
+
+<span class="fc" id="L86">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final PersonRepository personRepository;
+    private final ProducerTemplate pubSubProducer;
+    private final Kms kms;
+    private final ReactiveKmsClient reactiveKms;
+    private final CorrelationIdUtil correlationIdUtil;
+    private final OrgRepository orgRepository;
+    private final AccountRepository accountRepository;
+    private final InstituteUserRepository instituteUserRepository;
+    private final ReactiveAccountRepository reactiveAccountRepository;
+    private final PhrConfig config;
+    private final Supplier&lt;Optional&lt;Transaction&gt;&gt; transactionAccessor;
+    private final ConsentService consentService;
+
+<span class="fc" id="L101">    private static final EnumSet&lt;UserType&gt; USER_TYPES_WITH_ORG_ACCESS = EnumSet.of(ORG_COORD, INSTITUTE_ADMIN, REG_CLINICIAN);</span>
+
+    /**
+     * Both for efficiency and to avoid dealing with confusing ordering issues, we only want to sync a given person
+     * once per transaction. This ThreadLocal stores the ids of the people for which we've already registered synchronisations.
+     * I chose not to use a concurrent Map here in order to allow for multiple threads/transactions to update the same person
+     * at once without risking lost updates depending on the order the transactions commit.
+     */
+<span class="fc" id="L109">    private static final ThreadLocal&lt;Set&lt;Long&gt;&gt; patientsAlreadyPendingUpdate = ThreadLocal.withInitial(HashSet::new);</span>
+
+    public CryptoModelSynchronisationService(
+            PersonRepository personRepository,
+            ProducerTemplate pubSubProducer,
+            Kms kms,
+            ReactiveKmsClient reactiveKms,
+            CorrelationIdUtil correlationIdUtil,
+            OrgRepository orgRepository,
+            AccountRepository accountRepository,
+            InstituteUserRepository instituteUserRepository,
+            ReactiveAccountRepository reactiveAccountRepository,
+            PhrConfig config,
+            ConsentService consentService,
+            @Nullable Supplier&lt;Optional&lt;Transaction&gt;&gt; transactionAccessor
+<span class="fc" id="L124">    ) {</span>
+<span class="fc" id="L125">        this.personRepository = personRepository;</span>
+<span class="fc" id="L126">        this.pubSubProducer = pubSubProducer;</span>
+<span class="fc" id="L127">        this.kms = kms;</span>
+<span class="fc" id="L128">        this.reactiveKms = reactiveKms;</span>
+<span class="fc" id="L129">        this.correlationIdUtil = correlationIdUtil;</span>
+<span class="fc" id="L130">        this.orgRepository = orgRepository;</span>
+<span class="fc" id="L131">        this.accountRepository = accountRepository;</span>
+<span class="fc" id="L132">        this.instituteUserRepository = instituteUserRepository;</span>
+<span class="fc" id="L133">        this.reactiveAccountRepository = reactiveAccountRepository;</span>
+<span class="fc" id="L134">        this.config = config;</span>
+<span class="fc" id="L135">        this.consentService = consentService;</span>
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">        this.transactionAccessor = transactionAccessor == null ? defaultTransactionAccesor() : transactionAccessor;</span>
+<span class="fc" id="L137">    }</span>
+
+
+    /**
+     * Call this to set up crypto access for a newly created person. This version grants access to the default account as
+     * well as ensuring other account access. Eventually when we tidy up registration to the point where we can trust that
+     * any account_user record connecting the user to their own account is going to be valid and usable, this step won't be necessary
+     * and can just be folded into the standard &quot;ensure access&quot; sync that happens otherwise.
+     */
+    public void syncCryptoAccessForNewPerson(long personId, String password) {
+<span class="fc" id="L147">        LOGGER.debug(&quot;Registering to sync crypto access for new person {}&quot;, personId);</span>
+<span class="fc" id="L148">        registerPostCommitBehaviour(new CryptoSyncSynchronisation(personId, getNewUserPreSyncOp(password)));</span>
+<span class="fc" id="L149">    }</span>
+
+
+    private  Function2&lt;PublicPKBPerson, UUID, Boolean&gt; getNewUserPreSyncOp(String password) {
+<span class="fc" id="L153">        return (person, accountPublicId) -&gt;</span>
+                //Login and reqquest account keys to ensure that account keys definitely end up in the KMS cache before attempting to grant access
+<span class="fc" id="L155">                kms.login(correlationIdUtil.getAsString(), new LoginRequest(person.getPublicId(), password.toCharArray(), true))</span>
+<span class="pc" id="L156">                        .peekLeft(e -&gt; LOGGER.error(&quot;Failed to login to KMS after creating new person: {}, Error: {}&quot;, person.getId(), e))</span>
+<span class="fc" id="L157">                        .flatMap($ -&gt; kms.grantAccessToAccountOwner(correlationIdUtil.getAsString(), new GrantUserAccessToAccountRequest(accountPublicId, person.getPublicId())))</span>
+<span class="fc" id="L158">                        .isRight();</span>
+    }
+
+    /**
+     * Call this to update the crypto key graph for a pre-existing person when their relationships change
+     */
+    public void syncCryptoAccessForPerson(long personId) {
+<span class="fc" id="L165">        LOGGER.debug(&quot;Registering to sync crypto access for existing person {}&quot;, personId);</span>
+<span class="fc" id="L166">        registerPostCommitBehaviour(new CryptoSyncSynchronisation(personId, ($1, $2) -&gt; true));</span>
+<span class="fc" id="L167">    }</span>
+
+    /**
+     * Call this to sync all verified patients from one Org to another -&gt; used for org networking.
+     */
+    @SuppressWarnings(&quot;WeakerAccess&quot;)
+    public Mono&lt;SyncCounts&gt; syncAccountsFromOrgToOrg(long sourceOrgId, long targetOrgId) {
+<span class="fc" id="L174">        LOGGER.info(&quot;Starting org network sync from {} to {}&quot;, sourceOrgId, targetOrgId);</span>
+<span class="fc" id="L175">        Stopwatch stopwatch = Stopwatch.createStarted();</span>
+
+<span class="fc" id="L177">        var sourceOrg = orgRepository.findById(sourceOrgId).orElseThrow();</span>
+<span class="fc" id="L178">        var targetOrg = orgRepository.findById(targetOrgId).orElseThrow();</span>
+<span class="fc" id="L179">        var nationalIdTypes = NationalIdType.getNationalIdTypesFromCountryCode(sourceOrg.getCountry());</span>
+<span class="fc" id="L180">        return reactiveAccountRepository.findPatientAccountPublicIdsToSync(sourceOrgId, targetOrgId, nationalIdTypes)</span>
+<span class="fc" id="L181">                .buffer(config.getOrgNetworkSyncBatchSize())</span>
+<span class="fc" id="L182">                .flatMap(accountPublicIds -&gt; reactiveKms.grantOrgAccessMultiple(correlationIdUtil.getAsString(), accountPublicIds, targetOrg.getPublicId())</span>
+<span class="fc" id="L183">                        .collect(HashSet&lt;UUID&gt;::new, HashSet::add)</span>
+<span class="fc" id="L184">                        .map(grantedAccountPublicIds -&gt; {</span>
+                            //noinspection SimplifyStreamApiCallChains
+<span class="fc" id="L186">                            var deferred = accountPublicIds.stream().filter(Predicates.negate(grantedAccountPublicIds::contains)).peek(toDefer -&gt;</span>
+<span class="nc" id="L187">                                queueDeferredOrgAccessGrant(targetOrg.getPublicId(), toDefer)</span>
+<span class="fc" id="L188">                            ).collect(Collectors.counting());</span>
+
+<span class="fc" id="L190">                            return ImmutableSyncCounts.of(grantedAccountPublicIds.size(), deferred.intValue());</span>
+<span class="fc" id="L191">                        }), config.getOrgNetworkSyncConcurrency())</span>
+<span class="fc" id="L192">                .reduce(ImmutableSyncCounts.of(0,0), SyncCounts::add)</span>
+<span class="fc" id="L193">                .map(syncedCounts -&gt; {</span>
+<span class="fc" id="L194">                    stopwatch.stop();</span>
+<span class="fc" id="L195">                    LOGGER.info(&quot;Completed org network sync from {} to {}. Elapsed time: {}. Successfully synced: {}. Deferred: {}&quot;, sourceOrgId, targetOrgId, stopwatch.elapsed(), syncedCounts.getGranted(), syncedCounts.getDeferred());</span>
+<span class="fc" id="L196">                    return syncedCounts;</span>
+                })
+<span class="fc" id="L198">                .doOnError(err -&gt; {</span>
+<span class="nc" id="L199">                    stopwatch.stop();</span>
+<span class="nc" id="L200">                    LOGGER.error(&quot;Org network sync from {} to {} failed with error. Elapsed time: {}. Error:&quot;, sourceOrgId, targetOrgId, stopwatch.elapsed(), err);</span>
+<span class="nc" id="L201">                });</span>
+    }
+
+    @Value.Immutable
+    @Value.Style(allParameters = true)
+    public interface SyncCounts {
+        int getGranted();
+        int getDeferred();
+
+        default SyncCounts add(SyncCounts other) {
+<span class="fc" id="L211">            return ImmutableSyncCounts.of(getGranted() + other.getGranted(), getDeferred() + other.getDeferred());</span>
+        }
+    }
+
+    private List&lt;Runnable&gt; getSyncOperations(PublicPKBPerson person, UUID accountPublicId) {
+
+<span class="fc" id="L217">        var orgs = orgRepository.getOrgsForPerson(person.getId());</span>
+<span class="fc" id="L218">        var operationStream = getFullOrgPublicIdSetToSyncToIncludingOrgNetworkMembers(person, orgs)</span>
+<span class="fc" id="L219">                .stream()</span>
+<span class="fc" id="L220">                .map(orgPublicId -&gt; getOrgAccessGrantOperation(accountPublicId, orgPublicId));</span>
+
+
+<span class="fc bfc" id="L223" title="All 2 branches covered.">        if (USER_TYPES_WITH_ORG_ACCESS.contains(person.getUserType())) {</span>
+<span class="fc" id="L224">            operationStream = Streams.concat(operationStream, orgs.stream()</span>
+<span class="fc" id="L225">                    .map(org -&gt; getAccesstoOrgGrantOperation(org, person.getPublicId())));</span>
+
+<span class="fc" id="L227">            var inactiveOrgs = orgRepository.getInactiveOrgsForPerson(person.getId());</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">            var revocationOrgs = inactiveOrgs.stream().filter(inactive -&gt; !orgs.contains(inactive));</span>
+<span class="fc" id="L229">            operationStream = Streams.concat(operationStream, revocationOrgs.map(org -&gt; getRevokeAccessToOrgOperation(org, person.getPublicId())));</span>
+        }
+
+<span class="fc bfc" id="L232" title="All 2 branches covered.">        if (shouldGrantSuperAdminAccessToAccountOf(person, orgs)) {</span>
+<span class="fc" id="L233">            operationStream = Streams.concat(operationStream, personRepository.findSuperAdminPublicIds().stream()</span>
+<span class="fc" id="L234">                    .map(adminPublicId -&gt; getSuperAdminAccessGrantOperation(accountPublicId, adminPublicId)));</span>
+        }
+<span class="fc bfc" id="L236" title="All 4 branches covered.">        else if (person.getUserType() == INSTITUTE_ADMIN &amp;&amp; person.getStatus() == UserStatus.EMAIL_CONFIRMED) {</span>
+<span class="fc" id="L237">            operationStream = Streams.concat(operationStream, getSuperAdminAccessRevokeOperations(accountPublicId));</span>
+        }
+
+<span class="fc bfc" id="L240" title="All 2 branches covered.">        if(isFirstAdminInTeam(person)) {</span>
+<span class="fc" id="L241">            UUID teamAccountId = instituteUserRepository.getTeamAccountPublicIdsForPerson(person.getId()).get(0);</span>
+
+            //Because the KMS doesn't yet fully control the creation of accounts, as it ought to - and also
+            //because, frustratingly, KMS treats org accounts differently to everthing else, we can't grant
+            //the org access to the team until after the PHR transaction that potentially creates them both
+            //has committed. So we piggyback onto the creation of the first coord in the team in order to ensure
+            //that the org has access to the team account.
+<span class="fc" id="L248">            operationStream = Streams.concat(</span>
+                    operationStream,
+<span class="fc" id="L250">                    Stream.of(getOrgAccessGrantOperation(teamAccountId, orgs.get(0).getPublicId()))</span>
+            );
+        }
+
+<span class="fc bfc" id="L254" title="All 2 branches covered.">        if (person.isPatient()) {</span>
+<span class="fc" id="L255">            operationStream = Streams.concat(operationStream,</span>
+<span class="fc" id="L256">                    getPatientAccessGrantsAndRevocations(person, accountPublicId),</span>
+<span class="fc" id="L257">                    getIndividualAccessGrantsAndRevocations(person, AccessingEntityType.CARER)</span>
+            );
+        }
+<span class="fc bfc" id="L260" title="All 2 branches covered.">        else if(person.getUserType() == REG_CLINICIAN) {</span>
+<span class="fc" id="L261">            operationStream = Streams.concat(operationStream, getIndividualAccessGrantsAndRevocations(person, AccessingEntityType.INDIVIDUAL));</span>
+        }
+
+
+<span class="fc" id="L265">        return operationStream.collect(Collectors.toUnmodifiableList());</span>
+    }
+
+
+
+    private Runnable getRevokeAccessToOrgOperation(PublicOrg org, UUID personPublicId) {
+<span class="fc" id="L271">        return () -&gt; kms.revokeAccessToAccountTrusted(correlationIdUtil.getAsString(), org.getOrgAccount().getPublicId(), personPublicId)</span>
+<span class="pc" id="L272">                .peekLeft(error -&gt; LOGGER.error(&quot;Failed to revoke individual access to org account for org {} for person {}, error was: {}&quot;, org.getId(), personPublicId, error));</span>
+    }
+
+    private Stream&lt;Runnable&gt; getPatientAccessGrantsAndRevocations(PublicPKBPerson person, UUID patientAccountPublicId) {
+<span class="fc" id="L276">        return consentService.getConsentsForPatient(person.getId(), EnumSet.of(AccessingEntityType.INDIVIDUAL, AccessingEntityType.CARER), true)</span>
+<span class="fc" id="L277">                .stream()</span>
+<span class="fc" id="L278">                .map(consent -&gt; getGrantOrRevokeOperationForConsent(consent, patientAccountPublicId));</span>
+    }
+
+    private Stream&lt;Runnable&gt; getIndividualAccessGrantsAndRevocations(PublicPKBPerson person, AccessingEntityType accessType) {
+<span class="fc" id="L282">        List&lt;PatientConsentDTO&gt; consents = consentService.findAllPatientConsentsForIndividual(person.getId(), accessType);</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">        if (consents.isEmpty()) {</span>
+<span class="fc" id="L284">            return Stream.empty();</span>
+        }
+<span class="fc" id="L286">        List&lt;Long&gt; patientIds = consents.stream().map(PatientConsentDTO::patientPersonId).collect(toImmutableList());</span>
+<span class="fc" id="L287">        Map&lt;Long, UUID&gt; patientAccountPublicIdMap = personRepository.getAccountPublicIdsByPersonIds(patientIds).stream().collect(toImmutableMap(t -&gt; t.get(&quot;personId&quot;, Long.class), t -&gt; t.get(&quot;accountPublicId&quot;, UUID.class)));</span>
+<span class="fc" id="L288">        return consents</span>
+<span class="fc" id="L289">                .stream()</span>
+<span class="fc" id="L290">                .map(consent -&gt; getGrantOrRevokeOperationForConsent(consent, patientAccountPublicIdMap.get(consent.patientPersonId())));</span>
+    }
+
+    private Runnable getGrantOrRevokeOperationForConsent(PatientConsentDTO consent, UUID patientAccountPublicId) {
+        //noinspection OptionalGetWithoutIsPresent
+<span class="fc" id="L295">        var accessingPersonPublicId = consent.accessingPersonPublicId().get();</span>
+<span class="fc bfc" id="L296" title="All 2 branches covered.">        if (consent.discharged()) {</span>
+<span class="fc" id="L297">            return () -&gt; kms.revokeAccessToAccountTrusted(correlationIdUtil.getAsString(), patientAccountPublicId, accessingPersonPublicId)</span>
+<span class="pc" id="L298">                    .peekLeft(error -&gt; LOGGER.error(&quot;Failed to revoke individual access to account {} for person {}, error was: {}&quot;, patientAccountPublicId, accessingPersonPublicId, error));</span>
+        } else {
+<span class="fc" id="L300">            return () -&gt; kms.grantAccessToAccountTrusted(correlationIdUtil.getAsString(), new GrantUserAccessToAccountRequest(patientAccountPublicId, accessingPersonPublicId))</span>
+<span class="fc" id="L301">                    .peekLeft(error -&gt; LOGGER.error(&quot;Failed to grant individual access to account {} for person {}, error was: {}&quot;, patientAccountPublicId, accessingPersonPublicId, error));</span>
+            //No deferred grant here. This should never happen because there's no route to granting consent to an individual (pro or carer) that doesn't necessarily entail us already
+                        //having keys in the KMS for the patient, not least because the consent record is actually only created at the point that the invitation is accepted.
+                        //Note that this is still occasionally failing for a different reason - that the invitee is an &quot;invited&quot; individual professional who doesn't yet have a UPK. That's getting
+                        //fixed soon by reworking individual professional invites
+        }
+    }
+
+
+    private Stream&lt;Runnable&gt; getSuperAdminAccessRevokeOperations(UUID accountPublicId) {
+<span class="fc" id="L311">        return personRepository.findSuperAdminPublicIds().stream()</span>
+<span class="fc" id="L312">                .map(adminPublicId -&gt; getSuperAdminAccessRevokeOperation(accountPublicId, adminPublicId));</span>
+    }
+    private Runnable getSuperAdminAccessGrantOperation(UUID accountPublicId, UUID adminPublicId) {
+<span class="fc" id="L315">        return () -&gt; kms.grantAccessToAccountTrusted(correlationIdUtil.getAsString(), new GrantUserAccessToAccountRequest(accountPublicId, adminPublicId))</span>
+<span class="pc" id="L316">                .peekLeft(error -&gt; LOGGER.error(&quot;Failed to grant superadmin access to account {}, error was: {}&quot;, accountPublicId, error));</span>
+    }
+
+    private Runnable getSuperAdminAccessRevokeOperation(UUID accountPublicId, UUID adminPublicId) {
+<span class="fc" id="L320">        return () -&gt; kms.revokeAccessToAccountTrusted(correlationIdUtil.getAsString(), accountPublicId, adminPublicId)</span>
+<span class="pc" id="L321">                .peekLeft(error -&gt; LOGGER.error(&quot;Failed to revoke superadmin access to account {}, error was: {}&quot;, accountPublicId, error));</span>
+    }
+
+    private Runnable getOrgAccessGrantOperation(UUID accountPublicId, UUID orgPublicId) {
+<span class="fc" id="L325">        return () -&gt; kms.grantOrgAccess(correlationIdUtil.getAsString(), accountPublicId, orgPublicId)</span>
+<span class="fc" id="L326">                .peekLeft(error -&gt; queueDeferredOrgAccessGrant(orgPublicId, accountPublicId));</span>
+    }
+
+    private Runnable getAccesstoOrgGrantOperation(PublicOrg org, UUID personPublicId) {
+<span class="fc" id="L330">        return () -&gt; kms.grantAccessToAccountTrusted(correlationIdUtil.getAsString(), new GrantUserAccessToAccountRequest(org.getOrgAccount().getPublicId(), personPublicId))</span>
+<span class="fc" id="L331">                .peekLeft(error -&gt; queueDeferredAccessToOrgGrant(personPublicId, org.getId()));</span>
+    }
+
+    private void queueDeferredAccessToOrgGrant(UUID personPublicId, Long orgId) {
+<span class="fc" id="L335">        pubSubProducer.sendBody(CryptoAccessGrantRequestRouteBuilder.GRANT_ACCESS_TO_ORG_REQUEST, new GrantAccessToOrgRequest(personPublicId.toString(), orgId));</span>
+<span class="fc" id="L336">    }</span>
+
+    private void queueDeferredOrgAccessGrant(UUID orgPublicId, UUID accountPublicId) {
+<span class="fc" id="L339">        pubSubProducer.sendBody(CryptoAccessGrantRequestRouteBuilder.GRANT_ORG_ACCESS_REQUEST, new GrantOrgAccessRequest(orgPublicId.toString(), accountPublicId.toString()));</span>
+<span class="fc" id="L340">    }</span>
+
+    private boolean shouldGrantSuperAdminAccessToAccountOf(PublicPKBPerson person, List&lt;PublicOrg&gt; orgs) {
+<span class="fc bfc" id="L343" title="All 2 branches covered.">        return person.getUserType() == PRIVACY_OFFICER</span>
+<span class="fc bfc" id="L344" title="All 4 branches covered.">                || (person.getUserType() == REG_CLINICIAN &amp;&amp; orgs.isEmpty())</span>
+<span class="fc bfc" id="L345" title="All 6 branches covered.">                || (person.getUserType() == INSTITUTE_ADMIN &amp;&amp; person.getStatus() != UserStatus.EMAIL_CONFIRMED &amp;&amp; isFirstAdminInTeam(person));</span>
+    }
+
+    private boolean isFirstAdminInTeam(PublicPKBPerson person) {
+        //The query filters by INSTITUTE_ADMIN but we want to avoid making an unnecessary query for other user types
+<span class="fc bfc" id="L350" title="All 4 branches covered.">        return person.getUserType() == INSTITUTE_ADMIN &amp;&amp; personRepository.countRegisteredAdminColleaguesOnTeam(person.getId()) == 0;</span>
+    }
+
+    /**
+     * Patient keys should be synced to all org network members whose registered country matches the country of one of the patients
+     * national ids. So e.g. if the patient has an NHS number, they can be synced to any UK org in the org network
+     */
+    private Set&lt;UUID&gt; getFullOrgPublicIdSetToSyncToIncludingOrgNetworkMembers(PublicPKBPerson person, List&lt;PublicOrg&gt; orgs) {
+<span class="fc" id="L358">        var orgPublicIds = orgs.stream().map(PublicOrg::getPublicId).collect(Collectors.toSet());</span>
+<span class="fc" id="L359">        var populatedNationalIdCountryCodes = person.getNationalIds().stream()</span>
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">                .filter(nationalId -&gt; nationalId.getValue() != null)</span>
+<span class="fc" id="L361">                .map(PublicNationalId::getType)</span>
+<span class="fc" id="L362">                .map(NationalIdType::getCountryCodes)</span>
+<span class="fc" id="L363">                .flatMap(Collection::stream)</span>
+<span class="fc" id="L364">                .collect(Collectors.toSet());</span>
+
+<span class="fc bfc" id="L366" title="All 6 branches covered.">        if (person.isPatient() &amp;&amp; !populatedNationalIdCountryCodes.isEmpty() &amp;&amp; !orgPublicIds.isEmpty()) {</span>
+<span class="fc" id="L367">            var orgNetworkMemberIds = orgRepository.getActiveOrgNetworkMemberPublicIdsForOrgsFilteredByCountry(orgPublicIds, populatedNationalIdCountryCodes);</span>
+<span class="fc" id="L368">            orgPublicIds.addAll(orgNetworkMemberIds);</span>
+        }
+<span class="fc" id="L370">        return orgPublicIds;</span>
+    }
+
+    /**
+     * This is incredibly heinous and makes me want to vomit, but our hideous frankenstack prevents us from using
+     * Spring's nice easy transaction synchronisation. When we finally burn J2EE out of our stack for good, we can
+     * get rid of this an replace it with a nice clean TransactionEventListener
+     */
+    private void registerPostCommitBehaviour(CryptoSyncSynchronisation operation) {
+<span class="fc" id="L379">        transactionAccessor.get().ifPresentOrElse(transaction -&gt;</span>
+<span class="fc" id="L380">                registerTransactionSynchronisation(transaction, operation), operation::runOutsideTransaction);</span>
+<span class="fc" id="L381">    }</span>
+
+
+    private void registerTransactionSynchronisation(Transaction transaction, CryptoSyncSynchronisation operation) {
+        try {
+<span class="fc bfc" id="L386" title="All 2 branches covered.">            if (!patientsAlreadyPendingUpdate.get().contains(operation.personId)) {</span>
+<span class="fc" id="L387">                transaction.registerSynchronization(operation);</span>
+<span class="fc" id="L388">                patientsAlreadyPendingUpdate.get().add(operation.personId);</span>
+            }
+<span class="nc" id="L390">        } catch (Exception e) {</span>
+<span class="nc" id="L391">            throw new RuntimeException(e);</span>
+<span class="fc" id="L392">        }</span>
+<span class="fc" id="L393">    }</span>
+
+    /**
+     * JTA synchronisation hooks are a bit of PITA. In afterCompletion you can't
+     * access anything from the transaction, but obviously in beforeCompletion you don't
+     * know if the transaction is going to commit or not. So we have to read thes state of things
+     * and cue up our operations in beforeCompletion, and then trigger the KMS in afterCompletion
+     * if it commits.
+     */
+    private class CryptoSyncSynchronisation implements Synchronization {
+
+        private final long personId;
+        private PublicPKBPerson person;
+        private UUID accountPublicId;
+        private final Function2&lt;PublicPKBPerson, UUID, Boolean&gt; preSyncOperation;
+        private List&lt;Runnable&gt; syncOperations;
+
+<span class="fc" id="L410">        CryptoSyncSynchronisation(long personId, Function2&lt;PublicPKBPerson, UUID, Boolean&gt; preSyncOperation) {</span>
+<span class="fc" id="L411">            this.personId = personId;</span>
+<span class="fc" id="L412">            this.preSyncOperation = preSyncOperation;</span>
+<span class="fc" id="L413">        }</span>
+
+        void runOutsideTransaction() {
+<span class="fc" id="L416">            LOGGER.debug(&quot;Running crypto sync for person: {} outside transaction&quot;, personId);</span>
+<span class="fc" id="L417">            beforeCompletion();</span>
+<span class="fc" id="L418">            afterCompletion(Status.STATUS_COMMITTED);</span>
+<span class="fc" id="L419">        }</span>
+
+        @Override
+        public void beforeCompletion() {
+<span class="fc" id="L423">            LOGGER.debug(&quot;Before complete crypto sync for person: {}&quot;, personId);</span>
+            try {
+<span class="fc" id="L425">                person = personRepository.findPersonWithNationalIds(personId);</span>
+<span class="fc" id="L426">                accountPublicId = accountRepository.getAccountPublicIdByPersonId(personId);</span>
+<span class="fc" id="L427">                syncOperations = getSyncOperations(person, accountPublicId);</span>
+<span class="nc" id="L428">            } catch (Exception e) {</span>
+<span class="nc" id="L429">                LOGGER.error(&quot;Error attempting to determine crypto sync operations for person {} :&quot;, personId, e);</span>
+<span class="nc" id="L430">                syncOperations = Collections.emptyList();</span>
+                //Swallow exception so that we always run afterCompletion to clear the ThreadLocal
+<span class="fc" id="L432">            }</span>
+
+<span class="fc" id="L434">        }</span>
+
+        @Override
+        public void afterCompletion(int status) {
+<span class="fc" id="L438">            LOGGER.debug(&quot;After complete crypto sync for person: {}&quot;, personId);</span>
+            try {
+<span class="pc bpc" id="L440" title="1 of 4 branches missed.">                if (status == Status.STATUS_COMMITTED &amp;&amp; preSyncOperation.apply(person, accountPublicId)) {</span>
+<span class="fc" id="L441">                    syncOperations.forEach(Runnable::run);</span>
+                }
+                else {
+<span class="fc" id="L444">                    LOGGER.debug(&quot;Skipping crypto sync for person {}, transaction wasn't committed, transaction status: {}&quot;, personId, status);</span>
+                }
+            } finally {
+<span class="fc" id="L447">                patientsAlreadyPendingUpdate.get().clear();</span>
+            }
+
+<span class="fc" id="L450">        }</span>
+    }
+
+    /**
+     * Pulled out to allow for substitution during testing
+     */
+    private static Supplier&lt;Optional&lt;Transaction&gt;&gt; defaultTransactionAccesor() {
+<span class="fc" id="L457">        return () -&gt; {</span>
+            try {
+<span class="fc" id="L459">                InitialContext ctx = new InitialContext();</span>
+                try {
+<span class="fc" id="L461">                    return Optional.ofNullable(((TransactionManager) (ctx).lookup(&quot;java:/TransactionManager&quot;)).getTransaction());</span>
+
+
+                } finally {
+<span class="fc" id="L465">                    ctx.close();</span>
+                }
+<span class="nc" id="L467">            } catch (Exception e) {</span>
+<span class="nc" id="L468">                throw new RuntimeException(e);</span>
+            }
+        };
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

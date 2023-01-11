@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EhrDataDecryptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.common.decrypt</a> &gt; <span class="el_source">EhrDataDecryptor.java</span></div><h1>EhrDataDecryptor.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.common.decrypt;
+
+import com.google.common.base.Converter;
+import com.pkb.crypto.AccountKeys;
+import com.pkb.crypto.decryptionhelper.DecryptionHelper;
+import com.pkb.crypto.decryptionhelper.dto.EncryptedDataWithSourceRecord;
+import com.pkb.crypto.decryptionhelper.dto.ImmutableEncryptedDataWithSourceRecord;
+import com.pkb.crypto.decryptionhelper.provider.accountkeys.AccountKeysKeyProvider;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.fhir.common.enums.DecryptedEhrDataStatus;
+import com.pkb.fhir.common.retrieve.EncryptedEhrDataDataDto;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static java.lang.invoke.MethodHandles.lookup;
+
+/**
+ * Actually does the decryption of a piece of menu_data
+ */
+public class EhrDataDecryptor {
+<span class="fc" id="L35">    private static final Logger LOG = LoggerFactory.getLogger(lookup().lookupClass());</span>
+
+    private final AccountKeyProvider accountKeyProvider;
+    private final DecryptionHelper decryptionHelper;
+
+<span class="fc" id="L40">    public EhrDataDecryptor(AccountKeyProvider accountKeyProvider, DecryptionHelper decryptionHelper) {</span>
+<span class="fc" id="L41">        this.accountKeyProvider = accountKeyProvider;</span>
+<span class="fc" id="L42">        this.decryptionHelper = decryptionHelper;</span>
+<span class="fc" id="L43">    }</span>
+
+    public List&lt;DecryptedEhrData&gt; decrypt(List&lt;EncryptedEhrDataDataDto&gt; encryptedEhrData) {
+        List&lt;DecryptedEhrData&gt; result;
+<span class="fc" id="L47">        Either&lt;String, List&lt;AccountKeysDTO&gt;&gt; accountKeys = accountKeyProvider.getAccountKeys(new ArrayList&lt;&gt;(encryptedEhrData.stream().map(</span>
+<span class="fc" id="L48">                EncryptedEhrDataDataDto::getAccountPublicId).collect(Collectors.toSet())));</span>
+<span class="pc bpc" id="L49" title="1 of 2 branches missed.">        if (accountKeys.isLeft()) {</span>
+<span class="nc" id="L50">            result = encryptedEhrData.stream()</span>
+<span class="nc" id="L51">                    .map(sourceData -&gt; createDecryptedEhrData(sourceData, accountKeys.getLeft(), DecryptedEhrDataStatus.FAILURE))</span>
+<span class="nc" id="L52">                    .collect(Collectors.toList());</span>
+        } else {
+<span class="fc" id="L54">            Map&lt;UUID, AccountKeysDTO&gt; accountKeyMapByAccount = accountKeys.get()</span>
+<span class="fc" id="L55">                    .stream()</span>
+<span class="fc" id="L56">                    .collect(Collectors.toMap(AccountKeysDTO::getAccountPublicId, Function.identity()));</span>
+<span class="fc" id="L57">            result = encryptedEhrData.stream().map(sourceData -&gt; decryptAll(accountKeyMapByAccount, sourceData))</span>
+<span class="fc" id="L58">                    .collect(Collectors.toList());</span>
+        }
+<span class="fc" id="L60">        return result;</span>
+    }
+
+    @NotNull
+    private DecryptedEhrData createDecryptedEhrData(EncryptedEhrDataDataDto sourceData, String content, DecryptedEhrDataStatus status) {
+<span class="fc" id="L65">        return new DecryptedEhrData(sourceData.getId(), content, status, sourceData.getDataType());</span>
+    }
+
+    @NotNull
+    private DecryptedEhrData decryptAll(Map&lt;UUID, AccountKeysDTO&gt; accountKeyMapByAccount, EncryptedEhrDataDataDto sourceData) {
+        DecryptedEhrDataStatus status;
+        String content;
+<span class="pc bpc" id="L72" title="1 of 2 branches missed.">        if (accountKeyMapByAccount.containsKey(sourceData.getAccountPublicId())) {</span>
+            byte[] decryptedContent;
+            try {
+<span class="fc" id="L75">                decryptedContent = doDecrypt(sourceData, AccountKeys.accountKeys(accountKeyMapByAccount.get(sourceData.getAccountPublicId())));</span>
+<span class="fc" id="L76">                content = new String(decryptedContent, StandardCharsets.UTF_8);</span>
+<span class="fc" id="L77">                status = DecryptedEhrDataStatus.SUCCESS;</span>
+<span class="nc" id="L78">            } catch (Exception e) {</span>
+<span class="nc" id="L79">                status = DecryptedEhrDataStatus.FAILURE;</span>
+<span class="nc" id="L80">                StringWriter contentWriter = new StringWriter();</span>
+<span class="nc" id="L81">                PrintWriter printWriter = new PrintWriter(contentWriter);</span>
+<span class="nc" id="L82">                e.printStackTrace(printWriter);</span>
+<span class="nc" id="L83">                content = contentWriter.toString();</span>
+<span class="nc" id="L84">                LOG.error(e.getMessage(), e);</span>
+<span class="pc" id="L85">            }</span>
+        } else {
+<span class="nc" id="L87">            status = DecryptedEhrDataStatus.NOKEYS;</span>
+<span class="nc" id="L88">            content = &quot;account.keys.unavailable&quot;;</span>
+        }
+<span class="fc" id="L90">        return createDecryptedEhrData(sourceData, content, status);</span>
+    }
+
+
+    private byte[] doDecrypt(EncryptedEhrDataDataDto encryptedEhrData, AccountKeys accountKeys) {
+<span class="fc" id="L95">        var keyProvider = new AccountKeysKeyProvider&lt;&gt;(accountKeys);</span>
+<span class="fc" id="L96">        return decryptionHelper.decrypt(encryptedEhrData.getEncryptedData(), keyProvider, keyProvider, createConverter(encryptedEhrData));</span>
+    }
+
+    @NotNull
+    private Converter&lt;Object, EncryptedDataWithSourceRecord&lt;Object&gt;&gt; createConverter(EncryptedEhrDataDataDto encryptedEhrData) {
+<span class="fc" id="L101">        return new Converter&lt;&gt;() {</span>
+            @Override
+            protected EncryptedDataWithSourceRecord&lt;Object&gt; doForward(@NotNull Object o) {
+<span class="fc" id="L104">                return ImmutableEncryptedDataWithSourceRecord.builder()</span>
+<span class="fc" id="L105">                        .dataIdentifier(String.format(&quot;ehrdata: %d&quot;, encryptedEhrData.getId()))</span>
+<span class="fc" id="L106">                        .encryptedData(encryptedEhrData.getEncryptedData())</span>
+<span class="fc" id="L107">                        .secretKeyAlgorithm(Optional.ofNullable(encryptedEhrData.getSecretKeyAlgorithm()))</span>
+<span class="fc" id="L108">                        .dESSecretKey(Optional.ofNullable(encryptedEhrData.getSecretKeyInline()))</span>
+<span class="fc" id="L109">                        .symmetricEncryptionKeyId(Optional.ofNullable(encryptedEhrData.getSymmetricEncryptionKeyId()))</span>
+<span class="fc" id="L110">                        .nonceBase64(Optional.ofNullable(encryptedEhrData.getNonceBase64()))</span>
+<span class="fc" id="L111">                        .sourceRecord(Optional.of(new HashMap&lt;String, String&gt;()))</span>
+<span class="fc" id="L112">                        .build();</span>
+
+            }
+
+            @Override
+            protected Object doBackward(@NotNull EncryptedDataWithSourceRecord&lt;Object&gt; objectEncryptedDataWithSourceRecord) {
+<span class="nc" id="L118">                return null;</span>
+            }
+        };
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

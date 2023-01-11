@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AppointmentResourceEnricher.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhirwall.service.resource</a> &gt; <span class="el_source">AppointmentResourceEnricher.java</span></div><h1>AppointmentResourceEnricher.java</h1><pre class="source lang-java linenums">package com.pkb.fhirwall.service.resource;
+
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.pkb.common.ClearableInternalState;
+import com.pkb.entities.enums.ReferenceDataType;
+import com.pkb.fhirwall.config.FhirwallConfig;
+import com.pkb.fhirwall.domain.ResourceRepository;
+import io.prometheus.client.Counter;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.http.client.utils.URIBuilder;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.Appointment;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Extension;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.ResourceType;
+import org.hl7.fhir.r4.model.UrlType;
+import org.hl7.fhir.r4.model.ValueSet;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+
+import java.net.URISyntaxException;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static java.util.concurrent.TimeUnit.MINUTES;
+
+/**
+ * Resource info addition for Appointment resources
+ * Adds ODS codes, and specialty descriptions derived from ReferenceDatums.
+ */
+public class AppointmentResourceEnricher extends BaseResourceEnricher implements ClearableInternalState {
+
+    //Stupid big, there aren't even this many orgs in the UK, but just in case something goes wrong don't want this unbounded
+<span class="fc" id="L41">    private static long ODS_CODE_CACHE_MAX_SIZE = 10000L;</span>
+    //Relatively short timeframe as ODS codes can change
+<span class="fc" id="L43">    private static long ODS_CODE_CACHE_EXPIRY_MINUTES = 10L;</span>
+
+<span class="fc" id="L45">    private static String ODS_CODE_SYSTEM = &quot;https://fhir.nhs.uk/Id/ods-organization-code&quot;;</span>
+
+<span class="fc" id="L47">    private static final Counter ORGANIZATION_CACHE_USAGE = Counter.build()</span>
+<span class="fc" id="L48">            .name(&quot;pkb_fhirwall_appointment_enricher_org_cache_usage&quot;)</span>
+<span class="fc" id="L49">            .labelNames(&quot;usage&quot;)</span>
+<span class="fc" id="L50">            .help(&quot;How many times we hit the FHIR store vs how many times we use the local cache for organizations.&quot;)</span>
+<span class="fc" id="L51">            .register();</span>
+
+<span class="fc" id="L53">    private LoadingCache&lt;String, String&gt; odsCache = Caffeine.newBuilder()</span>
+<span class="fc" id="L54">            .maximumSize(ODS_CODE_CACHE_MAX_SIZE)</span>
+<span class="fc" id="L55">            .expireAfterWrite(ODS_CODE_CACHE_EXPIRY_MINUTES, MINUTES)</span>
+<span class="fc" id="L56">            .build(this::getOdsCodeFromOrganizationUuid);</span>
+
+<span class="fc" id="L58">    private static long REFERENCE_DATUM_CACHES_MAX_SIZE = 100000L;</span>
+<span class="fc" id="L59">    private static long REFERENCE_DATUM_CACHES_EXPIRY_MINUTES = 60L;</span>
+    private static final String SPECIALTY_VALUE_SET_URL_PREFIX = &quot;http://fhir.patientsknowbest.com/valueset/specialty&quot;;
+    private static final String NHS_AGGREGATOR_DEEPLINK_EXTENSION_URL = &quot;https://fhir.nhs.uk/StructureDefinition/Extension-Portal-Link&quot;;
+
+<span class="fc" id="L63">    private LoadingCache&lt;ReferenceDatumKey, Optional&lt;String&gt;&gt; referenceDatumDisplayCache = Caffeine.newBuilder()</span>
+<span class="fc" id="L64">            .maximumSize(REFERENCE_DATUM_CACHES_MAX_SIZE)</span>
+<span class="fc" id="L65">            .expireAfterWrite(REFERENCE_DATUM_CACHES_EXPIRY_MINUTES, MINUTES)</span>
+<span class="fc" id="L66">            .build(this::getReferenceDatumTextForOrgAndType);</span>
+
+    private static final String ORG_CODE_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/org-code&quot;;
+
+<span class="fc" id="L70">    private LoadingCache&lt;String, String&gt; orgCodeCache = Caffeine.newBuilder()</span>
+<span class="fc" id="L71">            .maximumSize(REFERENCE_DATUM_CACHES_MAX_SIZE)</span>
+<span class="fc" id="L72">            .expireAfterWrite(REFERENCE_DATUM_CACHES_EXPIRY_MINUTES, MINUTES)</span>
+<span class="fc" id="L73">            .build(this::getOrgCodeFromOrganizationUuid);</span>
+
+    private FhirwallConfig config;
+
+    public AppointmentResourceEnricher(ResourceRepository resourceRepository, FhirwallConfig config) {
+<span class="fc" id="L78">        super(resourceRepository);</span>
+<span class="fc" id="L79">        this.config = config;</span>
+<span class="fc" id="L80">    }</span>
+
+    @Override
+    public void enrichResources(List&lt;IBaseResource&gt; resource) {
+<span class="fc" id="L84">        resource.forEach(appointment -&gt; {</span>
+<span class="fc" id="L85">            enrichWithSourceOrgOdsCode((Appointment)appointment);</span>
+<span class="fc" id="L86">            enrichWithSpecialtyReferenceDatumText((Appointment) appointment);</span>
+<span class="fc" id="L87">            enrichWithDeeplinkExtension((Appointment)appointment);</span>
+<span class="fc" id="L88">        });</span>
+<span class="fc" id="L89">    }</span>
+
+    private void enrichWithSourceOrgOdsCode(Appointment appointment) {
+<span class="fc" id="L92">        Extension sourceOrgExtension = appointment.getMeta().getExtensionByUrl(&quot;http://fhir.patientsknowbest.com/structuredefinition/source-organization&quot;);</span>
+<span class="fc bfc" id="L93" title="All 2 branches covered.">        if (sourceOrgExtension == null) {</span>
+            //We do not have source org information. This is most likely a patient-entered appointment
+<span class="fc" id="L95">            return;</span>
+        }
+
+<span class="fc" id="L98">        List&lt;Appointment.AppointmentParticipantComponent&gt; locationParticipants = getLocationParticipants(appointment);</span>
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">        if (locationParticipants.size() &gt; 1) {</span>
+<span class="nc" id="L100">            throw new RuntimeException(&quot;More than one Location participant for appointment with id &quot; + appointment.getId());</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">        } else if (locationParticipants.isEmpty()) {</span>
+            //For Wayfinder ODS codes MUST exist if this is from a real org, and there's no harm in always adding one
+            // for consistency.
+<span class="fc" id="L104">            Appointment.AppointmentParticipantComponent locationActor = new Appointment.AppointmentParticipantComponent();</span>
+<span class="fc" id="L105">            locationActor.getActor().setType(ResourceType.Location.toString());</span>
+<span class="fc" id="L106">            locationActor.setStatus(getParticipantStatus(appointment.getStatus()));</span>
+<span class="fc" id="L107">            appointment.addParticipant(locationActor);</span>
+        }
+
+<span class="fc" id="L110">        String sourceOrgUuid = ((Reference)sourceOrgExtension.getValue()).getReferenceElement().getIdPart();</span>
+<span class="fc" id="L111">        String odsCode = odsCache.get(sourceOrgUuid);</span>
+
+        //Total count for every org we use; then we can distinguish how many db hits we needed to do in total
+<span class="fc" id="L114">        ORGANIZATION_CACHE_USAGE.labels(&quot;total&quot;).inc();</span>
+
+<span class="fc" id="L116">        getLocationParticipants(appointment).stream().findFirst()</span>
+<span class="fc" id="L117">                .ifPresent(participant -&gt; {</span>
+<span class="fc" id="L118">                    Identifier locationIdentifier = new Identifier();</span>
+<span class="fc" id="L119">                    locationIdentifier.setSystem(ODS_CODE_SYSTEM);</span>
+<span class="fc" id="L120">                    locationIdentifier.setValue(odsCode);</span>
+<span class="fc" id="L121">                    participant.getActor().setIdentifier(locationIdentifier);</span>
+<span class="fc" id="L122">        });</span>
+<span class="fc" id="L123">    }</span>
+
+    /**
+     * As this enriches all data in the aggregate store, it needs to handle all possible statuses, as we could be sent
+     * these by customers via inbound FHIR
+     */
+    private Appointment.ParticipationStatus getParticipantStatus(Appointment.AppointmentStatus appointmentStatus) {
+<span class="pc bpc" id="L130" title="3 of 6 branches missed.">        if (appointmentStatus == Appointment.AppointmentStatus.CANCELLED || appointmentStatus == Appointment.AppointmentStatus.NOSHOW</span>
+                || appointmentStatus == Appointment.AppointmentStatus.ENTEREDINERROR) {
+<span class="nc" id="L132">            return Appointment.ParticipationStatus.DECLINED;</span>
+<span class="pc bpc" id="L133" title="9 of 10 branches missed.">        } else if (appointmentStatus == Appointment.AppointmentStatus.BOOKED || appointmentStatus == Appointment.AppointmentStatus.NULL</span>
+                || appointmentStatus == Appointment.AppointmentStatus.ARRIVED || appointmentStatus == Appointment.AppointmentStatus.FULFILLED
+                || appointmentStatus == Appointment.AppointmentStatus.CHECKEDIN) {
+<span class="fc" id="L136">            return Appointment.ParticipationStatus.ACCEPTED;</span>
+<span class="nc bnc" id="L137" title="All 6 branches missed.">        } else if (appointmentStatus == Appointment.AppointmentStatus.WAITLIST || appointmentStatus == Appointment.AppointmentStatus.PROPOSED</span>
+                || appointmentStatus == Appointment.AppointmentStatus.PENDING) {
+<span class="nc" id="L139">            return Appointment.ParticipationStatus.TENTATIVE;</span>
+        }else {
+<span class="nc" id="L141">            throw new IllegalArgumentException(String.format(&quot;Unknown status: %s for appointment&quot;, appointmentStatus));</span>
+        }
+    }
+
+    @NotNull
+    private List&lt;Appointment.AppointmentParticipantComponent&gt; getLocationParticipants(Appointment appointment) {
+<span class="fc" id="L147">        return appointment.getParticipant()</span>
+<span class="fc" id="L148">                .stream().filter(participant -&gt; {</span>
+<span class="fc" id="L149">                    Optional&lt;Reference&gt; actorReference = Optional.ofNullable(participant.getActor());</span>
+<span class="fc" id="L150">                    Optional&lt;String&gt; actorType = actorReference.map(Reference::getType);</span>
+<span class="fc" id="L151">                    return actorType.map(type -&gt; type.equals(ResourceType.Location.toString())).orElse(false);</span>
+                })
+<span class="fc" id="L153">                .collect(Collectors.toList());</span>
+    }
+
+    @NotNull
+    private String getOdsCodeFromOrganizationUuid(String organizationResourceUuid) {
+        //We had to hit the DB for this org
+<span class="fc" id="L159">        ORGANIZATION_CACHE_USAGE.labels(&quot;database&quot;).inc();</span>
+
+<span class="fc" id="L161">        Organization retrievedOrganization = resourceRepository.getResourceByFhirId(organizationResourceUuid, Organization.class)</span>
+<span class="pc" id="L162">                .orElseThrow(() -&gt; new RuntimeException(&quot;Failed to find Organization for id &quot; + organizationResourceUuid));</span>
+
+<span class="fc" id="L164">        Optional&lt;String&gt; sourceOrgOdsCode = retrievedOrganization.getIdentifier()</span>
+<span class="fc" id="L165">                .stream().filter(identifier -&gt; identifier.getSystem().equals(ODS_CODE_SYSTEM))</span>
+<span class="fc" id="L166">                .findFirst().map(Identifier::getValue);</span>
+
+<span class="fc" id="L168">        return sourceOrgOdsCode.orElseThrow(() -&gt; {</span>
+            // This is a serious configuration error, it indicates that the appointment was sourced from an org, but that org
+            // has not been configured with an ODS code. This is a breach of the interface specification with Wayfinder, and
+            // also means we either haven't followed internal process to add an ODS code for an org which is sending us appts,
+            // or a practitioner has added an appt to the front end, which is incredibly rare.
+            // The fix in any case is the same: get the trust-level ODS code of the appt, and add it to the org.
+<span class="nc" id="L174">            throw new RuntimeException(&quot;Attempting to enrich appointment with source org &quot; + organizationResourceUuid</span>
+                    + &quot;, but this org does not have an ODS code.&quot;);
+        });
+    }
+
+    @NotNull
+    private String getOrgCodeFromOrganizationUuid(String organizationResourceUuid) {
+<span class="fc" id="L181">        Organization retrievedOrganization = resourceRepository.getResourceByFhirId(organizationResourceUuid, Organization.class)</span>
+<span class="pc" id="L182">                .orElseThrow(() -&gt; new RuntimeException(&quot;Failed to find Organization for id &quot; + organizationResourceUuid));</span>
+
+<span class="fc" id="L184">        Optional&lt;String&gt; sourceOrgCode = retrievedOrganization.getIdentifier()</span>
+<span class="fc" id="L185">                .stream().filter(identifier -&gt; identifier.getSystem().equals(ORG_CODE_SYSTEM_URL))</span>
+<span class="fc" id="L186">                .findFirst().map(Identifier::getValue);</span>
+
+<span class="fc" id="L188">        return sourceOrgCode.orElseThrow(() -&gt; {</span>
+            // This should never be allowed to happen, and means we will not be able to find ReferenceDatums for them
+<span class="nc" id="L190">            throw new RuntimeException(&quot;Attempting to enrich appointment with source org &quot; + organizationResourceUuid</span>
+                    + &quot;, but this org does not have an org code.&quot;);
+        });
+    }
+
+    private void enrichWithSpecialtyReferenceDatumText(Appointment appointment) {
+<span class="fc" id="L196">        Extension sourceOrgExtension = appointment.getMeta().getExtensionByUrl(&quot;http://fhir.patientsknowbest.com/structuredefinition/source-organization&quot;);</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">        if (sourceOrgExtension == null) {</span>
+            //We do not have source org information. This is most likely a patient-entered appointment
+<span class="fc" id="L199">            return;</span>
+        }
+
+<span class="fc" id="L202">        String sourceOrgId = ((Reference)sourceOrgExtension.getValue()).getReferenceElement().getIdPart();</span>
+<span class="fc" id="L203">        UUID sourceOrgUuid = UUID.fromString(sourceOrgId);</span>
+
+<span class="fc" id="L205">        List&lt;CodeableConcept&gt; specialties = appointment.getSpecialty();</span>
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">        if (specialties.size() &gt; 1) {</span>
+<span class="nc" id="L207">            throw new RuntimeException(&quot;More than one specialty for appointment with id &quot; + appointment.getId());</span>
+        }
+
+<span class="fc" id="L210">        specialties.forEach(specialty -&gt;</span>
+<span class="fc" id="L211">                specialty.getCoding().stream().findFirst().ifPresent(coding -&gt; {</span>
+<span class="fc" id="L212">                    String code = coding.getCode();</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">                    if (StringUtils.isNotBlank(code)) {</span>
+<span class="fc" id="L214">                        ReferenceDatumKey referenceDatumKey = ImmutableReferenceDatumKey.referenceDatumKey(sourceOrgUuid, ReferenceDataType.HOSPITAL_SERVICE, code);</span>
+<span class="fc" id="L215">                        Objects.requireNonNull(referenceDatumDisplayCache.get(referenceDatumKey)).ifPresent(coding::setDisplay);</span>
+                    }
+<span class="fc" id="L217">        }));</span>
+<span class="fc" id="L218">    }</span>
+
+    private Optional&lt;String&gt; getReferenceDatumTextForOrgAndType(ReferenceDatumKey referenceDatumKey) {
+<span class="fc" id="L221">        String organizationResourceUuid = String.valueOf(referenceDatumKey.sourceOrgPublicId());</span>
+<span class="fc" id="L222">        ReferenceDataType referenceDataType = referenceDatumKey.referenceDataType();</span>
+
+<span class="fc" id="L224">        String orgCode = orgCodeCache.get(organizationResourceUuid);</span>
+<span class="fc" id="L225">        List&lt;IBaseResource&gt; valueSets =</span>
+<span class="fc" id="L226">                resourceRepository.searchResourceForListOfResources(&quot;ValueSet?url=&quot; + SPECIALTY_VALUE_SET_URL_PREFIX</span>
+<span class="fc" id="L227">                        + &quot;-&quot; + orgCode + &quot;-&quot; + referenceDataType.name());</span>
+
+<span class="fc" id="L229">        return valueSets.stream().findFirst().flatMap(valueSet -&gt;</span>
+<span class="fc" id="L230">                ((ValueSet)valueSet).getCompose().getInclude().stream().findFirst()</span>
+<span class="fc" id="L231">                .flatMap(include -&gt; include.getConcept().stream()</span>
+<span class="pc bpc" id="L232" title="2 of 4 branches missed.">                        .filter(concept -&gt; StringUtils.isNotBlank(concept.getCode()) &amp;&amp; concept.getCode().equals(referenceDatumKey.referenceDatumCode()))</span>
+<span class="fc" id="L233">                        .findFirst().map(ValueSet.ConceptReferenceComponent::getDisplay)));</span>
+    }
+
+    /**
+     * We also want to create a new extension containing a link to PHR based on the upstream appointment
+     * resource id. Currently this will only make sense in the context of ehrmigrated appointments since their
+     * resource ids correspond to unique ids in menudata, but it has to be there for _all_ appointment resources
+     * in order to pass wayfinder validation
+     */
+    private void enrichWithDeeplinkExtension(Appointment appointment) {
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">        if (!appointment.getExtensionsByUrl(NHS_AGGREGATOR_DEEPLINK_EXTENSION_URL).isEmpty()) {</span>
+            //This code used to live in the aggregator layer, which means that appointments that were aggregated
+            // before this point will already have this extension. We don't want to add it again.
+            // One day we may re-aggregate all the appointments so we don't need this handling, but that's not a
+            // priority right now.
+<span class="nc" id="L248">            return;</span>
+        }
+
+        try {
+<span class="fc" id="L252">            String appointmentPath = new URIBuilder()</span>
+<span class="fc" id="L253">                    .setPath(config.getAppointmentPagePath())</span>
+<span class="fc" id="L254">                    .addParameter(&quot;uniqueId&quot;, appointment.getIdElement().getIdPart())</span>
+<span class="fc" id="L255">                    .addParameter(&quot;nhsStyle&quot;, &quot;true&quot;)</span>
+<span class="fc" id="L256">                    .build()</span>
+<span class="fc" id="L257">                    .toString();</span>
+
+            // Encode the appointment URL as a redirect after NHS Login
+<span class="fc" id="L260">            String deepLink = new URIBuilder(config.getPhrBaseUrl())</span>
+<span class="fc" id="L261">                    .setPath(&quot;nhs-login/login&quot;)</span>
+<span class="fc" id="L262">                    .addParameter(&quot;phrPath&quot;, appointmentPath)</span>
+<span class="fc" id="L263">                    .build()</span>
+<span class="fc" id="L264">                    .toString();</span>
+
+<span class="fc" id="L266">            Extension extension = new Extension().setUrl(NHS_AGGREGATOR_DEEPLINK_EXTENSION_URL).setValue(new UrlType(deepLink));</span>
+<span class="fc" id="L267">            appointment.addExtension(extension);</span>
+<span class="nc" id="L268">        } catch (URISyntaxException e) {</span>
+<span class="nc" id="L269">            throw new RuntimeException(&quot;Failed to construct deeplink URL&quot;, e);</span>
+<span class="fc" id="L270">        }</span>
+<span class="fc" id="L271">    }</span>
+
+    @Override
+    public void clearState() {
+<span class="fc" id="L275">        odsCache.invalidateAll();</span>
+<span class="fc" id="L276">        referenceDatumDisplayCache.invalidateAll();</span>
+<span class="fc" id="L277">        orgCodeCache.invalidateAll();</span>
+<span class="fc" id="L278">    }</span>
+
+    @Value.Immutable
+    @Value.Style(allParameters = true, of = &quot;referenceDatumKey&quot;)
+    interface ReferenceDatumKey {
+        UUID sourceOrgPublicId();
+        ReferenceDataType referenceDataType();
+        String referenceDatumCode();
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

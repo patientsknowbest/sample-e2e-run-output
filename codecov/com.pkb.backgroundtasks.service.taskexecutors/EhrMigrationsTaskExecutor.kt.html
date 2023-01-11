@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EhrMigrationsTaskExecutor.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.backgroundtasks.service.taskexecutors</a> &gt; <span class="el_source">EhrMigrationsTaskExecutor.kt</span></div><h1>EhrMigrationsTaskExecutor.kt</h1><pre class="source lang-java linenums">package com.pkb.backgroundtasks.service.taskexecutors
+
+import com.pkb.backgroundtasks.AccountPrivateId
+import com.pkb.backgroundtasks.AccountPublicId
+import com.pkb.backgroundtasks.EhrDataMigrationRequestDTO
+import com.pkb.backgroundtasks.PhrClient
+import com.pkb.backgroundtasks.config.BackgroundTasksProperties
+import com.pkb.backgroundtasks.entity.AccountTaskDetails
+import com.pkb.backgroundtasks.entity.AccountTaskPending
+import com.pkb.backgroundtasks.entity.AccountTaskType
+import com.pkb.backgroundtasks.repository.AppMenuDataRepository
+import com.pkb.backgroundtasks.util.RequestIdUtil
+import com.pkb.crypto.dto.AccountKeysDTO
+import com.pkb.entities.enums.MenuDataType
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.data.domain.PageRequest
+import org.springframework.data.domain.Slice
+import java.lang.invoke.MethodHandles
+import java.util.UUID
+
+<span class="fc" id="L22">abstract class EhrMigrationsTaskExecutor&lt;SELF : EhrMigrationsTaskExecutor&lt;SELF, MD&gt;, MD : EhrMigrationsTaskDetail&lt;MD&gt;&gt;(</span>
+<span class="fc" id="L23">    private val phrClient: PhrClient,</span>
+<span class="fc" id="L24">    private val menuDataRepo: AppMenuDataRepository,</span>
+<span class="fc" id="L25">    private val requestIdUtil: RequestIdUtil,</span>
+<span class="fc" id="L26">    private val properties: BackgroundTasksProperties,</span>
+    migrationDetailClass: Class&lt;MD&gt;
+) :
+<span class="fc" id="L29">    AccountTaskExecutor&lt;SELF, MD&gt;(migrationDetailClass) {</span>
+
+<span class="fc" id="L31">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    protected abstract val dataTypes: List&lt;MenuDataType&gt;
+
+    override fun performTask(accountPublicId: AccountPublicId, accountKeysDTO: AccountKeysDTO, accountPrivateId: Long, taskDetails: MD): Boolean {
+<span class="fc" id="L36">        val versions = getEhrMigrationVersions()</span>
+<span class="fc" id="L37">        return dataTypes</span>
+<span class="fc" id="L38">            .flatMap { dataType -&gt;</span>
+<span class="fc" id="L39">                val targetVersion = versions[dataType]!!</span>
+<span class="fc" id="L40">                generateSequence({ nextSlice(accountPrivateId, dataType, targetVersion) }) { nextSlice(accountPrivateId, dataType, targetVersion, it) }</span>
+<span class="fc" id="L41">                    .filter { it.hasContent() }</span>
+<span class="pc" id="L42">                    .map { EhrDataMigrationRequestDTO(accountPrivateId, dataType, it.content) }</span>
+<span class="fc" id="L43">                    .map {</span>
+<span class="nc" id="L44">                        phrClient.triggerEhrMigrations(requestIdUtil.getRequestId(), it).execute()</span>
+<span class="nc" id="L45">                            .apply {</span>
+<span class="nc bnc" id="L46" title="All 2 branches missed.">                                if (!isSuccessful) {</span>
+<span class="nc bnc" id="L47" title="All 2 branches missed.">                                    log.error(&quot;Error during EHR migration for account {}. Code: {} Error: {}&quot;, accountPublicId, code(), errorBody()?.string())</span>
+                                }
+<span class="nc" id="L49">                            }</span>
+<span class="nc" id="L50">                            .isSuccessful</span>
+                    }
+            }
+<span class="pc" id="L53">            .all { it }</span>
+    }
+
+    override fun getSkippableTasks(accountsToProcess: List&lt;AccountTaskPending&gt;, accountIdLookup: Map&lt;UUID, Long&gt;): Set&lt;AccountTaskPending&gt; {
+<span class="fc" id="L57">        val accountsWithResults = menuDataRepo.findAccountsWithDataOfType(accountIdLookup.values, dataTypes)</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">        return accountsToProcess.filter { !accountsWithResults.contains(accountIdLookup[it.accountPublicId]) }.toSet()</span>
+    }
+
+<span class="fc" id="L61">    private fun nextSlice(accountPrivateId: AccountPrivateId, dataType: MenuDataType, targetVersion: Int, prev: Slice&lt;AccountPrivateId&gt;? = null) =</span>
+<span class="fc bfc" id="L62" title="All 2 branches covered.">        nextPageable(prev)?.let { menuDataRepo.getIdsNeedingMigrationForAccountAndDataType(accountPrivateId, dataType, targetVersion, it) }</span>
+
+    private fun nextPageable(prev: Slice&lt;AccountPrivateId&gt;?) =
+<span class="fc" id="L65">        when {</span>
+<span class="fc bfc" id="L66" title="All 2 branches covered.">            prev == null -&gt; PageRequest.of(0, properties.ehrMigrationsMigrator.pageSize)</span>
+<span class="pc bpc" id="L67" title="1 of 2 branches missed.">            prev.hasNext() -&gt; prev.nextPageable()</span>
+<span class="fc" id="L68">            else -&gt; null</span>
+<span class="fc" id="L69">        }</span>
+
+    private fun getEhrMigrationVersions() =
+<span class="fc" id="L72">        phrClient.getEhrMigrationVersions().execute().run {</span>
+<span class="pc bpc" id="L73" title="3 of 4 branches missed.">            if (!isSuccessful) throw RuntimeException(&quot;Error getting EHR Migration versions from PHR: ${errorBody()?.string()}&quot;)</span>
+<span class="fc" id="L74">            body()!!.versions.toMap()</span>
+<span class="fc" id="L75">        }</span>
+}
+
+<span class="fc" id="L78">abstract class EhrMigrationsTaskDetail&lt;SELF : EhrMigrationsTaskDetail&lt;SELF&gt;&gt;(type: AccountTaskType) : AccountTaskDetails&lt;SELF&gt;(type)</span>
+
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

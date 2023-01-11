@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractMenuDataRepository.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.internal.repository</a> &gt; <span class="el_source">AbstractMenuDataRepository.java</span></div><h1>AbstractMenuDataRepository.java</h1><pre class="source lang-java linenums">package com.pkb.domain.internal.repository;
+
+import com.google.common.collect.Ordering;
+import com.pkb.datamodel.AccountKeys;
+import com.pkb.datamodel.AppMenuDataWithSourceObjects;
+import com.pkb.datamodel.ImmutableAppMenuDataWithSourceObjects;
+import com.pkb.datamodel.ReferenceDatumCache;
+import com.pkb.datamodel.authorization.TargetOwnerData;
+import com.pkb.domain.repository.PersonRepository;
+import com.pkb.ehrdata.AccessFilter;
+import com.pkb.ehrdata.ImmutableOrderBy;
+import com.pkb.ehrdata.ImmutablePageFilter;
+import com.pkb.ehrdata.ImmutableSearchSpec;
+import com.pkb.ehrdata.OrderBy;
+import com.pkb.ehrdata.SearchSpec;
+import com.pkb.entities.app.AppMenuData;
+import com.pkb.entities.embeddables.SourceDetails;
+import com.pkb.entities.enums.ReferenceDataType;
+import com.pkb.entities.pub.PublicOrg;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.entities.pub.PublicReferenceDatum;
+import io.vavr.collection.HashMap;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.collection.Set;
+import io.vavr.control.Option;
+import io.vavr.control.Try;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.util.Objects;
+import java.util.UUID;
+
+import static io.vavr.API.Map;
+import static java.lang.String.format;
+import static java.util.Comparator.comparing;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
+
+/**
+ * Actually just an ordinary bean, _not_ a spring-data JPA repository.
+ */
+public abstract class AbstractMenuDataRepository {
+
+<span class="fc" id="L48">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private final AppMenuDataRepository menuDataRepository;
+    private final ReferenceDatumRepository referenceDatumRepository;
+    protected final PersonRepository personRepository;
+
+    protected AbstractMenuDataRepository(AppMenuDataRepository menuDataRepository, ReferenceDatumRepository referenceDatumRepository,
+<span class="fc" id="L55">                                         PersonRepository personRepository) {</span>
+<span class="fc" id="L56">        this.menuDataRepository = menuDataRepository;</span>
+<span class="fc" id="L57">        this.referenceDatumRepository = referenceDatumRepository;</span>
+<span class="fc" id="L58">        this.personRepository = personRepository;</span>
+<span class="fc" id="L59">    }</span>
+
+    @SuppressWarnings(&quot;serial&quot;)
+    protected AccountKeys checkAccountKeys(TargetOwnerData targetOwnerData, List&lt;AppMenuDataWithSourceObjects&gt; menuData) {
+<span class="pc" id="L63">        AccountKeys accountKeys = targetOwnerData.accountKeys().getOrElseThrow(() -&gt; new RuntimeException(&quot;No account keys!&quot;));</span>
+<span class="fc" id="L64">        return Try.of(() -&gt; checkAccountKeys(accountKeys, menuData))</span>
+<span class="fc" id="L65">                .recover(ex -&gt; {</span>
+<span class="nc" id="L66">                    LOGGER.warn(&quot;Symmetric keys missing from authz context, reloading&quot;, ex);</span>
+<span class="nc" id="L67">                    AccountKeys reloadedAccountKeys = targetOwnerData.accountKeysReloader().get();</span>
+<span class="nc" id="L68">                    return checkAccountKeys(reloadedAccountKeys, menuData);</span>
+                })
+<span class="fc" id="L70">                .get();</span>
+    }
+
+    private AccountKeys checkAccountKeys(AccountKeys accountKeys, List&lt;AppMenuDataWithSourceObjects&gt; menuData) {
+        // Make sure we have all the keys we need, otherwise we'll need to go back to the db
+<span class="fc" id="L75">        Set&lt;Long&gt; loadedKeyIds = accountKeys.getSymmetricKeys().keySet();</span>
+<span class="fc" id="L76">        Set&lt;Long&gt; requiredKeyIds = menuData</span>
+<span class="fc" id="L77">                .map(menuDataWrapper -&gt; menuDataWrapper.getAppMenuData().getSymmetricEncryptionKeyId())</span>
+<span class="fc" id="L78">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L79">                .toSet();</span>
+<span class="fc" id="L80">        Set&lt;Long&gt; missingKeys = requiredKeyIds.diff(loadedKeyIds);</span>
+<span class="pc bpc" id="L81" title="1 of 2 branches missed.">        if (!missingKeys.isEmpty()) {</span>
+<span class="nc" id="L82">            throw new IllegalStateException(format(&quot;Authz context is missing symmetric keys %s&quot;, missingKeys));</span>
+        }
+<span class="fc" id="L84">        return accountKeys;</span>
+    }
+
+    protected ReferenceDatumCache getReferenceDatumCache(List&lt;AppMenuDataWithSourceObjects&gt; menuDataList, ReferenceDataType dataType) {
+<span class="fc" id="L88">        List&lt;PublicOrg&gt; sourceOrgs = menuDataList.map(menuData -&gt; menuData.getAppMenuData().getSourceDetails())</span>
+<span class="fc" id="L89">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L90">                .map(SourceDetails::getOrg)</span>
+<span class="fc" id="L91">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L92">                .distinctBy(PublicOrg::getId);</span>
+
+<span class="fc bfc" id="L94" title="All 2 branches covered.">        if (sourceOrgs.isEmpty()) {</span>
+<span class="fc" id="L95">            return new ReferenceDatumCache(Map());</span>
+        }
+
+<span class="fc" id="L98">        List&lt;PublicReferenceDatum&gt; referenceDatums = referenceDatumRepository</span>
+<span class="fc" id="L99">                .findByOrgsAndDataType(sourceOrgs, dataType);</span>
+
+<span class="fc" id="L101">        return new ReferenceDatumCache(referenceDatums</span>
+<span class="fc" id="L102">                .groupBy(prd -&gt; prd.getOrg().getId())</span>
+<span class="fc" id="L103">                .mapValues(lrd -&gt; lrd.toMap(PublicReferenceDatum::getDataId, PublicReferenceDatum::getDataText)));</span>
+    }
+
+    @NotNull
+    protected ImmutableSearchSpec.Builder getSearchSpecBuilder(@NotNull Long patientAccountId,
+                                                               @NotNull String menuDataTypeName) {
+<span class="fc" id="L109">        return ImmutableSearchSpec.builder()</span>
+<span class="fc" id="L110">                .addAccountId(patientAccountId)</span>
+<span class="fc" id="L111">                .addDataType(menuDataTypeName);</span>
+    }
+
+    protected void addPageFilter(int maxNumberOfResources, ImmutableSearchSpec.Builder builder) {
+<span class="fc" id="L115">        builder.pageFilter(ImmutablePageFilter.builder().startPosition(0).count(maxNumberOfResources).build());</span>
+<span class="fc" id="L116">    }</span>
+
+
+    protected void addOrderBy(String fieldName, OrderBy.Direction direction, ImmutableSearchSpec.Builder searchSpecBuilder) {
+<span class="fc" id="L120">        searchSpecBuilder.orderBy(ImmutableOrderBy.builder().direction(direction).field(fieldName).build());</span>
+<span class="fc" id="L121">    }</span>
+
+    protected List&lt;AppMenuDataWithSourceObjects&gt; findMenuDatasByIds(List&lt;Long&gt; ids) {
+<span class="fc" id="L124">        return populateSourceDetailsOnMenuDatas(menuDataRepository.findByIds(ids).sorted(comparing(AppMenuData::getId, Ordering.explicit(ids.asJava()))));</span>
+    }
+
+    protected List&lt;AppMenuDataWithSourceObjects&gt; findMenuDatasByIdsWithAttachments(List&lt;Long&gt; ids) {
+<span class="fc" id="L128">        return populateSourceDetailsOnMenuDatas(menuDataRepository.findByIdsWithAttachments(ids).sorted(comparing(AppMenuData::getId, Ordering.explicit(ids.asJava()))));</span>
+    }
+
+    private List&lt;AppMenuDataWithSourceObjects&gt; populateSourceDetailsOnMenuDatas(List&lt;AppMenuData&gt; menuDatas) {
+<span class="fc" id="L132">        HashSet&lt;Long&gt; sourcePersonIds = menuDatas.map(menuData -&gt; menuData.getSourceDetails().getPersonId()).filter(Objects::nonNull)</span>
+<span class="fc" id="L133">                .collect(HashSet.collector());</span>
+<span class="fc" id="L134">        var sourcePersons = HashMap.ofAll(personRepository.findByIds(sourcePersonIds.toSet()).collect(toMap(PublicPKBPerson::getId, identity())));</span>
+
+<span class="fc" id="L136">        return menuDatas.map(menuData -&gt; {</span>
+<span class="fc" id="L137">            PublicPKBPerson sourcePerson = sourcePersons.get(menuData.getSourceDetails().getPersonId())</span>
+<span class="fc" id="L138">                    .getOrNull();</span>
+<span class="fc" id="L139">            return ImmutableAppMenuDataWithSourceObjects.builder().appMenuData(menuData).sourcePerson(Option.of(sourcePerson)).build();</span>
+        });
+    }
+
+    protected List&lt;Long&gt; find(SearchSpec searchSpec, AccessFilter accessFilter) {
+<span class="fc" id="L144">        return menuDataRepository.find(searchSpec, accessFilter);</span>
+    }
+
+    protected long count(SearchSpec searchSpec, AccessFilter accessFilter) {
+<span class="fc" id="L148">        return menuDataRepository.count(searchSpec, accessFilter);</span>
+    }
+
+    protected List&lt;Long&gt; findBatch(SearchSpec searchSpec, @NotNull Map&lt;Long, AccessFilter&gt; accessFilters){
+<span class="fc" id="L152">        return menuDataRepository.findBatch(searchSpec, accessFilters);</span>
+    }
+
+    protected List&lt;AppMenuData&gt; findByConversationIds(List&lt;UUID&gt; conversationIds) {
+<span class="fc" id="L156">        return menuDataRepository.findByConversationIds(conversationIds);</span>
+    }
+
+    protected List&lt;AppMenuData&gt; findByExternalMessageId(List&lt;String&gt; externalMessageId,
+                                                        Long sourceOrgId) {
+<span class="fc" id="L161">        return menuDataRepository.findByExternalMessageId(externalMessageId, sourceOrgId);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

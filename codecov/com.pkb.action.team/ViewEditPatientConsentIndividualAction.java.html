@@ -1,0 +1,654 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ViewEditPatientConsentIndividualAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.team</a> &gt; <span class="el_source">ViewEditPatientConsentIndividualAction.java</span></div><h1>ViewEditPatientConsentIndividualAction.java</h1><pre class="source lang-java linenums">/*
+
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package com.pkb.action.team;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.bean.IUserWebBean;
+import com.pkb.bean.impl.UserWebBean;
+import com.pkb.consent.entity.PatientConsent;
+import com.pkb.consent.entity.PatientConsentReason;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.datamodel.consent.ConsentExpiryDecision;
+import com.pkb.datamodel.consent.ConsentExpiryDecisionExisting;
+import com.pkb.datamodel.consent.ImmutableConsentExpiryDecision;
+import com.pkb.datamodel.consent.ImmutableConsentExpiryDecisionExisting;
+import com.pkb.datamodel.consent.PatientConsentDTO;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.ConsentReason;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.MailException;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.patientconsent.DeprecatedPatientConsentManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Optional;
+
+/**
+ * @author Russ Gray
+ */
+<span class="fc" id="L48">public class ViewEditPatientConsentIndividualAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 7932999669666153334L;
+<span class="fc" id="L51">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private UserAccessManager userAccessManager;
+    @SuppressWarnings(&quot;deprecation&quot;)
+    private DeprecatedPatientConsentManager deprecatedPatientConsentManager;
+    private IUserWebBean userWebBean;
+    private PatientConsentManager patientConsentManager;
+
+    private PKBEmailMessageManager pkbEmailMessageManager;
+
+    private PatientConsent patientConsent;
+    private PKBPerson individual;
+    private List&lt;ConsentReason&gt; consentReasons;
+    private String selectedReason;
+    private String freeTextReason;
+    private String proEditOnlyReason;
+    private Long clinicianId;
+    private Long carerId;
+
+    private String expiryReason13;
+    private String expiryReason16;
+    private String expiryReason18;
+
+    private String reason13EnteredBy;
+    private String reason16EnteredBy;
+    private String reason18EnteredBy;
+
+    private Instant reason13EnteredDate;
+    private Instant reason16EnteredDate;
+    private Instant reason18EnteredDate;
+
+    private boolean displayChildSafetySection;
+    private boolean displayMaintainAccessCheckbox;
+    private boolean maintainAccessAfterBirthday;
+    private boolean patientSelfView;
+    private boolean patientUnder18;
+    private boolean hasExpiryReason;
+    private boolean readOnly;
+
+    private AgeCriterion ageCriterion;
+
+    // Only used if the logged-in user is a carer. This is used to restrict
+    // carers to only grant their own level of consent to new carers or pros
+    private PatientConsentDTO loggedInCarerConsent;
+
+<span class="fc" id="L96">    @VisibleForTesting</span>
+    enum AgeCriterion {
+<span class="fc" id="L98">        CHILD_13(13),</span>
+<span class="fc" id="L99">        CHILD_16(16),</span>
+<span class="fc" id="L100">        CHILD_18(18),</span>
+<span class="fc" id="L101">        ADULT(0),</span>
+<span class="fc" id="L102">        UNKNOWN_DOB(0);</span>
+
+        private final int value;
+
+<span class="fc" id="L106">        AgeCriterion(int intValue) {</span>
+<span class="fc" id="L107">            value = intValue;</span>
+<span class="fc" id="L108">        }</span>
+
+        public int getValue() {
+<span class="fc" id="L111">            return value;</span>
+        }
+    }
+
+    public String view() {
+<span class="fc" id="L116">        var loggedInContext = getLoggedInEHRRequestContext();</span>
+
+<span class="fc" id="L118">        Long patientId = loggedInContext.getContextOrAccessingUserId();</span>
+
+        try {
+<span class="fc" id="L121">            boolean isSharingLockActive = false;</span>
+<span class="fc" id="L122">            Optional&lt;PatientConsent&gt; maybePatientConsent = deprecatedPatientConsentManager.getPatientConsent(</span>
+<span class="fc" id="L123">                    loggedInContext, clinicianId, carerId, patientId, true/*includeReasons*/);</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">            if (maybePatientConsent.isPresent()) {</span>
+<span class="fc" id="L125">                patientConsent = maybePatientConsent.get();</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">                if (patientConsent.isProEditOnlyForChild()) {</span>
+<span class="fc" id="L127">                    isSharingLockActive = true;</span>
+<span class="fc" id="L128">                    proEditOnlyReason = patientConsent.getReasons().getProEditOnlyForChildReasonText();</span>
+                }
+            }
+
+<span class="fc bfc" id="L132" title="All 2 branches covered.">            individual = userManager.getPKBPerson(clinicianId == null ? carerId : clinicianId);</span>
+
+            // Logged-in user is a carer if a patient is viewing a different patient
+<span class="fc" id="L135">            boolean isCarer = loggedInContext.isCarer();</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">            if (isCarer) {</span>
+<span class="fc" id="L137">                loggedInCarerConsent = loggedInContext.getConsentStatus().getConsent().orElse(null);</span>
+            }
+<span class="fc" id="L139">            var users = getContextAndLoggedInUsers(loggedInContext);</span>
+
+<span class="fc" id="L141">            List&lt;ConsentExpiryDecisionExisting&gt; expiryDecisions = patientConsentManager.findConsentExpiryDecisionsByConsentId(patientConsent.getId());</span>
+<span class="fc bfc" id="L142" title="All 4 branches covered.">            displayMaintainAccessCheckbox = anyConsentMaintainedForPatient(expiryDecisions) || !personHelper.isAtLeastYearsOld(18, users.contextUser()).orElse(false);</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">            if (displayMaintainAccessCheckbox) {</span>
+<span class="fc" id="L144">                ageCriterion = calculateAgeCriterion(users.contextUser());</span>
+<span class="fc" id="L145">                maintainAccessAfterBirthday = expiryDecisions.stream().anyMatch(expiry -&gt;</span>
+<span class="pc bpc" id="L146" title="1 of 6 branches missed.">                        expiry.getPatientAgeCriterion().isDefined() &amp;&amp; expiry.getPatientAgeCriterion().get() == ageCriterion.getValue() &amp;&amp; !expiry.getExpires());</span>
+<span class="fc" id="L147">                setExpiryReasons(expiryDecisions);</span>
+            }
+
+<span class="fc bfc" id="L150" title="All 4 branches covered.">            patientSelfView = users.loggedInUser().isPatient() &amp;&amp; users.contextUser().getId().equals(users.loggedInUser().getId());</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">            if (patientSelfView) {</span>
+<span class="fc" id="L152">                patientUnder18 = personHelper.isUnderAge(18, users.loggedInUser()).orElse(false);</span>
+            } else {
+<span class="fc" id="L154">                patientUnder18 = personHelper.isUnderAge(18, users.contextUser()).orElse(false);</span>
+            }
+
+<span class="fc" id="L157">            boolean isActiveTeamPro = loggedInUserUtil.isLoggedInUserTeamProfessional();</span>
+<span class="fc" id="L158">            boolean isTeamCoord = loggedInContext.isTeamCoordinator();</span>
+<span class="fc bfc" id="L159" title="All 6 branches covered.">            hasExpiryReason = expiryReason13 != null || expiryReason16 != null || expiryReason18 != null;</span>
+<span class="pc bpc" id="L160" title="1 of 12 branches missed.">            displayChildSafetySection = carerId != null &amp;&amp; (patientUnder18 || hasExpiryReason) &amp;&amp; (isActiveTeamPro || isTeamCoord || isSharingLockActive);</span>
+<span class="pc bpc" id="L161" title="1 of 8 branches missed.">            readOnly = patientUnder18 &amp;&amp; isSharingLockActive &amp;&amp; !isActiveTeamPro &amp;&amp; !isTeamCoord;</span>
+<span class="nc" id="L162">        } catch (RuntimeException ex) {</span>
+<span class="nc" id="L163">            LOGGER.error(&quot;failed to load consent for user {}&quot;, patientId, ex);</span>
+<span class="nc" id="L164">            return Action.ERROR;</span>
+<span class="fc" id="L165">        }</span>
+
+<span class="fc" id="L167">        consentReasons = Lists.newArrayList(ConsentReason.userSelectableValues());</span>
+<span class="fc" id="L168">        return Action.SUCCESS;</span>
+    }
+
+    private boolean anyConsentMaintainedForPatient(List&lt;ConsentExpiryDecisionExisting&gt; expiryDecisions) {
+<span class="fc bfc" id="L172" title="All 6 branches covered.">        return !expiryDecisions.isEmpty() &amp;&amp; expiryDecisions.stream().anyMatch(expiry -&gt; !expiry.getExpires());</span>
+    }
+
+    private AgeCriterion calculateAgeCriterion(PKBPerson patient) {
+<span class="fc" id="L176">        return personHelper.calculateAge(patient)</span>
+<span class="fc" id="L177">                .map(age -&gt; {</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">                    if (age &lt; 13) {</span>
+<span class="fc" id="L179">                        return AgeCriterion.CHILD_13;</span>
+<span class="fc bfc" id="L180" title="All 2 branches covered.">                    } else if (age &lt; 16) {</span>
+<span class="fc" id="L181">                        return AgeCriterion.CHILD_16;</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">                    } else if (age &lt; 18) {</span>
+<span class="fc" id="L183">                        return AgeCriterion.CHILD_18;</span>
+                    } else {
+<span class="fc" id="L185">                        return AgeCriterion.ADULT;</span>
+                    }
+                })
+<span class="fc" id="L188">                .orElse(AgeCriterion.UNKNOWN_DOB);</span>
+    }
+
+    @VisibleForTesting
+    String getExpiryReasonByAgeCriterion(AgeCriterion ageCriterion) {
+<span class="pc bpc" id="L193" title="1 of 4 branches missed.">        switch (ageCriterion) {</span>
+            case CHILD_13:
+<span class="fc" id="L195">                return expiryReason13;</span>
+            case CHILD_16:
+<span class="fc" id="L197">                return expiryReason16;</span>
+            case CHILD_18:
+<span class="fc" id="L199">                return expiryReason18;</span>
+            default:
+<span class="nc" id="L201">                throw new NoSuchElementException(&quot;No expiry reason found by age criterion - &quot; + ageCriterion.getValue());</span>
+        }
+    }
+
+    @VisibleForTesting
+    void setExpiryReasons(List&lt;ConsentExpiryDecisionExisting&gt; expiryDecisions) {
+<span class="fc bfc" id="L207" title="All 2 branches covered.">        for (ConsentExpiryDecision expiry : expiryDecisions) {</span>
+<span class="pc bpc" id="L208" title="1 of 4 branches missed.">            if (!expiry.getExpires() &amp;&amp; expiry.getPatientAgeCriterion().isDefined()) {</span>
+<span class="fc" id="L209">                Integer ageCriterion = expiry.getPatientAgeCriterion().get();</span>
+<span class="fc" id="L210">                String reason = expiry.getReason().get();</span>
+                // avoid showing potentially incorrect information: before PHR-8996, enteredBy column in consentExpiryDecision was never changed during update
+<span class="fc" id="L212">                boolean displaySourceString = expiry.getEnteredDate().isAfter(Instant.parse(config.getDateOfConsentExpiryUpdateFix()));</span>
+
+<span class="fc" id="L214">                String source = null;</span>
+<span class="fc" id="L215">                Instant enteredDate = null;</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">                if (displaySourceString) {</span>
+<span class="fc" id="L217">                    source = getSourceForExpiryReason(expiry);</span>
+<span class="fc" id="L218">                    enteredDate = expiry.getEnteredDate();</span>
+                }
+
+<span class="pc bpc" id="L221" title="1 of 4 branches missed.">                switch (ageCriterion) {</span>
+                    case 13:
+<span class="fc" id="L223">                        expiryReason13 = reason;</span>
+<span class="fc" id="L224">                        reason13EnteredBy = source;</span>
+<span class="fc" id="L225">                        reason13EnteredDate = enteredDate;</span>
+<span class="fc" id="L226">                        break;</span>
+                    case 16:
+<span class="fc" id="L228">                        expiryReason16 = reason;</span>
+<span class="fc" id="L229">                        reason16EnteredBy = source;</span>
+<span class="fc" id="L230">                        reason16EnteredDate = enteredDate;</span>
+<span class="fc" id="L231">                        break;</span>
+                    case 18:
+<span class="fc" id="L233">                        expiryReason18 = reason;</span>
+<span class="fc" id="L234">                        reason18EnteredBy = source;</span>
+<span class="fc" id="L235">                        reason18EnteredDate = enteredDate;</span>
+<span class="fc" id="L236">                        break;</span>
+                    default:
+<span class="nc" id="L238">                        throw new IllegalArgumentException(&quot;No expiry reason found for age criterion - &quot; + ageCriterion);</span>
+                }
+            }
+<span class="fc" id="L241">        }</span>
+<span class="fc" id="L242">    }</span>
+
+    private String getSourceForExpiryReason(ConsentExpiryDecision expiry) {
+<span class="fc" id="L245">        PKBPerson enteredBy = userManager.getPKBPerson(expiry.getEnteredBy());</span>
+<span class="fc" id="L246">        String name = enteredBy.getTitle() + &quot; &quot; + enteredBy.getNameWithoutTitle();</span>
+<span class="fc" id="L247">        String team = enteredBy.getOrganizationUnit();</span>
+<span class="fc" id="L248">        String org = enteredBy.getOrganizationName();</span>
+<span class="fc" id="L249">        return name + &quot;, &quot; + team + &quot;, &quot; + org;</span>
+    }
+
+    public String edit() throws MailException {
+<span class="fc" id="L253">        PKBPerson currentUser = loggedInUserUtil.getLoggedInUser();</span>
+<span class="fc" id="L254">        contextUserId = contextUserUtil.getContextUserId();</span>
+<span class="fc" id="L255">        PKBPerson contextUser = contextUserUtil.getContextUser();</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">        PKBPerson patient = contextUser == null ? currentUser : contextUser;</span>
+
+<span class="fc" id="L258">        long patientId = patient.getId();</span>
+
+        // for supporting locked child sharing: check if the current user is a patient and under 18
+<span class="fc" id="L261">        patientUnder18 = personHelper.isUnderAge(18, patient).orElse(false);</span>
+<span class="fc bfc" id="L262" title="All 4 branches covered.">        patientSelfView = currentUser.isPatient() &amp;&amp; patient.getId().equals(currentUser.getId());</span>
+        // Save main consent record
+        try {
+<span class="fc" id="L265">            PatientConsent origConsent =</span>
+<span class="fc" id="L266">                    deprecatedPatientConsentManager.getPatientConsent(</span>
+<span class="fc" id="L267">                            getLoggedInEHRRequestContext(), clinicianId, carerId, patientId, false</span>
+<span class="fc" id="L268">                    ).orElse(null);</span>
+            // ticking (or unticking) the under-18 sharing lock = only require that reason.  And limit who can do it here (not just JSP)
+<span class="pc bpc" id="L270" title="6 of 8 branches missed.">            if ((origConsent != null) &amp;&amp; origConsent.isProEditOnlyForChild() &amp;&amp; patientUnder18 &amp;&amp; !loggedInUserUtil.isLoggedInUserActiveTeamMember()) {</span>
+<span class="nc" id="L271">                addActionError(getText(&quot;patientEditConsentIndividual.err.under18_locked_share&quot;));</span>
+<span class="nc" id="L272">                view();</span>
+<span class="nc" id="L273">                return INPUT;</span>
+            }
+
+            // prevent carers granting consent beyond their own
+<span class="fc bfc" id="L277" title="All 4 branches covered.">            boolean isCarer = isLoggedInUserPatient() &amp;&amp; patientId != loggedInUserUtil.getLoggedInUserId();</span>
+<span class="fc bfc" id="L278" title="All 2 branches covered.">            if (isCarer) {</span>
+<span class="pc" id="L279">                PatientConsentDTO carerConsent = getEHRRequestContext().getConsentStatus().getConsent().orElseThrow(() -&gt; new RuntimeException(&quot;No consent available for carer&quot;));</span>
+                // TODO: MFA - Might need to refactor this action class too
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">                if (!patientConsent.validateCarerUpdate(origConsent, carerConsent)) {</span>
+<span class="nc" id="L282">                    addActionError(getText(&quot;patientEditConsentIndividual.err.carer_consent_level&quot;));</span>
+<span class="nc" id="L283">                    view();</span>
+<span class="nc" id="L284">                    return INPUT;</span>
+                }
+            }
+
+<span class="fc bfc" id="L288" title="All 2 branches covered.">            if (patientUnder18) {</span>
+<span class="fc" id="L289">                ageCriterion = calculateAgeCriterion(patient);</span>
+<span class="fc" id="L290">                String expiryReason = getExpiryReasonByAgeCriterion(ageCriterion);</span>
+<span class="fc bfc" id="L291" title="All 4 branches covered.">                if (expiryReason.isEmpty() &amp;&amp; maintainAccessAfterBirthday) {</span>
+<span class="fc" id="L292">                    addActionError(getText(&quot;patientEditConsentIndividual.err.missing_access_reason&quot;));</span>
+<span class="fc" id="L293">                    view();</span>
+<span class="fc" id="L294">                    return INPUT;</span>
+                } else {
+<span class="fc bfc" id="L296" title="All 2 branches covered.">                    saveConsentExpiry(origConsent, !maintainAccessAfterBirthday, expiryReason, ageCriterion);</span>
+                }
+            }
+            // Set up the reasons (will only be saved for categories that changed)
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">            if (patientConsent.getReasons() == null) {</span>
+<span class="fc" id="L301">                PatientConsentReason reasons = new PatientConsentReason(new SourceDetails(getEHRRequestContext()));</span>
+
+                // Default reason if logged in as patient
+<span class="fc bfc" id="L304" title="All 2 branches covered.">                if (currentUser.getId().equals(patientId)) {</span>
+<span class="fc" id="L305">                    reasons.setAllReasons(ConsentReason.EXPLICIT_CONSENT, &quot;&quot;);</span>
+<span class="pc bpc" id="L306" title="2 of 6 branches missed.">                } else if ((origConsent != null) &amp;&amp; !origConsent.isProEditOnlyForChild() &amp;&amp; patientConsent.isProEditOnlyForChild()) {</span>
+                    // special case for enabling the child lock option
+<span class="fc bfc" id="L308" title="All 2 branches covered.">                    if (StringUtils.isBlank(proEditOnlyReason)) {</span>
+<span class="fc" id="L309">                        addActionError(getText(&quot;viewEditPatientConsentIndividualAction.err.missing_reason&quot;));</span>
+<span class="fc" id="L310">                        view();</span>
+<span class="fc" id="L311">                        return INPUT;</span>
+                    } else {
+<span class="fc" id="L313">                        reasons.setProEditOnlyForChildReasonText(proEditOnlyReason);</span>
+
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">                        if (StringUtils.isNotEmpty(selectedReason)) {</span>
+                            // set others as well (if provided)
+<span class="nc" id="L317">                            reasons.setAllReasons(mapSelectedReason(), freeTextReason);</span>
+                        }
+                    }
+                } else {
+<span class="fc" id="L321">                    reasons.setAllReasons(mapSelectedReason(), freeTextReason);</span>
+                    // don't lose the pro edit reason...
+<span class="fc" id="L323">                    reasons.setProEditOnlyForChildReasonText(proEditOnlyReason);</span>
+                }
+
+<span class="fc" id="L326">                reasons.setEventText(&quot;updated by &quot; + currentUser.getId());</span>
+<span class="fc" id="L327">                reasons.trackConsentCategories(patientConsent);</span>
+<span class="fc" id="L328">                patientConsent.setReasons(reasons);</span>
+            }
+
+<span class="fc bfc" id="L331" title="All 2 branches covered.">            if (clinicianId != null) {</span>
+<span class="fc" id="L332">                userWebBean.updateOrCreateConsentRecord(getEHRRequestContext(), patientId, clinicianId,</span>
+<span class="fc" id="L333">                        AccessingEntityType.INDIVIDUAL, Optional.ofNullable(origConsent), patientConsent);</span>
+
+<span class="fc bfc" id="L335" title="All 2 branches covered.">                if (patientConsent.anyConsentGranted()) {</span>
+<span class="fc" id="L336">                    logActivityAndNotify(currentUser, patient);</span>
+                } else {
+                    // all consent removed - revoke access!
+<span class="fc" id="L339">                    userAccessManager.sendAccessRevocationNotification(getLoggedInEHRRequestContext(), clinicianId, patientId);</span>
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">                    if (clinicianId.equals(currentUser.getId())) {</span>
+<span class="nc" id="L341">                        contextUserUtil.clearContextUser();</span>
+                    }
+                }
+
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">            } else if (carerId != null) {</span>
+<span class="fc" id="L346">                userWebBean.updateOrCreateConsentRecord(getEHRRequestContext(), patientId, carerId,</span>
+<span class="fc" id="L347">                        AccessingEntityType.CARER, Optional.ofNullable(origConsent), patientConsent);</span>
+
+<span class="fc bfc" id="L349" title="All 2 branches covered.">                if (patientConsent.anyConsentGranted()) {</span>
+<span class="fc" id="L350">                    logActivityAndNotify(currentUser, patient);</span>
+                } else {
+<span class="fc" id="L352">                    userAccessManager.sendAccessRevocationNotification(getLoggedInEHRRequestContext(), carerId, patientId);</span>
+<span class="fc" id="L353">                    contextUserUtil.clearContextUser();</span>
+                }
+            } else {
+<span class="nc" id="L356">                LOGGER.warn(&quot;logged-in user {} tried to edit individual consent without providing a clinician/carer id&quot;,</span>
+<span class="nc" id="L357">                        loggedInUserUtil.getLoggedInUserId());</span>
+<span class="nc" id="L358">                throw new RuntimeException(&quot;could not edit unspecified individual&quot;);</span>
+            }
+
+<span class="nc" id="L361">        } catch (RuntimeException ex) {</span>
+<span class="nc" id="L362">            LOGGER.error(&quot;failed to save consent for user {}&quot;, currentUser.getId(), ex);</span>
+<span class="fc" id="L363">        }</span>
+
+        // If it's a patient looking at another patient (i.e. a carer), use a different redirect
+<span class="fc bfc" id="L366" title="All 4 branches covered.">        if (UserType.PATIENT == loggedInUserUtil.getLoggedInUserType() &amp;&amp; contextUserId != null) {</span>
+<span class="fc" id="L367">            return &quot;carerSuccess&quot;;</span>
+        }
+
+<span class="fc" id="L370">        return Action.SUCCESS;</span>
+    }
+
+    private ConsentReason mapSelectedReason() {
+<span class="pc bpc" id="L374" title="1 of 4 branches missed.">        if (selectedReason == null || selectedReason.trim().isEmpty()) {</span>
+<span class="fc" id="L375">            return null;</span>
+        }
+<span class="fc" id="L377">        return ConsentReason.valueOf(selectedReason);</span>
+    }
+
+    private void saveConsentExpiry(PatientConsent origConsent,
+                                   boolean expires,
+                                   String expiryReason,
+                                   AgeCriterion ageCriterion) {
+<span class="fc" id="L384">        patientConsentManager.findConsentExpiryDecisionsByConsentId(origConsent.getId())</span>
+<span class="fc" id="L385">                .stream()</span>
+<span class="fc bfc" id="L386" title="All 2 branches covered.">                .filter(expiryDecision -&gt; expiryDecision.getPatientAgeCriterion().map(it -&gt; it == ageCriterion.getValue()).getOrElse(false))</span>
+<span class="fc" id="L387">                .findFirst()</span>
+<span class="fc" id="L388">                .ifPresentOrElse(existingExpiry -&gt; {</span>
+<span class="fc bfc" id="L389" title="All 2 branches covered.">                    if (isExpiryDecisionChanged(expires, expiryReason, existingExpiry)) {</span>
+<span class="fc" id="L390">                        patientConsentManager.updateConsentExpiryDecision(ImmutableConsentExpiryDecisionExisting.builder()</span>
+<span class="fc" id="L391">                                .from(existingExpiry)</span>
+<span class="fc" id="L392">                                .enteredDate(dateTimeService.now())</span>
+<span class="fc" id="L393">                                .enteredBy(loggedInUserUtil.getLoggedInUser().getId())</span>
+<span class="fc" id="L394">                                .expires(expires)</span>
+<span class="fc" id="L395">                                .reason(expiryReason)</span>
+<span class="fc" id="L396">                                .build());</span>
+                    }
+<span class="fc" id="L398">                }, () -&gt; {</span>
+<span class="fc" id="L399">                    patientConsentManager.saveConsentExpiryDecision(ImmutableConsentExpiryDecision.builder()</span>
+<span class="fc" id="L400">                            .enteredDate(dateTimeService.now())</span>
+<span class="fc" id="L401">                            .enteredBy(loggedInUserUtil.getLoggedInUser().getId())</span>
+<span class="fc" id="L402">                            .consentId(origConsent.getId())</span>
+<span class="fc" id="L403">                            .patientAgeCriterion(ageCriterion.getValue())</span>
+<span class="fc" id="L404">                            .expires(expires)</span>
+<span class="fc" id="L405">                            .reason(expiryReason)</span>
+<span class="fc" id="L406">                            .build());</span>
+<span class="fc" id="L407">                });</span>
+<span class="fc" id="L408">    }</span>
+
+    private boolean isExpiryDecisionChanged(boolean enteredExpires, String enteredReason, ConsentExpiryDecisionExisting existingExpiry) {
+<span class="fc" id="L411">        String persistedReason = existingExpiry.getReason().getOrElseThrow(() -&gt;</span>
+<span class="nc" id="L412">                new IllegalStateException(&quot;Existing consent expiry reason cannot be empty - &quot; + existingExpiry.getId()));</span>
+<span class="fc bfc" id="L413" title="All 4 branches covered.">        return enteredExpires != existingExpiry.getExpires() || !enteredReason.equals(persistedReason);</span>
+    }
+
+    private void logActivityAndNotify(PKBPerson currentUser, PKBPerson patient) {
+<span class="fc" id="L417">        logActivityByOthers(Activity.Action.UPDATED_CONSENT_RECORD, dateTimeService.now(), false, new NoConsentsRequired());</span>
+<span class="fc bfc" id="L418" title="All 2 branches covered.">        if (!currentUser.getId().equals(patient.getId())) {</span>
+            try {
+<span class="fc" id="L420">                sendNotification(currentUser, patient);</span>
+<span class="nc" id="L421">            } catch (RuntimeException e) {</span>
+<span class="nc" id="L422">                LOGGER.error(&quot;Exception while notification of updating consent record patient-{}&quot;, patient, e);</span>
+<span class="fc" id="L423">            }</span>
+        }
+<span class="fc" id="L425">    }</span>
+
+    private void sendNotification(PKBPerson actor, PKBPerson patient) {
+<span class="fc bfc" id="L428" title="All 2 branches covered.">        individual = userManager.getPKBPerson(clinicianId == null ? carerId : clinicianId);</span>
+<span class="fc" id="L429">        EHRRequestContext requestContext = getEHRRequestContext();</span>
+<span class="fc" id="L430">        pkbEmailMessageManager.sendNotificationToCarersOfPatient(actor,</span>
+                patient,
+                carer -&gt; {
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">                    if (notSelf.test(actor, carer)) {</span>
+<span class="fc" id="L434">                        pkbEmailMessageManager.sendChangePrivacyLevelNotificationToCarer(requestContext, actor, patient, carer, individual);</span>
+                    }
+<span class="fc" id="L436">                });</span>
+<span class="fc" id="L437">        pkbEmailMessageManager.sendChangePrivacyLevelNotificationToPatient(requestContext, actor, patient, individual);</span>
+
+<span class="fc" id="L439">    }</span>
+
+    public String cancel() {
+<span class="nc" id="L442">        return Action.SUCCESS;</span>
+    }
+
+    // &lt;editor-fold desc=&quot;Accessors&quot;&gt;
+
+    public PatientConsent getPatientConsent() {
+<span class="fc" id="L448">        return patientConsent;</span>
+    }
+
+    public void setPatientConsent(PatientConsent patientConsent) {
+<span class="fc" id="L452">        this.patientConsent = patientConsent;</span>
+<span class="fc" id="L453">    }</span>
+
+    public IUserWebBean getUserWebBean() {
+<span class="nc" id="L456">        return userWebBean;</span>
+    }
+
+    public void setUserWebBean(UserWebBean userWebBean) {
+<span class="fc" id="L460">        this.userWebBean = userWebBean;</span>
+<span class="fc" id="L461">    }</span>
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L464">        return userAccessManager;</span>
+    }
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L468">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L469">    }</span>
+
+    public Long getClinicianId() {
+<span class="fc" id="L472">        return clinicianId;</span>
+    }
+
+    public void setClinicianId(Long clinicianId) {
+<span class="fc" id="L476">        this.clinicianId = clinicianId;</span>
+<span class="fc" id="L477">    }</span>
+
+    public List&lt;ConsentReason&gt; getConsentReasons() {
+<span class="fc" id="L480">        return consentReasons;</span>
+    }
+
+    public void setConsentReasons(List&lt;ConsentReason&gt; consentReasons) {
+<span class="nc" id="L484">        this.consentReasons = consentReasons;</span>
+<span class="nc" id="L485">    }</span>
+
+    public String getSelectedReason() {
+<span class="fc" id="L488">        return selectedReason;</span>
+    }
+
+    public void setSelectedReason(String selectedReason) {
+<span class="fc" id="L492">        this.selectedReason = selectedReason;</span>
+<span class="fc" id="L493">    }</span>
+
+    public String getFreeTextReason() {
+<span class="nc" id="L496">        return freeTextReason;</span>
+    }
+
+    public void setFreeTextReason(String freeTextReason) {
+<span class="fc" id="L500">        this.freeTextReason = freeTextReason;</span>
+<span class="fc" id="L501">    }</span>
+
+    public Long getCarerId() {
+<span class="fc" id="L504">        return carerId;</span>
+    }
+
+    public void setCarerId(Long carerId) {
+<span class="fc" id="L508">        this.carerId = carerId;</span>
+<span class="fc" id="L509">    }</span>
+
+    public @SuppressWarnings(&quot;deprecation&quot;)
+    DeprecatedPatientConsentManager getDeprecatedPatientConsentManager() {
+<span class="nc" id="L513">        return deprecatedPatientConsentManager;</span>
+    }
+
+    public void setDeprecatedPatientConsentManager(@SuppressWarnings(&quot;deprecation&quot;) DeprecatedPatientConsentManager deprecatedPatientConsentManager) {
+<span class="fc" id="L517">        this.deprecatedPatientConsentManager = deprecatedPatientConsentManager;</span>
+<span class="fc" id="L518">    }</span>
+
+    public PatientConsentManager getPatientConsentManager() {
+<span class="nc" id="L521">        return patientConsentManager;</span>
+    }
+
+    public void setPatientConsentManager(PatientConsentManager patientConsentManager) {
+<span class="fc" id="L525">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L526">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L529">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L533">        this.userManager = userManager;</span>
+<span class="fc" id="L534">    }</span>
+
+    public PKBPerson getIndividual() {
+<span class="fc" id="L537">        return individual;</span>
+    }
+
+    public void setIndividual(PKBPerson individual) {
+<span class="nc" id="L541">        this.individual = individual;</span>
+<span class="nc" id="L542">    }</span>
+
+    public String getProEditOnlyReason() {
+<span class="fc" id="L545">        return proEditOnlyReason;</span>
+    }
+
+    public void setProEditOnlyReason(String proEditOnlyReason) {
+<span class="fc" id="L549">        this.proEditOnlyReason = proEditOnlyReason;</span>
+<span class="fc" id="L550">    }</span>
+
+    public PatientConsentDTO getLoggedInCarerConsent() {
+<span class="fc" id="L553">        return loggedInCarerConsent;</span>
+    }
+
+    public PKBEmailMessageManager getPkbEmailMessageManager() {
+<span class="nc" id="L557">        return pkbEmailMessageManager;</span>
+    }
+
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L561">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L562">    }</span>
+
+    public boolean isMaintainAccessAfterBirthday() {
+<span class="fc" id="L565">        return maintainAccessAfterBirthday;</span>
+    }
+
+    public void setMaintainAccessAfterBirthday(boolean maintainAccessAfterBirthday) {
+<span class="fc" id="L569">        this.maintainAccessAfterBirthday = maintainAccessAfterBirthday;</span>
+<span class="fc" id="L570">    }</span>
+
+    public boolean isDisplayChildSafetySection() {
+<span class="fc" id="L573">        return displayChildSafetySection;</span>
+    }
+
+    public boolean isDisplayMaintainAccessCheckbox() {
+<span class="nc" id="L577">        return displayMaintainAccessCheckbox;</span>
+    }
+
+    public void setDisplayMaintainAccessCheckbox(boolean displayMaintainAccessCheckbox) {
+<span class="nc" id="L581">        this.displayMaintainAccessCheckbox = displayMaintainAccessCheckbox;</span>
+<span class="nc" id="L582">    }</span>
+
+    public boolean isPatientSelfView() {
+<span class="fc" id="L585">        return patientSelfView;</span>
+    }
+
+    public boolean isPatientUnder18() {
+<span class="fc" id="L589">        return patientUnder18;</span>
+    }
+
+    public String getExpiryReason13() {
+<span class="fc" id="L593">        return expiryReason13;</span>
+    }
+
+    public void setExpiryReason13(String expiryReason13) {
+<span class="fc" id="L597">        this.expiryReason13 = expiryReason13;</span>
+<span class="fc" id="L598">    }</span>
+
+    public String getExpiryReason16() {
+<span class="fc" id="L601">        return expiryReason16;</span>
+    }
+
+    public void setExpiryReason16(String expiryReason16) {
+<span class="fc" id="L605">        this.expiryReason16 = expiryReason16;</span>
+<span class="fc" id="L606">    }</span>
+
+    public String getExpiryReason18() {
+<span class="fc" id="L609">        return expiryReason18;</span>
+    }
+
+    public void setExpiryReason18(String expiryReason18) {
+<span class="fc" id="L613">        this.expiryReason18 = expiryReason18;</span>
+<span class="fc" id="L614">    }</span>
+
+    public int getAgeCriterion() {
+<span class="fc" id="L617">        return ageCriterion.getValue();</span>
+    }
+
+    public String getReason13EnteredBy() {
+<span class="fc" id="L621">        return reason13EnteredBy;</span>
+    }
+
+    public String getReason16EnteredBy() {
+<span class="fc" id="L625">        return reason16EnteredBy;</span>
+    }
+
+    public String getReason18EnteredBy() {
+<span class="fc" id="L629">        return reason18EnteredBy;</span>
+    }
+
+    public Instant getReason13EnteredDate() {
+<span class="fc" id="L633">        return reason13EnteredDate;</span>
+    }
+
+    public Instant getReason16EnteredDate() {
+<span class="fc" id="L637">        return reason16EnteredDate;</span>
+    }
+
+    public Instant getReason18EnteredDate() {
+<span class="fc" id="L641">        return reason18EnteredDate;</span>
+    }
+
+    public boolean isReadOnly() {
+<span class="fc" id="L645">        return readOnly;</span>
+    }
+
+    public boolean isHasExpiryReason() {
+<span class="fc" id="L649">        return hasExpiryReason;</span>
+    }
+
+// &lt;/editor-fold&gt;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

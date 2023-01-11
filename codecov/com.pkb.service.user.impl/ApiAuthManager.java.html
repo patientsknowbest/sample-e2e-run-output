@@ -1,0 +1,565 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ApiAuthManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.user.impl</a> &gt; <span class="el_source">ApiAuthManager.java</span></div><h1>ApiAuthManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.user.impl;
+
+import com.pkb.common.api.error.accesstoken.AccessTokenRequestError;
+import com.pkb.common.api.error.accesstoken.GrantTypeNotAllowedException;
+import com.pkb.common.api.error.accesstoken.InvalidAuthCodeError;
+import com.pkb.common.api.error.accesstoken.InvalidClientIdError;
+import com.pkb.common.api.error.accesstoken.InvalidRefreshTokenError;
+import com.pkb.common.api.exception.ApiSessionException;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.CryptoHelper;
+import com.pkb.datamodel.ApiAuthSession;
+import com.pkb.datamodel.ApiClient;
+import com.pkb.datamodel.ImmutableApiAuthSession;
+import com.pkb.datamodel.ImmutableWebAppOtp;
+import com.pkb.datamodel.ModifiableApiAuthSession;
+import com.pkb.datamodel.WebAppOtp;
+import com.pkb.domain.ApiAuthService;
+import com.pkb.entities.enums.api.ApiClientScope;
+import com.pkb.entities.enums.api.WebAppOtpStatus;
+import com.pkb.service.user.ApiClientNotFoundException;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.springframework.data.util.Pair;
+
+import javax.crypto.Cipher;
+import javax.crypto.SecretKey;
+import javax.crypto.SecretKeyFactory;
+import javax.crypto.spec.PBEKeySpec;
+import javax.crypto.spec.PBEParameterSpec;
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.Response;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.nio.charset.CharacterCodingException;
+import java.security.GeneralSecurityException;
+import java.security.SecureRandom;
+import java.time.Instant;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Optional;
+
+import static com.pkb.common.api.error.accesstoken.AccessTokenRequestError.ErrorCode.INVALID_GRANT;
+import static com.pkb.common.api.error.accesstoken.AccessTokenRequestError.ErrorCode.INVALID_REQUEST;
+import static com.pkb.common.api.error.accesstoken.AccessTokenRequestError.ErrorCode.INVALID_SCOPE;
+import static com.pkb.common.api.exception.ApiSessionException.ErrorCode.invalid_client;
+import static com.pkb.common.api.exception.ApiSessionException.ErrorCode.invalid_grant;
+import static com.pkb.common.api.exception.ApiSessionException.ErrorCode.invalid_request;
+import static com.pkb.crypto.CryptoConstants.PBE_SHORT_NAME;
+import static com.pkb.crypto.CryptoHelper.secretKey;
+import static com.pkb.crypto.util.RandomUtil.randomString;
+import static com.pkb.datamodel.ApiAuthSession.LOOKUP_LENGTH;
+import static com.pkb.datamodel.ApiAuthSession.OTP_EXPIRY_SECONDS;
+import static com.pkb.datamodel.ApiAuthSession.SECRET_CHAR_SET;
+import static com.pkb.datamodel.ApiAuthSession.SECRET_LENGTH;
+import static com.pkb.datamodel.ApiAuthSession.SECRET_SEPARATOR;
+import static com.pkb.entities.enums.api.ApiAuthSessionStatus.AUTHENTICATED;
+import static com.pkb.entities.enums.api.ApiAuthSessionStatus.TOKEN_ISSUED;
+import static com.pkb.entities.enums.api.GrantType.CODE;
+import static com.pkb.entities.enums.api.GrantType.PASSWORD;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.Predicates.is;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.slf4j.LoggerFactory.getLogger;
+import static org.tolven.core.entity.TolvenProperties.PASSWORD_ITERATION_COUNT;
+import static org.tolven.core.entity.TolvenProperties.PASSWORD_SALT_LENGTH;
+
+/**
+ * Work with auth tokens for API OAuth2 implementation
+ *
+ * @author robwhelan
+ */
+public class ApiAuthManager extends TransactionManager {
+
+<span class="fc" id="L90">    private class PasswordEncryptionResult {</span>
+        private byte[] salt;
+        private int iterationCount;
+        private byte[] encryptedPassword;
+        private String secret;
+
+        byte[] getSalt() {
+<span class="fc" id="L97">            return salt;</span>
+        }
+
+        void setSalt(byte[] salt) {
+<span class="fc" id="L101">            this.salt = salt;</span>
+<span class="fc" id="L102">        }</span>
+
+        int getIterationCount() {
+<span class="fc" id="L105">            return iterationCount;</span>
+        }
+
+        void setIterationCount(@SuppressWarnings(&quot;SameParameterValue&quot;) int iterationCount) {
+<span class="fc" id="L109">            this.iterationCount = iterationCount;</span>
+<span class="fc" id="L110">        }</span>
+
+        byte[] getEncryptedPassword() {
+<span class="fc" id="L113">            return encryptedPassword;</span>
+        }
+
+        void setEncryptedPassword(byte[] encryptedPassword) {
+<span class="fc" id="L117">            this.encryptedPassword = encryptedPassword;</span>
+<span class="fc" id="L118">        }</span>
+
+        String getSecret() {
+<span class="fc" id="L121">            return secret;</span>
+        }
+
+        void setSecret(String secret) {
+<span class="fc" id="L125">            this.secret = secret;</span>
+<span class="fc" id="L126">        }</span>
+    }
+
+<span class="fc" id="L129">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+    private static final long AUTH_CODE_EXPIRES_MS = 10 * 60 * 1000; // 10 minutes
+<span class="fc" id="L131">    private static final SecureRandom RNG = new SecureRandom();</span>
+
+    private final ApiAuthService apiAuthService;
+
+<span class="fc" id="L135">    public enum ReEncryptPassword {</span>
+<span class="fc" id="L136">        YES, NO</span>
+    }
+
+    public ApiAuthManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, ApiAuthService apiAuthService) {
+<span class="fc" id="L140">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L141">        this.apiAuthService = apiAuthService;</span>
+<span class="fc" id="L142">    }</span>
+
+    /**
+     * Lookup the API Client using their API key (provided to them on registering the app)
+     */
+    public Optional&lt;ApiClient&gt; getApiClientByApiId(String apiId) {
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">        if (isEmpty(apiId)) {</span>
+<span class="nc" id="L149">            return Optional.empty();</span>
+        }
+<span class="fc" id="L151">        return apiAuthService.findApiClientByApiId(apiId);</span>
+    }
+
+    public void createAuthSession(@NotNull ApiAuthSession session) {
+<span class="fc" id="L155">        var client = session.getApiClient();</span>
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">        if (!client.isGrantTypePermitted(CODE)) {</span>
+<span class="nc" id="L157">            throw new GrantTypeNotAllowedException(client.getApiId(), CODE);</span>
+        }
+<span class="fc" id="L159">        apiAuthService.saveAuthSession(session);</span>
+<span class="fc" id="L160">    }</span>
+
+    /**
+     * Returns a session with the random secret used to encrypt the password (to be used as part of a token or code)
+     */
+    public ApiAuthSession updateAuthSession(@NotNull ApiAuthSession session, @NotNull ReEncryptPassword reencryptPassword) {
+<span class="fc" id="L166">        var modifiableSession = Optional.of(session)</span>
+<span class="fc bfc" id="L167" title="All 2 branches covered.">                .filter(authSession -&gt; reencryptPassword == ReEncryptPassword.YES)</span>
+<span class="pc" id="L168">                .map(authSession -&gt; getSessionWithEncryptedPassword(authSession, authSession.getPassword().orElseThrow(() -&gt; new IllegalStateException(&quot;Unable to update ApiAuthSession due to missing password.&quot;))))</span>
+<span class="fc" id="L169">                .orElse(ModifiableApiAuthSession.create().from(session));</span>
+<span class="fc" id="L170">        apiAuthService.saveAuthSession(modifiableSession);</span>
+<span class="fc" id="L171">        return modifiableSession;</span>
+    }
+
+    /**
+     * @param sessionId the randomly-generated id, not the sequential Long value
+     */
+    public Optional&lt;ApiAuthSession&gt; getAuthSession(String sessionId) {
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">        if (isEmpty(sessionId)) {</span>
+<span class="nc" id="L179">            return Optional.empty();</span>
+        }
+<span class="fc" id="L181">        return apiAuthService.findAuthSession(sessionId);</span>
+    }
+
+    public Either&lt;AccessTokenRequestError, ApiAuthSession&gt; useAuthCode(String apiClientId, String authCode) {
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">        if (isEmpty(authCode)) {</span>
+<span class="nc" id="L186">            return left(new InvalidAuthCodeError(authCode, &quot;Invalid empty auth code&quot;));</span>
+        }
+<span class="fc" id="L188">        var partAndSecret = splitTokenIntoPartAndSecret(authCode);</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">        if (partAndSecret.isEmpty()) {</span>
+<span class="nc" id="L190">            LOGGER.error(&quot;Failed to split auth code&quot;);</span>
+<span class="nc" id="L191">            return left(new InvalidAuthCodeError(authCode));</span>
+        }
+<span class="fc" id="L193">        var part = partAndSecret.get().getFirst();</span>
+<span class="fc" id="L194">        var sessions = apiAuthService.findAuthSessionsByAuthCode(part).orElse(Collections.emptyList());</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">        if (sessions.isEmpty()) {</span>
+<span class="fc" id="L196">            LOGGER.error(&quot;Found no ApiAuthSessions for authCodePart {}&quot;, part);</span>
+<span class="fc" id="L197">            return left(new InvalidAuthCodeError(authCode, &quot;no session matches authCodePart &quot; + part));</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">        } else if (sessions.size() &gt; 1) {</span>
+<span class="nc" id="L199">            LOGGER.warn(&quot;Found multiple ApiAuthSessions for authCodePart {}&quot;, part);</span>
+        }
+<span class="fc" id="L201">        var session = sessions.get(0);</span>
+<span class="fc" id="L202">        var client = session.getApiClient();</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">        if (!client.getApiId().equals(apiClientId)) {</span>
+<span class="fc" id="L204">            LOGGER.error(&quot;apiClientId ({}) doesn't match session value {}&quot;, apiClientId, client.getApiId());</span>
+<span class="fc" id="L205">            return left(new InvalidClientIdError(&quot;Incorrect client ID has been supplied&quot;));</span>
+        }
+<span class="pc bpc" id="L207" title="2 of 4 branches missed.">        if (session.getAuthCodeIssued().isEmpty() || dateTimeService.now().isAfter(session.getAuthCodeIssued().get().plusMillis(AUTH_CODE_EXPIRES_MS))) {</span>
+<span class="nc" id="L208">            LOGGER.error(&quot;auth code has expired; issued {}&quot;, session.getAuthCodeIssued().get());</span>
+<span class="nc" id="L209">            return left(new InvalidAuthCodeError(authCode, &quot;auth code has expired; issued &quot; + session.getAuthCodeIssued().get()));</span>
+        }
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">        if (session.getStatus() != AUTHENTICATED) {</span>
+<span class="nc" id="L212">            LOGGER.error(&quot;wrong status to pick up auth code: {}&quot;, session.getStatus());</span>
+<span class="nc" id="L213">            return left(new InvalidAuthCodeError(authCode, &quot;wrong status to pick up auth code: &quot; + session.getStatus()));</span>
+        }
+        try {
+<span class="fc" id="L216">            var updatedSession = ImmutableApiAuthSession.copyOf(getSessionWithDecryptedPassword(session, partAndSecret.get().getSecond()))</span>
+                    // validation or decryption succeeded on the tolven side
+                    // set up access and (if allowed) refresh tokens
+<span class="fc" id="L219">                    .withStatus(TOKEN_ISSUED)</span>
+<span class="fc" id="L220">                    .withAccessTokenPart(randomString(LOOKUP_LENGTH))</span>
+                    // set on web server, so only check on web server to avoid drift mismatch...
+<span class="fc" id="L222">                    .withAccessTokenIssued(dateTimeService.now())</span>
+<span class="fc" id="L223">                    .withRefreshTokenPart(randomString(LOOKUP_LENGTH));</span>
+<span class="fc" id="L224">            return right(updateAuthSession(updatedSession, ReEncryptPassword.YES));</span>
+<span class="nc" id="L225">        } catch (GeneralSecurityException | CharacterCodingException ignore) {</span>
+<span class="nc" id="L226">            return left(new InvalidAuthCodeError(authCode, &quot;unexpected error handling auth code&quot;));</span>
+        }
+    }
+
+    /**
+     * TolvenGuest changes :
+     *
+     * This method is called from :
+     *
+     * RestUtil.retrieveCommonParams : Added explicit tolvenGuest login here
+     * ApiAuthorizationService.openRequest :
+     * This doesn;t seem to be in active use (AddMediaActAction???) &amp; ApiAuthorizationService aspect
+     *
+     * Internally by generateWebappOTP :
+     * caller (V1OTPService.getOTP()) calls RestUtil.retrieveCommonParams so tolvenGuest is assured here
+     */
+    public Optional&lt;ApiAuthSession&gt; getAuthSessionByAccessToken(String accessToken) {
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">        if (isEmpty(accessToken)) {</span>
+<span class="nc" id="L244">            return Optional.empty();</span>
+        }
+<span class="fc" id="L246">        var partAndSecret = splitTokenIntoPartAndSecret(accessToken);</span>
+<span class="fc bfc" id="L247" title="All 2 branches covered.">        if (partAndSecret.isEmpty()) {</span>
+<span class="fc" id="L248">            throw new WebApplicationException(&quot;invalid access token - secret separator not found&quot;, Response.Status.UNAUTHORIZED);</span>
+        }
+<span class="fc" id="L250">        var part = partAndSecret.get().getFirst();</span>
+<span class="fc" id="L251">        var secret = partAndSecret.get().getSecond();</span>
+<span class="fc" id="L252">        var sessions = apiAuthService.findAuthSessionsByAccessToken(part).orElse(Collections.emptyList());</span>
+<span class="fc bfc" id="L253" title="All 2 branches covered.">        if (sessions.isEmpty()) {</span>
+<span class="fc" id="L254">            LOGGER.error(&quot;Found no ApiAuthSessions for accessTokenPart {}&quot;, part);</span>
+<span class="fc" id="L255">            throw new WebApplicationException(&quot;No auth sessions found for the given access token&quot;, Response.Status.UNAUTHORIZED);</span>
+<span class="pc bpc" id="L256" title="1 of 2 branches missed.">        } else if (sessions.size() &gt; 1) {</span>
+<span class="nc" id="L257">            LOGGER.warn(&quot;Found multiple ApiAuthSessions for accessTokenPart {}&quot;, part);</span>
+        }
+<span class="fc" id="L259">        var session = sessions.get(0);</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">        if (session.getStatus() != TOKEN_ISSUED) {</span>
+<span class="fc" id="L261">            throw new WebApplicationException(&quot;wrong status to use access token: &quot; + session.getStatus(), Response.Status.UNAUTHORIZED);</span>
+        }
+<span class="fc" id="L263">        var webserverNow = dateTimeService.now();</span>
+<span class="fc" id="L264">        var tokenLifeSeconds = (webserverNow.toEpochMilli() - session.getAccessTokenIssued()</span>
+<span class="pc" id="L265">                .orElseThrow(() -&gt; new WebApplicationException(&quot;Unable to get time access token issued&quot;, Response.Status.UNAUTHORIZED))</span>
+<span class="fc" id="L266">                .toEpochMilli()) / 1000;</span>
+<span class="fc" id="L267">        var client = session.getApiClient();</span>
+<span class="fc bfc" id="L268" title="All 4 branches covered.">        if (client.hasTokenExpiry() &amp;&amp; (tokenLifeSeconds &gt; client.getTokenExpirySeconds())) {</span>
+            // this will return null (see below)
+<span class="fc" id="L270">            LOGGER.info(&quot;access token for api client api id: {} has expired&quot;, client.getApiId());</span>
+            // don't change the error message used here as clients rely on parsing it
+<span class="fc" id="L272">            throw new WebApplicationException(&quot;access token for api client id:&quot; +</span>
+<span class="fc" id="L273">                    client.getApiId() +</span>
+                    &quot; has expired; issued &quot; +
+<span class="fc" id="L275">                    session.getAccessTokenIssued() +</span>
+                    &quot;, expiry secs: &quot; +
+<span class="fc" id="L277">                    client.getTokenExpirySeconds() +</span>
+                    &quot;, webserverNow: &quot; +
+                    webserverNow, Response.Status.UNAUTHORIZED);
+        }
+        try {
+<span class="fc" id="L282">            return Optional.of(getSessionWithDecryptedPassword(session, secret));</span>
+<span class="fc" id="L283">        } catch (GeneralSecurityException | CharacterCodingException e) {</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">            LOGGER.error(format(&quot;%s while decrypting password into session-&quot;, e.getCause() instanceof GeneralSecurityException ? &quot;GeneralSecurityException&quot; : &quot;CharacterCodingException&quot;), e);</span>
+            //noinspection ThrowInsideCatchBlockWhichIgnoresCaughtException
+<span class="fc" id="L286">            throw new WebApplicationException(&quot;unexpected error handling access token&quot;, Response.Status.UNAUTHORIZED);</span>
+        }
+    }
+
+    public void invalidateAuthSessionByAccessToken(String accessToken) {
+<span class="fc" id="L291">        getAuthSessionByAccessToken(accessToken).ifPresent(apiAuthService::invalidateAuthSession);</span>
+<span class="fc" id="L292">    }</span>
+
+    public @NotNull Either&lt;AccessTokenRequestError, ApiAuthSession&gt; useRefreshToken(@NotNull String clientId, @NotNull String refreshToken, @Nullable String requestedScope) {
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">        if (isEmpty(refreshToken)) {</span>
+<span class="nc" id="L296">            return left(new InvalidRefreshTokenError(refreshToken));</span>
+        }
+<span class="fc" id="L298">        var partAndSecret = splitTokenIntoPartAndSecret(refreshToken);</span>
+<span class="pc bpc" id="L299" title="1 of 2 branches missed.">        if (partAndSecret.isEmpty()) {</span>
+<span class="nc" id="L300">            return left(new InvalidRefreshTokenError(refreshToken));</span>
+        }
+<span class="fc" id="L302">        var part = partAndSecret.get().getFirst();</span>
+<span class="fc" id="L303">        var secret = partAndSecret.get().getSecond();</span>
+<span class="fc" id="L304">        LOGGER.info(&quot;Attempting to issue a new refresh token for client=[{}], (with scope=[{}])&quot;, clientId, requestedScope);</span>
+<span class="fc" id="L305">        Instant nowInstant = dateTimeService.now();</span>
+<span class="fc" id="L306">        long nowMillis = nowInstant.toEpochMilli();</span>
+<span class="fc" id="L307">        return transactional(() -&gt; {</span>
+            try {
+<span class="fc" id="L309">                var session = ModifiableApiAuthSession.create()</span>
+<span class="fc" id="L310">                        .from(getSessionWithDecryptedPassword(getSessionAndMoveRefreshTokenToHistory(clientId, part, nowInstant), secret));</span>
+<span class="pc bpc" id="L311" title="1 of 4 branches missed.">                if (isNotBlank(requestedScope) &amp;&amp; !session.getScope().toString().equalsIgnoreCase(requestedScope)) {</span>
+<span class="nc" id="L312">                    LOGGER.info(&quot;Scope mismatch while attempting to refresh token for client=[{}]&quot;, clientId);</span>
+<span class="nc" id="L313">                    return left(new AccessTokenRequestError(INVALID_SCOPE, format(&quot;can't change scope from [%s] to [%s]&quot;, session.getScope(), requestedScope)));</span>
+                }
+<span class="fc" id="L315">                var client = session.getApiClient();</span>
+<span class="fc" id="L316">                session.setAccessTokenPart(randomString(LOOKUP_LENGTH));</span>
+<span class="fc" id="L317">                session.setAccessTokenIssued(nowInstant);</span>
+<span class="pc bpc" id="L318" title="1 of 2 branches missed.">                if (client.hasSessionExpiry()) {</span>
+<span class="pc" id="L319">                    long sessionExpirationMillis = session.getAuthCodeIssued().orElseThrow(() -&gt; new IllegalStateException(&quot;Missing time auth code issued&quot;))</span>
+<span class="fc" id="L320">                            .toEpochMilli() + (client.getSessionExpirySeconds() * 1000);</span>
+<span class="fc" id="L321">                    long lastRefreshTokenMillis = sessionExpirationMillis - (client.getTokenExpirySeconds() * 1000);</span>
+<span class="fc bfc" id="L322" title="All 2 branches covered.">                    if (nowMillis &lt; lastRefreshTokenMillis) {</span>
+<span class="fc" id="L323">                        LOGGER.info(&quot;Issued both Access and Refresh Tokens for client=[{}].&quot;, clientId);</span>
+<span class="fc" id="L324">                        session.setRefreshTokenPart(randomString(LOOKUP_LENGTH));</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">                    } else if (nowMillis &lt; sessionExpirationMillis) {</span>
+<span class="fc" id="L326">                        LOGGER.info(&quot;Session for client=[{}] is almost over. Last Access Token without Refresh Token is issued.&quot;, clientId);</span>
+<span class="fc" id="L327">                        session.setRefreshTokenPart(Optional.empty());</span>
+                    } else {
+<span class="fc" id="L329">                        LOGGER.info(&quot;Session for client=[{}] has expired. Neither Access Token nor Refresh Token is issued.&quot;, clientId);</span>
+<span class="fc" id="L330">                        String message = format(&quot;Current time %s is already past session expiration %s, given authCodeIssued %s and sessionExpirySeconds %s&quot;,</span>
+<span class="fc" id="L331">                                Date.from(nowInstant),</span>
+<span class="fc" id="L332">                                Date.from(Instant.ofEpochMilli(sessionExpirationMillis)),</span>
+<span class="fc" id="L333">                                Date.from(session.getAuthCodeIssued().get()),</span>
+<span class="fc" id="L334">                                client.getSessionExpirySeconds());</span>
+<span class="fc" id="L335">                        return left(new AccessTokenRequestError(INVALID_GRANT, message));</span>
+                    }
+<span class="fc" id="L337">                } else {</span>
+<span class="nc" id="L338">                    LOGGER.info(&quot;Issued both Access and Refresh Tokens for client=[{}] with non expiring session.&quot;, clientId);</span>
+<span class="nc" id="L339">                    session.setRefreshTokenPart(randomString(LOOKUP_LENGTH));</span>
+                }
+<span class="fc" id="L341">                return right(updateAuthSession(session, ReEncryptPassword.YES));</span>
+<span class="fc" id="L342">            } catch (ApiSessionException e) {</span>
+<span class="fc" id="L343">                return Match(e.getErrorCode()).of(</span>
+<span class="fc" id="L344">                        Case($(is(invalid_client)), left(new InvalidClientIdError(&quot;Client Error&quot;))),</span>
+<span class="fc" id="L345">                        Case($(is(invalid_request)), left(new AccessTokenRequestError(INVALID_REQUEST, &quot;Invalid request&quot;))),</span>
+<span class="fc" id="L346">                        Case($(is(invalid_grant)), left(new AccessTokenRequestError(INVALID_GRANT, &quot;Invalid Grant&quot;))),</span>
+<span class="fc" id="L347">                        Case($(), o -&gt; {</span>
+<span class="nc" id="L348">                            LOGGER.warn(&quot;Unhandled error-code=[{}]&quot;, e.getErrorCode());</span>
+<span class="nc" id="L349">                            return left(new AccessTokenRequestError(INVALID_GRANT, &quot;Invalid Grant&quot;, e));</span>
+                        }));
+<span class="nc" id="L351">            } catch (Exception e) {</span>
+<span class="nc" id="L352">                String message = format(&quot;Client=[%s] tried [and failed] to use refresh token=[%s] whilst in scope=[%s].&quot;,</span>
+                        clientId,
+<span class="nc" id="L354">                        refreshToken.split(&quot;-&quot;)[0],</span>
+                        requestedScope);
+<span class="nc" id="L356">                LOGGER.warn(message, e);</span>
+<span class="nc" id="L357">                return left(new AccessTokenRequestError(INVALID_GRANT, message, e));</span>
+            }
+        });
+    }
+
+    /**
+     * Generates a new One Time Password for the user currently associated with
+     * the specified accessToken.
+     *
+     * @param accessToken The access token for the current session.
+     * @return The OTP token.
+     */
+    public String generateWebappOTP(String accessToken) {
+<span class="fc" id="L370">        String authTokenClean = accessToken.substring(&quot;Bearer &quot;.length()).trim();</span>
+<span class="pc" id="L371">        var session = getAuthSessionByAccessToken(authTokenClean).orElseThrow(() -&gt; new IllegalStateException(&quot;no session&quot;));</span>
+<span class="fc" id="L372">        var personId = session.getPersonId()</span>
+<span class="fc" id="L373">                .map(String::valueOf)</span>
+<span class="pc" id="L374">                .orElseThrow(() -&gt; new IllegalStateException(&quot;Unable to generate one time password for person. The person id value is missing.&quot;));</span>
+<span class="fc" id="L375">        var lookupPart = randomString(LOOKUP_LENGTH);</span>
+<span class="fc" id="L376">        return transactional(() -&gt; {</span>
+            try {
+<span class="fc" id="L378">                var encryptionResult = encryptPassword(session.getPassword()</span>
+<span class="pc" id="L379">                        .orElseThrow(() -&gt; new IllegalStateException(&quot;Password missing from session&quot;))</span>
+<span class="fc" id="L380">                        .toCharArray());</span>
+<span class="fc" id="L381">                var otp = ImmutableWebAppOtp.builder()</span>
+<span class="fc" id="L382">                        .userId(personId)</span>
+<span class="fc" id="L383">                        .lookupPart(lookupPart)</span>
+<span class="fc" id="L384">                        .encryptedPassword(encryptionResult.getEncryptedPassword())</span>
+<span class="fc" id="L385">                        .salt(encryptionResult.getSalt())</span>
+<span class="fc" id="L386">                        .iterationCount(encryptionResult.getIterationCount())</span>
+<span class="fc" id="L387">                        .persistedDate(dateTimeService.now())</span>
+<span class="fc" id="L388">                        .status(WebAppOtpStatus.ACTIVE)</span>
+<span class="fc" id="L389">                        .apiClientId(session.getApiClient().getApiId())</span>
+<span class="fc" id="L390">                        .build();</span>
+<span class="fc" id="L391">                apiAuthService.deactivateWebAppOtpForUser(personId);</span>
+<span class="fc" id="L392">                apiAuthService.createWebAppOtp(otp);</span>
+<span class="fc" id="L393">                return lookupPart + SECRET_SEPARATOR + encryptionResult.getSecret();</span>
+<span class="nc" id="L394">            } catch (GeneralSecurityException e) {</span>
+<span class="nc" id="L395">                throw new RuntimeException(&quot;Could not generate OTP for: &quot; + session, e);</span>
+            }
+        });
+    }
+
+    /**
+     * Retrieves all the other data relating to this OTP from the database.
+     * After fetching the entry the OTP is disabled so that it can't be used
+     * again.
+     *
+     * @param otpToken The OTP token.
+     * @return A fully populated {@code WebappOTP}.
+     */
+    public WebAppOtp retrieveAndExpireWebappOTP(String otpToken) {
+<span class="fc" id="L409">        var partAndSecret = splitTokenIntoPartAndSecret(otpToken);</span>
+<span class="fc" id="L410">        var part = partAndSecret.map(Pair::getFirst).orElseThrow(() -&gt; new IllegalStateException(&quot;invalid otp token&quot;));</span>
+<span class="pc" id="L411">        var secret = partAndSecret.map(Pair::getSecond).orElseThrow(() -&gt; new IllegalStateException(&quot;invalid otp token&quot;));</span>
+
+<span class="pc" id="L413">        var otps = apiAuthService.findWebAppOtpByLookupPart(part).orElseThrow(() -&gt; new IllegalStateException(&quot;no matching otp token found&quot;));</span>
+<span class="pc bpc" id="L414" title="1 of 2 branches missed.">        if (otps.size() &gt; 1) {</span>
+            // This should never happen. Something has gone wrong, so deactivate them all.
+<span class="nc" id="L416">            apiAuthService.deactivateWebAppOtpForLookupPart(part);</span>
+<span class="nc" id="L417">            throw new IllegalStateException(&quot;more than one matching otp token found&quot;);</span>
+        }
+        try {
+<span class="fc" id="L420">            var otp = ImmutableWebAppOtp.copyOf(otps.get(0))</span>
+<span class="fc" id="L421">                    .withPassword(new String(decryptPassword(otps.get(0).getEncryptedPassword(),</span>
+                            secret,
+<span class="fc" id="L423">                            otps.get(0).getSalt(),</span>
+<span class="fc" id="L424">                            otps.get(0).getIterationCount())));</span>
+<span class="fc" id="L425">            var now = dateTimeService.now();</span>
+<span class="fc" id="L426">            var diff = now.toEpochMilli() - otp.getPersistedDate().toEpochMilli();</span>
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">            if (diff &gt; (1000 * OTP_EXPIRY_SECONDS)) {</span>
+<span class="nc" id="L428">                apiAuthService.updateWebAppOtpStatusForLookupPart(WebAppOtpStatus.EXPIRED, part);</span>
+                //noinspection ThrowCaughtLocally
+<span class="nc" id="L430">                throw new IllegalStateException(&quot;otp has expired&quot;);</span>
+            }
+            // We've used it, so record the timestamp and disable it
+<span class="fc" id="L433">            apiAuthService.updateWebAppOtpStatusForLookupPart(WebAppOtpStatus.USED, part);</span>
+<span class="fc" id="L434">            return otp;</span>
+<span class="fc" id="L435">        } catch (Exception e) {</span>
+<span class="fc" id="L436">            throw new IllegalStateException(&quot;error getting password from otp token&quot;, e);</span>
+        }
+    }
+
+    /**
+     * @throws ApiClientNotFoundException if no {@link ApiClient} record is found with {@code apiid=apiClientId}
+     */
+    public ApiAuthSession createSessionWithIssuedAccessToken(String apiClientId, PKBPerson person, String password, String scope) {
+<span class="fc" id="L444">        var client = getApiClientByApiId(apiClientId).orElseThrow(() -&gt; new ApiClientNotFoundException(apiClientId));</span>
+<span class="pc bpc" id="L445" title="1 of 2 branches missed.">        if (!client.isGrantTypePermitted(PASSWORD)) {</span>
+<span class="nc" id="L446">            throw new GrantTypeNotAllowedException(client.getApiId(), PASSWORD);</span>
+        }
+<span class="fc" id="L448">        var session = getSessionWithEncryptedPassword(ImmutableApiAuthSession.builder()</span>
+<span class="fc" id="L449">                .sessionId(randomString(LOOKUP_LENGTH))</span>
+<span class="fc" id="L450">                .redirectionEndpoint(&quot;&quot;)</span>
+<span class="fc" id="L451">                .status(TOKEN_ISSUED)</span>
+<span class="fc" id="L452">                .apiClient(client)</span>
+<span class="fc" id="L453">                .scope(ApiClientScope.valueOf(scope))</span>
+<span class="fc" id="L454">                .accessTokenPart(randomString(LOOKUP_LENGTH))</span>
+<span class="fc" id="L455">                .accessTokenIssued(dateTimeService.now())</span>
+<span class="fc" id="L456">                .refreshTokenPart(randomString(LOOKUP_LENGTH))</span>
+<span class="fc" id="L457">                .personId(person.getId())</span>
+<span class="fc" id="L458">                .build(), password);</span>
+<span class="fc" id="L459">        apiAuthService.saveAuthSession(session);</span>
+<span class="fc" id="L460">        return session;</span>
+    }
+
+    private Optional&lt;Pair&lt;String, String&gt;&gt; splitTokenIntoPartAndSecret(@NotNull String token) {
+<span class="fc" id="L464">        var indexOfSeparator = token.indexOf(SECRET_SEPARATOR);</span>
+<span class="pc bpc" id="L465" title="1 of 4 branches missed.">        if ((indexOfSeparator &lt; 0) || (indexOfSeparator &gt;= (token.length() - 1))) {</span>
+<span class="fc" id="L466">            return Optional.empty();</span>
+        }
+<span class="fc" id="L468">        return Optional.of(Pair.of(token.substring(0, indexOfSeparator), token.substring(indexOfSeparator + 1)));</span>
+    }
+
+    private ApiAuthSession getSessionWithEncryptedPassword(@NotNull ApiAuthSession session, @NotNull String password) {
+        try {
+<span class="fc" id="L473">            var modifiableSession = ModifiableApiAuthSession.create().from(session);</span>
+<span class="fc" id="L474">            var encryptionResult = encryptPassword(password.toCharArray());</span>
+            // set details back into the auth session
+<span class="fc" id="L476">            modifiableSession.setEncryptedPassword(encryptionResult.getEncryptedPassword());</span>
+<span class="fc" id="L477">            modifiableSession.setSalt(encryptionResult.getSalt());</span>
+<span class="fc" id="L478">            modifiableSession.setIterationCount(encryptionResult.getIterationCount());</span>
+<span class="fc" id="L479">            modifiableSession.setPassword(Optional.empty());</span>
+<span class="fc" id="L480">            modifiableSession.setNewSecret(encryptionResult.getSecret());</span>
+<span class="fc" id="L481">            return ImmutableApiAuthSession.copyOf(modifiableSession);</span>
+<span class="nc" id="L482">        } catch (GeneralSecurityException e) {</span>
+<span class="nc" id="L483">            throw new RuntimeException(&quot;Could not encrypt password for: &quot; + session, e);</span>
+        }
+    }
+
+    private PasswordEncryptionResult encryptPassword(char[] password) throws GeneralSecurityException {
+        // Generate seed data
+<span class="fc" id="L489">        var randomSecret = new char[SECRET_LENGTH];</span>
+<span class="fc bfc" id="L490" title="All 2 branches covered.">        for (var i = 0; i &lt; randomSecret.length; i++) {</span>
+<span class="fc" id="L491">            var charX = RNG.nextInt(SECRET_CHAR_SET.length());</span>
+<span class="fc" id="L492">            randomSecret[i] = SECRET_CHAR_SET.charAt(charX);</span>
+        }
+<span class="fc" id="L494">        var salt = new byte[PASSWORD_SALT_LENGTH];</span>
+<span class="fc" id="L495">        RNG.nextBytes(new byte[PASSWORD_SALT_LENGTH]);</span>
+        // Do the encryption
+<span class="fc" id="L497">        var pbeKeySpec = new PBEKeySpec(randomSecret);</span>
+<span class="fc" id="L498">        var secretKey = SecretKeyFactory.getInstance(PBE_SHORT_NAME).generateSecret(pbeKeySpec);</span>
+<span class="fc" id="L499">        var pbeParamSpec = new PBEParameterSpec(salt, PASSWORD_ITERATION_COUNT);</span>
+<span class="fc" id="L500">        var cipher = Cipher.getInstance(secretKey.getAlgorithm());</span>
+<span class="fc" id="L501">        cipher.init(Cipher.ENCRYPT_MODE, secretKey, pbeParamSpec);</span>
+<span class="fc" id="L502">        var baos = new ByteArrayOutputStream();</span>
+        try {
+<span class="fc" id="L504">            try (OutputStreamWriter outputStreamWriter = new OutputStreamWriter(baos, UTF_8)) {</span>
+<span class="fc" id="L505">                outputStreamWriter.write(password, 0, password.length);</span>
+            }
+<span class="nc" id="L507">        } catch (IOException ex) {</span>
+<span class="nc" id="L508">            throw new RuntimeException(&quot;Could not not convert password from char[] to bytes&quot;, ex);</span>
+<span class="fc" id="L509">        }</span>
+<span class="fc" id="L510">        var encryptedPassword = cipher.doFinal(baos.toByteArray());</span>
+        // Wrap and return
+<span class="fc" id="L512">        var encryptionResult = new PasswordEncryptionResult();</span>
+<span class="fc" id="L513">        encryptionResult.setEncryptedPassword(encryptedPassword);</span>
+<span class="fc" id="L514">        encryptionResult.setSalt(salt);</span>
+<span class="fc" id="L515">        encryptionResult.setIterationCount(PASSWORD_ITERATION_COUNT);</span>
+<span class="fc" id="L516">        encryptionResult.setSecret(new String(randomSecret));</span>
+<span class="fc" id="L517">        return encryptionResult;</span>
+    }
+
+    private ApiAuthSession getSessionWithDecryptedPassword(@NotNull ApiAuthSession session, @NotNull String secret) throws GeneralSecurityException, CharacterCodingException {
+<span class="fc" id="L521">        var passwordChars = decryptPassword(session.getEncryptedPassword(),</span>
+                secret,
+<span class="fc" id="L523">                session.getSalt(),</span>
+<span class="fc" id="L524">                session.getIterationCount());</span>
+<span class="fc" id="L525">        return ImmutableApiAuthSession.copyOf(session).withPassword(new String(passwordChars));</span>
+    }
+
+    private char[] decryptPassword(byte[] encryptedPassword, @NotNull String secret, byte[] salt, int iterationCount) throws GeneralSecurityException, CharacterCodingException {
+<span class="fc" id="L529">        SecretKey secretKey = secretKey(secret, PBE_SHORT_NAME);</span>
+<span class="fc" id="L530">        return CryptoHelper.decryptPassword(encryptedPassword, salt, iterationCount, secretKey);</span>
+    }
+
+    private ApiAuthSession getSessionAndMoveRefreshTokenToHistory(@NotNull String clientId, @NotNull String part, @NotNull Instant serverNow) throws ApiSessionException {
+<span class="fc" id="L534">        var sessions = apiAuthService.findAuthSessionsByRefreshToken(part).orElse(Collections.emptyList());</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">        if (sessions.isEmpty()) {</span>
+<span class="fc" id="L536">            LOGGER.error(&quot;Found no ApiAuthSessions for refreshTokenPart {}; checking history&quot;, part);</span>
+<span class="fc" id="L537">            throw new ApiSessionException(invalid_grant, reportOnAndInvalidateHistoricalUse(part));</span>
+<span class="pc bpc" id="L538" title="1 of 2 branches missed.">        } else if (sessions.size() &gt; 1) {</span>
+<span class="nc" id="L539">            LOGGER.warn(&quot;Found multiple ApiAuthSessions for refreshTokenPart {}&quot;, part);</span>
+        }
+<span class="fc" id="L541">        var session = sessions.get(0);</span>
+<span class="fc" id="L542">        var client = session.getApiClient();</span>
+<span class="fc bfc" id="L543" title="All 2 branches covered.">        if (!client.getApiId().equals(clientId)) {</span>
+<span class="fc" id="L544">            throw new ApiSessionException(invalid_client, &quot;apiClientId (&quot; + clientId + &quot;) doesn't match session value &quot; + client.getApiId());</span>
+        }
+<span class="pc bpc" id="L546" title="1 of 2 branches missed.">        if (session.getStatus() != TOKEN_ISSUED) {</span>
+<span class="nc" id="L547">            throw new ApiSessionException(invalid_grant, &quot;wrong status to use refresh token: &quot; + session.getState());</span>
+        }
+<span class="fc" id="L549">        apiAuthService.createRefreshTokenInHistory(session, part, serverNow);</span>
+<span class="fc" id="L550">        return session;</span>
+    }
+
+    private String reportOnAndInvalidateHistoricalUse(@NotNull String refreshTokenPart) {
+<span class="fc" id="L554">        var sessions = apiAuthService.findAuthSessionsInRefreshHistoryByRefreshToken(refreshTokenPart).orElse(Collections.emptyList());</span>
+<span class="fc" id="L555">        var message = new StringBuilder(&quot;no active session matches refreshTokenPart &quot;).append(refreshTokenPart);</span>
+<span class="fc bfc" id="L556" title="All 2 branches covered.">        if (!sessions.isEmpty()) {</span>
+<span class="fc" id="L557">            LOGGER.error(&quot;Attempt to reuse refreshTokenPart {}; invalidating sessions&quot;, refreshTokenPart);</span>
+<span class="fc" id="L558">            message.append(&quot;; found history matches &quot;).append(sessions.size()).append(&quot;; invalidating sessions!&quot;);</span>
+            //noinspection RedundantArrayCreation
+<span class="fc" id="L560">            sessions.forEach(session -&gt; apiAuthService.invalidateAuthSession(ImmutableApiAuthSession.copyOf(session).withEncryptedPassword(new byte[0])));</span>
+        }
+<span class="fc" id="L562">        return message.toString();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

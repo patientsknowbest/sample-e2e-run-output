@@ -1,0 +1,236 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AccountPrivateKey.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.tolven.security.key</a> &gt; <span class="el_source">AccountPrivateKey.java</span></div><h1>AccountPrivateKey.java</h1><pre class="source lang-java linenums">/*
+ *  Copyright (C) 2006 Tolven Inc 
+ *
+ * This library is free software; you can redistribute it and/or modify it under the terms of 
+ * the GNU Lesser General Public License as published by the Free Software Foundation; either 
+ * version 2.1 of the License, or (at your option) any later version.
+ * 
+ * This library is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; 
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. 
+ * See the GNU Lesser General Public License for more details.
+ * 
+ * Contact: info@tolvenhealth.com
+ */
+package org.tolven.security.key;
+
+import com.pkb.crypto.javasecurityutil.KeyUtil;
+import com.pkb.crypto.util.RandomUtil;
+
+import javax.crypto.EncryptedPrivateKeyInfo;
+import javax.crypto.SecretKey;
+import javax.persistence.Column;
+import javax.persistence.Embeddable;
+import javax.persistence.Embedded;
+import java.io.IOException;
+import java.io.Serializable;
+import java.security.GeneralSecurityException;
+import java.security.KeyPair;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+
+/**
+ * We've extended Tolven's version. This encapsulates an EncryptedPrivateKeyInfo.
+ *
+ * The orig supports storing:
+ * - the account private key, encrypted with a random secret key
+ * - the secret key stored encrypted with a UserPublicKey
+ * and forces you to copy from an existing, encrypted/encoded AccountPrivateKey to pass to a new user.
+ *
+ * This version supports two simpler init methods, so that we can store as above, OR:
+ * - the account private key, encrypted with a GIVEN secret key
+ * - the secret key is not stored
+ * Plus we can more easily save new versions for selected users, given the decrypted acct private key (no copy forced).
+ *
+ * @author Joseph Isaac
+ * @author Rob Whelan
+ */
+@Embeddable
+public class AccountPrivateKey implements Serializable {
+    private static final long serialVersionUID = 3L;
+    private static final String NOT_INITIALIZED = &quot;AccountPrivateKey not initialized&quot;;
+    private static final String INITIALIZED = &quot;AccountPrivateKey already initialized&quot;;
+
+    @Column(name = &quot;encoded_encrypted_private_key_info_inline&quot;)
+    private byte[] encodedEncryptedPrivateKeyInfoInline;
+
+    @Column(name = &quot;private_key_size&quot;)
+    private int keySize;
+
+    @Column(name = &quot;private_key_algorithm&quot;)
+    private String algorithm;
+
+    @Embedded
+    private AccountSecretKey accountSecretKey;
+
+<span class="fc" id="L65">    protected AccountPrivateKey() {</span>
+<span class="fc" id="L66">    }</span>
+
+    /**
+     * Return an instance of AccountPrivateKey
+     */
+    public static AccountPrivateKey getInstance() {
+<span class="fc" id="L72">        return new AccountPrivateKey();</span>
+    }
+
+    /**
+     * Decrypt the AccountPrivateKey using aDecryptionKey and re-encrypt it
+     * using anEncryptionKey
+     */
+    public void init(AccountPrivateKey anAccountPrivateKey, UserPrivateKey aUserPrivateKey, PublicKey anEncryptionKey,
+            String kbeKeyAlgorithm, int kbeKeyLength) throws GeneralSecurityException, IOException {
+<span class="nc bnc" id="L81" title="All 2 branches missed.">        if (accountSecretKey != null) {</span>
+<span class="nc" id="L82">            throw new IllegalStateException(INITIALIZED);</span>
+        }
+
+<span class="nc" id="L85">        PrivateKey privateKey = anAccountPrivateKey.getPrivateKey(aUserPrivateKey.getPrivateKey());</span>
+
+        // piggyback on new impl
+<span class="nc" id="L88">        init(privateKey, anEncryptionKey, anAccountPrivateKey.getKeySize(), kbeKeyAlgorithm, kbeKeyLength);</span>
+<span class="nc" id="L89">    }</span>
+
+    /**
+     * Fresh setup init:
+     * Create a PrivateKey, encrypt it with a randomly generated SecretKey and
+     * encrypt the SecretKey with a PublicKey
+     *
+     * @param anEncryptionKey
+     *            generally the user public key
+     */
+    public KeyPair init(PublicKey anEncryptionKey, String privateKeyAlgorithm, int privateKeyLength,
+            String kbeKeyAlgorithm, int kbeKeyLength) throws GeneralSecurityException, IOException {
+<span class="nc bnc" id="L101" title="All 2 branches missed.">        if (accountSecretKey != null) {</span>
+<span class="nc" id="L102">            throw new IllegalStateException(INITIALIZED);</span>
+        }
+
+<span class="nc" id="L105">        KeyPair keyPair = KeyUtil.generateNewKeyPair(privateKeyAlgorithm, privateKeyLength);</span>
+
+<span class="nc" id="L107">        accountSecretKey = AccountSecretKey.getInstance();</span>
+<span class="nc" id="L108">        SecretKey secretKey = accountSecretKey.init(anEncryptionKey, kbeKeyAlgorithm, kbeKeyLength);</span>
+
+<span class="nc" id="L110">        EncryptedPrivateKeyInfo encryptedPrivateKeyInfo = KeyUtil.encryptPrivateKeyWithSecretKey(</span>
+<span class="nc" id="L111">                keyPair.getPrivate(), secretKey);</span>
+<span class="nc" id="L112">        setEncodedEncryptedPrivateKeyInfo(encryptedPrivateKeyInfo, privateKeyLength);</span>
+<span class="nc" id="L113">        return keyPair;</span>
+    }
+
+    /**
+     * NEW FLOW: Save already-decrypted account PrivateKey:
+     * Encrypt the account PrivateKey (given clear!) with the given PublicKey (often user public key), using the accountSecretKey as usual.
+     */
+    public void init(PrivateKey clearPrivateKey, PublicKey ownerPublicKey, int accountPrivateKeySize,
+            String kbeKeyAlgorithm, int kbeKeyLength) throws GeneralSecurityException, IOException {
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">        if (accountSecretKey != null) {</span>
+<span class="nc" id="L123">            throw new IllegalStateException(INITIALIZED);</span>
+        }
+<span class="fc" id="L125">        accountSecretKey = AccountSecretKey.getInstance();</span>
+<span class="fc" id="L126">        SecretKey secretKey = accountSecretKey.init(ownerPublicKey, kbeKeyAlgorithm, kbeKeyLength);</span>
+
+<span class="fc" id="L128">        setEncodedEncryptedPrivateKeyInfo(</span>
+<span class="fc" id="L129">                KeyUtil.encryptPrivateKeyWithSecretKey(clearPrivateKey, secretKey),</span>
+                accountPrivateKeySize);
+<span class="fc" id="L131">    }</span>
+
+    /**
+     * NEW FLOW: Known private key, known secret key (from access token) init:
+     * Pass in already-decrypted account private key, and encrypt using a secret key derived from an access token (store salt, not key or
+     * access token)
+     */
+    public void init(PrivateKey clearPrivateKey, int accountPrivateKeySize, String kbeKeyAlgorithm,
+                     String accessToken,
+                     String secretKeyDerivAlgorithm, int secretKeyDerivDataLength, int secretKeyDerivSaltLength,
+                     int secretKeyDerivIterations) throws GeneralSecurityException, IOException {
+<span class="fc" id="L142">        init(clearPrivateKey, accountPrivateKeySize, kbeKeyAlgorithm, accessToken, secretKeyDerivAlgorithm,</span>
+<span class="fc" id="L143">                secretKeyDerivDataLength, secretKeyDerivIterations, RandomUtil.randomBytes(secretKeyDerivSaltLength));</span>
+<span class="fc" id="L144">    }</span>
+
+    public void init(PrivateKey clearPrivateKey, int accountPrivateKeySize, String kbeKeyAlgorithm,
+            String accessToken, String secretKeyDerivAlgorithm, int secretKeyDerivDataLength,
+            int secretKeyDerivIterations, byte[] secretKeySalt) throws GeneralSecurityException, IOException {
+<span class="pc bpc" id="L149" title="1 of 2 branches missed.">        if (accountSecretKey != null) {</span>
+<span class="nc" id="L150">            throw new IllegalStateException(INITIALIZED);</span>
+        }
+
+<span class="fc" id="L153">        accountSecretKey = AccountSecretKey.getInstance();</span>
+<span class="fc" id="L154">        SecretKey secretKey = accountSecretKey.init(kbeKeyAlgorithm, accessToken, secretKeyDerivAlgorithm,</span>
+                secretKeyDerivDataLength, secretKeyDerivIterations, secretKeySalt);
+
+<span class="fc" id="L157">        setEncodedEncryptedPrivateKeyInfo(</span>
+<span class="fc" id="L158">                KeyUtil.encryptPrivateKeyWithSecretKey(clearPrivateKey, secretKey),</span>
+                accountPrivateKeySize);
+<span class="fc" id="L160">    }</span>
+
+    /**
+     * Unwrap with user's PrivateKey (unwraps stored, encrypted secret key)
+     * Decrypt and return the PrivateKey using aDecryptionKey
+     */
+    public PrivateKey getPrivateKey(PrivateKey aDecryptionKey) throws GeneralSecurityException, IOException {
+<span class="nc bnc" id="L167" title="All 2 branches missed.">        if (accountSecretKey == null) {</span>
+<span class="nc" id="L168">            throw new IllegalStateException(NOT_INITIALIZED);</span>
+        }
+<span class="nc" id="L170">        SecretKey secretKey = accountSecretKey.getSecretKey(aDecryptionKey);</span>
+<span class="nc" id="L171">        return KeyUtil.decryptPrivateKeyWithSecretKey(getEncodedEncryptedPrivateKeyInfo(), secretKey);</span>
+    }
+
+    /**
+     * NEW FLOW: Unwrap with known secret key:
+     * Decrypt the account's PrivateKey using a known SecretKey (skipping private key to unwrap a stored, random secret key)
+     */
+    public PrivateKey getPrivateKey(String accessToken) throws GeneralSecurityException, IOException {
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">        if (getEncodedEncryptedPrivateKeyInfo() == null) {</span>
+<span class="nc" id="L180">            throw new IllegalStateException(NOT_INITIALIZED);</span>
+        }
+
+<span class="fc" id="L183">        SecretKey secretKey = accountSecretKey.getSecretKey(accessToken);</span>
+<span class="fc" id="L184">        return KeyUtil.decryptPrivateKeyWithSecretKey(getEncodedEncryptedPrivateKeyInfo(), secretKey);</span>
+    }
+
+    /**
+     * Return the EncryptedPrivateKeyInfo
+     */
+    public byte[] getEncodedEncryptedPrivateKeyInfo() {
+<span class="fc" id="L191">        return encodedEncryptedPrivateKeyInfoInline;</span>
+    }
+
+    private void setEncodedEncryptedPrivateKeyInfo(byte[] encodedEncryptedPrivateKeyInfo) {
+<span class="fc" id="L195">        this.encodedEncryptedPrivateKeyInfoInline = encodedEncryptedPrivateKeyInfo;</span>
+<span class="fc" id="L196">    }</span>
+
+    /**
+     * Set the EncryptedPrivateKeyInfo
+     */
+    private void setEncodedEncryptedPrivateKeyInfo(EncryptedPrivateKeyInfo anEncryptedPrivateKeyInfo, int aKeySize) throws IOException {
+<span class="fc" id="L202">        setAlgorithm(anEncryptedPrivateKeyInfo.getAlgName());</span>
+<span class="fc" id="L203">        setKeySize(aKeySize);</span>
+<span class="fc" id="L204">        setEncodedEncryptedPrivateKeyInfo(anEncryptedPrivateKeyInfo.getEncoded());</span>
+<span class="fc" id="L205">    }</span>
+
+    /**
+     * return the PrivateKey size
+     */
+    public int getKeySize() {
+<span class="fc" id="L211">        return keySize;</span>
+    }
+
+    private void setKeySize(int keySize) {
+<span class="fc" id="L215">        this.keySize = keySize;</span>
+<span class="fc" id="L216">    }</span>
+
+    /**
+     * return the PrivateKey algorithm
+     */
+    public String getAlgorithm() {
+<span class="fc" id="L222">        return algorithm;</span>
+    }
+
+    /**
+     * Keep the PrivateKey algorithm. It it is part of an EncryptedPrivateKeyInfo but one has to decrypt to find out what it is
+     */
+    private void setAlgorithm(String aString) {
+<span class="fc" id="L229">        algorithm = aString;</span>
+<span class="fc" id="L230">    }</span>
+
+    public AccountSecretKey getSecretKey() {
+<span class="fc" id="L233">        return accountSecretKey;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

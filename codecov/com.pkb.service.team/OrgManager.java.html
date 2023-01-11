@@ -1,0 +1,365 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OrgManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.team</a> &gt; <span class="el_source">OrgManager.java</span></div><h1>OrgManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.team;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
+import com.pkb.VersionDetails;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.consent.entity.PatientOptOut;
+import com.pkb.consent.entity.PatientOptOutDocumentation;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.consent.PatientConsentUpdateDTO;
+import com.pkb.document.entity.Attachment;
+import com.pkb.domain.consent.ConsentService;
+import com.pkb.dto.ChangeOrgInviteeEmailDTO;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.IllegalReuseOfEmailAddressException;
+import com.pkb.institute.entity.ImmutableOrgPatientSearchOptionsDto;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.mappers.SourceDetailsMapper;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.repository.legacy.LegacyOrgRepository;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.service.invitation.impl.InvitationManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.search.PatientSearchParameters;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.IdentityVerification;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PasswordAccess;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.collection.LinkedHashMap;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.text.MessageFormat;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.pkb.entities.enums.ConsentReason.PATIENT_OPT_OUT;
+import static com.pkb.entities.enums.InvitationStatus.EXPIRED;
+import static java.lang.String.format;
+
+/**
+ * @author Russ Gray
+ */
+public class OrgManager extends TransactionManager {
+
+<span class="fc" id="L65">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final UserManager userManager;
+    private final TeamManager teamManager;
+    private final TeamUserManager teamUserManager;
+    private final PKBEmailMessageManager pkbEmailMessageManager;
+    private UserAccessManager userAccessManager;
+    private final InvitationManager invitationManager;
+    private final ConsentService consentService;
+    private final PatientConsentManager patientConsentManager;
+    private final SourceDetailsMapper sourceDetailsMapper;
+    private final LegacyOrgRepository orgRepository;
+    private final ChunkedDocManager chunkedDocManager;
+
+    public OrgManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, UserManager userManager, TeamManager teamManager,
+                      TeamUserManager teamUserManager, PKBEmailMessageManager pkbEmailMessageManager, UserAccessManager userAccessManager, InvitationManager invitationManager,
+                      ConsentService consentService, PatientConsentManager patientConsentManager, SourceDetailsMapper sourceDetailsMapper, LegacyOrgRepository orgRepository,
+                      ChunkedDocManager chunkedDocManager) {
+<span class="fc" id="L83">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L84">        this.userManager = userManager;</span>
+<span class="fc" id="L85">        this.teamManager = teamManager;</span>
+<span class="fc" id="L86">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L87">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L88">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L89">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L90">        this.consentService = consentService;</span>
+<span class="fc" id="L91">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L92">        this.sourceDetailsMapper = sourceDetailsMapper;</span>
+<span class="fc" id="L93">        this.orgRepository = orgRepository;</span>
+<span class="fc" id="L94">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L95">    }</span>
+
+    //Integration tests fiddle with it....
+    @VisibleForTesting
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="nc" id="L100">        this.userAccessManager = userAccessManager;</span>
+<span class="nc" id="L101">    }</span>
+
+    public void assignPrivacyOfficerToOrg(
+            @NotNull LoggedInEHRRequestContext requestContext,
+            @NotNull Org org,
+            @NotNull PKBPerson superAdmin,
+            @NotNull PKBPerson privacyOfficerDetailsHolder,
+            @NotNull Email privacyOfficerEmail) {
+<span class="fc" id="L109">        transactional(() -&gt; {</span>
+
+<span class="fc" id="L111">            List&lt;PKBPerson&gt; existingPersons = userManager.getPKBPersonByConfirmedOrPrimaryEmail(privacyOfficerEmail);</span>
+<span class="fc bfc" id="L112" title="All 2 branches covered.">            if (!existingPersons.isEmpty()) {</span>
+<span class="fc" id="L113">                throw new IllegalReuseOfEmailAddressException(format(&quot;Found %s existing users with email address %s&quot;,</span>
+<span class="fc" id="L114">                        existingPersons.size(), privacyOfficerEmail.address()));</span>
+            }
+
+            // All users must have a team - just use the first one
+<span class="fc" id="L118">            Team firstTeam = org.getTeams()</span>
+<span class="fc" id="L119">                    .stream()</span>
+<span class="fc" id="L120">                    .findFirst()</span>
+<span class="pc" id="L121">                    .orElseThrow(() -&gt; new IllegalStateException(MessageFormat.format(&quot;Org {0} has no teams&quot;, org)));</span>
+
+            // Build the DTO object required by tolven
+<span class="fc" id="L124">            PKBPersonDTO privacyOfficerDTO = PKBPersonDTO.of(</span>
+<span class="fc" id="L125">                    privacyOfficerDetailsHolder.getTitle(),</span>
+<span class="fc" id="L126">                    privacyOfficerDetailsHolder.getFirstName(),</span>
+<span class="fc" id="L127">                    privacyOfficerDetailsHolder.getLastName(),</span>
+                    privacyOfficerEmail,
+                    UserType.PRIVACY_OFFICER,
+<span class="fc" id="L130">                    superAdmin.getLanguageCode(),</span>
+<span class="fc" id="L131">                    firstTeam.getTimeZoneId());</span>
+
+            // Register account and send invite
+<span class="fc" id="L134">            PKBPerson privacyOfficer = registerAndVerifyPrivacyOfficer(</span>
+                    requestContext, privacyOfficerDTO, firstTeam, superAdmin);
+<span class="fc" id="L136">            pkbEmailMessageManager.invitePrivacyOfficer(org, privacyOfficer, superAdmin);</span>
+
+<span class="fc" id="L138">            LOGGER.info(&quot;Privacy officer {} invited to org {}&quot;, privacyOfficerEmail, org);</span>
+<span class="fc" id="L139">        });</span>
+<span class="fc" id="L140">    }</span>
+
+    public List&lt;PKBPerson&gt; searchPatients(
+            @NotNull EHRRequestContext requestContext,
+            @NotNull Org org,
+            @NotNull PatientSearchParameters searchParameters,
+            int maxRecords,
+            PKBPerson.Lazy... lazies) {
+
+<span class="fc" id="L149">        return teamUserManager.searchAllPatientsForOrg(ImmutableOrgPatientSearchOptionsDto.searchParams()</span>
+<span class="fc" id="L150">                .orgId(org.getId())</span>
+<span class="fc" id="L151">                .searchIdType(searchParameters.getIdentifierType().toString())</span>
+<span class="fc" id="L152">                .searchId(searchParameters.getIdentifier())</span>
+<span class="fc" id="L153">                .searchName(searchParameters.getName())</span>
+<span class="fc" id="L154">                .searchDobYear(searchParameters.getDateOfBirthYear())</span>
+<span class="fc" id="L155">                .searchDobMonth(searchParameters.getDateOfBirthMonth())</span>
+<span class="fc" id="L156">                .searchDobDay(searchParameters.getDateOfBirthDay())</span>
+<span class="fc" id="L157">                .maxRecords(maxRecords)</span>
+<span class="fc" id="L158">                .lazies(lazies)</span>
+<span class="fc" id="L159">                .build());</span>
+    }
+
+    public PKBPerson changeEmailForInvitedOrgUser(
+            @NotNull LoggedInEHRRequestContext requestContext,
+            @NotNull ChangeOrgInviteeEmailDTO invitee,
+            @NotNull PKBPerson superAdmin) {
+
+<span class="fc" id="L167">        PKBPerson person = userManager.getPKBPerson(invitee.getPersonId(), PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L168">        person.setPrimaryEmail(invitee.getEmailAddress(), VersionDetails.of(requestContext, dateTimeService.now()));</span>
+<span class="fc" id="L169">        userManager.updateUser(requestContext, person);</span>
+
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">        if (UserType.PRIVACY_OFFICER == person.getUserType()) {</span>
+<span class="fc" id="L172">            PasswordAccess passwordAccess = userAccessManager.getPasswordAccess(</span>
+<span class="fc" id="L173">                    invitee.getPersonId(),</span>
+                    requestContext);
+<span class="fc" id="L175">            person.setPassword(passwordAccess.getPassword());</span>
+<span class="fc" id="L176">            pkbEmailMessageManager.invitePrivacyOfficer(teamManager.getOrg(invitee.getOrgId()).orElse(null), person, superAdmin);</span>
+        }
+
+<span class="fc" id="L179">        return person;</span>
+    }
+
+    private PKBPerson registerAndVerifyPrivacyOfficer(
+            @NotNull LoggedInEHRRequestContext requestContext,
+            @NotNull PKBPersonDTO privacyOfficerDTO,
+            @NotNull Team team,
+            @NotNull PKBPerson superAdmin) {
+
+        // Create then reload the user
+<span class="fc" id="L189">        userManager.registerUserFull(</span>
+                requestContext,
+                privacyOfficerDTO,
+<span class="fc" id="L192">                team.getId()</span>
+        );
+<span class="fc" id="L194">        LOGGER.debug(&quot;Registered user {}&quot;, privacyOfficerDTO);</span>
+<span class="fc" id="L195">        PKBPerson privacyOfficer = userManager.getPKBPerson(privacyOfficerDTO.getId());</span>
+
+        // Verify
+<span class="fc" id="L198">        IdentityVerification verification = IdentityVerification.of(privacyOfficer, superAdmin, null /* team */, dateTimeService.now());</span>
+<span class="fc" id="L199">        teamUserManager.activateUserAccount(privacyOfficer.getId(), team.getId(), verification);</span>
+<span class="fc" id="L200">        LOGGER.debug(&quot;Activated user {} with verification {}&quot;, privacyOfficer, verification);</span>
+
+<span class="fc" id="L202">        return privacyOfficer;</span>
+    }
+
+    public long optOutPatient(
+            @NotNull LoggedInEHRRequestContext requestContext,
+            @NotNull PKBPerson privacyOfficer,
+            @NotNull Org org,
+            Team team,
+            long patientId,
+            @NotNull List&lt;Attachment&gt; attachments) {
+<span class="fc" id="L212">        return transactional(() -&gt; {</span>
+<span class="fc" id="L213">            @NotNull PKBPerson patient = userManager.getPKBPerson(patientId);</span>
+
+<span class="fc" id="L215">            long insertId = doOptOutPatient(requestContext, patient, attachments);</span>
+
+<span class="fc" id="L217">            pkbEmailMessageManager.sendSharingDisabledNotificationToPatient(privacyOfficer, patient, org, team, dateTimeService.nowZonedDateTime());</span>
+
+<span class="fc" id="L219">            return insertId;</span>
+        });
+    }
+
+    /**
+     * Bulk patient disable sharing
+     * Not yet updated for batch handling; this should be refactored for general use
+     */
+    public List&lt;Map&lt;String, Long&gt;&gt; disableSharingForPatients(
+            @NotNull LoggedInEHRRequestContext requestContext,
+            @NotNull PKBPerson privacyOfficer,
+            @NotNull Org org,
+            Team team,
+            @NotNull Map&lt;Long, List&lt;Attachment&gt;&gt; patientIdAttachmentsMap) {
+
+        // only keep patients that have sharing ENABLED (not already opted out)
+<span class="fc" id="L235">        List&lt;PKBPerson&gt; patients = userManager.getPKBPersonList(patientIdAttachmentsMap.keySet())</span>
+<span class="fc" id="L236">                .stream()</span>
+<span class="fc" id="L237">                .filter(p -&gt; Optional.ofNullable(p.getOptoutDetails()).map(PatientOptOut::isSharingEnabled).orElse(true))</span>
+<span class="fc" id="L238">                .collect(Collectors.toList());</span>
+
+<span class="fc" id="L240">        List&lt;Map&lt;String, Long&gt;&gt; patientAndOptoutIds = new ArrayList&lt;&gt;();</span>
+
+        // per patient
+<span class="fc" id="L243">        patients.forEach(pat -&gt; {</span>
+<span class="fc" id="L244">            List&lt;Attachment&gt; attachments = patientIdAttachmentsMap.get(pat.getId());</span>
+<span class="fc" id="L245">            long optOutId = optOutPatient(requestContext, privacyOfficer, org, team, pat.getId(), attachments);</span>
+<span class="fc" id="L246">            patientAndOptoutIds.add(LinkedHashMap.of(&quot;patient_ID&quot;, pat.getId(), &quot;confirmation_ID&quot;, optOutId).toJavaMap());</span>
+<span class="fc" id="L247">        });</span>
+
+<span class="fc" id="L249">        return patientAndOptoutIds;</span>
+    }
+
+    private long doOptOutPatient(@NotNull LoggedInEHRRequestContext requestContext, @NotNull PKBPerson patient, @NotNull List&lt;Attachment&gt; attachments) {
+<span class="fc" id="L253">        Long accountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">        if (patient.getOptoutDetails() == null) {</span>
+<span class="fc" id="L255">            PatientOptOut optOut = new PatientOptOut();</span>
+<span class="fc" id="L256">            optOut.setPersonId(patient.getId());</span>
+<span class="fc" id="L257">            patient.setOptoutDetails(optOut);</span>
+        }
+
+<span class="fc" id="L260">        long documentationId = changePatientSharing(requestContext, false, accountId, patient, attachments);</span>
+<span class="fc" id="L261">        consentService.findAllActivePatientConsents(patient.getId())</span>
+<span class="fc" id="L262">                .stream()</span>
+<span class="fc" id="L263">                .map(pc -&gt; PatientConsentUpdateDTO.revocationOf(pc, sourceDetailsMapper.mapFromEHRRequestContext(requestContext), PATIENT_OPT_OUT))</span>
+<span class="fc" id="L264">                .forEach(update -&gt; {</span>
+<span class="fc" id="L265">                    patientConsentManager.updatePatientConsent(requestContext, update);</span>
+<span class="fc" id="L266">                });</span>
+
+        // Cancel all invitations
+<span class="fc" id="L269">        invitationManager.getInvitations(patient.getId())</span>
+<span class="fc" id="L270">                .forEach(this::cancelInvitation);</span>
+
+<span class="fc" id="L272">        LOGGER.info(&quot;Patient account {} opted out from sharing&quot;, accountId);</span>
+
+<span class="fc" id="L274">        return documentationId;</span>
+    }
+
+    private long changePatientSharing(
+            LoggedInEHRRequestContext requestContext,
+            boolean sharingEnabled,
+            long accountId,
+            PKBPerson patient,
+            List&lt;Attachment&gt; attachments) {
+
+<span class="fc" id="L284">        PatientOptOutDocumentation documentation = new PatientOptOutDocumentation(new SourceDetails(requestContext));</span>
+<span class="fc" id="L285">        documentation.getBaseFields().setPrivacyFlag(PrivacyFlag.GENERAL);</span>
+<span class="fc" id="L286">        documentation.setSharingEnabled(sharingEnabled);</span>
+<span class="fc" id="L287">        documentation.setAttachmentList(attachments);</span>
+<span class="fc" id="L288">        documentation.getBaseFields().generateNewRandomUniqueId();</span>
+<span class="fc" id="L289">        EHRData ehrData = beanFactory.getEhrRemote().populateEHRData(documentation, accountId, PatientOptOutDocumentation.MS_PATH, requestContext);</span>
+<span class="fc" id="L290">        long documentationId = beanFactory.getEhrRemote().saveEHRData(requestContext, ehrData);</span>
+
+<span class="fc" id="L292">        chunkedDocManager.createAttachments(documentationId, documentation.getAttachmentList(), requestContext.getAccessingUserId(), accountId);</span>
+
+<span class="fc" id="L294">        patient.getOptoutDetails().setPersonId(patient.getId());</span>
+<span class="fc" id="L295">        patient.getOptoutDetails().setDocumentationId(documentationId);</span>
+<span class="fc" id="L296">        patient.getOptoutDetails().setSharingEnabled(sharingEnabled);</span>
+
+<span class="fc" id="L298">        VersionDetails newVersionDetails = VersionDetails.of(requestContext, dateTimeService.now());</span>
+<span class="fc" id="L299">        patient.getOptoutDetails().setVersionDetails(newVersionDetails);</span>
+
+<span class="fc" id="L301">        beanFactory.getPKBPersonBean().savePatientOptOut(patient.getOptoutDetails());</span>
+
+<span class="fc" id="L303">        return documentationId;</span>
+    }
+
+    private void cancelInvitation(PKBInvitation invitation) {
+<span class="fc" id="L307">        invitationManager.updateInvitationStatus(invitation.getPublicId(), EXPIRED);</span>
+<span class="fc" id="L308">    }</span>
+
+    public long optInPatient(
+            @NotNull LoggedInEHRRequestContext requestContext,
+            @NotNull PKBPerson privacyOfficer,
+            @NotNull Org org,
+            Team team,
+            long patientId,
+            @NotNull List&lt;Attachment&gt; attachments) {
+<span class="fc" id="L317">        PKBPerson patient = userManager.getPKBPerson(patientId);</span>
+<span class="fc" id="L318">        long insertId = transactional(() -&gt; doOptInPatient(requestContext, attachments, patient));</span>
+<span class="fc" id="L319">        pkbEmailMessageManager.sendSharingEnabledNotificationToPatient(privacyOfficer, patient, org, team, dateTimeService.nowZonedDateTime());</span>
+<span class="fc" id="L320">        return insertId;</span>
+    }
+
+    private long doOptInPatient(@NotNull LoggedInEHRRequestContext requestContext, @NotNull List&lt;Attachment&gt; attachments, PKBPerson patient) {
+<span class="fc" id="L324">        checkNotNull(patient.getOptoutDetails(), &quot;patient.optoutDetails&quot;);</span>
+
+<span class="fc" id="L326">        Long accountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="fc" id="L327">        long documentationId = changePatientSharing(requestContext, true, accountId, patient, attachments);</span>
+
+<span class="fc" id="L329">        LOGGER.info(&quot;Patient account {} opted back in to sharing&quot;, accountId);</span>
+
+<span class="fc" id="L331">        return documentationId;</span>
+    }
+
+    public List&lt;PatientOptOutDocumentation&gt; getOptOutDocumentation(@NotNull LoggedInEHRRequestContext requestContext, long patientId) {
+<span class="fc" id="L335">        Long accountId = userManager.getDefaultAccountId(patientId);</span>
+<span class="fc" id="L336">        return doGetOptOutDocumentation(requestContext.withConsentNotRequired(), accountId);</span>
+    }
+
+    private List&lt;PatientOptOutDocumentation&gt; doGetOptOutDocumentation(@NotNull LoggedInEHRRequestContext requestContext, Long accountId) {
+
+<span class="fc" id="L341">        EHRSearch&lt;PatientOptOutDocumentation&gt; search = new EHRSearch&lt;&gt;(</span>
+<span class="fc" id="L342">                accountId,</span>
+                PatientOptOutDocumentation.class,
+                PatientOptOutDocumentation.MS_PATH);
+<span class="fc" id="L345">        search.setOrderBy(&quot;persistedDate&quot;, EHRSearch.OrderByDirection.Desc);</span>
+
+<span class="fc" id="L347">        List&lt;PatientOptOutDocumentation&gt; documentation = beanFactory.getEhrRemote().queryTypedData(search, requestContext);</span>
+
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">        if (documentation != null) {</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">            for (PatientOptOutDocumentation d : documentation) {</span>
+<span class="fc" id="L351">                List&lt;Attachment&gt; attachments = chunkedDocManager.findAttachmentsAsAttachment(d.getId());</span>
+<span class="fc" id="L352">                d.setAttachmentList(attachments);</span>
+<span class="fc" id="L353">            }</span>
+        } else {
+<span class="nc" id="L355">            documentation = Lists.newArrayList();</span>
+        }
+
+<span class="fc" id="L358">        return documentation;</span>
+    }
+
+    public long save(Org org) {
+<span class="fc" id="L362">        return orgRepository.saveAndFlush(org).getId();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

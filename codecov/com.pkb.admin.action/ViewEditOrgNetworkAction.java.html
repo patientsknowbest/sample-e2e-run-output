@@ -1,0 +1,280 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ViewEditOrgNetworkAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.admin.action</a> &gt; <span class="el_source">ViewEditOrgNetworkAction.java</span></div><h1>ViewEditOrgNetworkAction.java</h1><pre class="source lang-java linenums">package com.pkb.admin.action;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.datamodel.ImmutableOrgNetworkMemberNew;
+import com.pkb.datamodel.Org;
+import com.pkb.datamodel.OrgNetwork;
+import com.pkb.datamodel.OrgNetworkExisting;
+import com.pkb.datamodel.OrgNetworkMemberExisting;
+import com.pkb.datamodel.OrgNetworkMemberView;
+import com.pkb.domain.OrgNetworkService;
+import com.pkb.domain.exception.OrgNetworkException;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.MailException;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+
+<span class="fc" id="L24">public class ViewEditOrgNetworkAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 8601038524733891459L;
+<span class="fc" id="L27">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private Long orgNetworkId;
+    private OrgNetworkExisting orgNetwork;
+    private List&lt;OrgNetworkMemberView&gt; orgNetworkMembers;
+
+    private Long modifiedOrgId;
+    private OrgNetworkMemberView modifiedOrg;
+
+    // Used when logged in as superadmin, to populate the orgs available to add to this network
+    private List&lt;Org&gt; orgsNotInAnyNetwork;
+
+    // Used when logged in as org admin, this is the membership info for your org
+    private OrgNetworkMemberView myMembership;
+
+
+    // Dependencies
+    private OrgNetworkService orgNetworkService;
+    private PKBEmailMessageManager pkbEmailMessageManager;
+
+
+    private Long currentUserOrgId;
+
+
+    @Override
+    public void prepare() throws Exception {
+<span class="fc" id="L53">        currentUserOrgId = loggedInUserUtil.getOptionalLoggedInUserOrg().map(com.pkb.institute.entity.Org::getId).orElse(null);</span>
+<span class="fc" id="L54">    }</span>
+
+    public String viewOrgNetwork() {
+<span class="fc" id="L57">        UserType loggedInUserType = loggedInUserUtil.getLoggedInUserType();</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">        if (UserType.SUPER_ADMIN == loggedInUserType) {</span>
+            // Can only add other orgs if they're not already in a network
+<span class="fc" id="L60">            orgsNotInAnyNetwork = orgNetworkService.getOrgsNotInAnyNetwork();</span>
+        }
+
+<span class="fc" id="L63">        populateOrgNetwork();</span>
+<span class="fc" id="L64">        return Action.SUCCESS;</span>
+    }
+
+    public String activateOrgInOrgNetworkForm() {
+<span class="fc" id="L68">        populateOrgNetwork();</span>
+<span class="fc" id="L69">        return Action.SUCCESS;</span>
+    }
+
+    public String activateOrgInOrgNetwork() {
+<span class="fc" id="L73">        LoggedInEHRRequestContext requestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L74">        populateOrgNetwork();</span>
+<span class="fc" id="L75">        var orgNetworkActivatedFor = orgNetworkService.getOrgNetworkById(orgNetworkId);</span>
+<span class="fc" id="L76">        orgNetworkService.activateOrgInOrgNetwork(modifiedOrgId, orgNetworkId, requestContext.getAccessingUserId())</span>
+<span class="pc" id="L77">                .doOnError(err -&gt; LOGGER.error(&quot;Error during initial sync of org network member org {} to org network {}&quot;, modifiedOrgId, orgNetworkId, err))</span>
+<span class="fc" id="L78">                .subscribe((activated) -&gt; {</span>
+<span class="fc bfc" id="L79" title="All 2 branches covered.">                    if (activated) {</span>
+<span class="fc" id="L80">                        userManager.findOrgCoords(modifiedOrgId)</span>
+<span class="fc" id="L81">                                .forEach(orgCoord -&gt; {</span>
+                                    try {
+<span class="fc" id="L83">                                        pkbEmailMessageManager.notifyOrgCoordOfOrgNetworkActivation(orgCoord, modifiedOrg,</span>
+<span class="fc" id="L84">                                                orgNetworkActivatedFor, requestContext.getAccessingUserId());</span>
+<span class="nc" id="L85">                                    } catch (MailException e) {</span>
+<span class="nc" id="L86">                                        LOGGER.error(&quot;failed to send email notification of network activation to {}&quot;, orgCoord, e);</span>
+<span class="fc" id="L87">                                    }</span>
+<span class="fc" id="L88">                                });</span>
+                    }
+<span class="fc" id="L90">        });</span>
+<span class="fc" id="L91">        return Action.SUCCESS;</span>
+    }
+
+    public String addOrgToOrgNetwork() {
+        try {
+<span class="fc" id="L96">            var newMember = ImmutableOrgNetworkMemberNew.builder()</span>
+<span class="fc" id="L97">                    .orgId(modifiedOrgId)</span>
+<span class="fc" id="L98">                    .orgNetworkId(orgNetworkId)</span>
+<span class="fc" id="L99">                    .createdByPersonId(getLoggedInEHRRequestContext().getAccessingUserId())</span>
+<span class="fc" id="L100">                    .build();</span>
+
+<span class="fc" id="L102">            var onm = orgNetworkService.addOrgNetworkMember(newMember);</span>
+<span class="fc" id="L103">            sendNetworkInvite(onm);</span>
+<span class="fc" id="L104">        } catch (OrgNetworkException e) {</span>
+<span class="fc" id="L105">            addActionError(getText(e.getErrorCode(), e.getArguments()));</span>
+<span class="fc" id="L106">        }</span>
+<span class="fc" id="L107">        return Action.SUCCESS;</span>
+    }
+
+    public String removeOrgFromOrgNetworkForm() {
+<span class="nc" id="L111">        populateOrgNetwork();</span>
+<span class="nc" id="L112">        return Action.SUCCESS;</span>
+    }
+
+    public String removeOrgFromOrgNetwork() {
+<span class="nc" id="L116">        orgNetworkService.removeMemberOrg(orgNetworkId, modifiedOrgId);</span>
+<span class="nc" id="L117">        return Action.SUCCESS;</span>
+    }
+
+    /**
+     * Used by an org admin to reject the inclusion of their org in a network
+     */
+    public String rejectOrgNetwork() {
+<span class="fc" id="L124">        var org = orgNetworkService.removeMemberOrg(orgNetworkId, modifiedOrgId);</span>
+
+        // Send notification
+<span class="fc" id="L127">        var orgNetworkRejected = orgNetworkService.getOrgNetworkById(orgNetworkId);</span>
+<span class="fc" id="L128">        List&lt;PKBPerson&gt; orgCoords = userManager.findOrgCoords(orgNetworkRejected.getLeadingOrg().getId());</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        for (PKBPerson orgCoord : orgCoords) {</span>
+            try {
+<span class="fc" id="L131">                pkbEmailMessageManager.notifyLeaderOrgCoordOfInvitationRejection(orgCoord, orgNetworkRejected, org.getName(),</span>
+<span class="fc" id="L132">                        getLoggedInEHRRequestContext().getAccessingUserId());</span>
+<span class="nc" id="L133">            } catch (MailException e) {</span>
+<span class="nc" id="L134">                LOGGER.error(&quot;failed to send email notification of network rejection to {}&quot;, orgCoord, e);</span>
+<span class="fc" id="L135">            }</span>
+<span class="fc" id="L136">        }</span>
+<span class="fc" id="L137">        return Action.SUCCESS;</span>
+    }
+
+    /**
+     * Used by an org admin to approve the inclusion of their org in a network
+     */
+    public String approveOrgNetwork() {
+<span class="fc" id="L144">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+        try {
+<span class="fc" id="L146">            orgNetworkService.approveMember(currentUserOrgId, orgNetworkId, loggedInEHRRequestContext.getAccessingUserId());</span>
+
+<span class="fc" id="L148">            var orgNetworkApprovedFor = orgNetworkService.getOrgNetworkById(orgNetworkId);</span>
+
+            // Send notification
+<span class="fc" id="L151">            List&lt;PKBPerson&gt; orgCoords = userManager.findOrgCoords(orgNetworkApprovedFor.getLeadingOrg().getId());</span>
+<span class="fc bfc" id="L152" title="All 2 branches covered.">            for (PKBPerson orgCoord : orgCoords) {</span>
+                try {
+<span class="fc" id="L154">                    pkbEmailMessageManager.notifyOrgCoordOfOrgNetworkApproval(orgCoord, loggedInUserUtil.getLoggedInUserOrg(),</span>
+<span class="fc" id="L155">                            loggedInUserUtil.getLoggedInUserPrimaryTeam(), orgNetworkApprovedFor, loggedInEHRRequestContext.getAccessingUserId());</span>
+<span class="nc" id="L156">                } catch (MailException e) {</span>
+<span class="nc" id="L157">                    LOGGER.error(&quot;failed to send email notification of network approval to {}&quot;, orgCoord, e);</span>
+<span class="fc" id="L158">                }</span>
+<span class="fc" id="L159">            }</span>
+<span class="nc" id="L160">        } catch (Exception e) {</span>
+<span class="nc" id="L161">            addActionError(getText(&quot;viewEditOrgNetwork.txt.approval_error&quot;));</span>
+<span class="nc" id="L162">            LOGGER.error(&quot;Failed approving org network id: {}, user: {}&quot;, orgNetworkId, loggedInEHRRequestContext.getAccessingUserId(), e);</span>
+<span class="fc" id="L163">        }</span>
+
+<span class="fc" id="L165">        return Action.SUCCESS;</span>
+    }
+
+
+    private void populateOrgNetwork() {
+<span class="fc" id="L170">        UserType loggedInUserType = loggedInUserUtil.getLoggedInUserType();</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">        if (UserType.ORG_COORD == loggedInUserType) {</span>
+<span class="fc" id="L172">            orgNetwork = orgNetworkService.getOrgNetworkOfMember(currentUserOrgId, false)</span>
+<span class="fc" id="L173">                    .peek(returnedOrgNetwork -&gt; {</span>
+<span class="fc" id="L174">                        orgNetworkId = returnedOrgNetwork.getId();</span>
+<span class="fc" id="L175">                    })</span>
+<span class="fc" id="L176">                    .getOrNull();</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">        } else if (UserType.SUPER_ADMIN == loggedInUserType) {</span>
+<span class="fc" id="L178">            orgNetwork = orgNetworkService.getOrgNetworkById(orgNetworkId);</span>
+        } else {
+<span class="nc" id="L180">            throw new IllegalStateException(&quot;User &quot; + loggedInUserUtil.getLoggedInUserId() + &quot; of illegal type &quot; + loggedInUserType + &quot; has managed to access org networking pages&quot;);</span>
+        }
+
+<span class="fc" id="L183">        populateOrgNetworkMembers();</span>
+<span class="fc" id="L184">    }</span>
+
+    private void populateOrgNetworkMembers() {
+<span class="fc bfc" id="L187" title="All 2 branches covered.">        if (orgNetwork != null) {</span>
+<span class="fc" id="L188">            orgNetworkMembers = orgNetworkService.getOrgNetworkMembers(orgNetworkId);</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">            if (currentUserOrgId != null) {</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">                myMembership = orgNetworkMembers.stream().filter(it -&gt; it.getOrgId() == currentUserOrgId).findFirst().orElse(null);</span>
+            }
+<span class="fc bfc" id="L192" title="All 2 branches covered.">            if (modifiedOrgId != null) {</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">                modifiedOrg = orgNetworkMembers.stream().filter(it -&gt; it.getOrgId() == modifiedOrgId).findFirst().orElse(null);</span>
+            }
+        }
+<span class="fc" id="L196">    }</span>
+
+
+    private void sendNetworkInvite(OrgNetworkMemberExisting newMember) {
+<span class="fc" id="L200">        var orgNetworkForInvite = orgNetworkService.getOrgNetworkById(newMember.getOrgNetworkId());</span>
+<span class="fc" id="L201">        String actorId = getEHRRequestContext().getMaybeAccessingUserId()</span>
+<span class="fc" id="L202">                .map(Object::toString).orElse(null);</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">        for (PKBPerson orgCoord : userManager.findOrgCoords(newMember.getOrgId())) {</span>
+            try {
+<span class="fc" id="L205">                pkbEmailMessageManager.notifyOrgCoordOfInvitationToOrgNetwork(orgCoord, orgNetworkForInvite, actorId);</span>
+<span class="nc" id="L206">            } catch (MailException e) {</span>
+<span class="nc" id="L207">                LOGGER.error(&quot;failed to send email notification of network addition to {}&quot;, orgCoord, e);</span>
+<span class="fc" id="L208">            }</span>
+<span class="fc" id="L209">        }</span>
+<span class="fc" id="L210">    }</span>
+
+    // &lt;editor-fold desc=&quot;Accessors&quot;&gt;
+    public long getOrgNetworkId() {
+<span class="fc" id="L214">        return orgNetworkId;</span>
+    }
+
+    public void setOrgNetworkId(long orgNetworkId) {
+<span class="fc" id="L218">        this.orgNetworkId = orgNetworkId;</span>
+<span class="fc" id="L219">    }</span>
+
+    public OrgNetworkService getOrgNetworkService() {
+<span class="nc" id="L222">        return orgNetworkService;</span>
+    }
+
+    public void setOrgNetworkService(OrgNetworkService orgNetworkService) {
+<span class="fc" id="L226">        this.orgNetworkService = orgNetworkService;</span>
+<span class="fc" id="L227">    }</span>
+
+    public OrgNetwork getOrgNetwork() {
+<span class="fc" id="L230">        return orgNetwork;</span>
+    }
+
+    public void setOrgNetwork(OrgNetworkExisting orgNetwork) {
+<span class="nc" id="L234">        this.orgNetwork = orgNetwork;</span>
+<span class="nc" id="L235">    }</span>
+
+    public List&lt;Org&gt; getOrgsNotInAnyNetwork() {
+<span class="fc" id="L238">        return orgsNotInAnyNetwork;</span>
+    }
+
+    public Long getModifiedOrgId() {
+<span class="fc" id="L242">        return modifiedOrgId;</span>
+    }
+
+    public void setModifiedOrgId(Long modifiedOrgId) {
+<span class="fc" id="L246">        this.modifiedOrgId = modifiedOrgId;</span>
+<span class="fc" id="L247">    }</span>
+
+    public OrgNetworkMemberView getModifiedOrg() {
+<span class="fc" id="L250">        return modifiedOrg;</span>
+    }
+
+    public String getTab() {
+<span class="fc" id="L254">        return &quot;viewEditOrgNetwork&quot;;</span>
+    }
+
+    public OrgNetworkMemberView getMyMembership() {
+<span class="fc" id="L258">        return myMembership;</span>
+    }
+
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L263">        this.userManager = userManager;</span>
+<span class="fc" id="L264">    }</span>
+
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L267">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L268">    }</span>
+
+    public Long getCurrentUserOrgId() {
+<span class="fc" id="L271">        return currentUserOrgId;</span>
+    }
+
+    public List&lt;OrgNetworkMemberView&gt; getOrgNetworkMembers() {
+<span class="fc" id="L275">        return orgNetworkMembers;</span>
+    }
+
+    // &lt;/editor-fold&gt;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

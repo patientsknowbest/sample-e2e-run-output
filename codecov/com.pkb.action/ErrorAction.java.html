@@ -1,0 +1,246 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ErrorAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action</a> &gt; <span class="el_source">ErrorAction.java</span></div><h1>ErrorAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id:  ActivateUserAction.java May 25, 2009 3:05:05 PM anamika$
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.opensymphony.xwork2.Action;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.util.FrameFilter;
+import com.pkb.util.ContextUserUtil;
+import com.pkb.util.LoggedInUserUtil;
+import com.pkb.util.SupportCodeGenerator;
+import io.prometheus.client.Counter;
+import io.vavr.Tuple;
+import io.vavr.Tuple3;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.struts2.interceptor.ServletRequestAware;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import javax.servlet.http.HttpServletRequest;
+import java.time.Instant;
+import java.util.Map;
+import java.util.Optional;
+
+/**
+ * Log error details then redirect to error JSP
+ */
+<span class="fc" id="L38">public class ErrorAction // extends ActionSupport</span>
+        // DO NOT extend ActionSupport -- that makes us ValidationAware...
+        // which means that if there are any ActionErrors on the stack, the &quot;input&quot; result will
+        // be returned automatically instead of executing our logging action.
+        implements Action, ServletRequestAware {
+
+    private static final String EXCEPTION_CLASS_LABEL = &quot;exceptionClass&quot;;
+    private static final String EXCEPTION_METHOD_LABEL = &quot;method&quot;;
+<span class="fc" id="L46">    private static final Counter EXCEPTION_COUNTER = Counter.build()</span>
+<span class="fc" id="L47">            .name(&quot;pkb_phr_struts_erroraction&quot;)</span>
+<span class="fc" id="L48">            .help(&quot;Exceptions handled by the global Struts exception handler Action&quot;)</span>
+<span class="fc" id="L49">            .labelNames(EXCEPTION_CLASS_LABEL, EXCEPTION_METHOD_LABEL)</span>
+<span class="fc" id="L50">            .register();</span>
+
+<span class="fc" id="L52">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String RESULT_PRE_LOGIN = &quot;preLogin&quot;;
+    private static final String RESULT_POST_LOGIN = &quot;postLogin&quot;;
+
+    // these are set by struts as part of error handling
+    private Throwable exception;
+    private String exceptionStack;
+
+    private HttpServletRequest servletRequest;
+
+    @Autowired
+    private ContextUserUtil contextUserUtil;
+
+    @Autowired
+    private LoggedInUserUtil loggedInUserUtil;
+
+    @Autowired
+    private PhrConfig config;
+
+    @Autowired
+    private SupportCodeGenerator supportCodeGenerator;
+
+    private ErrorPageViewModel errorPageViewModel;
+
+    /**
+     * Log the error and relevant details; verbose if not on production
+     */
+    @Override
+    public String execute() {
+<span class="fc" id="L82">        String exceptionType = &quot;no_exception&quot;;</span>
+<span class="fc" id="L83">        Throwable filtered = null;</span>
+<span class="fc bfc" id="L84" title="All 2 branches covered.">        if (exception != null) {</span>
+<span class="fc" id="L85">            exceptionType = exception.getClass().getSimpleName();</span>
+<span class="fc" id="L86">            filtered = FrameFilter.filter(exception);</span>
+        }
+<span class="fc" id="L88">        EXCEPTION_COUNTER.labels(exceptionType, &quot;&quot; + servletRequest.getMethod()).inc();</span>
+
+<span class="fc" id="L90">        Tuple3&lt;String, ErrorPageViewModel, String&gt; results = constructResult(servletRequest, exception, exceptionStack);</span>
+
+<span class="fc" id="L92">        errorPageViewModel = results._2;</span>
+<span class="fc" id="L93">        LOGGER.error(results._3, filtered);</span>
+<span class="fc" id="L94">        return results._1;</span>
+    }
+
+    @VisibleForTesting
+    Tuple3&lt;String, ErrorPageViewModel, String&gt; constructResult(HttpServletRequest request, Throwable throwable, String stack) {
+<span class="fc" id="L99">        boolean verboseLogging = false; // (set within try block below)</span>
+<span class="fc" id="L100">        var builder = ImmutableErrorPageViewModel.builder();</span>
+<span class="fc" id="L101">        StringBuilder messageBuilder = new StringBuilder(300);</span>
+<span class="fc" id="L102">        String supportCode = null;</span>
+<span class="fc" id="L103">        String result = null;</span>
+<span class="fc" id="L104">        String url = null;</span>
+        try {
+<span class="fc" id="L106">            url = request.getRequestURI();</span>
+<span class="fc" id="L107">            Optional&lt;PersonAuthInfo&gt; maybeLoggedInUser = loggedInUserUtil.getPrincipal();</span>
+<span class="fc" id="L108">            Long maybeContextUserId = contextUserUtil.getContextUserId();</span>
+<span class="fc" id="L109">            supportCode = supportCodeGenerator.getSupportCode(maybeLoggedInUser, maybeContextUserId);</span>
+
+<span class="fc bfc" id="L111" title="All 2 branches covered.">            if (throwable == null) {</span>
+<span class="fc" id="L112">                messageBuilder.append(&quot;Error action (null exception)&quot;);</span>
+            } else {
+<span class="fc" id="L114">                messageBuilder.append(&quot;Exception caught by Struts&quot;);</span>
+            }
+
+            try {
+                // NOT on production for security reasons
+<span class="fc" id="L119">                verboseLogging = config.isDisplayOfSensitiveErrorInformationEnabled();</span>
+<span class="fc" id="L120">                builder.sensitiveDetailShown(verboseLogging);</span>
+<span class="fc bfc" id="L121" title="All 4 branches covered.">                if (verboseLogging &amp;&amp; throwable != null) {</span>
+<span class="fc" id="L122">                    builder.exceptionMessage(throwable.getMessage());</span>
+<span class="fc" id="L123">                    builder.exceptionStacktrace(stack);</span>
+                }
+
+<span class="fc bfc" id="L126" title="All 2 branches covered.">                if (maybeLoggedInUser.isPresent()) {</span>
+<span class="fc" id="L127">                    messageBuilder.append(&quot;; user &quot;)</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">                            .append(verboseLogging ? loggedInUserUtil.getLoggedInPerson() : maybeLoggedInUser.get().getId());</span>
+
+<span class="fc" id="L130">                    result = RESULT_POST_LOGIN;</span>
+                } else {
+<span class="fc" id="L132">                    messageBuilder.append(&quot;; no signed-in user&quot;);</span>
+<span class="fc" id="L133">                    result = RESULT_PRE_LOGIN;</span>
+                }
+<span class="nc" id="L135">            } catch (Exception e) {</span>
+<span class="nc" id="L136">                LOGGER.error(&quot;Exception while handling struts error (orig error log below)&quot;, e);</span>
+<span class="nc" id="L137">                messageBuilder.append(&quot; error while checking user, see log above &quot;);</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">                result = result == null ? RESULT_PRE_LOGIN : result; // we don't know if there's a user...</span>
+<span class="fc" id="L139">            }</span>
+
+            try {
+                // attach request params if this is not production -- otherwise, just URL and web browser
+<span class="fc" id="L143">                attachRequestData(messageBuilder, verboseLogging, request);</span>
+
+                // TODO: log data in session? only if we start dumping each error to its own file
+<span class="nc" id="L146">            } catch (Exception e) {</span>
+<span class="nc" id="L147">                messageBuilder.append(&quot; error while logging request data, see log above &quot;);</span>
+<span class="nc" id="L148">                LOGGER.error(&quot;Exception while handling struts error (orig error log below)&quot;, e);</span>
+<span class="fc" id="L149">            }</span>
+
+<span class="nc" id="L151">        } catch (Exception e) {</span>
+<span class="nc" id="L152">            messageBuilder.append(&quot; error while handling exception, see log above &quot;);</span>
+<span class="nc" id="L153">            LOGGER.error(&quot;Exception while handling struts error (orig error log below)&quot;, e);</span>
+<span class="nc bnc" id="L154" title="All 2 branches missed.">            result = result == null ? RESULT_PRE_LOGIN : result; // we don't know if there's a user...</span>
+<span class="fc" id="L155">        }</span>
+
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">        url = url == null ? &quot;no-url&quot; : url;</span>
+<span class="fc" id="L158">        builder.url(url);</span>
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">        supportCode = supportCode == null ? SupportCodeGenerator.getSupportCode(&quot;e&quot;, &quot;e&quot;, now()) : supportCode;</span>
+<span class="fc" id="L160">        builder.supportCode(supportCode).sensitiveDetailShown(verboseLogging);</span>
+<span class="fc" id="L161">        messageBuilder.append(&quot;, support code: &quot;).append(supportCode);</span>
+<span class="fc" id="L162">        return Tuple.of(result, builder.build(), messageBuilder.toString());</span>
+    }
+
+    @VisibleForTesting
+    Instant now() {
+<span class="nc" id="L167">        return Instant.now();</span>
+    }
+
+    private void attachRequestData(StringBuilder messageBuilder, boolean verbose, HttpServletRequest request) {
+<span class="fc" id="L171">        messageBuilder.append(&quot;; REQUEST: {&quot;);</span>
+<span class="fc" id="L172">        messageBuilder.append(&quot;method &quot;).append(request.getMethod()).append(&quot;, &quot;)</span>
+<span class="fc" id="L173">                .append(&quot;url &quot;).append(request.getRequestURL()).append(&quot;, &quot;)</span>
+<span class="fc" id="L174">                .append(&quot;referer &quot;).append(request.getHeader(&quot;referer&quot;)).append(&quot;, &quot;)</span>
+<span class="fc" id="L175">                .append(&quot;user-agent &quot;).append(request.getHeader(&quot;user-agent&quot;)).append(&quot;, &quot;);</span>
+
+        // only show request params if verbose
+<span class="fc bfc" id="L178" title="All 2 branches covered.">        if (verbose) {</span>
+            @SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L180">            Map&lt;String, String[]&gt; paramMap = request.getParameterMap();</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">            for (Map.Entry&lt;String, String[]&gt; stringEntry : paramMap.entrySet()) {</span>
+
+<span class="fc" id="L183">                messageBuilder.append(&quot;param &quot;).append(stringEntry.getKey()).append(&quot;: &quot;)</span>
+<span class="fc" id="L184">                        .append(StringUtils.join(stringEntry.getValue(), &quot;,&quot;))</span>
+<span class="fc" id="L185">                        .append(&quot;, &quot;);</span>
+<span class="fc" id="L186">            }</span>
+        }
+
+        // strip trailing comma
+<span class="fc" id="L190">        messageBuilder.deleteCharAt(messageBuilder.length() - 1);</span>
+<span class="fc" id="L191">        messageBuilder.append(&quot;}&quot;);</span>
+<span class="fc" id="L192">    }</span>
+
+    @Override
+    public void setServletRequest(HttpServletRequest request) {
+<span class="fc" id="L196">        this.servletRequest = request;</span>
+
+<span class="fc" id="L198">    }</span>
+
+    public Throwable getException() {
+<span class="nc" id="L201">        return exception;</span>
+    }
+
+    public void setException(Throwable exception) {
+<span class="fc" id="L205">        this.exception = exception;</span>
+<span class="fc" id="L206">    }</span>
+
+    public String getExceptionStack() {
+<span class="nc" id="L209">        return exceptionStack;</span>
+    }
+
+    public void setExceptionStack(String exceptionStack) {
+<span class="fc" id="L213">        this.exceptionStack = exceptionStack;</span>
+<span class="fc" id="L214">    }</span>
+
+    public HttpServletRequest getServletRequest() {
+<span class="nc" id="L217">        return servletRequest;</span>
+    }
+
+    public ErrorPageViewModel getErrorPageViewModel() {
+<span class="fc" id="L221">        return errorPageViewModel;</span>
+    }
+
+    public void setErrorPageViewModel(ErrorPageViewModel errorPageViewModel) {
+<span class="nc" id="L225">        this.errorPageViewModel = errorPageViewModel;</span>
+<span class="nc" id="L226">    }</span>
+
+    @Value.Immutable
+    @Value.Style(get = {&quot;get*&quot;, &quot;is*&quot;})
+    public interface ErrorPageViewModel {
+
+        String getSupportCode();
+
+        @Nullable
+        String getUrl();
+
+        boolean isSensitiveDetailShown();
+
+        @Nullable
+        String getExceptionMessage();
+
+        @Nullable
+        String getExceptionStacktrace();
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

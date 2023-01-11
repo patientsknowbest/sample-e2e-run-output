@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PatientActivationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.patient</a> &gt; <span class="el_source">PatientActivationManager.java</span></div><h1>PatientActivationManager.java</h1><pre class="source lang-java linenums">package com.pkb.patient;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.ImmutableRegistrationEventNew;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.RegistrationEventService;
+import com.pkb.domain.duplicate.person.PersonService;
+import com.pkb.dto.LetterInvitationDTO;
+import com.pkb.entities.enums.RegistrationMethod;
+import com.pkb.exception.PatientNotFoundException;
+import com.pkb.institute.entity.Team;
+import com.pkb.patient.activation.letter.AccountDetailsDTO;
+import com.pkb.patient.activation.letter.InvitationTokenDTO;
+import com.pkb.patient.activation.nhslogin.NhsLoginAccountDetailsDTO;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.invitation.impl.LetterInvitationService;
+import com.pkb.service.oauth2.NhsLoginService;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.PKBPersonRemote;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.control.Try;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.user.entity.PKBPerson.Lazy.CONTACTS;
+
+/**
+ * Transaction-aware service class that handles activating patients invited by letter/sms.
+ */
+public class PatientActivationManager extends TransactionManager {
+
+    private final LetterInvitationMetrics letterInvitationMetrics;
+    private final PKBEmailMessageManager messagingManager;
+    private final LetterInvitationService invitationService;
+    private final PKBPersonRemote personBean;
+    private final NhsLoginService nhsLoginService;
+    private final PersonService personService;
+    private final RegistrationEventService registrationEventService;
+    private final TeamManager teamManager;
+
+    public PatientActivationManager(LetterInvitationMetrics letterInvitationMetrics, PKBEmailMessageManager messagingManager, LetterInvitationService invitationService,
+                                    PKBPersonRemote personBean, NhsLoginService nhsLoginService, PhrConfig config, DateTimeService dateTimeService, UUIDProvider uuidProvider,
+                                    TolvenBeanFactory tolvenBeanFactory, PersonService personService, RegistrationEventService registrationEventService, TeamManager teamManager) {
+<span class="fc" id="L55">        super(config, tolvenBeanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L56">        this.letterInvitationMetrics = letterInvitationMetrics;</span>
+<span class="fc" id="L57">        this.messagingManager = messagingManager;</span>
+<span class="fc" id="L58">        this.invitationService = invitationService;</span>
+<span class="fc" id="L59">        this.personBean = personBean;</span>
+<span class="fc" id="L60">        this.nhsLoginService = nhsLoginService;</span>
+<span class="fc" id="L61">        this.registrationEventService = registrationEventService;</span>
+<span class="fc" id="L62">        this.personService = personService;</span>
+<span class="fc" id="L63">        this.teamManager = teamManager;</span>
+<span class="fc" id="L64">    }</span>
+
+    /**
+     * Generates the details to populate a letter invitation for a patient (identified by person id)
+     * May fail with the following error codes (thrown in a ValidationException):
+     * &lt;ul&gt;
+     *     &lt;li&gt;{@link LetterInvitationDTO#EC_SYSTEM_ID} if no patient corresponds to the supplied patientId&lt;/li&gt;
+     *     &lt;li&gt;{@link LetterInvitationDTO#EC_STATUS} if the patient has died or is already registered&lt;/li&gt;
+     *     &lt;li&gt;{@link LetterInvitationDTO#EC_IDENTIFIER} if the patient is missing a national identifier&lt;/li&gt;
+     *     &lt;li&gt;{@link LetterInvitationDTO#EC_DOB} if the patient is missing a date of birth value&lt;/li&gt;
+     *     &lt;li&gt;{@link LetterInvitationDTO#EC_USER_TYPE} if the user referenced by the supplied id is not a patient&lt;/li&gt;
+     * &lt;/ul&gt;
+     */
+    public @NotNull LetterInvitationDTO generateLetterInvitation(@NotNull LoggedInEHRRequestContext requestContext, long patientId) {
+<span class="fc" id="L78">        LetterInvitationDTO dto = invitationService.generateLetterInvitation(requestContext, patientId);</span>
+<span class="fc" id="L79">        letterInvitationMetrics.invitationGenerated(invitationService.getTeamCode(dto.getId()));</span>
+<span class="fc" id="L80">        return dto;</span>
+    }
+
+    /**
+     * &lt;pre&gt;
+     * Activates a patient invited by letter/SMS using demographic info + secrets provided in the two DTOs. If this
+     * succeeds, an email will be sent to the patient to verify that they own the claimed email address.
+     * In erroneous cases Runtime Exception Raised must contain a List of Errors.
+     *    Error codes used in Error are defined in {@link com.pkb.encounter.entity.LetterInvitationDTO}.
+     *    Following error codes might be thrown:
+     *    {@link LetterInvitationDTO#EC_INCORRECT_CODE} if invitation cannot be found by given code,
+     *    {@link LetterInvitationDTO#EC_INVITATION_INVALID} if invitation is already invalidated,
+     *    {@link LetterInvitationDTO#EC_INVITATION_EXPIRED} if invitation expired,
+     *    {@link LetterInvitationDTO#EC_INCORRECT_TOKEN} if given token is incorrect,
+     *    {@link LetterInvitationDTO#EC_DOB_MISMATCH} if given DOB is incorrect,
+     *    {@link LetterInvitationDTO#EC_INVALID_SECURITY_QUESTION} if given security question is incorrect,
+     *    {@link LetterInvitationDTO#EC_EMAIL_TAKEN} if given email is already taken.
+     *    {@link LetterInvitationDTO#EC_USER_TYPE} when invitee's user type is not Patient.
+     *    {@link LetterInvitationDTO#EC_STATUS} when invitee's status is either dead or registered.
+     *    {@link LetterInvitationDTO#EC_DOB} when we don't have a Date of Birth for the given user.
+     * &lt;/pre&gt;
+     */
+    public @NotNull LetterInvitationDTO activatePatient(@NotNull InvitationTokenDTO invitationSecrets,
+                                                        @NotNull AccountDetailsDTO patientDetails,
+                                                        boolean useBrandedEmail, @Nullable String actorId) {
+<span class="fc" id="L105">        return transactional(() -&gt; {</span>
+<span class="fc" id="L106">            LetterInvitationDTO invitation = invitationService.activatePatient(invitationSecrets, patientDetails);</span>
+<span class="fc" id="L107">            Team team = teamManager.getTeam(invitationService.getTeamId(invitation.getId()));</span>
+<span class="fc" id="L108">            UUID patientPublicId = personService.findPerson(invitation.getInviteePersonId()).getPublicId();</span>
+
+<span class="fc" id="L110">            PKBPerson patient = personBean.findPKBPersonByPublicId(patientPublicId)</span>
+<span class="pc" id="L111">                    .getOrElseThrow(() -&gt; new PatientNotFoundException(&quot;Patient with public id &quot; + patientPublicId + &quot; does not exist&quot;));</span>
+<span class="fc" id="L112">            messagingManager.sendEmailVerificationMessage(patient, invitation.getClaimedEmail(), invitation.getVerificationCode(),</span>
+<span class="fc bfc" id="L113" title="All 2 branches covered.">                    useBrandedEmail ? team : null, actorId);</span>
+<span class="pc bpc" id="L114" title="1 of 2 branches missed.">            letterInvitationMetrics.patientActivated(team != null ? team.getCode() : null);</span>
+<span class="fc" id="L115">            return invitation;</span>
+        });
+    }
+
+    /**
+     * &lt;pre&gt;
+     * Once Patient Entered Invitation Code and Access Code successfully an Activation E-mail gets sent.
+     * When Patient clicks the link in the Activation e-mail, we also take their password to ensure that the e-mail:
+     * 1. is active
+     * 2. was really delivered to the right address (only Patient knows password).
+     * Post-conditions:
+     * 1. If method succeeds (no Runtime Exception is raised), patient's email becomes verified and patient is able to log in
+     * 2. In erroneous cases ValidationException is raised and it contains a List of Errors.
+     *    Following error codes might be thrown
+     *    {@link LetterInvitationDTO#EC_INVITATION_INVALID} if invitation cannot be find,
+     *    {@link LetterInvitationDTO#EC_EMAIL_TAKEN} if claimed email is already taken.
+     *    {@link LetterInvitationDTO#EC_INVALID_CREDENTIALS} if email or password does not match.
+     * &lt;/pre&gt;
+     *
+     */
+    public void verifyEmail(@NotNull EHRRequestContext requestContext, @NotNull String verificationId, @NotNull char[] password) {
+<span class="fc" id="L136">        transactional(()-&gt;{</span>
+<span class="fc" id="L137">            LetterInvitationDTO invitation = invitationService.verifyEmail(requestContext, verificationId, password);</span>
+<span class="fc" id="L138">            letterInvitationMetrics.patientVerified(invitationService.getTeamCode(invitation.getId()));</span>
+
+<span class="fc" id="L140">            Person person = personService.findPerson(invitation.getInviteePersonId());</span>
+
+<span class="fc" id="L142">            registrationEventService.create(ImmutableRegistrationEventNew.builder()</span>
+<span class="fc" id="L143">                    .registrationMethod(RegistrationMethod.TOKEN_INVITATION)</span>
+<span class="fc" id="L144">                    .registeredOn(dateTimeService.now())</span>
+<span class="fc" id="L145">                    .registeredOnConfirmed(true)</span>
+<span class="fc" id="L146">                    .personId(person.getId())</span>
+<span class="fc" id="L147">                    .letterInvitationId(invitation.getId()).build());</span>
+
+<span class="fc" id="L149">        });</span>
+<span class="fc" id="L150">    }</span>
+
+    /**
+     * Looks up the id of a patient invited by letter/sms using the invitation code from the letter/sms
+     * Throws {@link LetterInvitationDTO#EC_INCORRECT_CODE} if no invitiation can be found for the supplied code.
+     */
+    public @NotNull Optional&lt;Long&gt; getInvitedPersonIdByInvitationCode(@NotNull String invitationCode) {
+<span class="fc" id="L157">        return Try.of(() -&gt; invitationService.findByCode(invitationCode)).toJavaOptional()</span>
+<span class="fc" id="L158">                .map(LetterInvitationDTO::getInviteePersonId);</span>
+    }
+
+    /**
+     * Looks up the letter invitation object from its ID.
+     * Throws {@link LetterInvitationDTO#EC_INVITATION_INVALID} if no invitiation can be found for the supplied code.
+     */
+    public @NotNull LetterInvitationDTO findLetterInvitationById(long letterInvitationId) {
+<span class="fc" id="L166">        return invitationService.findById(letterInvitationId);</span>
+    }
+
+
+    /**
+     * Looks up the person id that corresponds to a verification code. The verification code is sent in the email
+     *      * confirmation after a user activates their account.
+     * Throws {@link LetterInvitationDTO#EC_INVITATION_INVALID} if no invitiation can be found for the supplied code.
+     */
+    public @NotNull Optional&lt;Long&gt; getInvitedPersonIdByVerificationCode(@NotNull String verificationCode) {
+<span class="fc" id="L176">        return Try.of(() -&gt; invitationService.findByVerificationCode(verificationCode))</span>
+<span class="fc" id="L177">                .toJavaOptional()</span>
+<span class="fc" id="L178">                .map(LetterInvitationDTO::getInviteePersonId);</span>
+
+    }
+
+    /**
+     * Looks up the email address that corresponds to a verification code. The verification code is sent in the email
+     * confirmation after a user activates their account.
+     * Throws {@link LetterInvitationDTO#EC_INVITATION_INVALID} if no invitiation can be found for the supplied code.
+     */
+    public @NotNull Email findEmailUsedForActivation(@NotNull String verificationCode) {
+<span class="nc" id="L188">        return invitationService.findByVerificationCode(verificationCode).getClaimedEmail();</span>
+    }
+
+    public @NotNull LetterInvitationDTO findInvitationForActivationByVerificationCode(@NotNull String verificationCode) {
+<span class="fc" id="L192">        return invitationService.findByVerificationCode(verificationCode);</span>
+    }
+
+    public Patient activateNhsLoginPatient(long personId, UUID personPublicId, Email email, NhsLoginAccountDetailsDTO accountDetails) {
+<span class="fc" id="L196">        return transactional(() -&gt; {</span>
+<span class="fc" id="L197">            invitationService.activateNhsLoginPatient(personId, personPublicId, accountDetails);</span>
+<span class="fc" id="L198">            nhsLoginService.activateOutOfAreaPatient(email, personId);</span>
+
+<span class="fc" id="L200">            Patient patient = personService.findPatient(personId).toTry().get();</span>
+
+<span class="fc" id="L202">            registrationEventService.create(ImmutableRegistrationEventNew.builder()</span>
+<span class="fc" id="L203">                    .registrationMethod(RegistrationMethod.NHS_LOGIN)</span>
+<span class="fc" id="L204">                    .registeredOn(dateTimeService.now())</span>
+<span class="fc" id="L205">                    .registeredOnConfirmed(true)</span>
+<span class="fc" id="L206">                    .personId(patient.getId())</span>
+<span class="fc" id="L207">                    .build());</span>
+
+<span class="fc" id="L209">            return patient;</span>
+        });
+    }
+
+
+    public void notifyNhsLoginPatientOfClaimedRecord(long personId) {
+<span class="fc" id="L215">        transactional(() -&gt; {</span>
+<span class="fc" id="L216">            var maybePerson = personBean.findPKBPerson(personId, CONTACTS);</span>
+<span class="fc" id="L217">            maybePerson.peek(messagingManager::notifyNhsLoginPatientOfClaimedRecord);</span>
+<span class="fc" id="L218">        });</span>
+<span class="fc" id="L219">    }</span>
+
+    public void notifyOutOfAreaPatientAccountActivation(UUID patientPublicId) {
+<span class="fc" id="L222">        PKBPerson patient = personBean.findPKBPersonByPublicId(patientPublicId)</span>
+<span class="fc" id="L223">                .getOrElseThrow(() -&gt; new PatientNotFoundException(&quot;Patient with public id &quot; + patientPublicId + &quot; does not exist&quot;));</span>
+<span class="fc" id="L224">        messagingManager.sendOutOfAreaDeferredActivationMessage(patient);</span>
+<span class="fc" id="L225">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

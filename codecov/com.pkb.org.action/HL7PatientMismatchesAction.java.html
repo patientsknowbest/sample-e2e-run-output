@@ -1,0 +1,465 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HL7PatientMismatchesAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.org.action</a> &gt; <span class="el_source">HL7PatientMismatchesAction.java</span></div><h1>HL7PatientMismatchesAction.java</h1><pre class="source lang-java linenums">package com.pkb.org.action;
+
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.pkb.action.BaseAction;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.datamodel.consent.RequiresConsent;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.dataupload.entity.UploadedData.Destination;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.institute.entity.Org;
+import com.pkb.notification.entity.Activity;
+import com.pkb.notification.entity.Activity.Action;
+import com.pkb.phplan.entity.PHPlan;
+import com.pkb.service.dataupload.hl7.HL7ApiHelper;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.dataupload.hl7.HL7MessageType;
+import com.pkb.service.dataupload.hl7.HL7ParsingManager;
+import com.pkb.service.dataupload.hl7.HL7TeamService;
+import com.pkb.service.dataupload.hl7.HL7Wrapper;
+import com.pkb.service.dataupload.hl7.HL7XmlDoc;
+import com.pkb.service.dataupload.hl7.segment.HL7Allergy;
+import com.pkb.service.dataupload.hl7.segment.HL7Diagnosis;
+import com.pkb.service.dataupload.hl7.segment.HL7Medication;
+import com.pkb.service.dataupload.hl7.segment.HL7Patient;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import com.pkb.service.dataupload.processor.UploadedDataService;
+import com.pkb.service.dataupload.processor.domain.UploadedDataPersistentState;
+import com.pkb.service.dataupload.processor.domain.UploadedDataProcessingResult;
+import com.pkb.service.encounter.impl.tolven.EncounterManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.Tuple2;
+import org.apache.struts2.interceptor.ServletResponseAware;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.dataupload.entity.UploadedData.Destination.ALLERGY_UPDATE;
+import static com.pkb.dataupload.entity.UploadedData.Destination.APPOINTMENT;
+import static com.pkb.dataupload.entity.UploadedData.Destination.DIAGNOSIS_UPDATE;
+import static com.pkb.dataupload.entity.UploadedData.Destination.DOCUMENT;
+import static com.pkb.dataupload.entity.UploadedData.Destination.ENCOUNTER;
+import static com.pkb.dataupload.entity.UploadedData.Destination.MEASUREMENT;
+import static com.pkb.dataupload.entity.UploadedData.Destination.MEDICATION_UPDATE;
+import static com.pkb.dataupload.entity.UploadedData.Destination.PATIENT_INFO_UPDATE;
+import static com.pkb.dataupload.entity.UploadedData.Destination.PHPLAN;
+import static com.pkb.dataupload.entity.UploadedData.Destination.RADIOLOGY;
+import static com.pkb.dataupload.entity.UploadedData.Destination.TEST_RESULT;
+import static com.pkb.dataupload.entity.UploadedData.Status.COMPLETED;
+import static com.pkb.dataupload.entity.UploadedData.Status.NEW;
+import static com.pkb.notification.entity.Activity.Action.EDITED_APPOINTMENT;
+import static com.pkb.service.dataupload.processor.ImmutableLoggedInUploadedDataProcessingContext.loggedInUploadedDataProcessingContext;
+import static com.pkb.util.PersonUtil.getNationalId;
+import static io.jsonwebtoken.lang.Collections.isEmpty;
+import static java.util.stream.Collectors.toSet;
+
+<span class="fc" id="L75">public class HL7PatientMismatchesAction extends BaseAction implements ServletResponseAware {</span>
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L79">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L81">    private static final DateTimeFormatter EXPORT_FILENAME_DATE_FORMAT = DateTimeFormatter.ofPattern(&quot;YYYYMMddHHmmss&quot;).withLocale(Locale.UK).withZone(ZoneId.of(&quot;UTC&quot;));</span>
+
+    @Autowired
+    private DataUploadManager dataUploadManager;
+
+    @Autowired
+    private UploadedDataService uploadedDataService;
+
+    @Autowired
+    private UserAccessManager userAccessManager;
+
+    @Autowired
+    private EncounterManager encounterManager;
+
+    @Autowired
+    private HL7ApiHelper apiHelper;
+
+    @Autowired
+    private HL7ParsingManager hl7ParsingManager;
+
+    @Autowired
+    private HL7TeamService hl7TeamService;
+
+    private Org org;
+    private String userId;
+    private List&lt;UploadedDataDTO&gt; uploadedDataList;
+    private Map&lt;Long, PKBPerson&gt; accountPatientMap;
+    private Map&lt;Long, String&gt; accountNationalIdMap;
+    private List&lt;String&gt; selectedIds;
+
+<span class="fc" id="L111">    private final String tab = &quot;hl7Review&quot;;</span>
+
+    private int offset;
+
+<span class="fc" id="L115">    private int pageSize = 25; // TODO - move to config</span>
+
+    private long mismatchCount;
+
+    private HttpServletResponse response;
+
+    // This approach is flawed, see PHR-4696. The correct action cannot be determined by destination alone. For example,
+    // whether the message will result in an addition, correction and deletion is often not possible to determine until
+    // the message is actually processed. Until we upgrade notification triggers to be based on actual activity in the
+    // account they will always be a best-guess at what is likely to happen.
+    // Historically, this was a catch-22 because it was the email notification which triggered a user to log in to
+    // trigger the processing. As we move away from usercryption to a an eager processing model it should become
+    // easier to fix the notifications.
+    // One example of this problem can be seen further down in the code; isDocWithdrawn cannot be determined from the
+    // destination alone, and represents a partial solution to the problem.
+    // A related problem caused by notifying before processing has occurred is the inability to correctly filter for
+    // consent. See PHR-2822.
+<span class="fc" id="L132">    private static final Map&lt;Destination, Action&gt; DESTINATION_TO_ACTION_MAPPING = Maps.immutableEnumMap(new ImmutableMap.Builder&lt;Destination, Action&gt;()</span>
+<span class="fc" id="L133">            .put(TEST_RESULT, Action.UPLOADED_LAB_RESULTS)</span>
+<span class="fc" id="L134">            .put(RADIOLOGY, Action.UPLOADED_RADIOLOGY)</span>
+<span class="fc" id="L135">            .put(ALLERGY_UPDATE, Action.UPDATED_ALLERGY)</span>
+<span class="fc" id="L136">            .put(DIAGNOSIS_UPDATE, Action.UPDATED_DIAGNOSIS)</span>
+<span class="fc" id="L137">            .put(MEDICATION_UPDATE, Action.EDITED_MEDICATION_RECORD)</span>
+<span class="fc" id="L138">            .put(PHPLAN, Action.UPLOADED_PHPLAN)</span>
+<span class="fc" id="L139">            .put(APPOINTMENT, Action.EDITED_APPOINTMENT)</span>
+<span class="fc" id="L140">            .put(MEASUREMENT, Action.UPLOADED_MEASUREMENTS)</span>
+<span class="fc" id="L141">            .put(DOCUMENT, Action.SENT_MESSAGE)</span>
+<span class="fc" id="L142">            .put(ENCOUNTER, Action.SENT_MESSAGE)</span>
+<span class="fc" id="L143">            .put(PATIENT_INFO_UPDATE, Action.UPLOADED_PATIENT_PROFILE_UPDATE)</span>
+<span class="fc" id="L144">            .build());</span>
+
+    @Override
+    public String input() {
+        // build the list to display
+<span class="fc" id="L149">        org = loggedInUserUtil.getLoggedInUserOrg();</span>
+
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">        if (offset &lt;= 0) {</span>
+<span class="fc" id="L152">            offset = 1;</span>
+        }
+
+<span class="fc" id="L155">        LOGGER.info(&quot;fetching HL7 messages with mismatched patient info for org {}&quot;, org);</span>
+<span class="fc" id="L156">        mismatchCount = dataUploadManager.getHL7UploadedDataPatientMismatchCount(org.getId());</span>
+
+<span class="fc" id="L158">        uploadedDataList = dataUploadManager.getHL7UploadedDataPatientMismatches(getLoggedInEHRRequestContext(), org.getId(), pageSize, this.offset - 1); // pageSize is set by the function passed in and so can vary</span>
+
+<span class="fc" id="L160">        Set&lt;Long&gt; accountIds = uploadedDataList.stream().map(UploadedDataDTO::getAccountId).collect(toSet());</span>
+<span class="fc" id="L161">        Map&lt;Long, PKBPerson&gt; accountOwners = userManager.getAccountOwners(accountIds, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="fc" id="L162">        accountPatientMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L163">        accountNationalIdMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L164">        uploadedDataList.forEach(dto -&gt; {</span>
+<span class="fc" id="L165">            Long accountId = dto.getAccountId();</span>
+<span class="fc" id="L166">            PKBPerson accountOwner = accountOwners.get(accountId);</span>
+<span class="fc" id="L167">            accountPatientMap.putIfAbsent(accountId, accountOwner);</span>
+<span class="fc" id="L168">            accountNationalIdMap.putIfAbsent(accountId, getNationalId(accountOwner, org));</span>
+<span class="fc" id="L169">        });</span>
+<span class="fc" id="L170">        return SUCCESS;</span>
+    }
+
+    public void export() throws IOException {
+<span class="fc" id="L174">        org = userManager.findOrgsForPatient(loggedInUserUtil.getLoggedInUserId()).get(0);</span>
+
+<span class="fc" id="L176">        OutputStream outputStream = response.getOutputStream();</span>
+
+<span class="fc" id="L178">        response.setHeader(&quot;Content-Disposition&quot;,</span>
+<span class="fc" id="L179">                &quot;attachment; filename=\&quot;HL7_patient_info_mismatches_&quot; + dateTimeService.nowLocalDateTime().format(EXPORT_FILENAME_DATE_FORMAT) + &quot;.csv\&quot;&quot;);</span>
+<span class="fc" id="L180">        response.setContentType(&quot;text/csv&quot;);</span>
+
+<span class="fc" id="L182">        dataUploadManager.exportMismatchedUploadedDataForOrg(userManager, org, outputStream);</span>
+
+<span class="fc" id="L184">        outputStream.flush();</span>
+<span class="fc" id="L185">        outputStream.close();</span>
+<span class="fc" id="L186">    }</span>
+
+    public String approveMessages() {
+<span class="fc" id="L189">        LOGGER.info(&quot;APPROVED HL7 messages with mismatched patient info: {}&quot;, selectedIds);</span>
+
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">        if (isEmpty(selectedIds)) {</span>
+<span class="nc" id="L192">            addActionError(getText(&quot;err.hl7.message.approve.missing.selection&quot;));</span>
+<span class="nc" id="L193">            return SUCCESS;</span>
+        }
+
+<span class="fc" id="L196">        org = userManager.findOrgsForPatient(loggedInUserUtil.getLoggedInUserId()).get(0);</span>
+<span class="fc" id="L197">        List&lt;Long&gt; selectedUploadedDataIdsWithPatientAccess = getSelectedUploadedDataIdsAndPatientIds()</span>
+<span class="fc" id="L198">                .stream()</span>
+<span class="fc" id="L199">                .filter(ids -&gt; userAccessManager.orgHasAccessToPerson(org.getPublicId(), ids._2)).map(ids -&gt; ids._1).collect(Collectors.toList());</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">        List&lt;Long&gt; selectedUploadedDataWithoutPatientAccess = getSelectedUploadedDataIds().stream().filter(id -&gt; !selectedUploadedDataIdsWithPatientAccess.contains(id))</span>
+<span class="fc" id="L201">                .collect(Collectors.toList());</span>
+
+        //for any dtos we don't have decryption access to, reset the status and these will be picked up once someone with decryption access logs in:
+<span class="fc bfc" id="L204" title="All 2 branches covered.">        if (!selectedUploadedDataWithoutPatientAccess.isEmpty()) {</span>
+<span class="fc" id="L205">            dataUploadManager.updateUploadedDataStatus(selectedUploadedDataWithoutPatientAccess, NEW);</span>
+        }
+
+        //for the rest, process straight away:
+<span class="fc bfc" id="L209" title="All 2 branches covered.">        if (!selectedUploadedDataIdsWithPatientAccess.isEmpty()) {</span>
+
+<span class="fc" id="L211">            List&lt;UploadedDataDTO&gt; uploadedDataPatientMismatches = dataUploadManager.findUploadedDataPatientMismatches(getLoggedInEHRRequestContext(),</span>
+                    selectedUploadedDataIdsWithPatientAccess);
+
+<span class="fc" id="L214">            Set&lt;Long&gt; accountOwnerIds = uploadedDataPatientMismatches.stream().map(UploadedDataDTO::getAccountId).collect(toSet());</span>
+<span class="fc" id="L215">            Map&lt;Long, PKBPerson&gt; accountOwners = userManager.getAccountOwners(accountOwnerIds, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS, PKBPerson.Lazy.CONTACTS);</span>
+
+            // change status and notify patients
+<span class="fc bfc" id="L218" title="All 2 branches covered.">            for (UploadedDataDTO dto : uploadedDataPatientMismatches) {</span>
+<span class="fc" id="L219">                Action action = getAction(dto.getDestination());</span>
+
+<span class="fc" id="L221">                PKBPerson patient = accountOwners.get(dto.getAccountId());</span>
+
+<span class="fc" id="L223">                HL7MessageType documentMessageTypeProcessed = null;</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">                if (action == Action.UPLOADED_PATIENT_PROFILE_UPDATE) {</span>
+
+                    // TODO: Processing PATIENT_INFO_UPDATE messages is needed most
+                    // urgently, but ultimately all dequeued messages should be
+                    // processed here, ideally in a new Thread.
+
+<span class="fc" id="L230">                    HL7Wrapper wrapper = hl7ParsingManager.processXmlData(dto.getData(), getEHRRequestContext());</span>
+<span class="fc" id="L231">                    HL7XmlDoc hl7 = wrapper.getHL7Xml();</span>
+<span class="fc" id="L232">                    HL7ConnContext hl7ConnContext = wrapper.getHl7ConnContext();</span>
+
+<span class="fc" id="L234">                    HL7Patient hl7Patient = hl7.parsePatient(hl7ConnContext);</span>
+<span class="fc" id="L235">                    List&lt;HL7Allergy&gt; hl7AllergyList = hl7.parseHL7Allergies();</span>
+<span class="fc" id="L236">                    List&lt;HL7Diagnosis&gt; hl7DiagnosisList = hl7.parseHL7Diagnoses();</span>
+<span class="fc" id="L237">                    List&lt;HL7Medication&gt; hl7MedicationList = hl7.parseHL7Medications();</span>
+
+                    // Update the demographics...
+<span class="fc" id="L240">                    Instant messageDate = Optional.ofNullable(hl7.getMessageDate())</span>
+<span class="fc" id="L241">                            .flatMap(md -&gt; Optional.ofNullable(md.getInstant()))</span>
+<span class="fc" id="L242">                            .orElse(dateTimeService.now());</span>
+<span class="fc" id="L243">                    apiHelper.updatePatientDemographics(getEHRRequestContext(), messageDate, hl7ConnContext, patient, hl7Patient);</span>
+
+                    // ...then queue any clinical data included with the demographics
+<span class="pc bpc" id="L246" title="1 of 2 branches missed.">                    if (!hl7AllergyList.isEmpty()) {</span>
+<span class="nc" id="L247">                        dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, null/*externalMessageId*/,</span>
+<span class="nc" id="L248">                                ALLERGY_UPDATE, NEW, null/*pidMismatches*/, patient, dto.getId());</span>
+                    }
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">                    if (!hl7DiagnosisList.isEmpty()) {</span>
+<span class="nc" id="L251">                        dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, null/*externalMessageId*/,</span>
+<span class="nc" id="L252">                                DIAGNOSIS_UPDATE, NEW, null/*pidMismatches*/, patient, dto.getId());</span>
+                    }
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">                    if (!hl7MedicationList.isEmpty()) {</span>
+<span class="nc" id="L255">                        dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, null/*externalMessageId*/,</span>
+<span class="nc" id="L256">                                MEDICATION_UPDATE, NEW, null/*pidMismatches*/, patient, dto.getId());</span>
+                    }
+
+<span class="fc" id="L259">                    dataUploadManager.updateUploadedDataStatus(dto.getId(), dto.getVersion(), COMPLETED);</span>
+
+<span class="fc" id="L261">                    hl7TeamService.addToTeams(patient, hl7, hl7ConnContext);</span>
+
+<span class="fc bfc" id="L263" title="All 2 branches covered.">                } else if (dto.getDestination() == Destination.DOCUMENT) {</span>
+<span class="fc" id="L264">                    Tuple2&lt;HL7MessageType, Optional&lt;UUID&gt;&gt; messageTypeAndEncounterUniqueIdOfDeletedMessage = encounterManager</span>
+<span class="fc" id="L265">                            .saveUploadedMessage(getEHRRequestContext().withConsentNotRequired(), patient, dto);</span>
+<span class="fc" id="L266">                    documentMessageTypeProcessed = messageTypeAndEncounterUniqueIdOfDeletedMessage._1;</span>
+<span class="fc bfc" id="L267" title="All 2 branches covered.">                } else if (dto.getDestination() == PHPLAN) {</span>
+<span class="fc" id="L268">                    UploadedDataProcessingResult&lt;?&gt; uploadedDataProcessingResult = uploadedDataService.processUploadedData(</span>
+<span class="fc" id="L269">                            loggedInUploadedDataProcessingContext()</span>
+<span class="fc" id="L270">                                    .requestContext(getLoggedInEHRRequestContext().withPiggyback(true))</span>
+<span class="fc" id="L271">                                    .patientId(patient.getId())</span>
+<span class="fc" id="L272">                                    .destination(UploadedData.Destination.PHPLAN)</span>
+<span class="fc" id="L273">                                    .patientAccountId(dto.getAccountId())</span>
+<span class="fc" id="L274">                                    .patient(patient)</span>
+<span class="fc" id="L275">                                    .build(),</span>
+                            dto);
+<span class="pc bpc" id="L277" title="2 of 4 branches missed.">                    if (uploadedDataProcessingResult.getStatus() == COMPLETED &amp;&amp; uploadedDataProcessingResult.getSingleResult().isPresent()) {</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">                        Activity.Action carePlanAction = uploadedDataProcessingResult.getPersistentState() == UploadedDataPersistentState.UploadedDataPersistentStateEnum.UPDATED</span>
+<span class="nc" id="L279">                                ? Activity.Action.UPDATED_PLAN</span>
+<span class="fc" id="L280">                                : Activity.Action.UPLOADED_PHPLAN;</span>
+<span class="fc" id="L281">                        logActivityAndNotifyPatient(carePlanAction, patient, (PHPlan) uploadedDataProcessingResult.getSingleResult().get(), dateTimeService.now());</span>
+                    }
+<span class="fc" id="L283">                } else {</span>
+<span class="fc" id="L284">                    dataUploadManager.updateUploadedDataStatus(dto.getId(), dto.getVersion(), NEW);</span>
+                }
+
+                //todo - PHR-2822: Clarify the right way to solve this. How is the consent level assigned to the data point? What actually happens
+                //in this method? Is anyone calling it? For now just writing in a new NoConsentRequired which is probably not correct
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">                boolean isDocWithdrawn = documentMessageTypeProcessed == HL7MessageType.MDM_T11;</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">                Activity activity = getActivity(isDocWithdrawn ? Action.DOCUMENT_WITHDRAWN : action,</span>
+<span class="pc" id="L291">                        patient, dto.findCreated().orElseGet(() -&gt; dateTimeService.now()));</span>
+<span class="fc bfc" id="L292" title="All 2 branches covered.">                if (activity.sendHistorical(dateTimeService.now())) {</span>
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">                    if (isDocWithdrawn) {</span>
+<span class="nc" id="L294">                        notificationManager.notifyUserAboutActivityByOtherUser(getEHRRequestContext(), activity, true, new NoConsentsRequired());</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">                    } else if (dto.getDestination() != PHPLAN) {</span>
+<span class="fc" id="L296">                        logActivityAndNotifyPatient(action, patient, new NoConsentsRequired(), activity.getTimestamp().toInstant());</span>
+                    }
+                }
+<span class="fc" id="L299">            }</span>
+        }
+
+<span class="fc" id="L302">        addActionMessage(getText(&quot;hl7.message.approved&quot;, new String[] { Integer.toString(selectedIds.size()) }));</span>
+
+<span class="fc" id="L304">        return SUCCESS;</span>
+    }
+
+    @NotNull
+    private Action getAction(Destination destination) {
+<span class="fc" id="L309">        Action action = DESTINATION_TO_ACTION_MAPPING.get(destination);</span>
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">        if (action == null) {</span>
+<span class="nc" id="L311">            throw new IllegalArgumentException(&quot;unsupported destination: &quot; + destination + &quot;; is HL7 for this data type queued and synched?&quot;);</span>
+        }
+<span class="fc" id="L313">        return action;</span>
+    }
+
+    /**
+     * Logs the activity and notifies the patient.
+     *
+     * @param action
+     *            The action about which the patient should be notified.
+     * @param patient
+     *            The patient that should be notified.
+     */
+    private void logActivityAndNotifyPatient(Action action, PKBPerson patient, RequiresConsent consentRequired, Instant timestampOfActivity) {
+<span class="fc" id="L325">        LOGGER.info(&quot;logging activity for patient {}&quot;, patient.getId());</span>
+
+        // If this is an appointment it does not yet exist (marked with UploadedData.Status.NEW) so the notification cannot be sent
+<span class="pc bpc" id="L328" title="1 of 2 branches missed.">        if (action != EDITED_APPOINTMENT) {</span>
+<span class="fc" id="L329">            notificationManager.notifyUserAboutActivityByOtherUser(getEHRRequestContext(), getActivity(action, patient, timestampOfActivity), true/*sendAsync*/, consentRequired);</span>
+        }
+
+<span class="fc" id="L332">        LOGGER.info(&quot;logged activity&quot;);</span>
+<span class="fc" id="L333">    }</span>
+
+    private Activity getActivity(Action action, PKBPerson patient, Instant timestampOfActivity) {
+<span class="pc bpc" id="L336" title="1 of 2 branches missed.">        Activity activity = new Activity(timestampOfActivity, action, org != null ? org.getId() : null);</span>
+<span class="fc" id="L337">        activity.setTargetId(patient.getId());</span>
+        // Although the Org Coord just approved the processing, the message itself did not come from them
+<span class="fc" id="L339">        activity.setActorId(null);</span>
+<span class="fc" id="L340">        return activity;</span>
+    }
+
+    public String rejectMessages() {
+<span class="fc" id="L344">        LOGGER.info(&quot;REJECTED HL7 messages with mismatched patient info: {}&quot;, selectedIds);</span>
+
+<span class="pc bpc" id="L346" title="2 of 4 branches missed.">        if ((selectedIds == null) || selectedIds.isEmpty()) {</span>
+<span class="nc" id="L347">            addActionError(getText(&quot;err.hl7.message.approve.missing.selection.reject&quot;));</span>
+<span class="nc" id="L348">            return SUCCESS;</span>
+        }
+
+<span class="fc" id="L351">        Set&lt;Long&gt; mismatchIds = new HashSet&lt;&gt;(getSelectedUploadedDataIds());</span>
+<span class="fc" id="L352">        dataUploadManager.confirmOrgHasPermissionToReview(mismatchIds, loggedInUserUtil.getLoggedInUserOrg().getId());</span>
+        // change status and DON'T notify patients
+<span class="fc" id="L354">        int updatedRecords = dataUploadManager.updateUploadedDataStatus(mismatchIds, UploadedData.Status.REJECTED);</span>
+<span class="fc" id="L355">        addActionMessage(getText(&quot;hl7.message.rejected&quot;, new String[] { Integer.toString(updatedRecords) }));</span>
+
+<span class="fc" id="L357">        return SUCCESS;</span>
+    }
+
+    private List&lt;Long&gt; getSelectedUploadedDataIds() {
+<span class="fc" id="L361">        return selectedIds.stream().map(ids -&gt; parseSelectedIdInput(ids)._1).collect(Collectors.toList());</span>
+    }
+
+    private List&lt;Tuple2&lt;Long, Long&gt;&gt; getSelectedUploadedDataIdsAndPatientIds() {
+<span class="fc" id="L365">        return selectedIds.stream().map(ids -&gt; parseSelectedIdInput(ids)).collect(Collectors.toList());</span>
+    }
+
+    private Tuple2&lt;Long, Long&gt; parseSelectedIdInput(String input) {
+<span class="fc" id="L369">        String[] parts = input.split(&quot;,&quot;);</span>
+<span class="pc bpc" id="L370" title="1 of 2 branches missed.">        if (parts.length != 2) {</span>
+<span class="nc" id="L371">            throw new IllegalStateException(String.format(&quot;Expected 2 ids, got %d: %s&quot;, parts.length, input));</span>
+        }
+<span class="fc" id="L373">        return new Tuple2(Long.parseLong(parts[0]), Long.parseLong(parts[1]));</span>
+    }
+
+    public String getUserId() {
+<span class="nc" id="L377">        return userId;</span>
+    }
+
+    public void setUserId(String userId) {
+<span class="nc" id="L381">        this.userId = userId;</span>
+<span class="nc" id="L382">    }</span>
+
+    public Org getOrg() {
+<span class="fc" id="L385">        return org;</span>
+    }
+
+    public List&lt;UploadedDataDTO&gt; getUploadedDataList() {
+<span class="fc" id="L389">        return uploadedDataList;</span>
+    }
+
+    public List&lt;String&gt; getSelectedIds() {
+<span class="fc" id="L393">        return selectedIds;</span>
+    }
+
+    public Map&lt;Long, PKBPerson&gt; getAccountPatientMap() {
+<span class="fc" id="L397">        return accountPatientMap;</span>
+    }
+
+    public Map&lt;Long, String&gt; getAccountNationalIdMap() {
+<span class="fc" id="L401">        return accountNationalIdMap;</span>
+    }
+
+    public String getTab() {
+<span class="fc" id="L405">        return tab;</span>
+    }
+
+    public void setSelectedIds(List&lt;String&gt; selectedIds) {
+<span class="fc" id="L409">        this.selectedIds = selectedIds;</span>
+<span class="fc" id="L410">    }</span>
+
+    public int getOffset() {
+<span class="fc" id="L413">        return offset;</span>
+    }
+
+    public void setOffset(int offset) {
+<span class="nc" id="L417">        this.offset = offset;</span>
+<span class="nc" id="L418">    }</span>
+
+    public int getPageSize() {
+<span class="nc" id="L421">        return pageSize;</span>
+    }
+
+    public void setPageSize(int pageSize) {
+<span class="nc" id="L425">        this.pageSize = pageSize;</span>
+<span class="nc" id="L426">    }</span>
+
+    public int getNewerPageOffset() {
+<span class="fc" id="L429">        return offset - pageSize;</span>
+    }
+
+    public int getOlderPageOffset() {
+<span class="fc" id="L433">        return offset + pageSize;</span>
+    }
+
+    public long getOldestPageOffset() {
+<span class="fc" id="L437">        return mismatchCount / pageSize * pageSize;</span>
+    }
+
+    public boolean isNotFirstPage() {
+<span class="pc bpc" id="L441" title="1 of 2 branches missed.">        return offset &gt; 1;</span>
+    }
+
+    public boolean isNotLastPage() {
+<span class="pc bpc" id="L445" title="1 of 2 branches missed.">        return mismatchCount &gt; getOlderPageOffset() - 1;</span>
+    }
+
+    public long getPageLastElement() {
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">        return getOlderPageOffset() &gt; mismatchCount ? mismatchCount : getOlderPageOffset() - 1;</span>
+    }
+
+    public long getMismatchCount() {
+<span class="fc" id="L453">        return mismatchCount;</span>
+    }
+
+    public void setMismatchCount(long mismatchCount) {
+<span class="nc" id="L457">        this.mismatchCount = mismatchCount;</span>
+<span class="nc" id="L458">    }</span>
+
+    @Override
+    public void setServletResponse(HttpServletResponse response) {
+<span class="fc" id="L462">        this.response = response;</span>
+<span class="fc" id="L463">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

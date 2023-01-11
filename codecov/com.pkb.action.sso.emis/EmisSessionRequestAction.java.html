@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisSessionRequestAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.sso.emis</a> &gt; <span class="el_source">EmisSessionRequestAction.java</span></div><h1>EmisSessionRequestAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.sso.emis;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.action.BasePingAction;
+import com.pkb.domain.SSOService;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.SSOType;
+import com.pkb.service.sso.impl.emis.EMISSSOAuthManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.sso.SsoMetrics;
+import com.pkb.sso.emis.EMISSessionRequestValidator;
+import com.pkb.sso.emis.EMISSessionRequestValidator.SessionRequestErrorCode;
+import com.pkb.sso.emis.SessionRequestConverter;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.PersonAmbiguityHandler;
+import com.pkb.util.SessionRequestUtil;
+import io.prometheus.client.Summary;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.springframework.beans.factory.annotation.Autowired;
+import uk.co.e_mis.integration.portalsdk.entities.SessionRequest;
+
+import javax.ws.rs.WebApplicationException;
+import java.io.IOException;
+import java.util.List;
+
+import static com.pkb.util.PKBWebUtil.CONTEXT_USER_ID;
+
+/**
+ * Service to intercept SSO requests from EMIS client
+ * &lt;p&gt;
+ * Function :
+ * &lt;ul&gt;
+ * &lt;li&gt;Intercept the emis request from EMIS client&lt;/li&gt;
+ * &lt;li&gt;Validate the SessionRequest xml posted and flag errors if necessary. E.g
+ * malformed XML&lt;/li&gt;
+ * &lt;li&gt;Authenticate the requesting user (professional) If all vital information
+ * is available in SessionRequest like - patient details , Portal Id for PKB ,
+ * request provenance etc&lt;/li&gt;
+ * &lt;li&gt;Redirect to patient summary page if authentication is successful&lt;/li&gt;
+ * &lt;li&gt;Log the SSO request in PKB database for audit purpose&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author pravina
+ */
+<span class="fc" id="L47">public class EmisSessionRequestAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 4614644885276096123L;
+
+    static final String FIRST_SSO_REQUEST = &quot;firstSSORequestPage&quot;;
+
+    static final String PING_EMIS_SESSION_REQUEST_SERVICE = &quot;pingEmisSessionRequestService&quot;;
+    static final String EMIS_SESSION_REQUEST_PING_RESULT = &quot;emisSessionRequestPingResult&quot;;
+
+    private SSOService ssoService;
+    private EMISSSOAuthManager ssoAuthManager;
+    private SsoMetrics ssoMetrics;
+
+    private String emisSSOKey; // As sent in session request
+
+    private String emisSSOUserName; // As sent in session request
+
+    private String emisPasswordHash; // As sent in session request
+
+<span class="fc" id="L66">    private SessionRequestUtil sessionRequestUtil = new SessionRequestUtil();</span>
+
+<span class="fc" id="L68">    private EMISSessionRequestValidator emisSessionRequestValidator = new EMISSessionRequestValidator();</span>
+
+<span class="fc" id="L70">    private String pingResult = BasePingAction.PingStatus.FAIL.toString(); // result of ping set up for health check of portal service</span>
+
+    public String processSessionRequest() {
+
+        // Remove the contextUserId from the old session as part of the launch action. We have to do this as the EMIS
+        // client appears to reuse the session. Before the spring security refactor we were getting away with this by
+        // subverting validation preventing a patient switch by overriding this attribute as part of the launch action.
+        // Now we should explicitly clear it down so there can't be any cross-contamination when doing portal loads
+        // in the EMIS client. Invalidation of the entire session causes lots of knock-on problems so we've rejected
+        // it as a solution.
+<span class="fc" id="L80">        request.getSession().removeAttribute(CONTEXT_USER_ID);</span>
+
+<span class="fc" id="L82">        Summary.Timer timer = ssoMetrics.startTimerForProcessingSessionRequest(SSOType.EMIS);</span>
+        try {
+            SessionRequest emisSessionRequest;
+            try {
+<span class="fc" id="L86">                emisSessionRequest = parseAndValidateSessionRequest();</span>
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">                if (hasActionErrors()) {</span>
+<span class="nc" id="L88">                    return Action.ERROR;</span>
+                }
+<span class="nc" id="L90">            } catch (IOException | WebApplicationException ignored) {</span>
+<span class="nc" id="L91">                return handleBadRequest(&quot;ssoEMISError.err.bad_request&quot;);</span>
+<span class="fc" id="L92">            }</span>
+
+<span class="fc" id="L94">            emisSSOUserName = emisSessionRequest.getProvenance().getUser().getExternalCredentials().getUsername();</span>
+<span class="fc" id="L95">            emisPasswordHash = emisSessionRequest.getProvenance().getUser().getExternalCredentials().getPassword().getValue();</span>
+<span class="fc" id="L96">            String[] credentials = emisPasswordHash.split(&quot;:&quot;);</span>
+<span class="fc" id="L97">            emisSSOKey = credentials[2];</span>
+
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">            if (emisSSOUserName.equals(PING_EMIS_SESSION_REQUEST_SERVICE)) {</span>
+<span class="nc" id="L100">                pingResult = BasePingAction.PingStatus.OKAY.toString();</span>
+<span class="nc" id="L101">                return EMIS_SESSION_REQUEST_PING_RESULT;</span>
+            }
+
+<span class="fc" id="L104">            String patientNHSNumber = emisSessionRequest.getPatient().getIdentifier().get(0).getValue();</span>
+<span class="fc" id="L105">            Option&lt;PKBPerson&gt; maybePerson = NationalIdType.NHS_NUMBER.getValidNationalIdAndType(patientNHSNumber)</span>
+<span class="fc" id="L106">                    .map(userManager::getPKBPersonByNationalId)</span>
+<span class="fc" id="L107">                    .map(e -&gt; PersonAmbiguityHandler.getMaybePersonOrNone(e, &quot;nationalId&quot;))</span>
+<span class="fc" id="L108">                    .orElse(Option.none());</span>
+
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">            if (maybePerson.isEmpty()) {</span>
+<span class="nc" id="L111">                return handleBadRequest(&quot;ssoEMISError.err.patient_not_found&quot;);</span>
+            }
+
+<span class="fc" id="L114">            logEMISSSORequest(emisSessionRequest);</span>
+<span class="fc" id="L115">            contextUserId = maybePerson.get().getId();</span>
+
+<span class="fc bfc" id="L117" title="All 2 branches covered.">            if (ssoService.authRecordExists(emisSSOUserName, SSOType.EMIS)) {</span>
+<span class="fc" id="L118">                return Action.SUCCESS;</span>
+            }
+
+<span class="fc" id="L121">            return processRequestWithoutValidSSOAuth();</span>
+
+        } finally {
+<span class="fc" id="L124">            timer.observeDuration();</span>
+        }
+
+    }
+
+    @NotNull
+    private String handleBadRequest(String errorCode) {
+<span class="nc" id="L131">        addActionError(getText(errorCode));</span>
+<span class="nc" id="L132">        ssoMetrics.incrementUnSuccessfulSessionRequest(SSOType.EMIS, errorCode);</span>
+
+<span class="nc" id="L134">        return Action.ERROR;</span>
+    }
+
+    private void logEMISSSORequest(SessionRequest emisSessionRequest) {
+<span class="fc" id="L138">        SessionRequestConverter sessionRequestConverter = new SessionRequestConverter(emisSessionRequest, emisSSOUserName, dateTimeService);</span>
+<span class="fc" id="L139">        ssoService.saveEMISSSORequestLog(sessionRequestConverter.getEMISSSORequestLog());</span>
+<span class="fc" id="L140">    }</span>
+
+    private String processRequestWithoutValidSSOAuth() {
+        // Either valid sso auth record doesn't exist or
+        // SSO creds were not created from PKB UI
+<span class="fc" id="L145">        return ssoService.getSSOIdLinkForSSOUsernameAndSSOType(emisSSOUserName, SSOType.EMIS)</span>
+<span class="fc" id="L146">                .map(ssoIdLink -&gt; {</span>
+                    // First SSO request so redirect to login page to accept PKB creds
+<span class="fc" id="L148">                    return FIRST_SSO_REQUEST;</span>
+<span class="fc" id="L149">                }).orElseGet(() -&gt; {</span>
+                    // professional hasn't created SSO creds from PKB UI ; raise error message informing the same
+<span class="nc" id="L151">                    return handleBadRequest(&quot;ssoEMISError.err.pkb_emis_link_absent&quot;);</span>
+                });
+    }
+
+    /**
+     * Parse SessionRequest XML &amp; validate it
+     */
+    private SessionRequest parseAndValidateSessionRequest() throws IOException {
+<span class="fc" id="L159">        SessionRequest emisSessionRequest = sessionRequestUtil.parseSessionRequest(getRequest().getReader());</span>
+<span class="fc" id="L160">        List&lt;SessionRequestErrorCode&gt; errorCodes = emisSessionRequestValidator.validate(emisSessionRequest);</span>
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">        if (!errorCodes.isEmpty()) {</span>
+<span class="nc" id="L162">            errorCodes.forEach(code -&gt; addActionError(getText(code.getI18nCode())));</span>
+        }
+<span class="fc" id="L164">        return emisSessionRequest;</span>
+    }
+
+    @Autowired
+    public void setSsoService(SSOService ssoService) {
+<span class="fc" id="L169">        this.ssoService = ssoService;</span>
+<span class="fc" id="L170">    }</span>
+
+    @Autowired
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L174">        this.userManager = userManager;</span>
+<span class="fc" id="L175">    }</span>
+
+    @Autowired
+    public void setSsoAuthManager(EMISSSOAuthManager ssoAuthManager) {
+<span class="fc" id="L179">        this.ssoAuthManager = ssoAuthManager;</span>
+<span class="fc" id="L180">    }</span>
+
+    @Autowired
+    public void setSsoMetrics(SsoMetrics ssoMetrics) {
+<span class="fc" id="L184">        this.ssoMetrics = ssoMetrics;</span>
+<span class="fc" id="L185">    }</span>
+
+    public String getEmisSSOKey() {
+<span class="fc" id="L188">        return emisSSOKey;</span>
+    }
+
+    public void setEmisSSOKey(String emisSSOKey) {
+<span class="nc" id="L192">        this.emisSSOKey = emisSSOKey;</span>
+<span class="nc" id="L193">    }</span>
+
+    public String getEmisSSOUserName() {
+<span class="fc" id="L196">        return emisSSOUserName;</span>
+    }
+
+    public void setEmisSSOUserName(String emisSSOUserName) {
+<span class="nc" id="L200">        this.emisSSOUserName = emisSSOUserName;</span>
+<span class="nc" id="L201">    }</span>
+
+    public String getEmisPasswordHash() {
+<span class="fc" id="L204">        return emisPasswordHash;</span>
+    }
+
+    public void setEmisPasswordHash(String emisPasswordHash) {
+<span class="nc" id="L208">        this.emisPasswordHash = emisPasswordHash;</span>
+<span class="nc" id="L209">    }</span>
+
+    public String getPingResult() {
+<span class="nc" id="L212">        return pingResult;</span>
+    }
+
+    public void setPingResult(String pingResult) {
+<span class="nc" id="L216">        this.pingResult = pingResult;</span>
+<span class="nc" id="L217">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

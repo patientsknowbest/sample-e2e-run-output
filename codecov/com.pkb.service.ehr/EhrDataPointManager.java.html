@@ -1,0 +1,368 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EhrDataPointManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.ehr</a> &gt; <span class="el_source">EhrDataPointManager.java</span></div><h1>EhrDataPointManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.ehr;
+
+import com.pkb.app.dto.DataPointSaveResult;
+import com.pkb.app.dto.ImmutableDataPointSaveResult;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PKBFilter;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.app.interfaces.EncryptedDataPoint;
+import com.pkb.app.interfaces.IBaseDTO;
+import com.pkb.coding.entity.CodeableConcept;
+import com.pkb.coding.entity.CodingReceived;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.data.EHRRemote;
+import com.pkb.emis.es.dto.DeduplicationCandidateDto;
+import com.pkb.entities.enums.CodingDataType;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.service.coding.CodingManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.Function1;
+import io.vavr.Function2;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.Tuple3;
+import io.vavr.collection.Seq;
+import io.vavr.control.Either;
+import org.apache.commons.collections4.CollectionUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptySet;
+import static java.util.stream.Collectors.partitioningBy;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+/**
+ * Common functionality for beans that manage medical data points
+ *
+ * @param &lt;T&gt; Type of the medical data point
+ */
+@SuppressWarnings({&quot;ClassWithTooManyMethods&quot;, &quot;CdiManagedBeanInconsistencyInspection&quot;})
+public abstract class EhrDataPointManager&lt;T extends EncryptedDataPoint &amp; IBaseDTO&gt; extends TransactionManager {
+
+    private CodingManager codingManager;
+
+    protected DeduplicatorManager deduplicator;
+
+    final Class&lt;T&gt; dtoClass;
+
+    final MenuDataType dataType;
+
+    public EhrDataPointManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider,
+                               CodingManager codingManager, DeduplicatorManager deduplicator, Class&lt;T&gt; dtoClass, MenuDataType dataType) {
+<span class="fc" id="L75">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L76">        this.codingManager = codingManager;</span>
+<span class="fc" id="L77">        this.deduplicator = deduplicator;</span>
+<span class="fc" id="L78">        this.dtoClass = dtoClass;</span>
+<span class="fc" id="L79">        this.dataType = dataType;</span>
+<span class="fc" id="L80">    }</span>
+
+    public Either&lt;String, UUID&gt; save(@NotNull EHRRequestContext requestContext, T dataPoint) {
+<span class="fc" id="L83">        dataPoint.generateNewRandomUniqueId();</span>
+
+<span class="fc" id="L85">        DataPointSaveResult&lt;T&gt; saveResult = saveToOneAccount(requestContext, Collections.singletonList(dataPoint));</span>
+<span class="fc" id="L86">        return checkDataPointExcluded(saveResult, dataPoint);</span>
+    }
+
+    public DataPointSaveResult&lt;T&gt; save(@NotNull EHRRequestContext requestContext, List&lt;T&gt; dataPoints) {
+<span class="fc" id="L90">        dataPoints.forEach(IBaseDTO::generateNewRandomUniqueId);</span>
+<span class="fc" id="L91">        return saveToOneAccount(requestContext, dataPoints);</span>
+    }
+
+    private DataPointSaveResult&lt;T&gt; saveToOneAccount(EHRRequestContext context, List&lt;T&gt; dataList) {
+<span class="fc" id="L95">        return save(dataList.stream().map(d -&gt; Tuple.of(d, context)).collect(toList()), true);</span>
+    }
+
+    private DataPointSaveResult&lt;T&gt; save(List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; dataList, boolean adjustCodings) {
+<span class="fc bfc" id="L99" title="All 2 branches covered.">        if (isEmpty(dataList)) {</span>
+<span class="fc" id="L100">            return emptySaveResult();</span>
+        }
+
+<span class="fc" id="L103">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+
+<span class="fc" id="L105">        List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; cleanData = new ArrayList&lt;&gt;(dataList);</span>
+<span class="fc" id="L106">        List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; excludeDataPoints = emptyList();</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">        if (adjustCodings) {</span>
+<span class="fc" id="L108">            excludeDataPoints = this.adjustCodings(dataList);</span>
+<span class="fc" id="L109">            cleanData.removeAll(excludeDataPoints);</span>
+        }
+
+<span class="fc" id="L112">        List&lt;T&gt; result = populateDataPointIds(cleanData.stream().map(Tuple2::_1), ehrBean.populateEHRDataListAndSave(cleanData));</span>
+
+<span class="pc" id="L114">        var excludedList = excludeDataPoints.stream().map(t -&gt; t._1).collect(toList());</span>
+<span class="fc" id="L115">        return ImmutableDataPointSaveResult.&lt;T&gt;builder()</span>
+<span class="fc" id="L116">                .excludedDataPoints(excludedList)</span>
+<span class="fc" id="L117">                .persistedDataPoints(result)</span>
+<span class="fc" id="L118">                .build();</span>
+    }
+
+    private List&lt;T&gt; populateDataPointIds(Stream&lt;T&gt; dataPoints, List&lt;EHRData&gt; ehrData) {
+<span class="fc" id="L122">        var uuidToIdMap = new HashMap&lt;UUID, Long&gt;();</span>
+<span class="fc" id="L123">        ehrData.forEach(data -&gt; uuidToIdMap.put(data.getUniqueId(), data.getId()));</span>
+<span class="fc" id="L124">        return dataPoints.peek(datapoint -&gt; datapoint.setId(uuidToIdMap.get(datapoint.getBaseFields().getUniqueId())))</span>
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">                .filter(dataPoint -&gt; dataPoint.getId() != null)</span>
+<span class="fc" id="L126">                .collect(toList());</span>
+    }
+
+    public Either&lt;String, UUID&gt; update(@NotNull EHRRequestContext requestContext, T dataPoint) {
+<span class="fc" id="L130">        return checkDataPointExcluded(update(requestContext, Collections.singletonList(dataPoint)), dataPoint);</span>
+    }
+
+    public DataPointSaveResult&lt;T&gt; update(@NotNull EHRRequestContext requestContext, List&lt;T&gt; dataPoints) {
+<span class="fc" id="L134">        Map&lt;Boolean, List&lt;T&gt;&gt; dataPointsWithOrWithoutUniqueId = dataPoints.stream()</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">                .collect(partitioningBy(dataPoint -&gt; dataPoint.getBaseFields().getUniqueId() != null));</span>
+
+<span class="fc" id="L137">        List&lt;T&gt; dataPointsWithoutUniqueId = dataPointsWithOrWithoutUniqueId.get(false);</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">        if (CollectionUtils.isNotEmpty(dataPointsWithoutUniqueId)) {</span>
+<span class="nc" id="L139">            throw new IllegalArgumentException(&quot;Cannot update dataPoints with no uniqueId. IDs: &quot; +</span>
+<span class="nc" id="L140">                    dataPointsWithoutUniqueId.stream().map(EncryptedDataPoint::getId).collect(toList()));</span>
+        }
+
+        // save new version (uniqueID is the same)
+<span class="fc" id="L144">        List&lt;T&gt; dataPointsWithUniqueId = dataPointsWithOrWithoutUniqueId.get(true);</span>
+<span class="fc" id="L145">        dataPointsWithUniqueId.forEach(dataPoint -&gt; dataPoint.setId(null));</span>
+
+<span class="fc" id="L147">        return saveToOneAccount(requestContext, dataPointsWithUniqueId);</span>
+    }
+
+    private Either&lt;String, UUID&gt; checkDataPointExcluded(DataPointSaveResult&lt;T&gt; saveResult, T dataPoint) {
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">        if (saveResult.getExcludedDataPoints().contains(dataPoint)) {</span>
+<span class="nc" id="L152">            return Either.left(&quot;Data point excluded via CodingMatch entry&quot;);</span>
+        } else {
+<span class="fc" id="L154">            return Either.right(dataPoint.getBaseFields().getUniqueId());</span>
+        }
+    }
+
+    public List&lt;T&gt; getByIds(@NotNull LoggedInEHRRequestContext requestContext, long patientAccountId, List&lt;Long&gt; dataPointIds) {
+<span class="fc" id="L159">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L160">        EHRSearch&lt;T&gt; ehrSearch = new EHRSearch&lt;&gt;(patientAccountId, dtoClass, dataType);</span>
+<span class="fc" id="L161">        ehrSearch.addFilter(new PKBFilter(&quot;id&quot;, PKBFilter.Operator.IN, dataPointIds));</span>
+<span class="fc" id="L162">        return ehrBean.queryDecryptAndPopulateData(ehrSearch, dtoClass, requestContext);</span>
+    }
+
+    @Nullable
+    public T getById(@NotNull LoggedInEHRRequestContext requestContext, long dataPointId) {
+<span class="fc" id="L167">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L168">        return ehrBean.findDecryptAndPopulate(dataPointId, dtoClass, requestContext);</span>
+    }
+
+    @Nullable
+    public T getByUniqueId(@NotNull LoggedInEHRRequestContext requestContext, long patientAccountId, UUID uniqueId) {
+<span class="fc" id="L173">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L174">        EHRSearch&lt;T&gt; ehrSearch = new EHRSearch&lt;&gt;(patientAccountId, dtoClass, dataType);</span>
+        //because we're querying for a specific unique ID, we should include deleted:
+<span class="fc" id="L176">        ehrSearch.setIncludeDeleted(true);</span>
+<span class="fc" id="L177">        ehrSearch.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L178">        ehrSearch.addFilter(new PKBFilter(EHRData.UNIQUE_ID, PKBFilter.Operator.EQUAL,</span>
+                uniqueId));
+
+<span class="fc" id="L181">        return ehrBean.queryDecryptAndPopulateData(ehrSearch, requestContext)</span>
+<span class="fc" id="L182">                .stream()</span>
+<span class="fc" id="L183">                .findFirst()</span>
+<span class="fc" id="L184">                .orElse(null);</span>
+    }
+
+    public List&lt;T&gt; deleteByIds(@NotNull LoggedInEHRRequestContext requestContext, long patientAccountId, List&lt;Long&gt; dataPointIds,
+                               SourceDetails deletedBy,
+                               Instant deletionDate) {
+<span class="fc" id="L190">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L191">        EHRSearch&lt;T&gt; ehrSearch = new EHRSearch&lt;&gt;(patientAccountId, dtoClass, dataType);</span>
+<span class="fc" id="L192">        ehrSearch.addFilter(new PKBFilter(&quot;id&quot;, PKBFilter.Operator.IN, dataPointIds));</span>
+
+<span class="fc" id="L194">        List&lt;T&gt; dtoList = ehrBean.queryDecryptAndPopulateData(ehrSearch, requestContext);</span>
+<span class="fc" id="L195">        List&lt;UUID&gt; uniqueIds = dtoList.stream().map(t -&gt; t.getBaseFields().getUniqueId()).collect(toList());</span>
+<span class="fc" id="L196">        deleteByUniqueIds(requestContext, patientAccountId, uniqueIds, deletedBy, deletionDate);</span>
+<span class="fc" id="L197">        return dtoList;</span>
+    }
+
+    //TODO: highly inefficient crappy deletion, why the f*** we need to tell what data type is it, when we're deleting by uniqueIds ????????
+    void deleteByUniqueIds(@NotNull EHRRequestContext requestContext, long patientAccountId,
+                           Collection&lt;UUID&gt; uniqueIds, SourceDetails deletedBy, Instant deletionDate) {
+<span class="fc bfc" id="L203" title="All 2 branches covered.">        if (uniqueIds.isEmpty()) {</span>
+<span class="fc" id="L204">            return;</span>
+        }
+<span class="fc" id="L206">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L207">        EHRSearch&lt;T&gt; search = new EHRSearch&lt;&gt;(patientAccountId, dtoClass, dataType);</span>
+<span class="fc" id="L208">        search.addFilter(new PKBFilter(&quot;uniqueId&quot;, PKBFilter.Operator.IN, uniqueIds));</span>
+<span class="fc" id="L209">        ehrBean.deleteEHRDataByUniqueId(requestContext, search, deletedBy, deletionDate);</span>
+<span class="fc" id="L210">    }</span>
+
+    /**
+     * Implementations of this method should call doAdjustCoding with the appropriate arguments
+     */
+    protected abstract List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; adjustCodings(List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; data);
+
+    /**
+     * Implementations of this method should call doAdjustCoding with the appropriate arguments
+     */
+    protected abstract List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; adjustCodingsNoCodingLookup(List&lt;Tuple3&lt;T, CodingReceived, EHRRequestContext&gt;&gt; data);
+
+    /**
+     * Adds data to the patient record that's defined in the data point's patientAccountId field.
+     * No decryption access is assumed
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public DataPointSaveResult&lt;T&gt; addToMultipleAccounts(@NotNull List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; data) {
+<span class="fc bfc" id="L228" title="All 2 branches covered.">        if (data.isEmpty()) {</span>
+<span class="fc" id="L229">            return emptySaveResult();</span>
+        }
+
+<span class="fc" id="L232">        List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; excludeDataPoints = this.adjustCodings(data);</span>
+
+<span class="fc" id="L234">        List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; cleanData = new ArrayList&lt;&gt;(data);</span>
+<span class="fc" id="L235">        cleanData.removeAll(excludeDataPoints);</span>
+
+<span class="fc" id="L237">        List&lt;T&gt; persisted = save(cleanData, false).persistedDataPoints();</span>
+<span class="fc" id="L238">        var excludedList = excludeDataPoints.stream().map(t -&gt; t._1).collect(toList());</span>
+<span class="fc" id="L239">        return ImmutableDataPointSaveResult.&lt;T&gt;builder()</span>
+<span class="fc" id="L240">                .excludedDataPoints(excludedList)</span>
+<span class="fc" id="L241">                .persistedDataPoints(persisted)</span>
+<span class="fc" id="L242">                .build();</span>
+    }
+
+    public DataPointSaveResult&lt;T&gt; addToMultipleAccountsNoCodingLookup(@NotNull List&lt;Tuple3&lt;T, CodingReceived, EHRRequestContext&gt;&gt; data) {
+<span class="fc bfc" id="L246" title="All 2 branches covered.">        if (data.isEmpty()) {</span>
+<span class="fc" id="L247">            return emptySaveResult();</span>
+        }
+
+<span class="fc" id="L250">        List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; excludeData = this.adjustCodingsNoCodingLookup(data);</span>
+
+<span class="fc" id="L252">        List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; cleanDataPoints = data.stream().map(t -&gt; Tuple.of(t._1, t._3)).collect(toList());</span>
+
+<span class="fc" id="L254">        cleanDataPoints.removeAll(excludeData);</span>
+
+<span class="fc" id="L256">        List&lt;T&gt; persisted = save(cleanDataPoints, false).persistedDataPoints();</span>
+<span class="fc" id="L257">        var excludedList = excludeData.stream().map(t -&gt; t._1).collect(toList());</span>
+<span class="fc" id="L258">        return ImmutableDataPointSaveResult.&lt;T&gt;builder()</span>
+<span class="fc" id="L259">                .excludedDataPoints(excludedList)</span>
+<span class="fc" id="L260">                .persistedDataPoints(persisted)</span>
+<span class="fc" id="L261">                .build();</span>
+    }
+
+    public Set&lt;UUID&gt; checkForDuplicatesWithCoding(
+            io.vavr.collection.List&lt;DeduplicationCandidateDto&lt;T&gt;&gt; deduplicationCandidates,
+            io.vavr.collection.Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys) {
+
+<span class="fc" id="L268">        Seq&lt;Tuple3&lt;T, CodingReceived, EHRRequestContext&gt;&gt; observationDTOsWithCoding = deduplicationCandidates.map(DeduplicationCandidateDto::toObservationDtoWithCoding);</span>
+<span class="fc" id="L269">        this.adjustCodingsNoCodingLookup(observationDTOsWithCoding.toJavaList());</span>
+<span class="fc" id="L270">        return deduplicateForAccountsWithAccessibleAccountKeys(deduplicationCandidates, accountIdToAccountKeys);</span>
+    }
+
+    public Set&lt;UUID&gt; checkForDuplicates(
+            io.vavr.collection.List&lt;DeduplicationCandidateDto&lt;T&gt;&gt; deduplicationCandidates,
+            io.vavr.collection.Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys) {
+
+<span class="fc" id="L277">        this.adjustCodings(deduplicationCandidates.map(dcd -&gt; Tuple.of(dcd.candidateEntity(), dcd.recordContext())).toJavaList());</span>
+<span class="fc" id="L278">        return deduplicateForAccountsWithAccessibleAccountKeys(deduplicationCandidates, accountIdToAccountKeys);</span>
+    }
+
+    private Set&lt;UUID&gt; deduplicateForAccountsWithAccessibleAccountKeys(
+            @NotNull io.vavr.collection.List&lt;DeduplicationCandidateDto&lt;T&gt;&gt; candidates,
+            io.vavr.collection.Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys) {
+
+<span class="fc" id="L285">        candidates = candidates.filter(e -&gt;</span>
+<span class="fc" id="L286">                accountIdToAccountKeys.containsKey(e.candidateEntity().getPatientAccountId()));</span>
+
+<span class="fc bfc" id="L288" title="All 2 branches covered.">        if (candidates.isEmpty()) {</span>
+<span class="fc" id="L289">            return emptySet();</span>
+        }
+
+<span class="fc" id="L292">        return deduplicator.filterDuplicates(candidates, accountIdToAccountKeys);</span>
+    }
+
+    /**
+     * Set coded data information for the given list of medical data.
+     *
+     * @param context                The request context
+     * @param codedDataList          List of medical data points
+     * @param codingDataType         The type of coded data
+     * @param mapType                Type of private map
+     * @param conceptExtractor       Function that extracts the CodeableConcept field from a given entity
+     * @param codingReceivedIdSetter Function that sets the privateId of the CodingReceived entity attached to the given data point
+     * @param privacyFlagHandler     Function that does whatever it wants with the privacy flags attached to the coding match
+     * @return list of data points that should not be saved (excluded by CodingMatch.exclude)
+     */
+    protected List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; doAdjustCodings(
+            List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; codedDataList,
+            CodingDataType codingDataType,
+            Function1&lt;T, CodeableConcept&gt; conceptExtractor,
+            Function2&lt;T, Long, Void&gt; codingReceivedIdSetter,
+            Function2&lt;T, PrivacyFlag, Void&gt; privacyFlagHandler) {
+<span class="fc" id="L313">        List&lt;Tuple3&lt;T, CodingReceived, EHRRequestContext&gt;&gt; dataWithCodings = codedDataList.stream()</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">                .filter(d -&gt; conceptExtractor.apply(d._1) != null)</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">                .filter(d -&gt; !conceptExtractor.apply(d._1).getCodings().isEmpty())</span>
+<span class="fc" id="L316">                .map(dataPoint -&gt; Tuple</span>
+<span class="fc" id="L317">                        .of(dataPoint,</span>
+<span class="fc" id="L318">                                CodingReceived.attemptCodingReceived(codingDataType, conceptExtractor.apply(dataPoint._1), dataPoint._2), dataPoint._2))</span>
+<span class="fc" id="L319">                .filter(t -&gt; t._2.isPresent())</span>
+<span class="fc" id="L320">                .map(t -&gt; Tuple.of(t._1._1, t._2.get(), t._3))</span>
+<span class="fc" id="L321">                .collect(toList());</span>
+<span class="fc" id="L322">        Map&lt;T, CodingReceived&gt; dataToCoding = dataWithCodings.stream()</span>
+<span class="fc" id="L323">                .collect(Collectors.toMap(dwc -&gt; dwc._1, dwc -&gt; dwc._2));</span>
+<span class="fc" id="L324">        Map&lt;T, CodingReceived&gt; ensuredCodings = codingManager.ensureCodingReceived(dataToCoding);</span>
+<span class="fc" id="L325">        Map&lt;T, EHRRequestContext&gt; dataToContext = dataWithCodings.stream().collect(toMap(dwc -&gt; dwc._1, dwc -&gt; dwc._3));</span>
+
+<span class="fc" id="L327">        return doAdjustCodingsNoCodingLookup(</span>
+<span class="fc" id="L328">                ensuredCodings.entrySet().stream().map(e -&gt; Tuple.of(e.getKey(), e.getValue(), dataToContext.get(e.getKey()))).collect(toList()),</span>
+                codingReceivedIdSetter, privacyFlagHandler);
+    }
+
+    /**
+     * Set coded data information for the given list of medical data.
+     *
+     * @param mapType                Type of private map*
+     * @param codingReceivedIdSetter Function that sets the privateId of the CodingReceived entity attached to the given data point
+     * @param privacyFlagHandler     Function that does whatever it wants with the privacy flags attached to the coding match
+     * @return list of data points that should not be saved (excluded by CodingMatch.exclude)
+     */
+    protected List&lt;Tuple2&lt;T, EHRRequestContext&gt;&gt; doAdjustCodingsNoCodingLookup(
+            List&lt;Tuple3&lt;T, CodingReceived, EHRRequestContext&gt;&gt; ensuredCodings,
+            Function2&lt;T, Long, Void&gt; codingReceivedIdSetter,
+            Function2&lt;T, PrivacyFlag, Void&gt; privacyFlagHandler) {
+<span class="fc" id="L344">        List&lt;Tuple3&lt;T, CodingReceived, EHRRequestContext&gt;&gt; excludeData = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L345">        ensuredCodings</span>
+<span class="fc" id="L346">                .forEach(t -&gt; {</span>
+<span class="fc" id="L347">                    T data = t._1;</span>
+<span class="fc" id="L348">                    CodingReceived codingReceived = t._2;</span>
+<span class="fc bfc" id="L349" title="All 4 branches covered.">                    if (codingReceived.getCodingMatch() != null &amp;&amp; codingReceived.getCodingMatch().isExclude()) {</span>
+<span class="fc" id="L350">                        excludeData.add(t);</span>
+                    } else {
+<span class="fc" id="L352">                        codingReceivedIdSetter.apply(data, codingReceived.getId());</span>
+<span class="pc bpc" id="L353" title="1 of 4 branches missed.">                        if (codingReceived.getCodingMatch() != null &amp;&amp; codingReceived.getCodingMatch().getPrivacyFlag() != null) {</span>
+<span class="fc" id="L354">                            privacyFlagHandler.apply(data, codingReceived.getCodingMatch().getPrivacyFlag());</span>
+                        }
+                    }
+<span class="fc" id="L357">                });</span>
+        // exclusions: return the list of data points we need to drop (can't remove here from ensuredCodingds)
+<span class="fc" id="L359">        return excludeData.stream()</span>
+<span class="fc" id="L360">                .map(t -&gt; Tuple.of(t._1, t._3))</span>
+<span class="fc" id="L361">                .collect(toList());</span>
+    }
+
+    DataPointSaveResult&lt;T&gt; emptySaveResult() {
+<span class="fc" id="L365">        return ImmutableDataPointSaveResult.&lt;T&gt;builder().build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

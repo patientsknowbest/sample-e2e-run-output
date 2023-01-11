@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConvertFileAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.file</a> &gt; <span class="el_source">ConvertFileAction.java</span></div><h1>ConvertFileAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action.file;
+
+import com.pkb.action.BaseAction;
+import com.pkb.exception.PKBException;
+import com.pkb.service.file.ChunkFetchInputStream;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.service.file.FileManager;
+import com.pkb.service.file.TempFileInputStream;
+import org.apache.commons.io.FilenameUtils;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.docx4j.Docx4J;
+import org.docx4j.convert.out.FOSettings;
+import org.docx4j.fonts.IdentityPlusMapper;
+import org.docx4j.fonts.Mapper;
+import org.docx4j.model.fields.FieldUpdater;
+import org.docx4j.openpackaging.packages.WordprocessingMLPackage;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.util.Scanner;
+import java.util.UUID;
+
+/**
+ * For docx documents: convert to PDF or JPG.
+ * Soon: take args for other types of conversions.
+ *
+ * @author robwhelan
+ */
+<span class="fc" id="L41">public class ConvertFileAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = -4168629627225767493L;
+
+    private static final String FORMAT_PDF = &quot;pdf&quot;;
+    private static final String FORMAT_MP4 = &quot;mp4&quot;;
+
+    private static final String FFMPEG_BASE_PATH = &quot;/usr/bin/&quot;;
+
+    // source file id (only for supporting the test results source files)
+    private Long sourceFileId;
+
+    private UUID parentDocId;
+
+    // convert to format: PDF or selected video format...?
+    private String toFormat;
+
+    private String fileName;
+
+    private String contentType;
+
+    private String contentDisposition;
+
+<span class="fc" id="L64">    private Long contentLength = 0L;</span>
+
+    private InputStream inputStream;
+
+    private ChunkedDocManager chunkedDocManager;
+
+    private FileManager fileManager;
+
+<span class="fc" id="L72">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L74">    private final String tab = &quot;files&quot;;</span>
+
+    @Override
+    public String execute() {
+        try {
+<span class="fc bfc" id="L79" title="All 2 branches covered.">            if (parentDocId == null) {</span>
+<span class="fc" id="L80">                fileManager.getFile(getLoggedInEHRRequestContext(), sourceFileId, false/*don't fetch contents*/)</span>
+<span class="fc" id="L81">                        .ifPresent(fileDTO -&gt; {</span>
+<span class="fc" id="L82">                    fileName = fileDTO.getFileName();</span>
+<span class="fc" id="L83">                    parentDocId = fileDTO.getDocumentMetadataId();</span>
+<span class="fc" id="L84">                });</span>
+            }
+
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">            if (parentDocId == null) {</span>
+<span class="nc" id="L88">                LOGGER.error(&quot;Failed to retrieve file for conversion requestContext {}, sourceFileId {}&quot;,</span>
+<span class="nc" id="L89">                        getLoggedInEHRRequestContext(), sourceFileId);</span>
+<span class="nc" id="L90">                addActionError(getText(&quot;downloadFileAction.err.already_deleted&quot;));</span>
+<span class="nc" id="L91">                return INPUT;</span>
+            }
+
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">            if (chunkedDocManager.getMetadata(parentDocId).isEmpty()) {</span>
+<span class="nc" id="L95">                addActionError(getText(&quot;downloadFileAction.err.already_deleted&quot;));</span>
+<span class="nc" id="L96">                return INPUT;</span>
+            }
+
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">            if (FORMAT_PDF.equals(toFormat)) {</span>
+                // do conversion into a temp file, first of all
+
+<span class="fc" id="L102">                fileName = fixFileNameSuffix(fileName, &quot;pdf&quot;);</span>
+<span class="fc" id="L103">                contentType = &quot;application/pdf&quot;;</span>
+
+                // conversion: stream to file (this downloads subsequent chunks on the fly)
+<span class="fc" id="L106">                InputStream docxInputStream = new ChunkFetchInputStream(getLoggedInEHRRequestContext(), parentDocId, chunkedDocManager);</span>
+<span class="fc" id="L107">                File tempFile = File.createTempFile(&quot;docxToPdfWork-&quot;, &quot;tmp&quot;);</span>
+<span class="fc" id="L108">                LOGGER.info(&quot;temp file for docx conversion: {}&quot;, tempFile.getAbsolutePath());</span>
+<span class="fc" id="L109">                convertDocxToPdf(docxInputStream, tempFile);</span>
+                // clean up here!
+<span class="fc" id="L111">                docxInputStream.close();</span>
+<span class="fc" id="L112">                LOGGER.info(&quot;docx conversion completed&quot;);</span>
+
+<span class="fc" id="L114">                contentLength = tempFile.length();</span>
+
+                // this will auto-clean up the file once it's read in
+<span class="fc" id="L117">                inputStream = new TempFileInputStream(tempFile);</span>
+<span class="pc bnc" id="L118" title="All 2 branches missed.">            } else if (FORMAT_MP4.equals(toFormat)) {</span>
+                // stream it!
+<span class="nc" id="L120">                String origFileName = fileName;</span>
+<span class="nc" id="L121">                fileName = fixFileNameSuffix(fileName, &quot;mp4&quot;);</span>
+<span class="nc" id="L122">                LOGGER.info(&quot;ffmpeg transcoding: new file name {}&quot;, fileName);</span>
+<span class="nc" id="L123">                contentType = &quot;video/mp4&quot;;</span>
+                //   not getting there, streaming mp4... apparently it has a wrapper that needs updating after writing the file. :(
+                //                contentLength = -1L; // fileDTO.getTotalBytes();  Not yet implemented!
+                //
+                //                InputStream vidInputStream = new ChunkFetchInputStream(getParentDocId(), chunkedDocManager);
+                //                inputStream = transcodeVideo( vidInputStream );
+                // no temp file on disk = no cleanup!
+
+                // simplest possible: write file to disk, convert to disk, then stream that out.
+<span class="nc" id="L132">                InputStream srcInputStream = null;</span>
+<span class="nc" id="L133">                FileOutputStream srcFileOutStream = null;</span>
+<span class="nc" id="L134">                String extension = FilenameUtils.getExtension(origFileName);</span>
+<span class="nc" id="L135">                File tempFileSrc = File.createTempFile(&quot;vidSrc-&quot;, &quot;.&quot; + extension);</span>
+                try {
+<span class="nc" id="L137">                    srcInputStream = new ChunkFetchInputStream(getLoggedInEHRRequestContext(), parentDocId, chunkedDocManager);</span>
+<span class="nc" id="L138">                    srcFileOutStream = new FileOutputStream(tempFileSrc, false/*append*/);</span>
+<span class="nc" id="L139">                    IOUtils.copyLarge(srcInputStream, srcFileOutStream);</span>
+<span class="nc" id="L140">                    srcFileOutStream.flush();</span>
+<span class="nc" id="L141">                    LOGGER.info(&quot;ffmpeg transcoding: wrote source vid to file {}&quot;, tempFileSrc.getAbsolutePath());</span>
+<span class="nc" id="L142">                } catch (Exception e) {</span>
+<span class="nc" id="L143">                    LOGGER.error(&quot;error feeding source video into ffmpeg process&quot;, e);</span>
+                } finally {
+<span class="nc" id="L145">                    IOUtils.closeQuietly(srcInputStream);</span>
+<span class="nc" id="L146">                    IOUtils.closeQuietly(srcFileOutStream);</span>
+                }
+
+                // now transcode!
+<span class="nc" id="L150">                File tempFileDest = File.createTempFile(&quot;vidDest-&quot;, &quot;.mp4&quot;);</span>
+<span class="nc" id="L151">                LOGGER.info(&quot;ffmpeg transcoding: prep dest vid file {}&quot;, tempFileDest.getAbsolutePath());</span>
+<span class="nc" id="L152">                transcodeVideoFile(tempFileSrc, tempFileDest);</span>
+
+                // clean up the orig: done with it!
+<span class="nc" id="L155">                tempFileSrc.delete();</span>
+
+<span class="nc" id="L157">                contentLength = tempFileDest.length();</span>
+
+<span class="nc" id="L159">                LOGGER.info(&quot;ffmpeg transcoding: returning wrapped inputstream&quot;);</span>
+
+                // this will auto-clean up the file as part of closing the stream
+<span class="nc" id="L162">                inputStream = new TempFileInputStream(tempFileDest);</span>
+            }
+<span class="nc" id="L164">        } catch (Exception exception) {</span>
+<span class="nc" id="L165">            throw new PKBException(&quot;failed getting document with id &quot; + parentDocId.toString(), exception);</span>
+<span class="fc" id="L166">        }</span>
+<span class="fc" id="L167">        return SUCCESS;</span>
+    }
+
+    private void convertDocxToPdf(InputStream docxInputStream, File tempFile) throws Exception {
+<span class="fc" id="L171">        WordprocessingMLPackage wordMLPackage = WordprocessingMLPackage.load(docxInputStream);</span>
+<span class="fc" id="L172">        FieldUpdater updater = new FieldUpdater(wordMLPackage);</span>
+<span class="fc" id="L173">        updater.update(true);</span>
+        // Set up font mapper (optional)
+<span class="fc" id="L175">        Mapper fontMapper = new IdentityPlusMapper();</span>
+<span class="fc" id="L176">        wordMLPackage.setFontMapper(fontMapper);</span>
+<span class="fc" id="L177">        FOSettings foSettings = Docx4J.createFOSettings();</span>
+<span class="fc" id="L178">        foSettings.setWmlPackage(wordMLPackage);</span>
+
+        // output to temp file
+<span class="fc" id="L181">        FileOutputStream fileOutput = new FileOutputStream(tempFile, false);</span>
+<span class="fc" id="L182">        Docx4J.toFO(foSettings, fileOutput, Docx4J.FLAG_EXPORT_PREFER_XSL);</span>
+<span class="fc" id="L183">        fileOutput.flush();</span>
+<span class="fc" id="L184">        fileOutput.close();</span>
+<span class="fc" id="L185">    }</span>
+
+    private void transcodeVideoFile(File tempFileSrc, File tempFileDest) throws Exception {
+        // https://github.com/bramp/ffmpeg-cli-wrapper
+        // huh. this only works with files; we can do streaming, though, if we manage the process ourselves.
+
+        // install ffmpeg from here (static builds! but won't work on RHEL5): http://johnvansickle.com/ffmpeg/
+
+        // jonathan's suggested encoding args:
+        // ffmpeg -i iphonevid4.m4v -b 1500k -vcodec libx264 &quot;iphonevid4.mp4&quot;
+
+<span class="nc" id="L196">        ProcessBuilder pb = new ProcessBuilder(</span>
+                &quot;/usr/bin/taskset&quot;, &quot;-c&quot;, &quot;0-3&quot;,
+                FFMPEG_BASE_PATH + &quot;ffmpeg&quot;,
+<span class="nc" id="L199">                &quot;-i&quot;, tempFileSrc.getAbsolutePath(),</span>
+                &quot;-b:v&quot;, &quot;1500k&quot;,
+                &quot;-strict&quot;, &quot;experimental&quot;,
+                &quot;-vcodec&quot;, &quot;libx264&quot;, &quot;-y&quot;,
+                &quot;-threads&quot;, &quot;8&quot;,
+<span class="nc" id="L204">                tempFileDest.getAbsolutePath());</span>
+        // pb.redirectErrorStream(); // This will make both stdout and stderr be redirected to process.getInputStream();
+<span class="nc" id="L206">        Process ffmpeg = pb.start();</span>
+<span class="nc" id="L207">        LOGGER.info(&quot;started ffmpeg conversion process&quot;);</span>
+
+<span class="nc" id="L209">        InputStream readErr = ffmpeg.getErrorStream();</span>
+<span class="nc" id="L210">        InputStream readIn = ffmpeg.getInputStream();</span>
+
+        // copy the src data from the chunkedInputStream to the process' stdin
+        // do this in a sep thread... awkward!
+<span class="nc" id="L214">        Thread stdoutThread = new Thread(() -&gt; {</span>
+            try {
+                // log from stdout until it's done
+<span class="nc" id="L217">                Scanner scanner = new Scanner(readIn);</span>
+<span class="nc bnc" id="L218" title="All 2 branches missed.">                while (scanner.hasNextLine()) {</span>
+                    // TODO: What does the process output? Anything sensitive?
+<span class="nc" id="L220">                    LOGGER.warn(&quot;FFMPEG stdout: {}&quot;, scanner.nextLine());</span>
+                }
+<span class="nc" id="L222">            } catch (Exception e) {</span>
+<span class="nc" id="L223">                LOGGER.error(&quot;error reading from stdout of ffmpeg process&quot;, e);</span>
+            } finally {
+<span class="nc" id="L225">                LOGGER.info(&quot;ffmpeg stdout reader exiting&quot;);</span>
+<span class="nc" id="L226">                IOUtils.closeQuietly(readIn);</span>
+            }
+<span class="nc" id="L228">        });</span>
+<span class="nc" id="L229">        stdoutThread.setDaemon(true);</span>
+<span class="nc" id="L230">        stdoutThread.start();</span>
+
+        // read from stderr as well, and log
+<span class="nc" id="L233">        Thread stderrThread = new Thread(() -&gt; {</span>
+            try {
+                // log from err until it's done
+<span class="nc" id="L236">                Scanner scanner = new Scanner(readErr);</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">                while (scanner.hasNextLine()) {</span>
+                    // TODO: What does the process output? Anything sensitive?
+<span class="nc" id="L239">                    LOGGER.warn(&quot;FFMPEG stderr: {}&quot;, scanner.nextLine());</span>
+                }
+<span class="nc" id="L241">            } catch (Exception e) {</span>
+<span class="nc" id="L242">                LOGGER.error(&quot;error reading from stderr of ffmpeg process&quot;, e);</span>
+            } finally {
+<span class="nc" id="L244">                LOGGER.info(&quot;ffmpeg stderr reader exiting&quot;);</span>
+<span class="nc" id="L245">                IOUtils.closeQuietly(readErr);</span>
+            }
+<span class="nc" id="L247">        });</span>
+<span class="nc" id="L248">        stderrThread.setDaemon(true);</span>
+<span class="nc" id="L249">        stderrThread.start();</span>
+
+<span class="nc" id="L251">        LOGGER.info(&quot;ffmpeg process waited: exited with code {}&quot;, ffmpeg.waitFor());</span>
+<span class="nc" id="L252">    }</span>
+
+    /** change the extension */
+    private String fixFileNameSuffix(String origFileName, String convertedExtension) {
+<span class="pc bpc" id="L256" title="1 of 2 branches missed.">        String oldFilename = StringUtils.isEmpty(origFileName) ? &quot;unnamedFile&quot; : origFileName;</span>
+
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">        if (FilenameUtils.isExtension(oldFilename, convertedExtension)) {</span>
+<span class="nc" id="L259">            return oldFilename;</span>
+        }
+
+<span class="fc" id="L262">        String oldExtension = FilenameUtils.getExtension(oldFilename);</span>
+<span class="fc" id="L263">        String oldBase = FilenameUtils.getBaseName(oldFilename);</span>
+
+<span class="fc" id="L265">        String newBase = oldBase;</span>
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(oldExtension)) {</span>
+<span class="fc" id="L267">            newBase += &quot;-&quot; + oldExtension;</span>
+        }
+
+<span class="fc" id="L270">        return newBase + &quot;.&quot; + convertedExtension;</span>
+    }
+
+    public void setParentDocId(UUID parentDocId) {
+<span class="fc" id="L274">        this.parentDocId = parentDocId;</span>
+<span class="fc" id="L275">    }</span>
+
+    public String getFileName() {
+<span class="fc" id="L278">        return fileName;</span>
+    }
+
+    public String getContentType() {
+<span class="fc" id="L282">        return contentType;</span>
+    }
+
+    public InputStream getInputStream() {
+<span class="fc" id="L286">        return inputStream;</span>
+    }
+
+    public Long getContentLength() {
+<span class="fc" id="L290">        return contentLength;</span>
+    }
+
+    public void setChunkedDocManager(ChunkedDocManager chunkedDocManager) {
+<span class="fc" id="L294">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L295">    }</span>
+
+    public void setFileName(String fileName) {
+<span class="fc" id="L298">        this.fileName = fileName;</span>
+<span class="fc" id="L299">    }</span>
+
+    public void setInputStream(InputStream inputStream) {
+<span class="nc" id="L302">        this.inputStream = inputStream;</span>
+<span class="nc" id="L303">    }</span>
+
+    public Long getSourceFileId() {
+<span class="nc" id="L306">        return sourceFileId;</span>
+    }
+
+    public void setSourceFileId(Long sourceFileId) {
+<span class="fc" id="L310">        this.sourceFileId = sourceFileId;</span>
+<span class="fc" id="L311">    }</span>
+
+    public void setFileManager(FileManager fileManager) {
+<span class="fc" id="L314">        this.fileManager = fileManager;</span>
+<span class="fc" id="L315">    }</span>
+
+    public String getTab() {
+<span class="nc" id="L318">        return tab;</span>
+    }
+
+    public String getContentDisposition() {
+<span class="fc" id="L322">        return contentDisposition;</span>
+    }
+
+    public void setContentDisposition(String contentDisposition) {
+<span class="fc" id="L326">        this.contentDisposition = contentDisposition;</span>
+<span class="fc" id="L327">    }</span>
+
+    public void setToFormat(String toFormat) {
+<span class="fc" id="L330">        this.toFormat = toFormat;</span>
+<span class="fc" id="L331">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

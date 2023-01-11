@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GCSDocumentStoreImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.document.storage</a> &gt; <span class="el_source">GCSDocumentStoreImpl.java</span></div><h1>GCSDocumentStoreImpl.java</h1><pre class="source lang-java linenums">package com.pkb.service.document.storage;
+
+import com.google.api.gax.paging.Page;
+import com.google.cloud.BatchResult;
+import com.google.cloud.storage.Blob;
+import com.google.cloud.storage.BlobId;
+import com.google.cloud.storage.Bucket;
+import com.google.cloud.storage.Storage;
+import com.google.cloud.storage.StorageBatch;
+import com.google.cloud.storage.StorageException;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.document.Document;
+import com.pkb.document.entity.GcsDeleteQueue;
+import com.pkb.entities.enums.DocStorageBackend;
+import com.pkb.repository.legacy.LegacyGcsDeleteQueueRepository;
+import com.pkb.service.document.EncryptedDocumentStore;
+import com.pkb.service.document.GCSDocumentStore;
+import com.pkb.service.document.storage.gcs.StorageProvider;
+import com.pkb.service.uuid.UUIDProvider;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import io.vavr.Tuple;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+
+import java.time.Instant;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+public class GCSDocumentStoreImpl implements GCSDocumentStore {
+
+    private static final String DELETE_TIMER_NAME = &quot;phr_gcs_deletion_timer&quot;;
+<span class="fc" id="L41">    private static final Timer STORAGE_TIMER = Timer.builder(DELETE_TIMER_NAME)</span>
+<span class="fc" id="L42">            .description(&quot;Latencies of document deletion from GCS&quot;)</span>
+<span class="fc" id="L43">            .publishPercentileHistogram()</span>
+<span class="fc" id="L44">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L45">            .register(Metrics.globalRegistry);</span>
+
+    private final Storage storage;
+    private final Bucket bucket;
+    private final UUIDProvider uuidProvider;
+    private final DateTimeService dateTimeService;
+    private final LegacyGcsDeleteQueueRepository repository;
+    private final PhrConfig config;
+
+<span class="fc" id="L54">    public GCSDocumentStoreImpl(PhrConfig config, UUIDProvider uuidProvider, StorageProvider storageProvider, DateTimeService dateTimeService, LegacyGcsDeleteQueueRepository repository) {</span>
+<span class="fc" id="L55">        this.uuidProvider = uuidProvider;</span>
+<span class="fc" id="L56">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L57">        this.repository = repository;</span>
+<span class="fc" id="L58">        this.storage = storageProvider.getStorage();</span>
+<span class="fc" id="L59">        this.bucket = storage.get(config.getDocumentGcsStoreBucketName());</span>
+<span class="fc" id="L60">        this.config = config;</span>
+<span class="fc" id="L61">    }</span>
+
+    @Override
+    public DocStorageBackend storageType() {
+<span class="fc" id="L65">        return DocStorageBackend.GCS;</span>
+    }
+
+    @Override
+    public String create(@NotNull Document document) {
+<span class="fc" id="L70">        String id = uuidProvider.randomUUID().toString();</span>
+<span class="fc" id="L71">        Blob blob = bucket.create(id, EncryptedDocumentStore.getContent(document), &quot;application/octet-stream&quot;);</span>
+<span class="fc" id="L72">        return blob.getBlobId().getName();</span>
+    }
+
+    @Override
+    public Optional&lt;byte[]&gt; retrieve(@NotNull String id) {
+<span class="fc" id="L77">        Blob blob = bucket.get(id);</span>
+<span class="fc" id="L78">        return Optional.ofNullable(blob).map(Blob::getContent);</span>
+    }
+
+    @Override
+    public @NotNull Map&lt;String, byte[]&gt; retrieve(@NotNull Collection&lt;String&gt; ids) {
+<span class="pc bpc" id="L83" title="1 of 2 branches missed.">        if (isEmpty(ids)) {</span>
+<span class="nc" id="L84">            return Collections.emptyMap();</span>
+        }
+
+<span class="fc" id="L87">        List&lt;Blob&gt; blobs = bucket.get(ids);</span>
+
+<span class="fc" id="L89">        return blobs.stream()</span>
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">                .filter(blob -&gt; blob != null)</span>
+<span class="fc" id="L91">                .map(blob -&gt; Tuple.of(blob.getBlobId().getName(), blob.getContent()))</span>
+<span class="fc" id="L92">                .collect(Collectors.toMap(t -&gt; t._1, t -&gt; t._2));</span>
+    }
+
+    @Override
+    public boolean delete(@NotNull String id) {
+<span class="fc" id="L97">        GcsDeleteQueue toDelete = new GcsDeleteQueue();</span>
+<span class="fc" id="L98">        toDelete.setIdInStore(id);</span>
+<span class="fc" id="L99">        toDelete.setDeletedDate(dateTimeService.now());</span>
+<span class="fc" id="L100">        repository.save(toDelete);</span>
+<span class="fc" id="L101">        return true;</span>
+    }
+
+    @Override
+    public int delete(Collection&lt;String&gt; ids) {
+<span class="fc" id="L106">        Instant now = dateTimeService.now();</span>
+<span class="fc" id="L107">        ids.forEach(id -&gt; {</span>
+<span class="fc" id="L108">            GcsDeleteQueue toDelete = new GcsDeleteQueue();</span>
+<span class="fc" id="L109">            toDelete.setIdInStore(id);</span>
+<span class="fc" id="L110">            toDelete.setDeletedDate(now);</span>
+<span class="fc" id="L111">            repository.save(toDelete);</span>
+<span class="fc" id="L112">        });</span>
+<span class="fc" id="L113">        return ids.size();</span>
+    }
+
+    @Override
+    public Map&lt;String, Either&lt;StorageException, Boolean&gt;&gt; deleteBlobs(@NotNull Collection&lt;String&gt; ids) {
+<span class="fc" id="L118">        List&lt;BlobId&gt; blobIds = ids.stream().distinct().map(id -&gt; BlobId.of(bucket.getName(), id)).collect(Collectors.toList());</span>
+<span class="fc" id="L119">        StorageBatch batch = storage.batch();</span>
+<span class="fc" id="L120">        Map&lt;String, Either&lt;StorageException, Boolean&gt;&gt; results = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L122">        blobIds.forEach(blobId -&gt; batch.delete(blobId, new Storage.BlobSourceOption[0]).notify(new BatchResult.Callback&lt;&gt;() {</span>
+            @Override
+            public void success(Boolean result) {
+<span class="fc" id="L125">                results.put(blobId.getName(), Either.right(result));</span>
+<span class="fc" id="L126">            }</span>
+
+            @Override
+            public void error(StorageException e) {
+<span class="nc" id="L130">                results.put(blobId.getName(), Either.left(e));</span>
+<span class="nc" id="L131">            }</span>
+        }));
+
+<span class="fc" id="L134">        Metrics.timer(DELETE_TIMER_NAME).record(() -&gt; batch.submit());</span>
+<span class="fc" id="L135">        return results;</span>
+    }
+
+    @Override
+    public Page&lt;Blob&gt; getBlobsInGcs() {
+<span class="fc" id="L140">        return storage.list(bucket.getName(), Storage.BlobListOption.pageSize(config.getOrphanedGcsDocumentDeletionPageSize()),</span>
+<span class="fc" id="L141">                Storage.BlobListOption.fields(Storage.BlobField.TIME_CREATED));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

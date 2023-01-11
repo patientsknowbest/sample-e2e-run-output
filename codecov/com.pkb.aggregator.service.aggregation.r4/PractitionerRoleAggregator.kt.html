@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PractitionerRoleAggregator.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.service.aggregation.r4</a> &gt; <span class="el_source">PractitionerRoleAggregator.kt</span></div><h1>PractitionerRoleAggregator.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.service.aggregation.r4
+
+import com.pkb.aggregator.R4Extension
+import com.pkb.aggregator.R4PractitionerRole
+import com.pkb.aggregator.extension.findSingleR4UpstreamTagExtension
+import com.pkb.aggregator.extension.getSourcedReference
+import com.pkb.aggregator.extension.safeAddAll
+import com.pkb.aggregator.extension.safeAddExtensions
+import com.pkb.aggregator.extension.simpleDownstreamResourceId
+import com.pkb.aggregator.extension.simpleResourceId
+import com.pkb.aggregator.extension.untagSource
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamResource
+import com.pkb.aggregator.service.aggregation.ResourceAggregator
+import com.pkb.aggregator.service.exception.UnexpectedTypeException
+import com.pkb.aggregator.service.reference.ReferenceExtractor
+import com.pkb.aggregator.service.reference.ReferenceExtractor.IdentifierMap
+import org.hl7.fhir.instance.model.api.IDomainResource
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+
+/**
+ * Aggregates multiple resources referring to the same practitioner role into a single resource for the downstream store
+ */
+<span class="fc" id="L26">@Service</span>
+<span class="fc" id="L27">class PractitionerRoleAggregator(</span>
+<span class="fc" id="L28">    private val referenceExtractor: ReferenceExtractor,</span>
+) : ResourceAggregator&lt;R4PractitionerRole&gt; {
+
+<span class="fc" id="L31">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    fun mergeAll(upstreamResources: List&lt;IDomainResource&gt;, references: IdentifierMap): List&lt;R4PractitionerRole&gt; {
+
+        // This is a bit fiddly. Basically for each upstream role we need to translate it to a downstream practitioner
+        // and downstream org, and then group by both those references (because we might have two different upstreams
+        // telling us a practitioner has a role at an organization, but each of those upstreams hvae completely
+        // different resource ids for both) and merge where we have two entries referring to the same org/pro
+        // relationship.
+        //
+        // Example scenario:
+        //
+        // Upstream 1: up1-pro1 is a member of up1-org
+        // Upstream 2: up2-pro1 is a member of up2-org
+        // Upstream 2: up2-pro2 is a member of up2-org
+        //
+        // Downstream: up1-pro1 and up2-pro1 are the same pro: down1-pro1
+        //             up2-pro2 is a different pro:            down1-pro2
+        //             up1-org and up2-org are the same org:   down1-org
+        //
+        // Passed into this function are 3 PractitionerRoles:
+        //    Role(up1-pro1, up1-org)
+        //    Role(up2-pro1, up2-org)
+        //    Role(up2-pro2, up2-org)
+        //
+        // And an identifier map:
+        //    practitioners: [ (up1-pro1, down1-pro1), (up2-pro1, down1-pro1), (up2-pro2, down1-pro2) ]
+        //    organizations: [ (up1-org, down1-org), (up2-org, down1-org) ]
+        //
+        // Expected output from this function is two roles, one for each downstream pro linking them to the downstream org.
+        // For down1-pro1 the role information should be merged from the two upstreams
+        //
+        // [ Role(down1-pro1, down1-org), Role(down1-pro2, down1-org) ]
+
+<span class="nc bnc" id="L65" title="All 2 branches missed.">        val practitionerRoles = upstreamResources.mapNotNull { it as? R4PractitionerRole }</span>
+
+        // Group by downstream pro and org, merging cases where there's more than one
+<span class="nc" id="L68">        return practitionerRoles</span>
+<span class="nc" id="L69">            .groupBy { downstreamPractitionerOrganizationKey(it, references) }</span>
+<span class="nc" id="L70">            .map { merge(it.value, null as String?, references) }</span>
+    }
+
+<span class="nc" id="L73">    data class DownstreamPractitionerOrganizationKey(val practitionerResourceId: String, val organizationResourceId: String)</span>
+
+<span class="fc" id="L75">    override fun createDownstreamInstance(downstreamId: String) = R4PractitionerRole()</span>
+
+    override fun mergeResource(
+        downstreamResource: R4PractitionerRole,
+        upstreamResource: IDomainResource,
+        references: IdentifierMap
+    ) {
+<span class="pc bpc" id="L82" title="2 of 4 branches missed.">        val upstreamPractitionerRole = upstreamResource as? R4PractitionerRole</span>
+<span class="nc" id="L83">            ?: throw UnexpectedTypeException(upstreamResource)</span>
+
+<span class="fc" id="L85">        val source = upstreamPractitionerRole.findSingleR4UpstreamTagExtension()</span>
+
+        // TODO PHR-9286
+<span class="fc" id="L88">        downstreamResource.active = upstreamPractitionerRole.active</span>
+<span class="fc" id="L89">        downstreamResource.organization = createOrganizationReference(upstreamPractitionerRole, references)</span>
+<span class="fc" id="L90">        downstreamResource.practitioner = createPractitionerReference(upstreamPractitionerRole, references)</span>
+<span class="fc" id="L91">        downstreamResource.period = upstreamPractitionerRole.period.copy()</span>
+<span class="fc" id="L92">        downstreamResource.availabilityExceptions = upstreamPractitionerRole.availabilityExceptions</span>
+
+<span class="fc" id="L94">        downstreamResource.identifier.safeAddAll(upstreamPractitionerRole.identifier, source)</span>
+<span class="fc" id="L95">        downstreamResource.code.safeAddAll(upstreamPractitionerRole.code, source)</span>
+<span class="fc" id="L96">        downstreamResource.specialty.safeAddAll(upstreamPractitionerRole.specialty, source)</span>
+<span class="fc" id="L97">        downstreamResource.location.safeAddAll(upstreamPractitionerRole.location, source)</span>
+<span class="fc" id="L98">        downstreamResource.telecom.safeAddAll(upstreamPractitionerRole.telecom, source)</span>
+<span class="fc" id="L99">        downstreamResource.availableTime.safeAddAll(upstreamPractitionerRole.availableTime, source)</span>
+<span class="fc" id="L100">        downstreamResource.notAvailable.safeAddAll(upstreamPractitionerRole.notAvailable, source)</span>
+
+<span class="fc" id="L102">        downstreamResource.safeAddExtensions(upstreamPractitionerRole.extension)</span>
+<span class="fc" id="L103">    }</span>
+
+    override fun stripResource(downstreamResource: R4PractitionerRole, sourceTag: R4Extension) {
+<span class="nc" id="L106">        downstreamResource.identifier.untagSource(sourceTag)</span>
+<span class="nc" id="L107">        downstreamResource.code.untagSource(sourceTag)</span>
+<span class="nc" id="L108">        downstreamResource.specialty.untagSource(sourceTag)</span>
+<span class="nc" id="L109">        downstreamResource.telecom.untagSource(sourceTag)</span>
+<span class="nc" id="L110">        downstreamResource.availableTime.untagSource(sourceTag)</span>
+<span class="nc" id="L111">        downstreamResource.notAvailable.untagSource(sourceTag)</span>
+
+<span class="nc" id="L113">        downstreamResource.extension.removeIf { it.equalsDeep(sourceTag) }</span>
+<span class="nc" id="L114">    }</span>
+
+    override fun mergeIdentifiers(downstreamResource: R4PractitionerRole) {
+        // Do nothing - we don't currently care about consistent downstream ids for this resource because they
+        // are basically just a way to join orgs and pros
+<span class="fc" id="L119">    }</span>
+
+    override fun deriveDownstreamResourceId(currentDownstreamId: String?, resources: List&lt;IDomainResource&gt;): String {
+        // resources list contains 1..N resources representing the same relationship, so just grab the first
+<span class="fc" id="L123">        val role = resources</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">            .mapNotNull { it as? R4PractitionerRole }</span>
+<span class="pc" id="L125">            .minByOrNull { it.practitioner.reference }!!</span>
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">        return currentDownstreamId ?: role.simpleDownstreamResourceId()</span>
+    }
+
+    fun updateOrCreate(
+        practitionerRole: R4PractitionerRole,
+        currentDownstream: R4PractitionerRole?,
+        downstreamResourceId: String?
+    ): R4PractitionerRole {
+<span class="fc" id="L134">        val resources = listOf(practitionerRole)</span>
+<span class="fc" id="L135">        val references = referenceExtractor.extract(resources)</span>
+<span class="fc" id="L136">        val result = merge(resources, currentDownstream, downstreamResourceId, references)</span>
+<span class="fc" id="L137">        log.debug(</span>
+<span class="fc" id="L138">            &quot;Aggregated upstream practitioner role {} to downstream practitioner role {}&quot;,</span>
+<span class="fc" id="L139">            practitionerRole.simpleResourceId(),</span>
+<span class="fc" id="L140">            result.simpleResourceId()</span>
+        )
+<span class="fc" id="L142">        return result</span>
+    }
+
+    private fun downstreamPractitionerOrganizationKey(
+        upstreamPractitionerRole: R4PractitionerRole,
+        references: IdentifierMap
+    ): DownstreamPractitionerOrganizationKey {
+
+        // Get source information
+<span class="nc" id="L151">        val source = upstreamPractitionerRole.getSourcedReference()</span>
+
+        // Lookup the downstream practitioner
+<span class="nc" id="L154">        val practitionerReference = UpstreamResource(source.upstreamSource, upstreamPractitionerRole.practitioner.reference)</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">        val practitionerResourceId = references.practitioners</span>
+<span class="nc bnc" id="L156" title="All 4 branches missed.">            .find { it.upstream == practitionerReference }</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">            ?.downstreamId</span>
+<span class="nc" id="L158">            ?: throw RuntimeException(&quot;Could not find downstream practitioner resource id for $practitionerReference&quot;)</span>
+
+        // Lookup the downstream organization
+<span class="nc" id="L161">        val organizationReference = UpstreamResource(source.upstreamSource, upstreamPractitionerRole.organization.reference)</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">        val organizationResourceId = references.organizations</span>
+<span class="nc bnc" id="L163" title="All 4 branches missed.">            .find { it.upstream == organizationReference }</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">            ?.downstreamId</span>
+<span class="nc" id="L165">            ?: throw RuntimeException(&quot;Could not find downstream organization resource id for $organizationReference&quot;)</span>
+
+<span class="nc" id="L167">        return DownstreamPractitionerOrganizationKey(practitionerResourceId, organizationResourceId)</span>
+    }
+
+    private fun createOrganizationReference(role: R4PractitionerRole, references: IdentifierMap) =
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">        if (role.hasOrganization()) {</span>
+<span class="fc" id="L172">            val source = role.organization.getSourcedReference()</span>
+<span class="fc" id="L173">            val needle = UpstreamResource(source.upstreamSource, role.organization.reference)</span>
+<span class="fc" id="L174">            references.getOrganizationReference(needle).apply {</span>
+<span class="fc" id="L175">                extension = role.organization.extension.map { it.copy() }</span>
+<span class="fc" id="L176">            }</span>
+        } else {
+<span class="nc" id="L178">            null</span>
+<span class="fc" id="L179">        }</span>
+
+    private fun createPractitionerReference(role: R4PractitionerRole, references: IdentifierMap) =
+<span class="pc bpc" id="L182" title="1 of 2 branches missed.">        if (role.hasPractitioner()) {</span>
+<span class="fc" id="L183">            val source = role.practitioner.getSourcedReference()</span>
+<span class="fc" id="L184">            val needle = UpstreamResource(source.upstreamSource, role.practitioner.reference)</span>
+<span class="fc" id="L185">            references.getPractitionerReference(needle).apply {</span>
+<span class="fc" id="L186">                extension = role.practitioner.extension.map { it.copy() }</span>
+<span class="fc" id="L187">            }</span>
+        } else {
+<span class="nc" id="L189">            null</span>
+<span class="fc" id="L190">        }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

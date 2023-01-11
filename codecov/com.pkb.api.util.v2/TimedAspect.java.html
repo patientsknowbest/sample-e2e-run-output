@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TimedAspect.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.util.v2</a> &gt; <span class="el_source">TimedAspect.java</span></div><h1>TimedAspect.java</h1><pre class="source lang-java linenums">package com.pkb.api.util.v2;
+
+import com.pkb.api.aspect.annotation.Timed;
+import com.pkb.datamodel.ApiAuthSession;
+import com.pkb.datamodel.ApiClient;
+import io.prometheus.client.Histogram;
+import io.vavr.collection.Stream;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.lang.annotation.Around;
+import org.aspectj.lang.annotation.Aspect;
+import org.aspectj.lang.reflect.CodeSignature;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+
+import javax.servlet.http.HttpServletRequest;
+import java.util.List;
+
+import static com.pkb.api.util.v2.RestUtil.AUTH_SESSION_VAR;
+
+@Aspect
+@Order(2000) // Must be higher than ValidateScopeAspect
+@Component
+<span class="fc" id="L29">public class TimedAspect {</span>
+<span class="fc" id="L30">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L32">    private static final Histogram restApiHistograms = Histogram.build()</span>
+<span class="fc" id="L33">            .linearBuckets(0, 0.1, 50)</span>
+<span class="fc" id="L34">            .name(&quot;restApiCallHistogram&quot;)</span>
+<span class="fc" id="L35">            .help(&quot;Histogram of REST API call processing times&quot;)</span>
+<span class="fc" id="L36">            .labelNames(&quot;method&quot;, &quot;servletPath&quot;, &quot;apiclientid&quot;)</span>
+<span class="fc" id="L37">            .register();</span>
+
+    /**
+     * Performs basic logging so we can track which clients are using which REST API operations.
+     *
+     * It will log the REST API Client ID, the HTTP method, and a sanitised version of the requested URL.
+     *
+     * URL sanitisation involves:
+     * &lt;ul&gt;
+     * &lt;li&gt;Dropping any query parameters&lt;/li&gt;
+     * &lt;li&gt;Replacing any parameters marked sensitive in the remaining URL as &quot;PROTECTED&quot;&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * REST API endpoints should use the Timed annotation in order to appear in prometheus metrics.
+     */
+    @Around(&quot;(execution(* com.pkb.api..*.*(..)) || execution(* com.pkb.api.internal..*.*(..))) &amp;&amp; @annotation(timed)&quot;)
+    public Object timed(ProceedingJoinPoint pjp, Timed timed) throws Throwable {
+        // Strip any sensitive parameters out of the URL
+<span class="fc" id="L55">        List&lt;String&gt; parameterNames = List.of(((CodeSignature) pjp.getSignature()).getParameterNames());</span>
+<span class="fc" id="L56">        String sanitisedURL = Stream.of(timed.hideParams())</span>
+                // Find the index of the parameter, given it's name
+<span class="fc bfc" id="L58" title="All 2 branches covered.">                .map(parameterNames::indexOf).filter(i -&gt; i &gt; -1)</span>
+                // Find the actual argument value from the index
+<span class="fc" id="L60">                .map(i -&gt; pjp.getArgs()[i])</span>
+                // replace any instances of sensitive values in the URL with PROTECTED
+<span class="fc" id="L62">                .foldLeft(getRequest().getRequestURI(), (url, hideParam) -&gt; sanitise(url, hideParam.toString()));</span>
+        // Pull out the clientId if we can
+<span class="fc" id="L64">        String clientId =  Option.of((ApiAuthSession) getRequest().getAttribute(AUTH_SESSION_VAR))</span>
+<span class="fc" id="L65">                .flatMap(it -&gt; Option.of(it.getApiClient()))</span>
+<span class="fc" id="L66">                .map(ApiClient::getApiId)</span>
+<span class="fc" id="L67">                .map(it -&gt; StringUtils.defaultIfEmpty(it, &quot;-&quot;))</span>
+<span class="fc" id="L68">                .getOrElse(&quot;-&quot;);</span>
+        // Log the call
+<span class="fc" id="L70">        LOGGER.info(&quot;REST API Call [{}] [{}] [{}]&quot;, clientId, getRequest().getMethod(), sanitisedURL);</span>
+        // Time the call
+<span class="fc" id="L72">        Histogram.Timer timer = restApiHistograms.labels(getRequest().getMethod(), sanitisedURL, clientId).startTimer();</span>
+        try {
+            // Can't use the nice time(Callable&lt;E&gt;) method on histogram, as this call here declares
+            // Throwable, not Exception.
+<span class="fc" id="L76">            return pjp.proceed();</span>
+        } finally {
+<span class="fc" id="L78">            timer.observeDuration();</span>
+        }
+    }
+
+    /**
+     * Replace parameters to be hidden with the term: PROTECTED
+     *
+     * This is helpful for:
+     * &lt;ul&gt;
+     *     &lt;li&gt;preventing patient-specific information (e.g.  NHS number) appearing in logs (both Grafana and console)&lt;/li&gt;
+     *     &lt;li&gt;preventing many-valued parameters (e.g.  timestamps) from overloading Grafana&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @param url The URL which includes the content to be hidden
+     * @param parameter The literal content of a value to be hidden
+     * @return The input url with all instances of the literal parameter value replaced with PROTECTED
+     */
+    public static String sanitise(String url, String parameter) {
+<span class="fc" id="L96">        return url.replace(parameter, &quot;PROTECTED&quot;);</span>
+    }
+
+    /**
+     * get a thread-safe, request object from Spring
+     *
+     * @return returns HttpServlet request
+     */
+    public HttpServletRequest getRequest() {
+<span class="fc" id="L105">        return ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes())</span>
+<span class="fc" id="L106">                .getRequest();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

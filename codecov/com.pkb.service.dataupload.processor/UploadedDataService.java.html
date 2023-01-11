@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UploadedDataService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.processor</a> &gt; <span class="el_source">UploadedDataService.java</span></div><h1>UploadedDataService.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.processor;
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.dataupload.entity.UploadedData.Destination;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.model.RecordWithId;
+import com.pkb.service.dataupload.hl7.HL7ParsingManager;
+import com.pkb.service.dataupload.hl7.HL7TeamService;
+import com.pkb.service.dataupload.hl7.HL7Wrapper;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import com.pkb.service.dataupload.processor.domain.UploadedDataPersistentState;
+import com.pkb.service.dataupload.processor.domain.UploadedDataPersistentState.UploadedDataPersistentStateEnum;
+import com.pkb.service.dataupload.processor.domain.UploadedDataProcessingResult;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.prometheus.client.Counter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import javax.persistence.OptimisticLockException;
+import javax.transaction.UserTransaction;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Supplier;
+
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+/**
+ * &lt;p&gt;
+ * Responsible to process uploaded data (mainly uploadeddata table -&gt; menu_data or other internal entities).
+ * Conceptually, based on configuration (UploadedDataProcessingConfiguration), for each {@link com.pkb.dataupload.entity.UploadedData.Destination}
+ * where we expect uploaded data, there is an instance of {@link UploadedDataProcessor} that is responsible to orchestrate parser(s) - to parse the content of
+ * uploaded data - and a persister - to save the parsed result in our database - and presents the result of processing.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ * {@link UploadedDataService} is responsible to maintain a consistent database after processing, in order to do so, manages transactions, so that
+ * it ensures the processed uploaded data status is persisted according to the result of processing, or in case of any peristence failure, it ensures
+ * that the whole process is rolled back so that the uploaded data remains in NEW status to be picked up in another scenario of synchronizing uploaded data.
+ * &lt;/p&gt;
+ */
+@Component
+public class UploadedDataService extends TransactionManager {
+<span class="fc" id="L54">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final DataUploadManager dataUploadManager;
+    private final Map&lt;Destination, UploadedDataProcessor&lt;?, LoggedInUploadedDataProcessingContext&gt;&gt; uploadedDataLoggedInProcessorMapping;
+    private final Map&lt;UploadedData.Destination, UploadedDataProcessor&lt;?, UploadedDataProcessingContext&gt;&gt; uploadedDataLoggedOutProcessorMapping;
+    private final HL7TeamService hl7TeamService;
+    private final HL7ParsingManager hl7ParsingManager;
+    private final UserManager userManager;
+
+<span class="fc" id="L63">    private static final Counter UPLOADEDDATA_COUNTER = Counter.build()</span>
+<span class="fc" id="L64">            .name(&quot;pkb_uploadeddata_processed_messages&quot;)</span>
+<span class="fc" id="L65">            .labelNames(&quot;destination&quot;, &quot;status&quot;)</span>
+<span class="fc" id="L66">            .help(&quot;Number of UploadedData rows processed&quot;)</span>
+<span class="fc" id="L67">            .register();</span>
+
+    @Autowired
+    public UploadedDataService(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, DataUploadManager dataUploadManager,
+                               Map&lt;Destination, UploadedDataProcessor&lt;?, LoggedInUploadedDataProcessingContext&gt;&gt; loggedInUploadedDataProcessorMapping,
+                               Map&lt;Destination, UploadedDataProcessor&lt;?, UploadedDataProcessingContext&gt;&gt; loggedOutUploadedDataProcessorMapping, HL7TeamService hl7TeamService,
+                               HL7ParsingManager hl7ParsingManager, UserManager userManager) {
+<span class="fc" id="L74">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L75">        this.dataUploadManager = dataUploadManager;</span>
+<span class="fc" id="L76">        this.uploadedDataLoggedInProcessorMapping = loggedInUploadedDataProcessorMapping;</span>
+<span class="fc" id="L77">        this.hl7TeamService = hl7TeamService;</span>
+<span class="fc" id="L78">        this.hl7ParsingManager = hl7ParsingManager;</span>
+<span class="fc" id="L79">        this.uploadedDataLoggedOutProcessorMapping = new EnumMap&lt;&gt;(UploadedData.Destination.class);</span>
+<span class="fc" id="L80">        this.uploadedDataLoggedOutProcessorMapping.putAll(loggedOutUploadedDataProcessorMapping);</span>
+<span class="fc" id="L81">        this.userManager = userManager;</span>
+<span class="fc" id="L82">    }</span>
+
+    /**
+     * Synchronizes multiple uploaded data instances identified by {@link com.pkb.dataupload.entity.UploadedData.Destination} for the given patient, based on the context argument.
+     * Iterates through uploaded data with status NEW.
+     *
+     * @param context holds contextual data for processing uploaded data
+     */
+    public void synchUploadedData(LoggedInUploadedDataProcessingContext context) {
+<span class="fc" id="L91">        var contextWithoutAccessLog = contextWithoutAccessLog(context);</span>
+<span class="pc bpc" id="L92" title="1 of 2 branches missed.">        if (!contextWithoutAccessLog.requestContext().isPiggyback()) {</span>
+<span class="nc" id="L93">            throw new IllegalStateException(&quot;Context requires isPiggyback to ensure updates do not fail due to lack of consent&quot;);</span>
+        }
+<span class="pc bpc" id="L95" title="1 of 2 branches missed.">        if (isTransactionAvailable()) {</span>
+<span class="fc" id="L96">            List&lt;Long&gt; uploadedDataIds = getNewUploadedDataIds(contextWithoutAccessLog);</span>
+<span class="fc bfc" id="L97" title="All 2 branches covered.">            if (isNotEmpty(uploadedDataIds)) {</span>
+<span class="fc bfc" id="L98" title="All 2 branches covered.">                if (config.getUploadedDataBatchSyncSize() &lt; uploadedDataIds.size()) {</span>
+<span class="fc" id="L99">                    io.vavr.collection.List.ofAll(uploadedDataIds)</span>
+<span class="fc" id="L100">                            .grouped(config.getUploadedDataBatchSyncSize())</span>
+<span class="fc" id="L101">                            .forEach(batch -&gt; syncUploadedDataBatch(batch.toJavaList(), contextWithoutAccessLog));</span>
+                } else {
+<span class="fc" id="L103">                    syncUploadedDataBatch(uploadedDataIds, contextWithoutAccessLog);</span>
+                }
+            }
+        }
+<span class="fc" id="L107">    }</span>
+
+    private ImmutableLoggedInUploadedDataProcessingContext contextWithoutAccessLog(LoggedInUploadedDataProcessingContext context) {
+<span class="fc" id="L110">        return ImmutableLoggedInUploadedDataProcessingContext.copyOf(context).withRequestContext(context.requestContext().withoutAccessLog());</span>
+    }
+
+    private void syncUploadedDataBatch(List&lt;Long&gt; uploadedDataIds, ImmutableLoggedInUploadedDataProcessingContext context) {
+<span class="fc" id="L114">        PKBPerson patient = userManager.getPKBPerson(context.patientId());</span>
+<span class="fc" id="L115">        LoggedInUploadedDataProcessingContext contextWithPatientInfo = context.withPatient(patient).withPatientAccountId(patient.getDefaultAccountId());</span>
+
+<span class="fc" id="L117">        var uploadedDataList = dataUploadManager.getUploadedData(contextWithPatientInfo.requestContext().fillMissingContextUser(contextWithPatientInfo.patientId()), uploadedDataIds);</span>
+
+<span class="fc" id="L119">        var addToTeamsList = uploadedDataList.stream()</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">                .filter(ud -&gt; ud.getFormat() == UploadedData.Format.HL7)</span>
+<span class="fc" id="L121">                .collect(toList());</span>
+<span class="fc" id="L122">        addPatientsToTeams(addToTeamsList, contextWithPatientInfo, patient);</span>
+
+<span class="fc" id="L124">        uploadedDataList.forEach(uploadedData -&gt; processUploadedDataInTransaction(contextWithPatientInfo, uploadedData));</span>
+<span class="fc" id="L125">    }</span>
+
+    /**
+     * Synchronizes uploaded data instance corresponding the given {@link UploadedDataDTO}.
+     *
+     * @param context      holds contextual data for processing uploaded data
+     * @param uploadedData holds uploaded data details to be processed
+     * @return represents result of processing
+     */
+    public UploadedDataProcessingResult&lt;?&gt; processUploadedData(LoggedInUploadedDataProcessingContext context, UploadedDataDTO uploadedData) {
+<span class="fc" id="L135">        var contextWithoutAccessLog = contextWithoutAccessLog(context);</span>
+<span class="fc" id="L136">        PKBPerson patient = userManager.getPKBPerson(contextWithoutAccessLog.patientId());</span>
+<span class="fc" id="L137">        addPatientsToTeams(uploadedData, contextWithoutAccessLog, patient);</span>
+<span class="fc" id="L138">        return processUploadedData(uploadedData, getLoggedInUploadedDataProcessor(contextWithoutAccessLog, uploadedData));</span>
+    }
+
+    public UploadedDataProcessingResult&lt;?&gt; processUploadedData(LoggedOutUploadedDataProcessingContext context, UploadedDataDTO uploadedData) {
+<span class="fc" id="L142">        PKBPerson patient = userManager.getPKBPerson(context.patientId());</span>
+<span class="fc" id="L143">        addPatientsToTeams(uploadedData, context, patient);</span>
+<span class="fc" id="L144">        return processUploadedData(uploadedData, () -&gt; uploadedDataLoggedOutProcessorMapping.get(context.destination()).processUploadedData(context, uploadedData));</span>
+    }
+
+    private UploadedDataProcessingResult&lt;?&gt; processUploadedData(UploadedDataDTO uploadedData,
+                                                                Supplier&lt;UploadedDataProcessingResult&lt;?&gt;&gt; processor) {
+<span class="fc" id="L149">        UploadedDataProcessingResult&lt;?&gt; result = null;</span>
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">        if (isTransactionAvailable()) {</span>
+<span class="fc" id="L151">            initializeUploadedDataProcessing();</span>
+<span class="fc" id="L152">            result = processor.get();</span>
+<span class="fc" id="L153">            wrapUpUploadedDataProcessing(uploadedData, result);</span>
+        }
+<span class="fc" id="L155">        return result;</span>
+    }
+
+    private Supplier&lt;UploadedDataProcessingResult&lt;?&gt;&gt; getLoggedInUploadedDataProcessor(LoggedInUploadedDataProcessingContext context, UploadedDataDTO uploadedData) {
+<span class="fc" id="L159">        return () -&gt;</span>
+        {
+<span class="fc" id="L161">            UploadedDataProcessor&lt;?, LoggedInUploadedDataProcessingContext&gt; processor = uploadedDataLoggedInProcessorMapping</span>
+<span class="fc" id="L162">                    .get(context.destination());</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">            if (processor != null) {</span>
+<span class="fc" id="L164">                return processor.processUploadedData(context, uploadedData);</span>
+            }
+<span class="fc" id="L166">            return uploadedDataLoggedOutProcessorMapping.get(context.destination()).processUploadedData(context, uploadedData);</span>
+        };
+    }
+
+    private List&lt;Long&gt; getNewUploadedDataIds(UploadedDataProcessingContext context) {
+        try {
+<span class="fc" id="L172">            return dataUploadManager.getNewUploadedDataIds(context.patientId(), context.destination());</span>
+<span class="nc" id="L173">        } catch (Exception exception) {</span>
+<span class="nc" id="L174">            LOGGER.error(&quot;Failed to claim uploaded data for patient {}, in destination {}&quot;, context.patientId(), context.destination(), exception);</span>
+<span class="nc" id="L175">            return Collections.emptyList();</span>
+        }
+    }
+
+    private void processUploadedDataInTransaction(LoggedInUploadedDataProcessingContext context, UploadedDataDTO uploadedData) {
+<span class="fc" id="L180">        initializeUploadedDataProcessing();</span>
+<span class="fc" id="L181">        UploadedDataProcessingResult&lt;?&gt; result = executeUploadedDataProcessor(context, uploadedData);</span>
+<span class="fc" id="L182">        UPLOADEDDATA_COUNTER.labels(uploadedData.getDestination().name(), result.getStatus().name()).inc();</span>
+<span class="fc" id="L183">        wrapUpUploadedDataProcessing(uploadedData, result);</span>
+<span class="fc" id="L184">    }</span>
+
+    private void initializeUploadedDataProcessing() {
+<span class="fc" id="L187">        beginTransaction();</span>
+<span class="fc" id="L188">    }</span>
+
+    private void wrapUpUploadedDataProcessing(UploadedDataDTO uploadedData, UploadedDataProcessingResult&lt;?&gt; result) {
+<span class="fc bfc" id="L191" title="All 2 branches covered.">        if (result.getStatus() == UploadedData.Status.ERROR) {</span>
+<span class="fc" id="L192">            rollbackIfNotCommitted();</span>
+<span class="fc" id="L193">            beginTransaction();</span>
+        }
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">        if (tryUpdateUploadedDataStatus(uploadedData, result.getStatus())) {</span>
+<span class="fc" id="L196">            commitTransaction();</span>
+        } else {
+<span class="nc" id="L198">            result.rollbackProcessingResult();</span>
+<span class="nc" id="L199">            rollbackIfNotCommitted();</span>
+        }
+<span class="fc" id="L201">    }</span>
+
+    private UploadedDataProcessingResult&lt;?&gt; executeUploadedDataProcessor(LoggedInUploadedDataProcessingContext context, UploadedDataDTO uploadedData) {
+        UploadedDataProcessingResult uploadedDataProcessingResult;
+        try {
+<span class="fc" id="L206">            uploadedDataProcessingResult = getLoggedInUploadedDataProcessor(context, uploadedData).get();</span>
+<span class="fc" id="L207">        } catch (Exception exception) {</span>
+<span class="fc" id="L208">            LOGGER.error(&quot;Failed processing {} msg {} for {}: {}&quot;, uploadedData.getFormat(), uploadedData.getId(), context.patientId(), exception.getMessage(), exception);</span>
+<span class="fc" id="L209">            uploadedDataProcessingResult = new UploadedDataProcessingResult&lt;&gt;(new UploadedDataPersistentState(UploadedData.Status.ERROR, UploadedDataPersistentStateEnum.NO_OP),</span>
+<span class="fc" id="L210">                    Collections.emptyList());</span>
+<span class="fc" id="L211">        }</span>
+<span class="fc" id="L212">        return uploadedDataProcessingResult;</span>
+    }
+
+    private boolean tryUpdateUploadedDataStatus(UploadedDataDTO uploadedData, UploadedData.Status status) {
+        boolean success;
+        try {
+<span class="fc" id="L218">            dataUploadManager.updateUploadedDataStatus(uploadedData.getId(), uploadedData.getVersion(), status);</span>
+<span class="fc" id="L219">            success = true;</span>
+<span class="nc" id="L220">        } catch (OptimisticLockException exception) {</span>
+<span class="nc" id="L221">            LOGGER.error(&quot;Uploaded data ({}) is already processed, proceeding&quot;, uploadedData.getId(), exception);</span>
+<span class="nc" id="L222">            success = false;</span>
+<span class="nc" id="L223">        } catch (Exception exception) {</span>
+<span class="nc" id="L224">            LOGGER.error(&quot;Failed to update uploaded data status ({}), proceeding&quot;, uploadedData.getId(), exception);</span>
+<span class="nc" id="L225">            success = false;</span>
+<span class="pc" id="L226">        }</span>
+<span class="fc" id="L227">        return success;</span>
+    }
+
+    private boolean isTransactionAvailable() {
+<span class="fc" id="L231">        boolean transactionAvailable = false;</span>
+        try {
+<span class="fc" id="L233">            UserTransaction transaction = lookupUserTransaction();</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">            transactionAvailable = transaction.getStatus() == javax.transaction.Status.STATUS_NO_TRANSACTION;</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">            if (!transactionAvailable) {</span>
+<span class="nc" id="L236">                LOGGER.error(&quot;Need to support existing open transactions in synchUploadedData(), txn status={}&quot;, transaction.getStatus());</span>
+            }
+<span class="nc" id="L238">        } catch (Exception e) {</span>
+<span class="nc" id="L239">            LOGGER.error(&quot;Failed to retrieve/access transaction&quot;, e);</span>
+<span class="fc" id="L240">        }</span>
+<span class="fc" id="L241">        return transactionAvailable;</span>
+    }
+
+    // Method only handles documents of HL7 format
+    private void addPatientsToTeams(UploadedDataDTO dto, UploadedDataProcessingContext context, PKBPerson patient) {
+<span class="pc bpc" id="L246" title="1 of 2 branches missed.">        if (UploadedData.Format.HL7 == dto.getFormat()) {</span>
+<span class="fc" id="L247">            HL7Wrapper hl7Wrapper = hl7ParsingManager.processXmlData(dto.getData(), context.requestContext());</span>
+<span class="fc" id="L248">            hl7TeamService.addToTeams(patient, hl7Wrapper.getHL7Xml(), hl7Wrapper.getHl7ConnContext());</span>
+<span class="fc" id="L249">        } else {</span>
+<span class="nc" id="L250">            LOGGER.error(&quot;Failed to add patients to teams due to invalid format of UploadedDataDTO: {}, {}.&quot;, dto.getId(), dto.getFormat());</span>
+        }
+<span class="fc" id="L252">    }</span>
+
+    // Method only handles documents of HL7 format
+    private void addPatientsToTeams(Collection&lt;UploadedDataDTO&gt; dto, UploadedDataProcessingContext context, PKBPerson patient) {
+<span class="fc" id="L256">        var dataList = dto.stream()</span>
+<span class="fc" id="L257">                .peek(ud -&gt; {</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">                    if (UploadedData.Format.HL7 != ud.getFormat()) {</span>
+<span class="nc" id="L259">                        LOGGER.error(&quot;Failed to add patients to teams due to invalid format of UploadedDataDTO: {}, {}.&quot;, ud.getId(), ud.getFormat());</span>
+                    }
+<span class="fc" id="L261">                })</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">                .filter(ud -&gt; UploadedData.Format.HL7 == ud.getFormat())</span>
+<span class="fc" id="L263">                .map(ud -&gt; RecordWithId.of(ud.getId(), ud.getData()))</span>
+<span class="fc" id="L264">                .collect(toList());</span>
+<span class="fc" id="L265">        hl7TeamService.addToTeams(hl7ParsingManager.processXmls(dataList, context.requestContext()).collect(toList()), patient);</span>
+<span class="fc" id="L266">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

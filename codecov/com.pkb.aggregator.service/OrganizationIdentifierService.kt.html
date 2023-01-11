@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OrganizationIdentifierService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.service</a> &gt; <span class="el_source">OrganizationIdentifierService.kt</span></div><h1>OrganizationIdentifierService.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.service
+
+import com.pkb.aggregator.R4Identifier
+import com.pkb.aggregator.R4Organization
+import com.pkb.aggregator.extension.simpleResourceId
+import com.pkb.aggregator.persistence.entity.OrganizationIdentifierMapEntry
+import com.pkb.aggregator.persistence.entity.embeddable.MapEntryKey
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamIdentifier
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamResource
+import com.pkb.aggregator.persistence.repository.DatabaseStateClearer
+import com.pkb.aggregator.persistence.repository.OrganizationIdentifierMapRepository
+import com.pkb.aggregator.service.aggregation.toMapEntryKeys
+import org.hl7.fhir.instance.model.api.IDomainResource
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+import java.util.UUID
+import javax.transaction.Transactional
+
+const val ODS_IDENTIFIER_SYSTEM = &quot;https://fhir.nhs.uk/Id/ods-organization-code&quot;
+
+@Service
+<span class="fc" id="L23">class OrganizationIdentifierService(</span>
+<span class="fc" id="L24">    private val organizationIdentifierMapRepository: OrganizationIdentifierMapRepository,</span>
+<span class="fc" id="L25">    private val stateClearer: DatabaseStateClearer,</span>
+<span class="fc" id="L26">) : AbstractIdentifierService&lt;R4Organization, OrganizationIdentifierMapEntry&gt;() {</span>
+
+<span class="fc" id="L28">    private val log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    override fun deriveDownstreamResourceId(baseResources: List&lt;IDomainResource&gt;): String {
+
+<span class="pc bpc" id="L32" title="1 of 2 branches missed.">        val resources = baseResources.mapNotNull { it as? R4Organization }</span>
+<span class="pc bpc" id="L33" title="1 of 4 branches missed.">        return deriveDownstreamIdFromODSCode(resources)</span>
+<span class="fc" id="L34">            ?: deriveDownstreamIdFromUpstreamSource(resources)</span>
+<span class="nc" id="L35">            ?: throw RuntimeException(&quot;No ODS code or source tag in $resources&quot;)</span>
+    }
+
+    fun findByUpstreamResourceIdIn(upstreamResourceIds: Collection&lt;UpstreamResource&gt;) =
+<span class="fc" id="L39">        organizationIdentifierMapRepository.findByMapEntryKeyUpstreamResourceIn(</span>
+<span class="fc" id="L40">            upstreamResourceIds.toSet(),</span>
+<span class="fc" id="L41">            OrganizationIdentifierMapEntry::class.java)</span>
+
+    @Transactional
+    override fun mergeIdentifiers(resource: R4Organization): Int {
+<span class="fc" id="L45">        val downstreamResourceId = resource.simpleResourceId()</span>
+<span class="fc" id="L46">        val newIdentifiers = findNewIdentifiers(downstreamResourceId, resource)</span>
+<span class="fc" id="L47">        return newIdentifiers.map { OrganizationIdentifierMapEntry(it, downstreamResourceId) }</span>
+<span class="fc bfc" id="L48" title="All 2 branches covered.">            .sumOf {</span>
+<span class="fc" id="L49">                val changed = organizationIdentifierMapRepository.safeInsertIdentifier(</span>
+<span class="fc" id="L50">                    it.mapEntryKey.identifier.upstreamIdentifierSystem,</span>
+<span class="fc" id="L51">                    it.mapEntryKey.identifier.upstreamIdentifierValue,</span>
+<span class="fc" id="L52">                    it.mapEntryKey.upstreamResource.upstreamSource,</span>
+<span class="fc" id="L53">                    it.mapEntryKey.upstreamResource.upstreamResourceId,</span>
+<span class="fc" id="L54">                    it.downstreamResourceId,</span>
+                )
+<span class="fc bfc" id="L56" title="All 2 branches covered.">                if (changed == 0) {</span>
+<span class="fc" id="L57">                    log.info(&quot;Skipped inserting identifier of system {} for downstream resource {}&quot;,</span>
+<span class="fc" id="L58">                        it.mapEntryKey.identifier.upstreamIdentifierSystem, it.downstreamResourceId)</span>
+                }
+<span class="fc" id="L60">                changed</span>
+            }
+    }
+
+    override fun findMapEntryKeys(resource: R4Organization): List&lt;MapEntryKey&gt; {
+<span class="fc" id="L65">        return resource.identifier.flatMap { it.toMapEntryKeys() }</span>
+    }
+
+    override fun findMapEntryKeysDownstreamResourceId(downstreamResourceId: String) =
+<span class="fc" id="L69">        organizationIdentifierMapRepository.findByDownstreamResourceId(</span>
+<span class="fc" id="L70">            downstreamResourceId,</span>
+            OrganizationIdentifierMapEntry::class.java
+<span class="fc" id="L72">        ).map { it.mapEntryKey }</span>
+
+    fun findByUpstreamIdentifierIn(identifiers: List&lt;R4Identifier&gt;) =
+<span class="fc" id="L75">        organizationIdentifierMapRepository.findByMapEntryKeyIdentifierIn(</span>
+<span class="fc" id="L76">            identifiers.map { UpstreamIdentifier(it.system, it.value) },</span>
+            OrganizationIdentifierMapEntry::class.java
+<span class="fc" id="L78">        )</span>
+
+    fun findSearchIdentifiers(upstreamSystem: String, upstreamValue: String): List&lt;OrganizationIdentifierMapEntry&gt; {
+<span class="nc" id="L81">        val upstreamIdentifier = UpstreamIdentifier(upstreamSystem, upstreamValue)</span>
+<span class="nc" id="L82">        return organizationIdentifierMapRepository.findByMapEntryKeyIdentifier(upstreamIdentifier,</span>
+            OrganizationIdentifierMapEntry::class.java)
+    }
+
+    private fun deriveDownstreamIdFromODSCode(baseResources: List&lt;R4Organization&gt;) =
+<span class="fc" id="L87">        baseResources</span>
+<span class="fc" id="L88">            .flatMap { it.identifier }</span>
+<span class="fc bfc" id="L89" title="All 4 branches covered.">            .find { it.system == ODS_IDENTIFIER_SYSTEM }</span>
+<span class="fc bfc" id="L90" title="All 2 branches covered.">            ?.let { UUID.nameUUIDFromBytes(&quot;pkb-internal-${it.system}/${it.value}&quot;.toByteArray()).toString() }</span>
+<span class="pc bpc" id="L91" title="1 of 2 branches missed.">            ?.let { &quot;$FHIR_TYPE_ORGANIZATION/$it&quot; }</span>
+
+<span class="fc" id="L93">    override fun clearState() = stateClearer.invoke {</span>
+<span class="nc" id="L94">        organizationIdentifierMapRepository.deleteAll()</span>
+<span class="pc" id="L95">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

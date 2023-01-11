@@ -1,0 +1,567 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DocumentManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.document</a> &gt; <span class="el_source">DocumentManager.java</span></div><h1>DocumentManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.document;
+
+import com.google.api.gax.paging.Page;
+import com.google.cloud.storage.Blob;
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.document.Document;
+import com.pkb.crypto.document.EncryptedDocument;
+import com.pkb.crypto.document.ImmutableEncryptedDocument;
+import com.pkb.crypto.document.ImmutablePlaintextDocument;
+import com.pkb.document.entity.DocumentMetadata;
+import com.pkb.document.entity.EncryptionMetadata;
+import com.pkb.document.entity.EncryptionMetadataWithAlgorithm;
+import com.pkb.document.entity.ImmutableEncryptionMetadata;
+import com.pkb.document.entity.ImmutableEncryptionMetadataWithAlgorithm;
+import com.pkb.entities.enums.DocStorageBackend;
+import com.pkb.repository.legacy.LegacyDocumentMetadataRepository;
+import com.pkb.repository.legacy.LegacyGcsDeleteQueueRepository;
+import com.pkb.service.document.storage.DocumentStorageFactory;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.DbUtil;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
+
+import static com.pkb.crypto.CryptoConstants.AES_SHORT_NAME;
+import static com.pkb.entities.enums.DocStorageBackend.GCS;
+import static com.pkb.util.EncryptedDocumentMapperHelper.ACCOUNT_ID;
+import static com.pkb.util.EncryptedDocumentMapperHelper.ACCOUNT_ID_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.AUTHOR_PERSON_ID;
+import static com.pkb.util.EncryptedDocumentMapperHelper.AUTHOR_PERSON_ID_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.MEDIA_TYPE;
+import static com.pkb.util.EncryptedDocumentMapperHelper.MEDIA_TYPE_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.genericMetadata;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+@SuppressWarnings(&quot;ClassWithTooManyMethods&quot;)
+public class DocumentManager extends TransactionManager {
+
+<span class="fc" id="L66">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final String STORAGE_TIMER_NAME = &quot;phr_document_storage_timer&quot;;
+    private static final String GCS_ERROR_COUNTER_NAME = &quot;phr_gcs_error_counter&quot;;
+    private static final String ORPHANED_DOCUMENT_DELETION_TIMER_NAME = &quot;phr_gcs_orphaned_document_deletion_timer&quot;;
+    private static final String ORPHANED_DOCUMENT_GCS_TIMER_NAME = &quot;phr_gcs_orphaned_document_in_gcs_timer&quot;;
+    private static final String ORPHANED_DOCUMENT_METADATA_TIMER_NAME = &quot;phr_gcs_orphaned_document_in_metadata_timer&quot;;
+    private static final String ORPHANED_DOCUMENT_QUEUE_TIMER_NAME = &quot;phr_gcs_orphaned_document_in_delete_queue_timer&quot;;
+
+    private static final String OPERATION_LABEL = &quot;operation&quot;;
+    private static final String STORAGE_LABEL = &quot;storage&quot;;
+    private static final String OPERATION_CREATE = &quot;create&quot;;
+    private static final String OPERATION_RETRIEVE_SINGLE = &quot;retrieve_single&quot;;
+    private static final String OPERATION_RETRIEVE_MULTIPLE = &quot;retrieve_multiple&quot;;
+    private static final String OPERATION_DELETE_SINGLE = &quot;delete_single&quot;;
+    private static final String OPERATION_DELETE_MULTIPLE = &quot;delete_multiple&quot;;
+
+    private static final String NO_ENCRYPTION_ALGORITHM = &quot;none&quot;;
+
+    private static final String ENCRYPTED_SECRET_KEY_BASE64 = &quot;encryptedSecretKey&quot;;
+    private static final String ENCRYPTED_SECRET_KEY_ID = &quot;encryptedSecretKeyId&quot;;
+    private static final String DATAPOINT_LEVEL_ENCRYPTED = &quot;datapointLevelEncrypted&quot;;
+    private static final String DATAPOINT_LEVEL_ENCRYPTED_TRUE = &quot;true&quot;;
+    private static final String DATAPOINT_LEVEL_KEY_ID = &quot;datapointLevelKeyId&quot;;
+
+    private static final String TEXT_PLAIN = &quot;text/plain&quot;;
+    private static final String TOLVENDOCUMENT = &quot;tolvendocument&quot;;
+
+    // These following Timer/Counter instances are used behind-the-scenes, although they appear unreferenced
+    // Please do not delete them...
+    @SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L97">    private static final Timer STORAGE_TIMER = Timer.builder(STORAGE_TIMER_NAME)</span>
+<span class="fc" id="L98">            .description(&quot;Latencies of document operations per storage type&quot;)</span>
+<span class="fc" id="L99">            .publishPercentileHistogram()</span>
+<span class="fc" id="L100">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L101">            .tags(OPERATION_LABEL, &quot;&quot;, STORAGE_LABEL, &quot;&quot;)</span>
+<span class="fc" id="L102">            .register(Metrics.globalRegistry);</span>
+
+    @SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L105">    private static final Counter GCS_ERROR_COUNTER = Counter.builder(GCS_ERROR_COUNTER_NAME)</span>
+<span class="fc" id="L106">            .description(&quot;GCS errors&quot;)</span>
+<span class="fc" id="L107">            .tags(OPERATION_LABEL, &quot;&quot;)</span>
+<span class="fc" id="L108">            .register(Metrics.globalRegistry);</span>
+
+    @SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L111">    private static final Timer ORPHANED_DOCUMENT_DELETION_TIMER = Timer.builder(ORPHANED_DOCUMENT_DELETION_TIMER_NAME)</span>
+<span class="fc" id="L112">            .description(&quot;Timer for finding and deleting one batch of orphaned documents from GCS&quot;)</span>
+<span class="fc" id="L113">            .publishPercentileHistogram()</span>
+<span class="fc" id="L114">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L115">            .register(Metrics.globalRegistry);</span>
+
+    @SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L118">    private static final Timer ORPHANED_DOCUMENT_GCS_TIMER = Timer.builder(ORPHANED_DOCUMENT_GCS_TIMER_NAME)</span>
+<span class="fc" id="L119">            .description(&quot;Timer for finding all document ids in GCS bucket&quot;)</span>
+<span class="fc" id="L120">            .publishPercentileHistogram()</span>
+<span class="fc" id="L121">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L122">            .register(Metrics.globalRegistry);</span>
+
+    @SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L125">    private static final Timer ORPHANED_DOCUMENT_METADATA_TIMER = Timer.builder(ORPHANED_DOCUMENT_METADATA_TIMER_NAME)</span>
+<span class="fc" id="L126">            .description(&quot;Timer for finding all GCS document ids in document_metadata&quot;)</span>
+<span class="fc" id="L127">            .publishPercentileHistogram()</span>
+<span class="fc" id="L128">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L129">            .register(Metrics.globalRegistry);</span>
+
+    @SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L132">    private static final Timer ORPHANED_DOCUMENT_QUEUE_TIMER = Timer.builder(ORPHANED_DOCUMENT_QUEUE_TIMER_NAME)</span>
+<span class="fc" id="L133">            .description(&quot;Timer for finding all GCS document ids in gcs_delete_queue&quot;)</span>
+<span class="fc" id="L134">            .publishPercentileHistogram()</span>
+<span class="fc" id="L135">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L136">            .register(Metrics.globalRegistry);</span>
+
+    private final DocumentStorageFactory documentStorageFactory;
+    private final LegacyDocumentMetadataRepository metadataRepository;
+    private final LegacyGcsDeleteQueueRepository deleteQueueRepository;
+
+    public DocumentManager(PhrConfig config,
+                           TolvenBeanFactory beanFactory,
+                           DateTimeService dateTimeService,
+                           UUIDProvider uuidProvider,
+                           DocumentStorageFactory documentStorageFactory,
+                           LegacyDocumentMetadataRepository metadataRepository,
+                           LegacyGcsDeleteQueueRepository deleteQueueRepository) {
+<span class="fc" id="L149">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L150">        this.documentStorageFactory = documentStorageFactory;</span>
+<span class="fc" id="L151">        this.metadataRepository = metadataRepository;</span>
+<span class="fc" id="L152">        this.deleteQueueRepository = deleteQueueRepository;</span>
+<span class="fc" id="L153">    }</span>
+
+    /**
+     * Creates a new document in the store that's set in the config 'defaultDocumentStore'.
+     */
+    public UUID create(Document document) {
+<span class="fc" id="L159">        return saveToStoreWithFallback(document, DocStorageBackend.valueOf(config.getDefaultDocumentStore()));</span>
+    }
+
+    public Optional&lt;Document&gt; retrieve(UUID documentId) {
+<span class="fc" id="L163">        var maybeDocumentMetadata = metadataRepository.findById(documentId);</span>
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">        if (maybeDocumentMetadata.isEmpty()) {</span>
+<span class="nc" id="L165">            return Optional.empty();</span>
+        }
+<span class="fc" id="L167">        var documentMetadata = maybeDocumentMetadata.get();</span>
+<span class="fc" id="L168">        var store = documentStorageFactory.getStore(documentMetadata.getStorage());</span>
+        try {
+<span class="fc" id="L170">            byte[] content = Metrics.timer(STORAGE_TIMER_NAME, OPERATION_LABEL, OPERATION_RETRIEVE_SINGLE, STORAGE_LABEL, store.storageType().name())</span>
+<span class="fc" id="L171">                    .record(() -&gt; store.retrieve(documentMetadata.getIdInStorage())</span>
+<span class="pc" id="L172">                            .orElseThrow(() -&gt; new RuntimeException(String.format(&quot;Could not find document in storage %s with internal ID %s (DocId: %s)&quot;,</span>
+<span class="nc" id="L173">                                    documentMetadata.getStorage(), documentMetadata.getIdInStorage(), documentMetadata.getId().toString())))</span>
+                    );
+
+<span class="fc" id="L176">            return Optional.of(map(new com.pkb.document.entity.Document(documentMetadata, content)));</span>
+<span class="fc" id="L177">        } catch (Exception e) {</span>
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">            if (documentMetadata.getStorage() == GCS) {</span>
+<span class="fc" id="L179">                Metrics.counter(GCS_ERROR_COUNTER_NAME, OPERATION_LABEL, OPERATION_DELETE_SINGLE).increment();</span>
+            }
+<span class="fc" id="L181">            throw e;</span>
+        }
+    }
+
+    public Document retrieveOrThrow(UUID id) {
+<span class="pc" id="L186">        return retrieve(id).orElseThrow(() -&gt; new RuntimeException(&quot;Could not find encryptedDocument with id=&quot; + id));</span>
+    }
+
+    public Map&lt;UUID, Document&gt; retrieve(Collection&lt;UUID&gt; ids) {
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">        if (isEmpty(ids)) {</span>
+<span class="nc" id="L191">            return Collections.emptyMap();</span>
+        }
+<span class="fc" id="L193">        var documents = DbUtil.getInBatches(ids, metadataRepository::findAllById);</span>
+<span class="fc" id="L194">        var storeSet = documents.stream().map(DocumentMetadata::getStorage).collect(Collectors.toSet());</span>
+<span class="fc" id="L195">        var result = new HashMap&lt;UUID, Document&gt;();</span>
+<span class="fc" id="L196">        storeSet.forEach(store -&gt; {</span>
+<span class="fc" id="L197">            var documentsById = documents.stream()</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">                    .filter(doc -&gt; doc.getStorage() == store)</span>
+<span class="fc" id="L199">                    .collect(Collectors.toMap(DocumentMetadata::getIdInStorage, Function.identity()));</span>
+
+<span class="fc" id="L201">            var foundContents = Metrics.timer(STORAGE_TIMER_NAME, OPERATION_LABEL, OPERATION_RETRIEVE_MULTIPLE, STORAGE_LABEL, store.name())</span>
+<span class="fc" id="L202">                    .record(() -&gt; {</span>
+                        try {
+<span class="fc" id="L204">                            return documentStorageFactory.getStore(store).retrieve(documentsById.keySet());</span>
+<span class="nc" id="L205">                        } catch (Exception e) {</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">                            if (store == GCS) {</span>
+<span class="nc" id="L207">                                Metrics.counter(GCS_ERROR_COUNTER_NAME, OPERATION_LABEL, OPERATION_RETRIEVE_MULTIPLE).increment(documentsById.size());</span>
+                            }
+<span class="nc" id="L209">                            throw e;</span>
+                        }
+                    });
+
+<span class="fc" id="L213">            var foundDocuments = Optional.ofNullable(foundContents)</span>
+<span class="fc" id="L214">                    .orElse(Map.of())</span>
+<span class="fc" id="L215">                    .entrySet()</span>
+<span class="fc" id="L216">                    .stream()</span>
+<span class="fc" id="L217">                    .map(e -&gt; new com.pkb.document.entity.Document(documentsById.get(e.getKey()), e.getValue()))</span>
+<span class="fc" id="L218">                    .collect(Collectors.toMap(com.pkb.document.entity.Document::getId, this::map));</span>
+
+<span class="fc" id="L220">            result.putAll(foundDocuments);</span>
+<span class="fc" id="L221">        });</span>
+<span class="fc" id="L222">        return result;</span>
+    }
+
+    @VisibleForTesting
+    @NotNull
+    Document map(com.pkb.document.entity.Document document) {
+<span class="fc" id="L228">        return map(document.getAccountId(), document.getMediaType(), document.getAuthorPersonId(), document.getAlgorithm(),</span>
+<span class="fc" id="L229">                document.getNonce(), document.getSymmetricEncryptionKeyId(), document.getEncryptedKeyInline(),</span>
+<span class="fc" id="L230">                document.isDatapointLevelEncrypted(), document.getDatapointLevelKeyId(), document.getContent());</span>
+    }
+
+    @VisibleForTesting
+    @NotNull
+    Document map(long accountId,
+                 String mediaType,
+                 Long authorPersonId,
+                 String algorithm,
+                 String nonce,
+                 Long symmetricEncryptionKeyId,
+                 byte[] encryptedKeyInline,
+                 boolean isDatapointLevelEncrypted,
+                 UUID datapointLevelKeyId,
+                 byte[] content) {
+<span class="fc" id="L245">        var metadata = io.vavr.collection.HashMap.of(ACCOUNT_ID, Long.toString(accountId)).toJavaMap();</span>
+
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">        if (mediaType != null) {</span>
+<span class="fc" id="L248">            metadata.put(MEDIA_TYPE, mediaType);</span>
+        }
+
+<span class="fc bfc" id="L251" title="All 2 branches covered.">        if (authorPersonId != null) {</span>
+<span class="fc" id="L252">            metadata.put(AUTHOR_PERSON_ID, authorPersonId.toString());</span>
+        }
+        byte[] decodedNonce;
+
+<span class="fc bfc" id="L256" title="All 2 branches covered.">        if (isEncrypted(algorithm)) {</span>
+<span class="fc bfc" id="L257" title="All 2 branches covered.">            if (AES_SHORT_NAME.equals(algorithm)) {</span>
+<span class="fc" id="L258">                decodedNonce = Base64.getDecoder().decode(nonce);</span>
+<span class="fc bfc" id="L259" title="All 2 branches covered.">                if (!isDatapointLevelEncrypted) {</span>
+<span class="fc" id="L260">                    metadata.put(ENCRYPTED_SECRET_KEY_ID, String.valueOf(symmetricEncryptionKeyId));</span>
+                }
+            } else {
+<span class="fc" id="L263">                metadata.put(ENCRYPTED_SECRET_KEY_BASE64, Base64.getEncoder().encodeToString(encryptedKeyInline));</span>
+<span class="fc" id="L264">                decodedNonce = new byte[]{};</span>
+            }
+
+<span class="fc bfc" id="L267" title="All 2 branches covered.">            if (isDatapointLevelEncrypted) {</span>
+<span class="fc" id="L268">                metadata.put(DATAPOINT_LEVEL_ENCRYPTED, DATAPOINT_LEVEL_ENCRYPTED_TRUE);</span>
+<span class="fc" id="L269">                metadata.put(DATAPOINT_LEVEL_KEY_ID, String.valueOf(datapointLevelKeyId));</span>
+            }
+
+<span class="fc" id="L272">            return ImmutableEncryptedDocument</span>
+<span class="fc" id="L273">                    .builder()</span>
+<span class="fc" id="L274">                    .algorithm(algorithm)</span>
+<span class="fc" id="L275">                    .cipherText(content)</span>
+<span class="fc" id="L276">                    .nonce(decodedNonce) // no nonce needed here</span>
+<span class="fc" id="L277">                    .metadata(metadata)</span>
+<span class="fc" id="L278">                    .build();</span>
+        } else {
+<span class="fc" id="L280">            return ImmutablePlaintextDocument</span>
+<span class="fc" id="L281">                    .builder()</span>
+<span class="fc" id="L282">                    .plainText(content)</span>
+<span class="fc" id="L283">                    .metadata(metadata)</span>
+<span class="fc" id="L284">                    .build();</span>
+        }
+    }
+
+    public boolean delete(@NotNull UUID id) {
+<span class="fc" id="L289">        var maybeDocumentMetadata = metadataRepository.findById(id);</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">        if (maybeDocumentMetadata.isEmpty()) {</span>
+<span class="nc" id="L291">            return false;</span>
+        }
+<span class="fc" id="L293">        var documentMetadata = maybeDocumentMetadata.get();</span>
+<span class="fc" id="L294">        var storage = documentStorageFactory.getStore(documentMetadata.getStorage());</span>
+<span class="fc" id="L295">        metadataRepository.delete(documentMetadata);</span>
+<span class="fc" id="L296">        Metrics.timer(STORAGE_TIMER_NAME, OPERATION_LABEL, OPERATION_DELETE_SINGLE, STORAGE_LABEL, storage.storageType().name()).record(() -&gt; storage.delete(documentMetadata.getIdInStorage()));</span>
+<span class="fc" id="L297">        return true;</span>
+    }
+
+    public int delete(Collection&lt;UUID&gt; ids) {
+<span class="nc bnc" id="L301" title="All 2 branches missed.">        if (isEmpty(ids)) {</span>
+<span class="nc" id="L302">            return 0;</span>
+        }
+<span class="nc" id="L304">        var documents = DbUtil.getInBatches(ids, metadataRepository::findAllById);</span>
+<span class="nc" id="L305">        int result = DbUtil.executeInBatches(ids, metadataRepository::deleteDocumentMetadataByIdIn);</span>
+<span class="nc" id="L306">        var storeSet = documents.stream().map(DocumentMetadata::getStorage).collect(Collectors.toSet());</span>
+<span class="nc" id="L307">        storeSet.forEach(store -&gt; {</span>
+<span class="nc" id="L308">            List&lt;String&gt; documentIds = documents.stream()</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">                    .filter(doc -&gt; doc.getStorage() == store)</span>
+<span class="nc" id="L310">                    .map(DocumentMetadata::getIdInStorage)</span>
+<span class="nc" id="L311">                    .collect(Collectors.toList());</span>
+
+<span class="nc" id="L313">            Metrics.timer(STORAGE_TIMER_NAME, OPERATION_LABEL, OPERATION_DELETE_MULTIPLE, STORAGE_LABEL, store.name()).record(() -&gt; documentStorageFactory.getStore(store).delete(documentIds));</span>
+<span class="nc" id="L314">        });</span>
+<span class="nc" id="L315">        return result;</span>
+    }
+
+    public Optional&lt;DocumentMetadata&gt; getMetadata(UUID id) {
+<span class="fc" id="L319">        return metadataRepository.findById(id);</span>
+    }
+
+    public Map&lt;UUID, DocumentMetadata&gt; getMetadata(Collection&lt;UUID&gt; ids) {
+<span class="fc bfc" id="L323" title="All 2 branches covered.">        if (isEmpty(ids)) {</span>
+<span class="fc" id="L324">            return Collections.emptyMap();</span>
+        }
+<span class="fc" id="L326">        var documents = DbUtil.getInBatches(ids, metadataRepository::findAllById);</span>
+<span class="fc" id="L327">        return documents.stream().collect(Collectors.toMap(DocumentMetadata::getId, Function.identity()));</span>
+    }
+
+    public Map&lt;UUID, EncryptionMetadata&gt; findChunksWithEncryptionMetadata(UUID parentDocumentId) {
+<span class="fc" id="L331">        var documents = new ArrayList&lt;DocumentMetadata&gt;();</span>
+<span class="fc" id="L332">        metadataRepository.findById(parentDocumentId).ifPresent(documents::add);</span>
+<span class="fc" id="L333">        documents.addAll(metadataRepository.getDocumentMetadataByParentDocumentMetadataId(parentDocumentId));</span>
+<span class="fc" id="L334">        return documents.stream().collect(Collectors.toMap(DocumentMetadata::getId, this::getImmutableEncryptionMetadata));</span>
+    }
+
+    public Map&lt;UUID, EncryptionMetadata&gt; findEncryptionMetadata(Collection&lt;UUID&gt; parentDocumentIds) {
+<span class="fc bfc" id="L338" title="All 2 branches covered.">        if (parentDocumentIds.isEmpty()) {</span>
+<span class="fc" id="L339">            return Collections.emptyMap();</span>
+        }
+<span class="fc" id="L341">        var documents = DbUtil.getInStreamOfBatches(parentDocumentIds, metadataRepository::findAllById);</span>
+<span class="fc" id="L342">        return documents.collect(Collectors.toMap(DocumentMetadata::getId, this::getImmutableEncryptionMetadata));</span>
+    }
+
+    public List&lt;UUID&gt; findDplKeyIds(Collection&lt;UUID&gt; parentDocumentIds) {
+<span class="fc bfc" id="L346" title="All 2 branches covered.">        if (parentDocumentIds.isEmpty()) {</span>
+<span class="fc" id="L347">            return Collections.emptyList();</span>
+        }
+<span class="fc" id="L349">        var documents = DbUtil.getInBatches(parentDocumentIds, metadataRepository::getDatapointLevelKeyIdsByIdInAndDataDatapointLevelEncrypted);</span>
+<span class="fc" id="L350">        documents.addAll(DbUtil.getInBatches(parentDocumentIds, metadataRepository::getDatapointLevelKeyIdsByParentDocumentMetadataIdInAndDatapointLevelEncrypted));</span>
+<span class="fc" id="L351">        return documents;</span>
+    }
+
+    public Optional&lt;EncryptionMetadataWithAlgorithm&gt; getDatapointLevelEncryptionMetadata(UUID documentId) {
+<span class="fc" id="L355">        var result = metadataRepository.findById(documentId);</span>
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">        if (result.isEmpty()) {</span>
+<span class="nc" id="L357">            return Optional.empty();</span>
+        }
+<span class="fc" id="L359">        var documentMetadata = result.get();</span>
+<span class="fc" id="L360">        return Optional.of(ImmutableEncryptionMetadataWithAlgorithm.builder()</span>
+<span class="fc" id="L361">                .isEncrypted(isEncrypted(documentMetadata.getAlgorithm()))</span>
+<span class="fc" id="L362">                .isDatapointLevelEncrypted(documentMetadata.isDatapointLevelEncrypted())</span>
+<span class="fc" id="L363">                .datapointLevelKeyId(documentMetadata.getDatapointLevelKeyId())</span>
+<span class="fc" id="L364">                .algorithm(documentMetadata.getAlgorithm())</span>
+<span class="fc" id="L365">                .build());</span>
+    }
+
+    public Map&lt;String, Either&lt;String, Boolean&gt;&gt; deleteBlobsFromGcs(@NotNull Collection&lt;String&gt; ids) {
+<span class="fc" id="L369">        return documentStorageFactory.getGcsDocumentStore().deleteBlobs(ids).entrySet().stream()</span>
+<span class="fc" id="L370">                .collect(Collectors.toMap(Map.Entry::getKey, e -&gt; e.getValue().mapLeft(Throwable::getMessage)));</span>
+    }
+
+    /**
+     * Required for migration from DOC to GCS.
+     * DO NOT USE IT FOR ANYTHING ELSE!
+     */
+    public String createInGcs(@NotNull Document document) {
+<span class="fc" id="L378">        return Metrics.timer(STORAGE_TIMER_NAME, OPERATION_LABEL, OPERATION_CREATE, STORAGE_LABEL, GCS.name())</span>
+<span class="fc" id="L379">                .record(() -&gt; documentStorageFactory.getStore(GCS).create(document));</span>
+    }
+
+    /**
+     * Required for migration from DOC to GCS.
+     * DO NOT USE IT FOR ANYTHING ELSE!
+     */
+    public void deleteFromGcs(@NotNull String idInGcs) {
+<span class="fc" id="L387">        Metrics.timer(STORAGE_TIMER_NAME, OPERATION_LABEL, OPERATION_DELETE_SINGLE, STORAGE_LABEL, GCS.name())</span>
+<span class="fc" id="L388">                .record(() -&gt; documentStorageFactory.getStore(GCS).delete(idInGcs));</span>
+<span class="fc" id="L389">    }</span>
+
+    public void deleteOrphanedGcsDocuments() {
+<span class="fc" id="L392">        LOGGER.info(&quot;Searching for orphaned documents in GCS...&quot;);</span>
+<span class="fc" id="L393">        long result = 0;</span>
+<span class="fc" id="L394">        Instant latest = dateTimeService.now().minus(1, ChronoUnit.DAYS);</span>
+
+<span class="fc" id="L396">        OrphanedGcsDocumentResult pageResult = Metrics.timer(ORPHANED_DOCUMENT_DELETION_TIMER_NAME).record(() -&gt; {</span>
+<span class="fc" id="L397">            Page&lt;Blob&gt; p = Metrics.timer(ORPHANED_DOCUMENT_GCS_TIMER_NAME).record(() -&gt; documentStorageFactory.getGcsDocumentStore().getBlobsInGcs());</span>
+<span class="fc" id="L398">            int r = processPage(Objects.requireNonNull(p).getValues(), latest);</span>
+<span class="fc" id="L399">            return new OrphanedGcsDocumentResult(p, r);</span>
+        });
+
+<span class="fc" id="L402">        Page&lt;Blob&gt; page = Objects.requireNonNull(pageResult).getPage();</span>
+<span class="fc" id="L403">        result += pageResult.getDeletedDocumentCount();</span>
+
+<span class="pc bpc" id="L405" title="1 of 2 branches missed.">        while (page.hasNextPage()) {</span>
+<span class="nc" id="L406">            Page&lt;Blob&gt; finalPage = page;</span>
+<span class="nc" id="L407">            pageResult = Metrics.timer(ORPHANED_DOCUMENT_DELETION_TIMER_NAME).record(() -&gt; {</span>
+<span class="nc" id="L408">                Page&lt;Blob&gt; p = Metrics.timer(ORPHANED_DOCUMENT_GCS_TIMER_NAME).record(finalPage::getNextPage);</span>
+<span class="nc" id="L409">                int r = processPage(Objects.requireNonNull(p).getValues(), latest);</span>
+<span class="nc" id="L410">                return new OrphanedGcsDocumentResult(p, r);</span>
+            });
+
+<span class="nc" id="L413">            page = Objects.requireNonNull(pageResult).getPage();</span>
+<span class="nc" id="L414">            result += pageResult.getDeletedDocumentCount();</span>
+<span class="nc" id="L415">        }</span>
+
+<span class="fc" id="L417">        LOGGER.info(&quot;Removed a total of {} orphaned documents from GCS&quot;, result);</span>
+<span class="fc" id="L418">    }</span>
+
+    public UUID saveDocument(EHRRequestContext requestContext, long userId, Long accountId, String contents) {
+<span class="fc" id="L421">        return create(</span>
+<span class="fc" id="L422">                beanFactory.getEhrRemote().createDocument(</span>
+                        requestContext,
+<span class="fc" id="L424">                        contents.getBytes(),</span>
+<span class="fc" id="L425">                        accountId,</span>
+<span class="fc" id="L426">                        genericMetadata(</span>
+                                TEXT_PLAIN,
+<span class="fc" id="L428">                                userId,</span>
+<span class="fc" id="L429">                                TOLVENDOCUMENT).toJavaMap()</span>
+                        )
+                );
+    }
+
+    public String getDocument(UUID documentId, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L435">        var document = retrieveOrThrow(documentId);</span>
+<span class="fc" id="L436">        return new String(beanFactory.getEhrRemote().decryptDoc(document, context).plainText());</span>
+    }
+
+    private ImmutableEncryptionMetadata getImmutableEncryptionMetadata(DocumentMetadata result) {
+<span class="fc" id="L440">        return ImmutableEncryptionMetadata.builder()</span>
+<span class="fc" id="L441">                .isEncrypted(isEncrypted(result.getAlgorithm()))</span>
+<span class="fc" id="L442">                .isDatapointLevelEncrypted(result.isDatapointLevelEncrypted())</span>
+<span class="fc" id="L443">                .datapointLevelKeyId(result.getDatapointLevelKeyId())</span>
+<span class="fc" id="L444">                .build();</span>
+    }
+
+    private int processPage(Iterable&lt;Blob&gt; blobs, Instant latest) {
+<span class="fc" id="L448">        List&lt;String&gt; filteredIds = StreamSupport.stream(blobs.spliterator(), false)</span>
+<span class="fc" id="L449">                .filter(blob -&gt; Instant.ofEpochMilli(blob.getCreateTime()).isBefore(latest))</span>
+<span class="fc" id="L450">                .map(Blob::getName)</span>
+<span class="fc" id="L451">                .collect(Collectors.toList());</span>
+
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">        if (filteredIds.isEmpty()) {</span>
+<span class="nc" id="L454">            return 0;</span>
+        }
+
+<span class="fc" id="L457">        List&lt;String&gt; idsInDocMetadata = Metrics.timer(ORPHANED_DOCUMENT_METADATA_TIMER_NAME).record(() -&gt; metadataRepository.getGcsInternalIdList(filteredIds));</span>
+<span class="pc bpc" id="L458" title="1 of 2 branches missed.">        if (idsInDocMetadata != null) {</span>
+<span class="fc" id="L459">            filteredIds.removeAll(idsInDocMetadata);</span>
+        }
+
+<span class="fc bfc" id="L462" title="All 2 branches covered.">        if (filteredIds.isEmpty()) {</span>
+<span class="fc" id="L463">            return 0;</span>
+        }
+
+<span class="fc" id="L466">        List&lt;String&gt; alreadyInQueue = Metrics.timer(ORPHANED_DOCUMENT_QUEUE_TIMER_NAME).record(() -&gt; deleteQueueRepository.getDocumentsInDeleteQueue(filteredIds));</span>
+<span class="pc bpc" id="L467" title="1 of 2 branches missed.">        if (alreadyInQueue != null) {</span>
+<span class="fc" id="L468">            filteredIds.removeAll(alreadyInQueue);</span>
+        }
+
+<span class="fc bfc" id="L471" title="All 2 branches covered.">        if (filteredIds.isEmpty()) {</span>
+<span class="fc" id="L472">            return 0;</span>
+        }
+
+<span class="fc" id="L475">        LOGGER.info(&quot;Adding {} orphaned documents to GCS to delete queue...&quot;, filteredIds.size());</span>
+        //noinspection ConstantConditions
+<span class="fc" id="L477">        return Metrics.timer(STORAGE_TIMER_NAME, OPERATION_LABEL, OPERATION_DELETE_MULTIPLE, STORAGE_LABEL, GCS.name())</span>
+<span class="fc" id="L478">                .record(() -&gt; documentStorageFactory.getStore(GCS).delete(filteredIds));</span>
+    }
+
+    private UUID saveToStoreWithFallback(Document document, DocStorageBackend store) {
+<span class="fc bfc" id="L482" title="All 2 branches covered.">        if (store != GCS) {</span>
+<span class="fc" id="L483">            return saveToStore(document, store);</span>
+        }
+
+        try {
+<span class="fc" id="L487">            return saveToStore(document, store);</span>
+<span class="fc" id="L488">        } catch (Exception e) {</span>
+<span class="fc" id="L489">            LOGGER.warn(&quot;Exception while uploading to GCS, falling back to GCS_FALLBACK store&quot;, e);</span>
+<span class="fc" id="L490">            Metrics.counter(GCS_ERROR_COUNTER_NAME, OPERATION_LABEL, OPERATION_CREATE).increment();</span>
+<span class="fc" id="L491">            return saveToStore(document, DocStorageBackend.GCS_FALLBACK);</span>
+        }
+    }
+
+    private UUID saveToStore(Document document, DocStorageBackend store) {
+<span class="fc" id="L496">        var documentStore = documentStorageFactory.getStore(store);</span>
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">        if (documentStore == null) {</span>
+<span class="nc" id="L498">            throw new RuntimeException(&quot;Could not found default storage&quot;);</span>
+        }
+<span class="fc" id="L500">        var internalId = Metrics.timer(STORAGE_TIMER_NAME,</span>
+                OPERATION_LABEL,
+                OPERATION_CREATE,
+                STORAGE_LABEL,
+<span class="fc" id="L504">                store.name()).record(() -&gt; documentStore.create(document));</span>
+<span class="fc" id="L505">        var metadata = mapToDocumentMetadata(document);</span>
+<span class="fc" id="L506">        metadata.setId(UUID.randomUUID());</span>
+<span class="fc" id="L507">        metadata.setFinalSubmitTime(dateTimeService.now());</span>
+<span class="fc" id="L508">        metadata.setStorage(store);</span>
+<span class="fc" id="L509">        metadata.setIdInStorage(internalId);</span>
+<span class="fc" id="L510">        return metadataRepository.saveAndFlush(metadata).getId();</span>
+    }
+
+    private DocumentMetadata mapToDocumentMetadata(Document doc) {
+<span class="fc" id="L514">        DocumentMetadata document = new DocumentMetadata();</span>
+<span class="fc" id="L515">        document.setAccountId(ACCOUNT_ID_PROVIDER.apply(doc));</span>
+<span class="fc" id="L516">        document.setMediaType(MEDIA_TYPE_PROVIDER.apply(doc));</span>
+<span class="fc" id="L517">        document.setAuthorPersonId(AUTHOR_PERSON_ID_PROVIDER.apply(doc).orElse(null));</span>
+
+<span class="fc bfc" id="L519" title="All 2 branches covered.">        if (doc instanceof EncryptedDocument) {</span>
+<span class="fc" id="L520">            EncryptedDocument encryptedDocument = (EncryptedDocument) doc;</span>
+<span class="fc" id="L521">            boolean dplEncryptedDocument = DATAPOINT_LEVEL_ENCRYPTED_TRUE.equals(encryptedDocument.metadata().get(DATAPOINT_LEVEL_ENCRYPTED));</span>
+
+<span class="pc bpc" id="L523" title="1 of 2 branches missed.">            if (AES_SHORT_NAME.equals(encryptedDocument.algorithm())) {</span>
+<span class="fc" id="L524">                document.setNonce(Base64.getEncoder().encodeToString(encryptedDocument.nonce()));</span>
+<span class="fc" id="L525">                document.setAlgorithm(encryptedDocument.algorithm());</span>
+<span class="fc bfc" id="L526" title="All 2 branches covered.">                if (!dplEncryptedDocument) {</span>
+<span class="fc" id="L527">                    document.setSymmetricEncryptionKeyId(Long.valueOf(encryptedDocument.metadata().get(ENCRYPTED_SECRET_KEY_ID)));</span>
+                }
+            } else { // default: legacy DESede
+<span class="nc" id="L530">                document.setEncryptedKeyInline(Base64.getDecoder().decode(encryptedDocument.metadata().get(ENCRYPTED_SECRET_KEY_BASE64)));</span>
+<span class="nc" id="L531">                document.setAlgorithm(encryptedDocument.algorithm());</span>
+            }
+
+<span class="fc bfc" id="L534" title="All 2 branches covered.">            if (dplEncryptedDocument) {</span>
+<span class="fc" id="L535">                document.setDatapointLevelEncrypted(true);</span>
+<span class="fc" id="L536">                document.setDatapointLevelKeyId(UUID.fromString(encryptedDocument.metadata().get(DATAPOINT_LEVEL_KEY_ID)));</span>
+            }
+<span class="fc" id="L538">        } else {</span>
+<span class="fc" id="L539">            document.setAlgorithm(NO_ENCRYPTION_ALGORITHM);</span>
+        }
+
+<span class="fc" id="L542">        return document;</span>
+    }
+
+    private static boolean isEncrypted(String algorithm) {
+<span class="fc bfc" id="L546" title="All 2 branches covered.">        return !NO_ENCRYPTION_ALGORITHM.equals(algorithm);</span>
+    }
+
+    private class OrphanedGcsDocumentResult {
+        private final Page&lt;Blob&gt; page;
+        private final int deletedDocumentCount;
+
+<span class="fc" id="L553">        OrphanedGcsDocumentResult(Page&lt;Blob&gt; page, int deletedDocumentCount) {</span>
+<span class="fc" id="L554">            this.page = page;</span>
+<span class="fc" id="L555">            this.deletedDocumentCount = deletedDocumentCount;</span>
+<span class="fc" id="L556">        }</span>
+
+        Page&lt;Blob&gt; getPage() {
+<span class="fc" id="L559">            return page;</span>
+        }
+
+        int getDeletedDocumentCount() {
+<span class="fc" id="L563">            return deletedDocumentCount;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

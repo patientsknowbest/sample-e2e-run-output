@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QuestionnaireResponseService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.questionnaireservice.service</a> &gt; <span class="el_source">QuestionnaireResponseService.kt</span></div><h1>QuestionnaireResponseService.kt</h1><pre class="source lang-java linenums">package com.pkb.questionnaireservice.service
+
+import com.pkb.kms.shared.representation.PersonPublicId
+import com.pkb.questionnaireservice.ErrorException
+import com.pkb.questionnaireservice.OrgPublicId
+import com.pkb.questionnaireservice.QuestionnaireId
+import com.pkb.questionnaireservice.entities.DecryptedQuestionnaireResponse
+import com.pkb.questionnaireservice.messages.QuestionnaireResponsesSearchCriteria
+import com.pkb.questionnaireservice.modelv2.QuestionnaireResponse
+import com.pkb.questionnaireservice.modelv2.QuestionnaireServiceError
+import com.pkb.questionnaireservice.modelv2.SearchResults
+import com.pkb.questionnaireservice.repositories.ques.QuestionnaireRepositoryCryptoHandler
+import com.pkb.questionnaireservice.repositories.ques.QuestionnaireResponseRepository
+import io.vavr.control.Either
+import java.lang.invoke.MethodHandles
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.data.domain.Pageable
+import org.springframework.stereotype.Service
+import reactor.core.publisher.Flux
+import reactor.core.publisher.Mono
+
+<span class="fc" id="L23">@Service</span>
+<span class="fc" id="L24">class QuestionnaireResponseService(</span>
+<span class="fc" id="L25">    private val questionnaireResponseRepository: QuestionnaireResponseRepository,</span>
+<span class="fc" id="L26">    private val cryptoHandler: QuestionnaireRepositoryCryptoHandler</span>
+) {
+
+<span class="fc" id="L29">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    fun save(
+        questionnaireResponse: DecryptedQuestionnaireResponse
+    ): Either&lt;QuestionnaireServiceError, QuestionnaireResponse&gt; {
+<span class="fc" id="L34">        return questionnaireResponse.checkMandatoryQuestionsHaveAnswers()</span>
+<span class="fc" id="L35">            .flatMap { cryptoHandler.encrypt(it as DecryptedQuestionnaireResponse) }</span>
+<span class="fc" id="L36">            .flatMap {questionnaireResponseRepository.save(questionnaireResponse, it)}</span>
+    }
+
+    fun getByQuestionnaireId(
+        questionnaireId: QuestionnaireId,
+        loggedInUserId: PersonPublicId,
+        pageable: Pageable
+    ): Either&lt;QuestionnaireServiceError, SearchResults&lt;QuestionnaireResponse&gt;&gt; {
+<span class="nc" id="L44">        log.debug(&quot;Getting questionnaire responses for questionnaire {}&quot;, questionnaireId)</span>
+<span class="nc" id="L45">        val questionnaireResponses = questionnaireResponseRepository.findByQuestionnaireId(questionnaireId, pageable)</span>
+<span class="nc" id="L46">        val result = cryptoHandler.decryptResponses(questionnaireResponses.toList(), loggedInUserId)</span>
+<span class="nc" id="L47">            .collectList()</span>
+<span class="nc" id="L48">            .map { decryptedResponses -&gt; Either.right&lt;QuestionnaireServiceError, SearchResults&lt;QuestionnaireResponse&gt;&gt;(SearchResults(decryptedResponses, questionnaireResponses.totalElements)) }</span>
+<span class="nc" id="L49">            .onErrorResume(ErrorException::class.java) { Mono.just(Either.left(it.error)) }.block()!!</span>
+<span class="nc" id="L50">        log.debug(&quot;Done getting questionnaire responses for questionnaire {}&quot;, questionnaireId)</span>
+<span class="nc" id="L51">        return result</span>
+    }
+
+    fun streamByQuestionnaireId(
+        questionnaireId: QuestionnaireId,
+        loggedInUserId: PersonPublicId
+    ): Flux&lt;QuestionnaireResponse&gt; =
+        //Note that we can't stream this direct from the database because Hibernate will close our connection when we return from the method (crossing the transaction boundary) and kill the underlying cursor
+        //Unless we move to a completely different persistence framework we need to materialise the results from the database first and then start streaming them off to the client.
+        //This isn't super memory-efficient but it does still mean we can start sending results to the client as soon as the first batch of keys comes back from the KMS, which reduces latency significantly
+<span class="fc" id="L61">        questionnaireResponseRepository.findByQuestionnaireId(questionnaireId, Pageable.unpaged())</span>
+<span class="fc" id="L62">            .let { cryptoHandler.decryptResponses(it.toList(), loggedInUserId) }</span>
+
+
+    fun getWithinOrg(
+        orgId: OrgPublicId,
+        questionnaireResponsesSearchCriteria: QuestionnaireResponsesSearchCriteria,
+        pageable: Pageable
+    ): Either&lt;QuestionnaireServiceError, SearchResults&lt;QuestionnaireResponse&gt;&gt; {
+<span class="fc" id="L70">        val questionnaireResponses =</span>
+<span class="fc" id="L71">            questionnaireResponseRepository.findResponses(orgId, questionnaireResponsesSearchCriteria, pageable)</span>
+<span class="fc" id="L72">        return cryptoHandler.decryptResponsesForOrg(questionnaireResponses.toList(), orgId)</span>
+<span class="fc" id="L73">            .collectList()</span>
+<span class="fc" id="L74">            .map { decryptedResponses -&gt;</span>
+<span class="fc" id="L75">                Either.right&lt;QuestionnaireServiceError, SearchResults&lt;QuestionnaireResponse&gt;&gt;(</span>
+<span class="fc" id="L76">                    SearchResults(decryptedResponses, questionnaireResponses.totalElements)</span>
+                )
+            }
+<span class="pc" id="L79">            .onErrorResume(ErrorException::class.java) { Mono.just(Either.left(it.error)) }</span>
+<span class="fc" id="L80">            .block()!!</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

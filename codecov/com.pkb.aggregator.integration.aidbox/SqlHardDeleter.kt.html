@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SqlHardDeleter.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.integration.aidbox</a> &gt; <span class="el_source">SqlHardDeleter.kt</span></div><h1>SqlHardDeleter.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.integration.aidbox
+
+import com.fasterxml.jackson.annotation.JsonRootName
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
+import com.pkb.aggregator.R4Medication
+import com.pkb.aggregator.R4Organization
+import com.pkb.aggregator.R4Patient
+import com.pkb.aggregator.R4Practitioner
+import com.pkb.aggregator.service.FHIR_TYPE_OBSERVATION
+import com.pkb.aggregator.service.FHIR_TYPE_PATIENT
+import org.hl7.fhir.instance.model.api.IDomainResource
+
+/**
+ * Issues a query to aidbox's /$sql endpoint to delete the specified resources
+ *
+ * We do this rather than sending a DELETE HTTP request because that would build a false modification history on the
+ * downstream - i.e. a clinical data item hasn't been deleted by a clinical team, but we need to delete it prior to
+ * sending a freshly-reaggregated patient account. We don't want that delete to be logged downstream because it's just
+ * a side effect of our business process rather than part of the actual medical record history
+ */
+<span class="fc" id="L22">class SqlHardDeleter(</span>
+<span class="fc" id="L23">    private val aidboxRestClient: AidboxRestClient,</span>
+    objectMapper: ObjectMapper
+) {
+
+<span class="fc" id="L27">    private val objectMapper = objectMapper.copy().apply {</span>
+<span class="fc" id="L28">        enable((SerializationFeature.WRAP_ROOT_VALUE))</span>
+<span class="fc" id="L29">    }</span>
+
+<span class="nc" id="L31">    @JsonRootName(value = &quot;subject&quot;)</span>
+<span class="nc" id="L32">    data class Subject(val resourceType: String, val id: String)</span>
+
+<span class="nc" id="L34">    @JsonRootName(value = &quot;patient&quot;)</span>
+<span class="nc" id="L35">    data class Patient(val resourceType: String = FHIR_TYPE_PATIENT, val id: String)</span>
+
+<span class="nc" id="L37">    @JsonRootName(value = &quot;organization&quot;)</span>
+<span class="nc" id="L38">    data class Organization(val resourceType: String = FHIR_TYPE_OBSERVATION, val id: String)</span>
+
+    fun &lt;T&gt; deleteResource(id: String, klass: Class&lt;T&gt;) where T: IDomainResource =
+<span class="nc" id="L41">        when (klass) {</span>
+<span class="nc bnc" id="L42" title="All 2 branches missed.">            R4Patient::class.java -&gt; deletePatient(id)</span>
+<span class="nc bnc" id="L43" title="All 2 branches missed.">            R4Organization::class.java -&gt; deleteOrganization(id)</span>
+<span class="nc bnc" id="L44" title="All 2 branches missed.">            R4Practitioner::class.java -&gt; deletePractitioner(id)</span>
+<span class="nc bnc" id="L45" title="All 2 branches missed.">            R4Medication::class.java -&gt; deleteMedication(id)</span>
+<span class="nc" id="L46">            else -&gt; throw RuntimeException(&quot;Cannot delete resources of type $klass&quot;)</span>
+<span class="nc" id="L47">        }</span>
+
+    private fun deletePatient(downstreamPatientId: String): List&lt;Pair&lt;String, Any?&gt;&gt; {
+<span class="nc" id="L50">        val subject = objectMapper.writeValueAsString(Subject(FHIR_TYPE_PATIENT, downstreamPatientId))!!</span>
+<span class="nc" id="L51">        val patient = objectMapper.writeValueAsString(Patient(FHIR_TYPE_PATIENT, downstreamPatientId))!!</span>
+<span class="nc" id="L52">        return listOf(</span>
+<span class="nc" id="L53">            &quot;encounter&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L54">                arrayOf(DELETE_ENCOUNTER, subject)</span>
+<span class="nc" id="L55">            ).execute().body(),</span>
+<span class="nc" id="L56">            &quot;encounter_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L57">                arrayOf(DELETE_ENCOUNTER_HISTORY, subject)</span>
+<span class="nc" id="L58">            ).execute().body(),</span>
+<span class="nc" id="L59">            &quot;observation&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L60">                arrayOf(DELETE_OBSERVATION, subject)</span>
+<span class="nc" id="L61">            ).execute().body(),</span>
+<span class="nc" id="L62">            &quot;observation_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L63">                arrayOf(DELETE_OBSERVATION_HISTORY, subject)</span>
+<span class="nc" id="L64">            ).execute().body(),</span>
+<span class="nc" id="L65">            &quot;medicationstatement&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L66">                arrayOf(DELETE_MEDICATION_STATEMENT, subject)</span>
+<span class="nc" id="L67">            ).execute().body(),</span>
+<span class="nc" id="L68">            &quot;medicationstatement_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L69">                arrayOf(DELETE_MEDICATION_STATEMENT_HISTORY, subject)</span>
+<span class="nc" id="L70">            ).execute().body(),</span>
+<span class="nc" id="L71">            &quot;condition&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L72">                arrayOf(DELETE_CONDITION, subject)</span>
+<span class="nc" id="L73">            ).execute().body(),</span>
+<span class="nc" id="L74">            &quot;condition_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L75">                arrayOf(DELETE_CONDITION_HISTORY, subject)</span>
+<span class="nc" id="L76">            ).execute().body(),</span>
+<span class="nc" id="L77">            &quot;allergyintolerance&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L78">                arrayOf(DELETE_ALLERGY, patient)</span>
+<span class="nc" id="L79">            ).execute().body(),</span>
+<span class="nc" id="L80">            &quot;allergyintolerance_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L81">                arrayOf(DELETE_ALLERGY_HISTORY, patient)</span>
+<span class="nc" id="L82">            ).execute().body(),</span>
+<span class="nc" id="L83">            &quot;appointment&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L84">                arrayOf(DELETE_APPOINTMENT, downstreamPatientId)</span>
+<span class="nc" id="L85">            ).execute().body(),</span>
+<span class="nc" id="L86">            &quot;appointment_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L87">                arrayOf(DELETE_APPOINTMENT_HISTORY, downstreamPatientId)</span>
+<span class="nc" id="L88">            ).execute().body(),</span>
+<span class="nc" id="L89">            &quot;patient&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L90">                arrayOf(DELETE_PATIENT, downstreamPatientId)</span>
+<span class="nc" id="L91">            ).execute().body(),</span>
+<span class="nc" id="L92">            &quot;patient_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L93">                arrayOf(DELETE_PATIENT_HISTORY, downstreamPatientId)</span>
+<span class="nc" id="L94">            ).execute().body(),</span>
+<span class="nc" id="L95">            &quot;person&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L96">                arrayOf(DELETE_PERSON, downstreamPatientId)</span>
+<span class="nc" id="L97">            ).execute().body(),</span>
+<span class="nc" id="L98">            &quot;person_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L99">                arrayOf(DELETE_PERSON_HISTORY, downstreamPatientId)</span>
+<span class="nc" id="L100">            ).execute().body(),</span>
+        )
+    }
+
+    private fun deleteOrganization(downstreamOrganizationId: String) =
+<span class="nc" id="L105">        objectMapper.writeValueAsString(Organization(id = downstreamOrganizationId)).let {</span>
+<span class="nc" id="L106">            listOf(</span>
+<span class="nc" id="L107">                &quot;practitionerrole&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L108">                    arrayOf(DELETE_PRACTITIONER_ROLE, it)</span>
+<span class="nc" id="L109">                ).execute().body(),</span>
+<span class="nc" id="L110">                &quot;practitionerrole_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L111">                    arrayOf(DELETE_PRACTITIONER_ROLE_HISTORY, it)</span>
+<span class="nc" id="L112">                ).execute().body(),</span>
+<span class="nc" id="L113">                &quot;organization&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L114">                    arrayOf(DELETE_ORGANIZATION, downstreamOrganizationId)</span>
+<span class="nc" id="L115">                ).execute().body(),</span>
+<span class="nc" id="L116">                &quot;organization_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L117">                    arrayOf(DELETE_ORGANIZATION_HISTORY, downstreamOrganizationId)</span>
+<span class="nc" id="L118">                ).execute().body(),</span>
+            )
+<span class="nc" id="L120">        }</span>
+
+<span class="nc" id="L122">    private fun deletePractitioner(downstreamPractitionerId: String) = listOf(</span>
+<span class="nc" id="L123">        &quot;practitioner&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L124">            arrayOf(DELETE_PRACTITIONER, downstreamPractitionerId)</span>
+<span class="nc" id="L125">        ).execute().body(),</span>
+<span class="nc" id="L126">        &quot;practitioner_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L127">            arrayOf(DELETE_PRACTITIONER_HISTORY, downstreamPractitionerId)</span>
+<span class="nc" id="L128">        ).execute().body(),</span>
+<span class="nc" id="L129">    )</span>
+
+<span class="nc" id="L131">    private fun deleteMedication(downstreamMedicationId: String)= listOf(</span>
+<span class="nc" id="L132">        &quot;medication&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L133">            arrayOf(DELETE_MEDICATION, downstreamMedicationId)</span>
+<span class="nc" id="L134">        ).execute().body(),</span>
+<span class="nc" id="L135">        &quot;medication_history&quot; to aidboxRestClient.postSql(</span>
+<span class="nc" id="L136">            arrayOf(DELETE_MEDICATION_HISTORY, downstreamMedicationId)</span>
+<span class="nc" id="L137">        ).execute().body(),</span>
+<span class="nc" id="L138">    )</span>
+
+    companion object {
+        const val DELETE_ENCOUNTER = &quot;delete from encounter where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_ENCOUNTER_HISTORY = &quot;delete from encounter_history where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_OBSERVATION = &quot;delete from observation where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_OBSERVATION_HISTORY = &quot;delete from observation_history where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_MEDICATION_STATEMENT = &quot;delete from medicationstatement where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_MEDICATION_STATEMENT_HISTORY = &quot;delete from medicationstatement_history where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_CONDITION = &quot;delete from condition where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_CONDITION_HISTORY = &quot;delete from condition_history where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_APPOINTMENT = &quot;&quot;&quot;delete from appointment a1 where a1.id in (select a2.id from appointment a2, jsonb_array_elements(a2.resource-&gt;'participant') p where p-&gt;'actor'-&gt;&gt;'id' = ?)&quot;&quot;&quot;
+        const val DELETE_APPOINTMENT_HISTORY = &quot;&quot;&quot;delete from appointment_history a1 where a1.id in (select a2.id from appointment a2, jsonb_array_elements(a2.resource-&gt;'participant') p where p-&gt;'actor'-&gt;&gt;'id' = ?)&quot;&quot;&quot;
+        const val DELETE_ALLERGY = &quot;delete from allergyintolerance where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_ALLERGY_HISTORY = &quot;delete from allergyintolerance_history where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_PATIENT = &quot;delete from patient where id = ? returning id&quot;
+        const val DELETE_PATIENT_HISTORY = &quot;delete from patient_history where id = ? returning id&quot;
+        const val DELETE_PERSON = &quot;delete from person p1 where p1.id in (select p2.id from person p2, jsonb_array_elements(p2.resource-&gt;'link') p where p-&gt;'target'-&gt;&gt;'id' = ?) returning id&quot;
+        const val DELETE_PERSON_HISTORY = &quot;delete from person_history p1 where p1.id in (select p2.id from person p2, jsonb_array_elements(p2.resource-&gt;'link') p where p-&gt;'target'-&gt;&gt;'id' = ?) returning id&quot;
+
+        const val DELETE_PRACTITIONER = &quot;delete from practitioner where id = ? returning id&quot;
+        const val DELETE_PRACTITIONER_HISTORY = &quot;delete from practitioner_history where id = ? returning id&quot;
+        const val DELETE_PRACTITIONER_ROLE = &quot;delete from practitionerrole where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_PRACTITIONER_ROLE_HISTORY = &quot;delete from practitionerrole_history where resource @&gt; cast(? as jsonb) returning id&quot;
+        const val DELETE_ORGANIZATION = &quot;delete from organization where id = ? returning id&quot;
+        const val DELETE_ORGANIZATION_HISTORY = &quot;delete from organization_history where id = ? returning id&quot;
+
+        const val DELETE_MEDICATION = &quot;delete from medication where id = ? returning id&quot;
+        const val DELETE_MEDICATION_HISTORY = &quot;delete from medication_history where id = ? returning id&quot;
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

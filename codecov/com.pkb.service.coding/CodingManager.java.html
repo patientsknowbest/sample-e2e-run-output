@@ -1,0 +1,404 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CodingManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.coding</a> &gt; <span class="el_source">CodingManager.java</span></div><h1>CodingManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.coding;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.coding.entity.Coding;
+import com.pkb.coding.entity.CodingMatch;
+import com.pkb.coding.entity.CodingReceived;
+import com.pkb.coding.entity.CodingSearchCriteria;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.entities.enums.CodingDataType;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.Route;
+import com.pkb.repository.legacy.LegacyCodingMatchRepository;
+import com.pkb.repository.legacy.LegacyCodingReceivedRepository;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.DbUtil;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Function2;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.Tuple3;
+import io.vavr.control.Option;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.NotImplementedException;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.Serializable;
+import java.lang.invoke.MethodHandles;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.google.common.collect.Sets.toImmutableEnumSet;
+import static java.util.Collections.emptyMap;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.lang3.ObjectUtils.isNotEmpty;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public class CodingManager extends TransactionManager {
+
+<span class="fc" id="L58">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final String CODE_MAPPING_PROBLEM_COUNTER_NAME = &quot;pkb_phr_code_mapping_mismatches&quot;;
+    private static final String MAPPING_PROBLEM_TYPE = &quot;type&quot;;
+
+    private final LegacyCodingReceivedRepository codingReceivedRepository;
+    private final LegacyCodingMatchRepository codingMatchRepository;
+
+    private static void incrementCodeProblemCounter(String type) {
+<span class="fc" id="L67">        Metrics.counter(CODE_MAPPING_PROBLEM_COUNTER_NAME, MAPPING_PROBLEM_TYPE, type).increment();</span>
+<span class="fc" id="L68">    }</span>
+
+    public CodingManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, LegacyCodingReceivedRepository codingReceivedRepository, LegacyCodingMatchRepository codingMatchRepository) {
+<span class="fc" id="L71">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L72">        this.codingReceivedRepository = codingReceivedRepository;</span>
+<span class="fc" id="L73">        this.codingMatchRepository = codingMatchRepository;</span>
+<span class="fc" id="L74">    }</span>
+
+    public &lt;K extends Serializable&gt; Map&lt;K, CodingReceived&gt; ensureCodingReceived(Map&lt;K, CodingReceived&gt; codingReceivedByAnyKey) {
+<span class="fc" id="L77">        Map&lt;K, CodingReceived&gt; found = findCodingReceived(codingReceivedByAnyKey);</span>
+
+<span class="fc" id="L79">        Map&lt;CodingReceived, List&lt;Map.Entry&lt;K, CodingReceived&gt;&gt;&gt; unfound = codingReceivedByAnyKey.entrySet()</span>
+<span class="fc" id="L80">                .stream()</span>
+<span class="fc bfc" id="L81" title="All 2 branches covered.">                .filter(e -&gt; !found.containsKey(e.getKey()))</span>
+<span class="fc" id="L82">                .collect(groupingBy(Map.Entry::getValue));</span>
+
+<span class="fc" id="L84">        Set&lt;CodingReceived&gt; codingReceiveds = unfound.keySet();</span>
+<span class="fc bfc" id="L85" title="All 2 branches covered.">        if(isNotEmpty(codingReceiveds)) {</span>
+<span class="fc" id="L86">            applyCodingMatchesAll(codingReceiveds);</span>
+<span class="fc" id="L87">            codingReceivedRepository.saveAll(codingReceiveds);</span>
+<span class="fc" id="L88">            unfound.forEach((codingReceived, map) -&gt; {</span>
+<span class="fc" id="L89">                map.forEach(e -&gt; e.setValue(codingReceived));</span>
+<span class="fc" id="L90">            });</span>
+        }
+
+<span class="fc" id="L93">        codingReceivedByAnyKey.putAll(found);</span>
+<span class="fc" id="L94">        return codingReceivedByAnyKey;</span>
+    }
+
+    /**
+     * Custom ensureCodingReceived method for EMIS ES where we have a value in ReadTermId field but don't know
+     * if it is a READ V2 Code or EMIS Custom Code and our curated CodingMatch entries will tell us.
+     * We have a match if [Code,CodeSystem] matches one of our stored codingMatches
+     *
+     * @param codingReceived
+     */
+    public &lt;K extends Serializable&gt; Map&lt;K, CodingReceived&gt; ensureCodingReceivedIfMatchForEmisEs(
+            Map&lt;K, Tuple2&lt;CodingReceived, Set&lt;CodingSearchCriteria&gt;&gt;&gt; codingReceived) {
+
+<span class="fc" id="L107">        io.vavr.collection.HashMap&lt;K, Tuple2&lt;CodingReceived, Set&lt;CodingSearchCriteria&gt;&gt;&gt; criteria = io.vavr.collection.HashMap</span>
+<span class="fc" id="L108">                .ofAll(codingReceived);</span>
+
+<span class="fc" id="L110">        io.vavr.collection.Map&lt;K, CodingMatch&gt; codingMatches = findCodingMatch(criteria);</span>
+
+<span class="fc" id="L112">        io.vavr.collection.Map&lt;K, CodingReceived&gt; searchCoding = io.vavr.collection.HashMap.ofAll(codingReceived)</span>
+<span class="fc" id="L113">                .map((k, v) -&gt; Tuple.of(k, v._1));</span>
+
+<span class="fc" id="L115">        io.vavr.collection.Set&lt;K&gt; foundKeys = searchCoding.keySet().intersect(codingMatches.keySet());</span>
+
+<span class="fc" id="L117">        Map&lt;K, CodingReceived&gt; correctedFoundKeys = foundKeys.toMap(k -&gt; {</span>
+<span class="fc" id="L118">            CodingMatch cm = codingMatches.get(k).get(); // surely present because of intersect() above</span>
+<span class="fc" id="L119">            CodingReceived cr = searchCoding.get(k).get(); // -||-</span>
+<span class="fc" id="L120">            cr.setCodingMatch(cm);</span>
+
+            //horrible hack. We should get rid of this when we remove EMIS/Read matches
+            //When we create the placeholder codingreceived record, we don't know if code1 is an EMIS or Read code.
+            //Additionally, we do some sanitisation of the read code received from EMIS so they're padded to 5 characters (see EmisReadCodeConverter)
+            //Once we've got the codingmatch, we know what type the code is so we can update the code1 fields.
+            //This has an (unfortunate?) side effect of meaning that if you match to a SNOMED code, both code1 and code2
+            //are set to be the SNOMED code, and the information about the Read/EMIS code is lost.
+            //https://patientsknowbest.slack.com/archives/C582GGUP2/p1622555424066800
+<span class="fc" id="L129">            cr.setCode1(cm.getCode());</span>
+<span class="fc" id="L130">            cr.setCodeSystem1(cm.getCodeSystem());</span>
+
+<span class="fc" id="L132">            cr.setCodingDataType(cm.getCodingDataType());</span>
+<span class="fc" id="L133">            cr.applyCodingMatch(cm);</span>
+<span class="fc" id="L134">            return Tuple.of(k, cr);</span>
+<span class="fc" id="L135">        }).toJavaMap();</span>
+
+<span class="fc" id="L137">        return ensureCodingReceived(correctedFoundKeys);</span>
+    }
+
+    // This method cannot handle more than 5k records criteria reliably
+    // -- PSQL has a 32k limit on query parameter count.
+    @VisibleForTesting
+    &lt;K&gt; Map&lt;K, CodingReceived&gt; findCodingReceived(Map&lt;K, CodingReceived&gt; codingReceived) {
+<span class="fc bfc" id="L144" title="All 2 branches covered.">        if (MapUtils.isEmpty(codingReceived)) {</span>
+<span class="fc" id="L145">            return emptyMap();</span>
+        }
+<span class="fc" id="L147">        Collection&lt;CodingReceived&gt; codings = codingReceived.values();</span>
+<span class="fc" id="L148">        List&lt;CodingDataType&gt; codingDataTypes = codings.stream().map(CodingReceived::getCodingDataType)</span>
+<span class="fc" id="L149">                .distinct()</span>
+<span class="fc" id="L150">                .collect(toList());</span>
+<span class="fc" id="L151">        Set&lt;Long&gt; orgIds = codings.stream()</span>
+<span class="fc" id="L152">                .map(CodingReceived::getOrgId)</span>
+<span class="fc" id="L153">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L154">                .collect(toSet());</span>
+<span class="fc" id="L155">        Set&lt;Route&gt; routes = codings.stream()</span>
+<span class="fc" id="L156">                .map(CodingReceived::getRoute)</span>
+<span class="fc" id="L157">                .collect(toImmutableEnumSet());</span>
+
+<span class="pc bpc" id="L159" title="1 of 4 branches missed.">        List&lt;CodingReceived&gt; singleCoding = codings.stream().filter(c -&gt; isBlank(c.getCode2()) &amp;&amp; isNotBlank(c.getCode1())).collect(toList());</span>
+<span class="fc" id="L160">        Set&lt;String&gt; singleCodes = singleCoding.stream()</span>
+<span class="fc" id="L161">                .map(CodingReceived::getCode1)</span>
+<span class="fc" id="L162">                .collect(toSet());</span>
+
+<span class="fc" id="L164">        Set&lt;String&gt; singleSystems = singleCoding.stream()</span>
+<span class="fc" id="L165">                .map(CodingReceived::getCodeSystem1)</span>
+<span class="fc" id="L166">                .collect(toSet());</span>
+
+<span class="pc bpc" id="L168" title="1 of 4 branches missed.">        List&lt;CodingReceived&gt; doubleCoding = codings.stream().filter(c -&gt; isNotBlank(c.getCode2()) &amp;&amp; isNotBlank(c.getCode1())).collect(toList());</span>
+<span class="fc" id="L169">        Set&lt;String&gt; doubleCode1s = doubleCoding.stream()</span>
+<span class="fc" id="L170">                .map(CodingReceived::getCode1)</span>
+<span class="fc" id="L171">                .collect(toSet());</span>
+
+<span class="fc" id="L173">        Set&lt;String&gt; doubleSystem1s = doubleCoding.stream()</span>
+<span class="fc" id="L174">                .map(CodingReceived::getCodeSystem1)</span>
+<span class="fc" id="L175">                .collect(toSet());</span>
+
+<span class="fc" id="L177">        Set&lt;String&gt; doubleCode2s = doubleCoding.stream()</span>
+<span class="fc" id="L178">                .map(CodingReceived::getCode2)</span>
+<span class="fc" id="L179">                .collect(toSet());</span>
+
+<span class="fc" id="L181">        Set&lt;String&gt; doubleSystem2s = doubleCoding.stream()</span>
+<span class="fc" id="L182">                .map(CodingReceived::getCodeSystem2)</span>
+<span class="fc" id="L183">                .collect(toSet());</span>
+
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">        if (singleCoding.size() + doubleCoding.size() &lt; codings.size()) {</span>
+<span class="nc" id="L186">            throw new NotImplementedException(&quot;This type of coding support isn't implemented yet, update the code to handle it!&quot;);</span>
+        }
+
+<span class="fc" id="L189">        List&lt;CodingReceived&gt; foundList = getCodingReceived(codingDataTypes, routes, orgIds, singleCodes, singleSystems,</span>
+                doubleCode1s, doubleSystem1s, doubleCode2s, doubleSystem2s, singleCoding, doubleCoding);
+<span class="fc" id="L191">        Map&lt;K, CodingReceived&gt; ret = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L192">        codingReceived.forEach((key, value) -&gt; {</span>
+<span class="fc" id="L193">            int persistedIndex = foundList.indexOf(value);</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">            if (persistedIndex &gt;= 0) {</span>
+<span class="fc" id="L195">                ret.put(key, foundList.get(persistedIndex));</span>
+            }
+<span class="fc" id="L197">        });</span>
+<span class="fc" id="L198">        return ret;</span>
+    }
+
+    private void applyCodingMatchesAll(Collection&lt;CodingReceived&gt; codingReceiveds) {
+<span class="fc" id="L202">        Map&lt;Tuple3&lt;CodingDataType, String, String&gt;, List&lt;CodingMatch&gt;&gt; codingMatchPossibles = findCodingMatchPossibles(codingReceiveds)</span>
+<span class="fc" id="L203">                .collect(groupingBy(pm -&gt; Tuple.of(pm.getCodingDataType(), pm.getCode(), pm.getCodeSystem())));</span>
+
+<span class="fc" id="L205">        codingReceiveds.forEach(cr -&gt; findBestMatchByPreferredCoding(cr, codingMatchPossibles));</span>
+<span class="fc" id="L206">    }</span>
+
+    private List&lt;CodingMatch&gt; getAllPossibleCodingMatches(Map&lt;Tuple3&lt;CodingDataType, String, String&gt;, List&lt;CodingMatch&gt;&gt; codingMatchPossibles, CodingReceived codingReceived) {
+<span class="fc" id="L209">        List&lt;CodingMatch&gt; codingMatches = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L211">        Tuple3&lt;CodingDataType, String, String&gt; key1 = Tuple.of(codingReceived.getCodingDataType(), codingReceived.getCode1(), codingReceived.getCodeSystem1());</span>
+<span class="fc" id="L212">        List&lt;CodingMatch&gt; codingMatchesForKey1 = codingMatchPossibles.get(key1);</span>
+<span class="fc bfc" id="L213" title="All 2 branches covered.">        if(Objects.nonNull(codingMatchesForKey1)) {</span>
+<span class="fc" id="L214">            codingMatches.addAll(codingMatchesForKey1);</span>
+        }
+
+<span class="fc" id="L217">        Tuple3&lt;CodingDataType, String, String&gt; key2 = Tuple.of(codingReceived.getCodingDataType(), codingReceived.getCode2(), codingReceived.getCodeSystem2());</span>
+<span class="fc" id="L218">        List&lt;CodingMatch&gt; codingMatchesForKey2 = codingMatchPossibles.get(key2);</span>
+<span class="fc bfc" id="L219" title="All 2 branches covered.">        if(Objects.nonNull(codingMatchesForKey2)) {</span>
+<span class="fc" id="L220">            codingMatches.addAll(codingMatchesForKey2);</span>
+        }
+<span class="fc" id="L222">        return codingMatches;</span>
+    }
+
+    private void findBestMatchByPreferredCoding(CodingReceived codingReceived, Map&lt;Tuple3&lt;CodingDataType, String, String&gt;, List&lt;CodingMatch&gt;&gt; codingMatchPossibles) {
+<span class="fc" id="L226">        List&lt;CodingMatch&gt; allPossibleCodingMatches = getAllPossibleCodingMatches(codingMatchPossibles, codingReceived);</span>
+
+<span class="fc bfc" id="L228" title="All 2 branches covered.">        if(isNotEmpty(allPossibleCodingMatches)) {</span>
+<span class="fc" id="L229">            Optional&lt;Coding&gt; preferredCoding = Optional.of(new Coding.Builder(</span>
+<span class="fc" id="L230">                    codingReceived.getCode1(),</span>
+<span class="fc" id="L231">                    codingReceived.getCodeSystem1())</span>
+<span class="fc" id="L232">                    .build());</span>
+
+<span class="fc" id="L234">            findBestMatch(allPossibleCodingMatches, preferredCoding)</span>
+<span class="fc" id="L235">                    .ifPresent(codingReceived::applyCodingMatch);</span>
+        }
+<span class="fc" id="L237">    }</span>
+
+    private &lt;K&gt; io.vavr.collection.Map&lt;K, CodingMatch&gt; findCodingMatch(
+            io.vavr.collection.HashMap&lt;K, Tuple2&lt;CodingReceived, Set&lt;CodingSearchCriteria&gt;&gt;&gt; candidates) {
+        // first lookup possible matches for code, codeSystemCandidates, orgId and route
+<span class="fc" id="L242">        io.vavr.collection.Map&lt;K, List&lt;CodingMatch&gt;&gt; possibleMatches = findCodingMatchPossibles(candidates);</span>
+<span class="fc" id="L243">        return possibleMatches.flatMap((k, v) -&gt; matchCodingReceivedToCodingMatch(candidates.get(k).get(), v).map(cm -&gt; Tuple.of(k, cm)));</span>
+    }
+
+    @VisibleForTesting
+    Option&lt;CodingMatch&gt; matchCodingReceivedToCodingMatch(Tuple2&lt;CodingReceived, Set&lt;CodingSearchCriteria&gt;&gt; criterium, List&lt;CodingMatch&gt; matches) {
+<span class="fc" id="L248">        Optional&lt;Coding&gt; preferredCoding = criterium._2.stream()</span>
+<span class="fc" id="L249">                .filter(CodingSearchCriteria::isPreferred)</span>
+<span class="fc" id="L250">                .findFirst()</span>
+<span class="fc" id="L251">                .map((preferred) -&gt; new Coding.Builder(preferred.getCode(), preferred.getCodeSystem()).build());</span>
+
+<span class="fc" id="L253">        return Option.ofOptional(findBestMatch(matches, preferredCoding));</span>
+    }
+
+    /**
+     * Whilst it would be nice to log the details of the codingreceived / codingmatches for this, sometimes it would
+     * be too easy to link to a patient (e.g. when processing individual datapoints for a patient.
+     * That's especially not ideal if the mismatches are around privacymappings or WSIC exclusions,
+     * as these could be around safeguarding / sexual health / ...
+     * &lt;p&gt;
+     * If we see these warnings it should be easy to find the mismatches, just look for codingreceived records that
+     * point to two codingmatches with different metadata.
+     */
+    private void trackCodingMismatches(List&lt;CodingMatch&gt; matches) {
+<span class="fc bfc" id="L266" title="All 2 branches covered.">        if (matches.size() &gt; 1) {</span>
+<span class="fc" id="L267">            Map&lt;PrivacyFlag, List&lt;CodingMatch&gt;&gt; privacyMappings = new EnumMap&lt;&gt;(PrivacyFlag.class);</span>
+<span class="fc" id="L268">            Map&lt;CodingDataType, List&lt;CodingMatch&gt;&gt; dataTypeMappings = new EnumMap&lt;&gt;(CodingDataType.class);</span>
+<span class="fc" id="L269">            Map&lt;Boolean, List&lt;CodingMatch&gt;&gt; excludeMappings = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L271">            matches.forEach(cm -&gt; {</span>
+<span class="fc" id="L272">                privacyMappings.computeIfAbsent(cm.getPrivacyFlag(), pf -&gt; new ArrayList&lt;&gt;(matches.size())).add(cm);</span>
+<span class="fc" id="L273">                dataTypeMappings.computeIfAbsent(cm.getCodingDataType(), pf -&gt; new ArrayList&lt;&gt;(matches.size())).add(cm);</span>
+<span class="fc" id="L274">                excludeMappings.computeIfAbsent(cm.isExclude(), pf -&gt; new ArrayList&lt;&gt;(matches.size())).add(cm);</span>
+<span class="fc" id="L275">            });</span>
+
+<span class="fc bfc" id="L277" title="All 2 branches covered.">            if (privacyMappings.keySet().size() &gt; 1) {</span>
+<span class="fc" id="L278">                incrementCodeProblemCounter(&quot;different_privacy_map&quot;);</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">                if (config.isExceptionForCodingMatchPrivacyFlagEnabled()) {</span>
+<span class="fc" id="L280">                    LOGGER.error(&quot;PHR-8372: Found more than one privacy mapping for coding matches {}&quot;, getGroupedIdsForLogging(matches));</span>
+<span class="fc" id="L281">                    throw new IllegalStateException(&quot;PHR-8372: Found more than one privacy mapping for coding matches. See error line.&quot;);</span>
+                }
+            }
+
+<span class="fc bfc" id="L285" title="All 2 branches covered.">            if (dataTypeMappings.keySet().size() &gt; 1) {</span>
+<span class="fc" id="L286">                incrementCodeProblemCounter(&quot;different_data_type&quot;);</span>
+            }
+
+<span class="fc bfc" id="L289" title="All 2 branches covered.">            if (excludeMappings.keySet().size() &gt; 1) {</span>
+<span class="fc" id="L290">                incrementCodeProblemCounter(&quot;different_exclusion&quot;);</span>
+            }
+        }
+<span class="fc" id="L293">    }</span>
+
+    private String getGroupedIdsForLogging(List&lt;CodingMatch&gt; input) {
+<span class="fc" id="L296">        return input.stream()</span>
+<span class="fc" id="L297">                .map(cm -&gt; Long.toString(cm.getId()))</span>
+<span class="fc" id="L298">                .collect(Collectors.joining(&quot;,&quot;));</span>
+    }
+
+    /**
+     * Either the codingmatch with the same code/system, or simply the first match
+     */
+    @NotNull
+    @SuppressWarnings(&quot;OptionalUsedAsFieldOrParameterType&quot;)
+    private Optional&lt;CodingMatch&gt; findBestMatch(List&lt;CodingMatch&gt; matches, Optional&lt;Coding&gt; preferredCoding) {
+<span class="fc" id="L307">        trackCodingMismatches(matches);</span>
+
+<span class="fc" id="L309">        return preferredCoding.flatMap(</span>
+<span class="fc" id="L310">                (pref) -&gt; matches.stream().filter(codingMatch -&gt; codingMatch.isCodingSame(pref.getCode(), pref.getCodeSystem())).findFirst()</span>
+<span class="fc" id="L311">        ).or(() -&gt; matches.stream().findFirst());</span>
+    }
+
+    /**
+     * @param &lt;K&gt;                  Type of the key
+     * @param codeSystemCandidates Map of K -&gt; Tuple&lt;orgId,route,code,Set&lt;codeSystemCandidates&gt;&gt;
+     * @return a list of possible coding matches for each tuple
+     */
+    @VisibleForTesting
+    &lt;K&gt; io.vavr.collection.Map&lt;K, List&lt;CodingMatch&gt;&gt; findCodingMatchPossibles(
+            io.vavr.collection.HashMap&lt;K, Tuple2&lt;CodingReceived, Set&lt;CodingSearchCriteria&gt;&gt;&gt; codeSystemCandidates) {
+<span class="fc bfc" id="L322" title="All 2 branches covered.">        if (codeSystemCandidates.isEmpty()) {</span>
+<span class="fc" id="L323">            return io.vavr.collection.HashMap.empty();</span>
+        }
+
+<span class="fc" id="L326">        List&lt;CodingMatch&gt; results = codingMatchRepository.findAllByCodeAndCodeSystem(</span>
+<span class="fc" id="L327">                codeSystemCandidates.values().flatMap(c -&gt; c._2).map(CodingSearchCriteria::getCode).distinct().collect(toList()),</span>
+<span class="fc" id="L328">                codeSystemCandidates.values().flatMap(c -&gt; c._2).map(CodingSearchCriteria::getCodeSystem).distinct().collect(toList()));</span>
+
+<span class="fc" id="L330">        Function2&lt;Set&lt;CodingSearchCriteria&gt;, CodingMatch, Boolean&gt; matchCriteria = (cAndCsCandidates, codingMatch) -&gt; cAndCsCandidates</span>
+<span class="fc" id="L331">                .stream().anyMatch(</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">                        (candidate) -&gt; Objects.equals(candidate.getCode(), codingMatch.getCode())</span>
+<span class="fc bfc" id="L333" title="All 2 branches covered.">                                &amp;&amp; Objects.equals(candidate.getCodeSystem(), codingMatch.getCodeSystem()));</span>
+
+        // We need to match the query results to keys (+ criteria).
+        // A result belongs to a key if 'matchCriteria(criteria, result) is true.
+        // Criterium::CodeSystem is a N:N relationship
+<span class="fc" id="L338">        return codeSystemCandidates</span>
+<span class="fc" id="L339">                .map((k, v) -&gt; Tuple.of(k, results.stream()</span>
+<span class="fc" id="L340">                        .filter(cs -&gt; matchCriteria.apply(v._2, cs))</span>
+<span class="fc" id="L341">                        .collect(toList())));</span>
+    }
+
+    private Stream&lt;CodingMatch&gt; findCodingMatchPossibles(Collection&lt;CodingReceived&gt; codingReceiveds) {
+
+<span class="fc" id="L346">        Set&lt;CodingDataType&gt; codingDataTypes = EnumSet.noneOf(CodingDataType.class);</span>
+<span class="fc" id="L347">        Set&lt;String&gt; codes = new HashSet&lt;&gt;(codingReceiveds.size());</span>
+<span class="fc" id="L348">        Set&lt;String&gt; codingSystems = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L349">        codingReceiveds.forEach(codingReceived -&gt; {</span>
+<span class="fc" id="L350">            codingDataTypes.add(codingReceived.getCodingDataType());</span>
+<span class="pc bpc" id="L351" title="1 of 2 branches missed.">            if(isNotBlank(codingReceived.getCode1())) {</span>
+<span class="fc" id="L352">                codes.add(codingReceived.getCode1());</span>
+            }
+<span class="fc bfc" id="L354" title="All 2 branches covered.">            if(isNotBlank(codingReceived.getCode2())) {</span>
+<span class="fc" id="L355">                codes.add(codingReceived.getCode2());</span>
+            }
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">            if(isNotBlank(codingReceived.getCodeSystem1())) {</span>
+<span class="fc" id="L358">                codingSystems.add(codingReceived.getCodeSystem1());</span>
+            }
+<span class="fc bfc" id="L360" title="All 2 branches covered.">            if(isNotBlank(codingReceived.getCodeSystem2())) {</span>
+<span class="fc" id="L361">                codingSystems.add(codingReceived.getCodeSystem2());</span>
+            }
+<span class="fc" id="L363">        });</span>
+
+<span class="pc bpc" id="L365" title="2 of 4 branches missed.">        if(codingDataTypes.isEmpty() || codes.isEmpty()) {</span>
+<span class="nc" id="L366">            return Stream.empty();</span>
+        }
+<span class="fc" id="L368">        return DbUtil.getInStreamOfBatches(</span>
+                codes,
+<span class="fc" id="L370">                (codeBatch) -&gt; codingMatchRepository.findAllByCodingDataTypesAndCodesAndCodingSystems(codingDataTypes, codeBatch, codingSystems));</span>
+    }
+
+    @SuppressWarnings(&quot;OverlyComplexMethod&quot;)
+    private List&lt;CodingReceived&gt; getCodingReceived(Collection&lt;CodingDataType&gt; codingDataTypes,
+                                                   Collection&lt;Route&gt; routes,
+                                                   Collection&lt;Long&gt; orgIds,
+                                                   Collection&lt;String&gt; singleCodes,
+                                                   Collection&lt;String&gt; singleSystems,
+                                                   Collection&lt;String&gt; doubleCode1s,
+                                                   Collection&lt;String&gt; doubleSystem1s,
+                                                   Collection&lt;String&gt; doubleCode2s,
+                                                   Collection&lt;String&gt; doubleSystem2s,
+                                                   List&lt;CodingReceived&gt; singleCoding,
+                                                   List&lt;CodingReceived&gt; doubleCoding) {
+<span class="fc bfc" id="L385" title="All 6 branches covered.">        if (!orgIds.isEmpty() &amp;&amp; !singleCoding.isEmpty() &amp;&amp; !doubleCoding.isEmpty()) {</span>
+<span class="fc" id="L386">            return codingReceivedRepository.findCodingReceivedForOrgBySingleAndDoubleCoding(codingDataTypes, routes, orgIds, singleCodes, singleSystems, doubleCode1s, doubleSystem1s, doubleCode2s, doubleSystem2s);</span>
+<span class="fc bfc" id="L387" title="All 4 branches covered.">        } else if (!orgIds.isEmpty() &amp;&amp; !singleCoding.isEmpty()) {</span>
+<span class="fc" id="L388">            return codingReceivedRepository.findCodingReceivedForOrgBySingleCoding(codingDataTypes, routes, orgIds, singleCodes, singleSystems);</span>
+<span class="pc bpc" id="L389" title="1 of 4 branches missed.">        } else if (!orgIds.isEmpty() &amp;&amp; !doubleCoding.isEmpty()) {</span>
+<span class="fc" id="L390">            return codingReceivedRepository.findCodingReceivedForOrgByDoubleCoding(codingDataTypes, routes, orgIds, doubleCode1s, doubleSystem1s, doubleCode2s, doubleSystem2s);</span>
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">        } else if (!orgIds.isEmpty()) {</span>
+<span class="nc" id="L392">            return codingReceivedRepository.findCodingReceivedByCodingDataTypeAndRouteAndOrgId(codingDataTypes, routes, orgIds);</span>
+<span class="fc bfc" id="L393" title="All 4 branches covered.">        } else if (!singleCoding.isEmpty() &amp;&amp; !doubleCoding.isEmpty()) {</span>
+<span class="fc" id="L394">            return codingReceivedRepository.findCodingReceivedBySingleAndDoubleCoding(codingDataTypes, routes, singleCodes, singleSystems, doubleCode1s, doubleSystem1s, doubleCode2s, doubleSystem2s);</span>
+<span class="fc bfc" id="L395" title="All 2 branches covered.">        } else if (!singleCoding.isEmpty()) {</span>
+<span class="fc" id="L396">            return codingReceivedRepository.findCodingReceivedBySingleCoding(codingDataTypes, routes, singleCodes, singleSystems);</span>
+<span class="pc bpc" id="L397" title="1 of 2 branches missed.">        } else if (!doubleCoding.isEmpty()) {</span>
+<span class="fc" id="L398">            return codingReceivedRepository.findCodingReceivedByDoubleCoding(codingDataTypes, routes, doubleCode1s, doubleSystem1s, doubleCode2s, doubleSystem2s);</span>
+        } else {
+<span class="nc" id="L400">            return codingReceivedRepository.findCodingReceivedByCodingDataTypeAndRoute(codingDataTypes, routes);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,472 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MyTestsAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.test</a> &gt; <span class="el_source">MyTestsAction.java</span></div><h1>MyTestsAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.test;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Charsets;
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.action.support.PathologyReportTransformer;
+import com.pkb.action.support.TestHistoryTransformer;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.bean.IMessageWebBean;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.test.PathologyReportManager;
+import com.pkb.service.test.TestManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.test.entity.LoincCommonForm;
+import com.pkb.test.entity.LoincTest;
+import com.pkb.test.entity.PathologyReportDTO;
+import com.pkb.test.entity.TestFormDTO;
+import com.pkb.test.entity.TestHistoryDTO;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.test.entity.TestsDTO;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.TestHistoryUtil;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+import static com.google.common.hash.Hashing.sha256;
+import static com.pkb.test.IncludeDeletedResults.INCLUDE_DELETED;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Collections.singleton;
+import static java.util.stream.Collectors.toSet;
+
+/**
+ * Provides server-side support for the Tests page.
+ *
+ * See: https://manual.patientsknowbest.com/patient/tests
+ */
+<span class="fc" id="L51">public class MyTestsAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * This will be set to true if and only if the following conditions are all true:
+     * &lt;ul&gt;
+     *     &lt;li&gt;The caller did not specify data=full&lt;/li&gt;
+     *     &lt;li&gt;The number test results available to the caller is &gt;= the threshold specified in the
+     *     latestResultsInitialThreshold config value&lt;/li&gt;
+     * &lt;/ul&gt;
+     */
+<span class="fc" id="L63">    private boolean overThreshold = false;</span>
+
+    /**
+     * This does not contain test result data. It is a query parameter passed in to the action from the web UI.
+     *
+     * If set to &quot;full&quot; then all data will be returned. Otherwise, the data may be truncated.
+     *
+     * If the data have been truncated then overThreshold will be set to true. The web UI will then display the smaller
+     * set of data whilst fetching the full set of data in the background. This prevents the initial display from being
+     * overloaded with a high volume of data.
+     */
+    private String data;
+
+    private InputStream jsonInputStream;
+
+    private int jsonContentLength;
+
+    private String testIdToDiscuss;
+
+    private TestManager testManager;
+
+    @Autowired
+    private TestHistoryTransformer testResultHistoryTransformer;
+
+    @Autowired
+    private PathologyReportTransformer pathologyReportTransformer;
+
+    private IMessageWebBean messageWebBean;
+
+    private PathologyReportManager pathologyReportManager;
+
+<span class="fc" id="L94">    private final String tab = &quot;health&quot;;</span>
+
+<span class="fc" id="L96">    private final String subTab = &quot;laboratory&quot;;</span>
+
+    private Long patientId;
+
+    private List&lt;LoincCommonForm&gt; commonForms;
+
+    private List&lt;PathologyReportDTO&gt; pathologyReports;
+
+<span class="fc" id="L104">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private TestHistoryUtil testHistoryUtil;
+
+    private ObjectMapper objectMapper;
+
+    private String discussMessage;
+
+    private String discussTopic;
+
+    @Override
+    public String execute() {
+<span class="fc" id="L116">        getPkbPersonAndSetPatientId();</span>
+
+<span class="fc" id="L118">        Long patientAccountId = userManager.getDefaultAccountId(patientId);</span>
+
+<span class="fc" id="L120">        pathologyReports = retrievePathologyReports(patientAccountId);</span>
+
+<span class="fc" id="L122">        return Action.SUCCESS;</span>
+    }
+
+    private List&lt;PathologyReportDTO&gt; retrievePathologyReports(Long patientAccountId) {
+<span class="fc" id="L126">        return pathologyReportTransformer.transformPathologyReport(pathologyReportManager.getPathologyReports(getLoggedInEHRRequestContext(), patientAccountId));</span>
+    }
+
+    /**
+     * Implements the nodecorate_fetchTestsJson action.
+     *
+     * @return The method itself returns the Struts outcome, the test content is made available from jsonInputStream.
+     */
+    public String fetchTestsJson() {
+        try {
+<span class="fc" id="L136">            TestsDTO testsDTO = testHistoryUtil.getTestsDTO(buildTestFormDTOs(getPkbPersonAndSetPatientId()), overThreshold);</span>
+<span class="fc" id="L137">            byte[] bytes = objectMapper.writeValueAsBytes(testsDTO);</span>
+<span class="fc" id="L138">            jsonInputStream = new ByteArrayInputStream(bytes);</span>
+<span class="fc" id="L139">            jsonContentLength = bytes.length;</span>
+<span class="nc" id="L140">        } catch (Exception e) {</span>
+<span class="nc" id="L141">            LOGGER.error(&quot;problem with JSON output for test history list&quot;, e);</span>
+<span class="nc" id="L142">            jsonInputStream = new ByteArrayInputStream(Action.ERROR.getBytes(UTF_8));</span>
+<span class="fc" id="L143">        }</span>
+
+<span class="fc" id="L145">        return Action.SUCCESS;</span>
+    }
+
+    private PKBPerson getPkbPersonAndSetPatientId() {
+<span class="fc" id="L149">        patientId = contextUserUtil.getContextOrLoggedInUserId();</span>
+<span class="fc" id="L150">        return Optional.ofNullable(contextUserUtil.getContextUser()).orElse(loggedInUserUtil.getLoggedInUser());</span>
+    }
+
+    /**
+     * Fetch the full history of all test results for the specified patient (unless thresholding applies) and then group
+     * the results into forms.
+     *
+     * Deleted results are included, so that information about the withdrawal can be shown in the web UI.
+     *
+     * @param patient The patient whose test results should be fetched.
+     * @return A list of all tests.
+     */
+    private List&lt;TestFormDTO&gt; buildTestFormDTOs(PKBPerson patient) {
+<span class="fc" id="L163">        LoggedInEHRRequestContext context = getLoggedInEHRRequestContext();</span>
+
+<span class="fc" id="L165">        List&lt;TestHistoryDTO&gt; fullElseTruncatedHistoryList = getTestHistoryDTOs(patient, context);</span>
+<span class="fc" id="L166">        testManager.applyLabDisciplineReferenceDataMappingsToTestHistories(fullElseTruncatedHistoryList);</span>
+
+<span class="fc" id="L168">        setCommonForms(testManager.getLoincCommonFormList());</span>
+<span class="fc" id="L169">        Map&lt;String, List&lt;TestHistoryDTO&gt;&gt; formToHistoriesMap = groupHistoriesIntoFormsAndLocalize(fullElseTruncatedHistoryList, patient);</span>
+
+<span class="fc" id="L171">        Map&lt;String, TestFormDTO&gt; resultsMap = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L173">        PKBPerson loggedInUser = loggedInUserUtil.getLoggedInUser();</span>
+<span class="fc" id="L174">        Team callerTeam = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+
+<span class="fc" id="L176">        formToHistoriesMap.forEach((form, historyList) -&gt; {</span>
+<span class="fc" id="L177">            sortHistoriesBySequenceInGroup(historyList);</span>
+<span class="fc" id="L178">            TestFormDTO testFormDTO = getLocalizedFormTests(form);</span>
+<span class="fc" id="L179">            testFormDTO.setTestHistoryMetadata(testHistoryUtil.getTestHistoryMetadata(context, loggedInUser, historyList, getLocale(), callerTeam, getLocalizedDecimalFormat()));</span>
+<span class="fc" id="L180">            resultsMap.put(form, testFormDTO);</span>
+<span class="fc" id="L181">        });</span>
+
+<span class="fc" id="L183">        List&lt;TestFormDTO&gt; testFormDtoList = new ArrayList&lt;&gt;(resultsMap.values());</span>
+<span class="fc" id="L184">        sortByFormName(testFormDtoList);</span>
+
+<span class="fc" id="L186">        return testFormDtoList;</span>
+    }
+
+    private void sortByFormName(List&lt;TestFormDTO&gt; testFormDtoList) {
+        // ordering: forms themselves order by form name
+<span class="fc" id="L191">        testFormDtoList.sort(Comparator.comparing(TestFormDTO::getFormName));</span>
+<span class="fc" id="L192">    }</span>
+
+    private Map&lt;String, String&gt; getLoincToFormCodeMapping() {
+<span class="fc" id="L195">        Map&lt;String, String&gt; loincToFormCodeMap = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L196" title="All 2 branches covered.">        for (LoincCommonForm form : commonForms) {</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">            for (LoincTest test : form.getLoincTestList()) {</span>
+<span class="fc" id="L198">                loincToFormCodeMap.put(test.getLoinc(), form.getFormCode());</span>
+<span class="fc" id="L199">            }</span>
+<span class="fc" id="L200">        }</span>
+<span class="fc" id="L201">        return loincToFormCodeMap;</span>
+    }
+
+    private Map&lt;String, List&lt;TestHistoryDTO&gt;&gt; groupHistoriesIntoFormsAndLocalize(List&lt;TestHistoryDTO&gt; fullHistoryList, PKBPerson patient) {
+
+<span class="fc" id="L206">        Map&lt;String, List&lt;TestHistoryDTO&gt;&gt; formToHistoriesMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L207">        List&lt;Integer&gt; counts = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L208">        int unmappedCounts = 0;</span>
+
+<span class="fc" id="L210">        Map&lt;String, String&gt; loincToFormCodeMap = getLoincToFormCodeMapping();</span>
+
+        // One history per non-empty loinc or loinc mapping
+<span class="fc bfc" id="L213" title="All 2 branches covered.">        for (TestHistoryDTO history : fullHistoryList) {</span>
+
+<span class="fc" id="L215">            counts.add(history.getTestResultList().size());</span>
+            String formCode;
+
+<span class="fc bfc" id="L218" title="All 2 branches covered.">            if (history.getLoincTest() != null) {</span>
+<span class="fc" id="L219">                formCode = loincToFormCodeMap.get(history.getLoincTest().getLoinc());</span>
+
+<span class="fc bfc" id="L221" title="All 2 branches covered.">                if (formCode == null) {</span>
+<span class="fc" id="L222">                    formCode = &quot;unmapped&quot;;</span>
+<span class="fc" id="L223">                    ++unmappedCounts;</span>
+<span class="fc" id="L224">                    LOGGER.info(&quot;DEBUG TESTS: unmapped loinc-{}&quot;, history.getLoincTest().getLoinc());</span>
+                }
+            } else {
+<span class="fc" id="L227">                formCode = &quot;unmapped&quot;;</span>
+<span class="fc" id="L228">                ++unmappedCounts;</span>
+            }
+
+            // i18n, only if there's a LoincTest (n/a for mappings w/o a loinc linked)
+<span class="fc bfc" id="L232" title="All 2 branches covered.">            if (history.getLoincTest() != null) {</span>
+<span class="fc" id="L233">                history.getLoincTest().setNameLocal(getText(history.getLoincTest().getNameKey()));</span>
+            }
+
+            // all data points for a given loinc(/mapping): sequence in date order
+<span class="fc" id="L237">            (history.getTestResultList()).sort(Comparator.comparing(TestResultDTO::getTestDate));</span>
+
+<span class="fc bfc" id="L239" title="All 2 branches covered.">            Set&lt;String&gt; formCodes = formCode.equals(&quot;unmapped&quot;) ?</span>
+<span class="fc" id="L240">                    history.getServiceNameIfConsistent()</span>
+<span class="fc" id="L241">                            .stream()</span>
+<span class="fc" id="L242">                            .map(serviceName -&gt; retrievePanelName(serviceName, history))</span>
+<span class="fc" id="L243">                            .collect(toSet()) :</span>
+<span class="fc" id="L244">                    singleton(formCode);</span>
+
+<span class="fc" id="L246">            formCodes.forEach(code -&gt; {</span>
+<span class="fc" id="L247">                List&lt;TestHistoryDTO&gt; histList = formToHistoriesMap.computeIfAbsent(code, k -&gt; new ArrayList&lt;&gt;());</span>
+<span class="fc" id="L248">                histList.add(history);</span>
+<span class="fc" id="L249">            });</span>
+<span class="fc" id="L250">        }</span>
+
+<span class="fc" id="L252">        LOGGER.info(&quot;DEBUG (lab result counts): patient ID {}; counts: {} ({} unmapped)&quot;, patient.getId(), counts, unmappedCounts);</span>
+
+<span class="fc" id="L254">        return formToHistoriesMap;</span>
+    }
+
+    private String retrievePanelName(String serviceName, TestHistoryDTO history) {
+        String panelName;
+<span class="fc bfc" id="L259" title="All 2 branches covered.">        if (StringUtils.isNotBlank(serviceName)) {</span>
+<span class="fc" id="L260">            panelName = StringUtils.trim(serviceName);</span>
+        } else {
+            // i18n the &quot;unmapped&quot;
+<span class="fc" id="L263">            panelName = getText(&quot;loinccommonform.unmapped.name&quot;);</span>
+        }
+
+        //add org name to unmapped tests (PHR-1643)
+<span class="fc bfc" id="L267" title="All 2 branches covered.">        if (history.getLoincMapping() != null &amp;&amp;</span>
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">                history.getLoincMapping().getOrg() != null &amp;&amp;</span>
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">                history.getLoincMapping().getOrg().getName() != null) {</span>
+<span class="fc" id="L270">            panelName += &quot; (&quot; + history.getLoincMapping().getOrg().getName() + &quot;)&quot;;</span>
+        }
+
+<span class="fc" id="L273">        return panelName;</span>
+    }
+
+    private List&lt;TestHistoryDTO&gt; getTestHistoryDTOs(PKBPerson patient, LoggedInEHRRequestContext context) {
+        // Limit the number of returned results to the configured threshold, unless the caller explicitly requested
+        // all data.
+<span class="fc" id="L279">        int threshold = super.getLatestResultsInitialThreshold();</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">        Integer latestResultsLimit = data.equals(&quot;full&quot;) ? null : threshold;</span>
+<span class="fc" id="L281">        List&lt;TestHistoryDTO&gt; fullElseTruncatedHistoryList = retrieveTestHistoryList(patient, context, latestResultsLimit);</span>
+        // Assume that if the size of the response is equal to the threshold then the data must have been truncated.
+        // This won't be true if the number of results is exactly equal to the threshold, but in this edge case there
+        // is no harm in returning a false positive.
+        // If the thresholding is working correctly it should not be possible for the result count to be &gt; threshold,
+        // but including that possibility because it's a free fail-safe.
+<span class="fc" id="L287">        long resultCount = fullElseTruncatedHistoryList.stream().map(TestHistoryDTO::getTestResultList).flatMap(List::stream).count();</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">        if (resultCount &gt;= threshold) {</span>
+<span class="fc" id="L289">            overThreshold = true;</span>
+        }
+<span class="fc" id="L291">        return fullElseTruncatedHistoryList;</span>
+    }
+
+    private TestFormDTO getLocalizedFormTests(String loincFormCodeElseServiceName) {
+
+<span class="fc" id="L296">        TestFormDTO formTests = new TestFormDTO();</span>
+
+<span class="fc" id="L298">        String i18nName = getText(&quot;loinccommonform.&quot; + loincFormCodeElseServiceName + &quot;.name&quot;);</span>
+<span class="pc bpc" id="L299" title="1 of 4 branches missed.">        if (i18nName == null || i18nName.startsWith(&quot;loinccommonform.&quot;)) {</span>
+            // If a loinc panel name was not found, then use the input value as the form name.
+<span class="fc" id="L301">            formTests.setFormName(loincFormCodeElseServiceName);</span>
+        } else {
+<span class="fc" id="L303">            formTests.setFormName(i18nName);</span>
+        }
+<span class="fc" id="L305">        formTests.setFormCode(hash(loincFormCodeElseServiceName));</span>
+<span class="fc" id="L306">        return formTests;</span>
+    }
+
+    private String hash(String loincFormCodeElseServiceName) {
+<span class="fc" id="L310">        return sha256().hashString(loincFormCodeElseServiceName, Charsets.UTF_8).toString().substring(0, 6);</span>
+    }
+
+    // sort the histories based on LoincMapping sequenceInGroup if possible; else asc alpha order
+    private void sortHistoriesBySequenceInGroup(List&lt;TestHistoryDTO&gt; histList) {
+
+<span class="fc" id="L316">        histList.sort((dto1, dto2) -&gt; {</span>
+<span class="fc" id="L317">            Integer seqFromHL71 = null;</span>
+<span class="fc" id="L318">            Integer seqFromHL72 = null;</span>
+
+<span class="fc bfc" id="L320" title="All 2 branches covered.">            if (dto1.getLoincMapping() != null) {</span>
+<span class="fc" id="L321">                seqFromHL71 = dto1.getLoincMapping().getSequenceInGroup();</span>
+            }
+<span class="fc bfc" id="L323" title="All 2 branches covered.">            if (dto2.getLoincMapping() != null) {</span>
+<span class="fc" id="L324">                seqFromHL72 = dto2.getLoincMapping().getSequenceInGroup();</span>
+            }
+
+            // tests with a sequence number always come first (in sequence order).  Other tests come in alpha order afterwards.
+
+<span class="pc bpc" id="L329" title="1 of 4 branches missed.">            if ((seqFromHL71 != null) &amp;&amp; (seqFromHL72 != null)) {</span>
+<span class="fc bfc" id="L330" title="All 2 branches covered.">                if (seqFromHL71.equals(seqFromHL72)) {</span>
+<span class="fc" id="L331">                    return dto1.getTestResultType().compareTo(dto2.getTestResultType());</span>
+                } else {
+<span class="fc" id="L333">                    return seqFromHL71.compareTo(seqFromHL72);</span>
+                }
+<span class="pc bpc" id="L335" title="2 of 4 branches missed.">            } else if ((seqFromHL71 == null) &amp;&amp; (seqFromHL72 == null)) {</span>
+<span class="fc" id="L336">                return dto1.getTestResultType().compareTo(dto2.getTestResultType());</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">            } else if (seqFromHL71 == null) {</span>
+<span class="nc" id="L338">                return 1; // only 2 has a sequence, so it wins</span>
+            } else {
+<span class="nc" id="L340">                return -1; // only 1 has a sequence, so it wins</span>
+            }
+        });
+<span class="fc" id="L343">    }</span>
+
+    private List&lt;TestHistoryDTO&gt; retrieveTestHistoryList(PKBPerson patient, LoggedInEHRRequestContext context, Integer latestResults) {
+<span class="fc" id="L346">        return testResultHistoryTransformer.transformTestHistory(testManager.getTestHistoryList(context, patient.getId(), latestResults, INCLUDE_DELETED));</span>
+    }
+
+    @Override
+    public String getCustomStyle() {
+<span class="fc" id="L351">        return MOBILE_OPTIMIZED_STYLE;</span>
+    }
+
+    public void setTestManager(TestManager testManager) {
+<span class="fc" id="L355">        this.testManager = testManager;</span>
+<span class="fc" id="L356">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L359">        return tab;</span>
+    }
+
+    public void setMessageWebBean(IMessageWebBean messageWebBean) {
+<span class="fc" id="L363">        this.messageWebBean = messageWebBean;</span>
+<span class="fc" id="L364">    }</span>
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L367">        this.userManager = userManager;</span>
+<span class="fc" id="L368">    }</span>
+
+    public Long getPatientId() {
+<span class="nc" id="L371">        return patientId;</span>
+    }
+
+    public void setPatientId(Long patientId) {
+<span class="nc" id="L375">        this.patientId = patientId;</span>
+<span class="nc" id="L376">    }</span>
+
+    public String getSubTab() {
+<span class="fc" id="L379">        return subTab;</span>
+    }
+
+    public List&lt;LoincCommonForm&gt; getCommonForms() {
+<span class="nc" id="L383">        return commonForms;</span>
+    }
+
+    public void setCommonForms(List&lt;LoincCommonForm&gt; commonForms) {
+<span class="fc" id="L387">        this.commonForms = commonForms;</span>
+<span class="fc" id="L388">    }</span>
+
+    public String getTestIdToDiscuss() {
+<span class="nc" id="L391">        return testIdToDiscuss;</span>
+    }
+
+    public void setTestIdToDiscuss(String testIdToDiscuss) {
+<span class="nc" id="L395">        this.testIdToDiscuss = testIdToDiscuss;</span>
+<span class="nc" id="L396">    }</span>
+
+    public boolean isOverThreshold() {
+<span class="nc" id="L399">        return overThreshold;</span>
+    }
+
+    public void setOverThreshold(boolean overThreshold) {
+<span class="nc" id="L403">        this.overThreshold = overThreshold;</span>
+<span class="nc" id="L404">    }</span>
+
+    public String getData() {
+<span class="nc" id="L407">        return data;</span>
+    }
+
+    public void setData(String data) {
+<span class="fc" id="L411">        this.data = data;</span>
+<span class="fc" id="L412">    }</span>
+
+    public PathologyReportManager getPathologyReportManager() {
+<span class="nc" id="L415">        return pathologyReportManager;</span>
+    }
+
+    public void setPathologyReportManager(
+            PathologyReportManager pathologyReportManager) {
+<span class="fc" id="L420">        this.pathologyReportManager = pathologyReportManager;</span>
+<span class="fc" id="L421">    }</span>
+
+    public List&lt;PathologyReportDTO&gt; getPathologyReports() {
+<span class="fc" id="L424">        return pathologyReports;</span>
+    }
+
+    public void setPathologyReports(List&lt;PathologyReportDTO&gt; pathologyReports) {
+<span class="nc" id="L428">        this.pathologyReports = pathologyReports;</span>
+<span class="nc" id="L429">    }</span>
+
+    public InputStream getJsonInputStream() {
+<span class="fc" id="L432">        return jsonInputStream;</span>
+    }
+
+    public int getJsonContentLength() {
+<span class="fc" id="L436">        return jsonContentLength;</span>
+    }
+
+    public final TestHistoryUtil getTestHistoryUtil() {
+<span class="nc" id="L440">        return testHistoryUtil;</span>
+    }
+
+    public final void setTestHistoryUtil(TestHistoryUtil testHistoryUtil) {
+<span class="fc" id="L444">        this.testHistoryUtil = testHistoryUtil;</span>
+<span class="fc" id="L445">    }</span>
+
+    public final ObjectMapper getObjectMapper() {
+<span class="nc" id="L448">        return objectMapper;</span>
+    }
+
+    public final void setObjectMapper(ObjectMapper objectMapper) {
+<span class="fc" id="L452">        this.objectMapper = objectMapper;</span>
+<span class="fc" id="L453">    }</span>
+
+    public String getDiscussMessage() {
+<span class="nc" id="L456">        return discussMessage;</span>
+    }
+
+    public void setDiscussMessage(String discussMessage) {
+<span class="nc" id="L460">        this.discussMessage = discussMessage;</span>
+<span class="nc" id="L461">    }</span>
+
+    public String getDiscussTopic() {
+<span class="nc" id="L464">        return discussTopic;</span>
+    }
+
+    public void setDiscussTopic(String discussTopic) {
+<span class="nc" id="L468">        this.discussTopic = discussTopic;</span>
+<span class="nc" id="L469">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,124 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EncounterPatientInfoUpdateParser.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.processor.parser.hl7.encounter</a> &gt; <span class="el_source">EncounterPatientInfoUpdateParser.java</span></div><h1>EncounterPatientInfoUpdateParser.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.processor.parser.hl7.encounter;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import com.pkb.encounter.entity.Encounter;
+import com.pkb.encounter.entity.EncounterEvent;
+import com.pkb.encounter.entity.Message;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.service.dataupload.hl7.HL7XmlDoc;
+import com.pkb.service.dataupload.hl7.segment.HL7PatientVisit1;
+import com.pkb.service.dataupload.hl7.value.HL7Date;
+import com.pkb.service.dataupload.processor.domain.UploadedEncounter;
+import com.pkb.service.dataupload.processor.domain.UploadedEncounterRequestType;
+import com.pkb.service.dataupload.processor.support.EncounterMessageFilter;
+import com.pkb.service.encounter.EncounterMessageHelper;
+import com.pkb.user.entity.PKBPerson;
+
+import io.prometheus.client.Counter;
+
+@Component
+public class EncounterPatientInfoUpdateParser {
+<span class="fc" id="L26">    private static final Counter messageIgnores = Counter.build()</span>
+<span class="fc" id="L27">            .name(&quot;pkb_phr_hl7_message_ignores_count_encounter_sync&quot;)</span>
+<span class="fc" id="L28">            .help(&quot;Number of ignored messages&quot;)</span>
+<span class="fc" id="L29">            .labelNames(&quot;type&quot;)</span>
+<span class="fc" id="L30">            .register();</span>
+    private final EncounterMessageFilter messageFilter;
+
+    @Autowired
+<span class="fc" id="L34">    public EncounterPatientInfoUpdateParser(EncounterMessageFilter messageFilter) {</span>
+<span class="fc" id="L35">        this.messageFilter = messageFilter;</span>
+<span class="fc" id="L36">    }</span>
+
+    /**
+     * ADT^A08
+     * Allows:
+     * &lt;ul&gt;
+     * &lt;li&gt;Admit Date Update (A01 PV1-44)&lt;/li&gt;
+     * &lt;li&gt;Discharge Date update (A03 PV1-45)&lt;/li&gt;
+     * &lt;/ul&gt;
+     */
+    public UploadedEncounter doProcess(HL7XmlDoc hl7, PKBPerson patient, Encounter encounter, EncounterEvent encounterEvent) {
+<span class="fc" id="L47">        List&lt;Message&gt; messages = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L48" title="All 2 branches covered.">        if (encounter != null) {</span>
+            // This Encounter exists in PKB's database, PV1-19.1 external visit ID is known
+            // Process information updates
+
+            // pre-find an existing A01 to check if this is being updated
+<span class="fc" id="L53">            List&lt;Message&gt; a01s = filterMessages(encounter.getMessages(), Message.MessageType.PATIENT_ADMIT);</span>
+            // pre-find an existing A03 to check if this is being updated
+<span class="fc" id="L55">            List&lt;Message&gt; a03s = filterMessages(encounter.getMessages(), Message.MessageType.PATIENT_DISCHARGE);</span>
+            // Check what information we should update:
+
+<span class="fc" id="L58">            HL7PatientVisit1 pv1 = hl7.getPV1()</span>
+<span class="pc" id="L59">                    .orElseThrow(() -&gt; new ApiCallMalformedException(&quot;Cannot handle ADT^A08 message: PV1 segment missing&quot;));</span>
+
+            // PV1.44 - Admit Date
+<span class="pc bpc" id="L62" title="1 of 4 branches missed.">            if (pv1.getAdmitDateTime().isProvided() &amp;&amp; !a01s.isEmpty()) {</span>
+<span class="pc bpc" id="L63" title="1 of 2 branches missed.">                if (a01s.size() &gt; 1) {</span>
+<span class="nc" id="L64">                    throw new ApiCallMalformedException(&quot;Duplicate A01 admit records are present for this encounter.&quot;);</span>
+                } else {
+<span class="fc" id="L66">                    Message admit = a01s.get(0);</span>
+<span class="fc bfc" id="L67" title="All 2 branches covered.">                    if (!pv1.getAdmitDateTime().getInstant().equals(admit.getMessageTimestamp())) {</span>
+                        // XXX Create a new versioned instance of the admit message data point with the new value and delete the old
+<span class="fc" id="L69">                        HL7Date admitHL7Date = pv1.getAdmitDateTime();</span>
+<span class="fc" id="L70">                        admit.setMessageTimestamp(admitHL7Date.getInstant());</span>
+<span class="fc" id="L71">                        admit.setSubject(EncounterMessageHelper.makeEncounterMessageSubject(admit.getEncounterClass()));</span>
+<span class="fc" id="L72">                        admit.setContent(</span>
+<span class="fc" id="L73">                                EncounterMessageHelper.makeEncounterMessageContentA01(admit, patient, admitHL7Date.getUtcOffset()));</span>
+                        //                        admit.setId(null); // XXX cause a new record to be created? Versioning?
+<span class="fc" id="L75">                        messages.add(admit);</span>
+                    }
+                }
+            }
+
+            // PV1.45 - Discharge Date
+<span class="fc bfc" id="L81" title="All 4 branches covered.">            if (pv1.getDischargeDateTime().isProvided() &amp;&amp; !a03s.isEmpty()) {</span>
+<span class="pc bpc" id="L82" title="1 of 2 branches missed.">                if (a03s.size() &gt; 1) {</span>
+<span class="nc" id="L83">                    throw new ApiCallMalformedException(&quot;Duplicate A03 dischargerecords are present for this encounter.&quot;);</span>
+                } else {
+<span class="fc" id="L85">                    Message discharge = a03s.get(0);</span>
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">                    if (!pv1.getDischargeDateTime().getInstant().equals(discharge.getMessageTimestamp())) {</span>
+<span class="fc" id="L87">                        HL7Date dischargeHL7Date = pv1.getDischargeDateTime();</span>
+<span class="fc" id="L88">                        discharge.setMessageTimestamp(dischargeHL7Date.getInstant());</span>
+<span class="fc" id="L89">                        discharge.setSubject(EncounterMessageHelper.makeEncounterMessageSubject(discharge.getEncounterClass()));</span>
+<span class="fc" id="L90">                        discharge.setContent(</span>
+<span class="fc" id="L91">                                EncounterMessageHelper.makeEncounterMessageContentA03(discharge, patient, dischargeHL7Date.getUtcOffset()));</span>
+                        //                        discharge.setId(null); // XXX cause a new record to be created? Versioning?
+<span class="fc" id="L93">                        messages.add(discharge);</span>
+                    }
+                }
+            }
+
+            // XXX Include other information that can be updated via A08 event payload?
+
+<span class="fc" id="L100">            HL7Date messageHL7Date = null;</span>
+<span class="pc bpc" id="L101" title="3 of 4 branches missed.">            if ((hl7.getHL7EventType() != null) &amp;&amp; hl7.getHL7EventType().getEventOccurredDate().isNotBlank()) {</span>
+<span class="nc" id="L102">                messageHL7Date = hl7.getHL7EventType().getEventOccurredDate(); // EVN-6</span>
+<span class="pc bpc" id="L103" title="2 of 4 branches missed.">            } else if ((hl7.getHL7MessageHeader() != null) &amp;&amp; hl7.getHL7MessageHeader().getDateTimeOfMessage().isNotBlank()) {</span>
+<span class="fc" id="L104">                messageHL7Date = hl7.getHL7MessageHeader().getDateTimeOfMessage(); // MSH-7</span>
+            } else {
+                // do not continue if we cannot establish a timestamp for this message
+<span class="nc" id="L107">                throw new RuntimeException(&quot;No Event occurred date (EVN-6 or MSH-7) provided in A08 update.&quot;);</span>
+            }
+
+<span class="fc" id="L110">            encounterEvent.setMessageTimestamp(messageHL7Date.getInstant());</span>
+<span class="fc" id="L111">            encounterEvent.setSubject(EncounterMessageHelper.makeEncounterMessageSubject(encounterEvent.getEncounterClass()));</span>
+<span class="fc" id="L112">            encounterEvent.setContent(EncounterMessageHelper.makeEncounterMessageContentA08(encounterEvent, patient, messageHL7Date.getUtcOffset()));</span>
+
+<span class="fc" id="L114">        }else{</span>
+<span class="fc" id="L115">            messageIgnores.labels(hl7.getMessageType().getCode()).inc();</span>
+        }
+<span class="fc" id="L117">        return new UploadedEncounter(encounterEvent, encounter, UploadedEncounterRequestType.INFORMATION_UPDATE, messages);</span>
+    }
+
+    private List&lt;Message&gt; filterMessages(List&lt;Message&gt; messages, Message.MessageType messageType) {
+<span class="fc" id="L121">        return messageFilter.filterMessages(messages, messageType);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

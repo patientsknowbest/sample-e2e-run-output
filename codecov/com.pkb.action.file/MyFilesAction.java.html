@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MyFilesAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.file</a> &gt; <span class="el_source">MyFilesAction.java</span></div><h1>MyFilesAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: GetInvitatonsAction.java Jun 3, 2009 2:35:47 PM mahendera$
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action.file;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.action.ConsentCategoryBaseAction;
+import com.pkb.action.message.ComposeMessageAction;
+import com.pkb.action.support.UserFileTransformer;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.bean.IMessageWebBean;
+import com.pkb.document.entity.Attachment;
+import com.pkb.file.FileDtoType;
+import com.pkb.file.entity.FileDTO;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.datapoint.DataWithUIPermissions;
+import com.pkb.service.file.FileManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.util.Pager;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Shows files this user has uploaded into their account
+ *
+ * @author robwhelan
+ *
+ */
+<span class="fc" id="L37">public class MyFilesAction extends ConsentCategoryBaseAction {</span>
+
+    private static final long serialVersionUID = -3636907697205518988L;
+
+    private FileManager fileManager;
+
+    private IMessageWebBean messageWebBean;
+
+    @Autowired
+    private UserFileTransformer userFileTransformer;
+
+    private List&lt;DataWithUIPermissions&lt;FileDTO&gt;&gt; fileList;
+
+    protected List&lt;Long&gt; selectId;
+
+    // when editing a file
+    private Long dataPointId;
+
+    private Pager pager;
+
+    private final static String TAB_NAME = &quot;files&quot;;
+
+    private List&lt;Attachment&gt; discussAttachments;
+
+    private String discussTopic;
+
+    /**
+     * grab list of files from Tolven
+     */
+    @Override
+    public String execute() {
+<span class="fc" id="L68">        var users = getContextAndLoggedInUsers();</span>
+<span class="fc" id="L69">        Long accountId = userManager.getDefaultAccountId(users.contextUser().getId());</span>
+        // update (may be already set)
+<span class="fc" id="L71">        getPager().setRecordCount((int) fileManager.getFileCount(getLoggedInEHRRequestContext(), accountId, defaultFileType()));</span>
+<span class="fc" id="L72">        setFileListAndFetchPermissions(retrieveFileList(users.contextUser().getId(),  getPager().getPerPage(), getPager().getOffset(), defaultFileType()),users);</span>
+
+<span class="fc" id="L74">        return Action.SUCCESS;</span>
+    }
+
+    /** called from main form submission (click button &quot;delete&quot;) */
+    public String deleteFilesForm() {
+
+        // if they DON'T have at least one existing file selected, addActionError and return
+<span class="pc bpc" id="L81" title="1 of 4 branches missed.">        if ((selectId == null) || selectId.isEmpty()) {</span>
+<span class="fc" id="L82">            addActionError(getText(&quot;myFilesAction.err.select_at_least_one_to_delete&quot;));</span>
+<span class="fc" id="L83">            return RELOAD;</span>
+        }
+
+<span class="fc" id="L86">        var users = getContextAndLoggedInUsers();</span>
+
+<span class="fc" id="L88">        int nonExistentFiles = countInvalidFiles();</span>
+<span class="pc bpc" id="L89" title="1 of 2 branches missed.">        if (nonExistentFiles &gt; 0) {</span>
+<span class="nc" id="L90">            addActionError(getText(&quot;myFilesAction.err.already_deleted_n&quot;, new String[] { &quot;&quot; + nonExistentFiles }));</span>
+<span class="nc" id="L91">            return RELOAD;</span>
+        }
+
+        // validation passed: confirmation time!
+        // populate a list of these files so the JSP has the details
+
+<span class="fc" id="L97">        List&lt;FileDTO&gt; deleteFileList = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L98" title="All 2 branches covered.">        for (Long deleteId : selectId) {</span>
+<span class="fc" id="L99">            boolean fetchContent = false;</span>
+<span class="fc" id="L100">            FileDTO file = retrieveFile(deleteId, fetchContent);</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">            if (hasNotPermissionsToDeleteDatapoint(file, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam())) {</span>
+<span class="fc" id="L102">                return CANCEL;</span>
+            }
+<span class="fc" id="L104">            deleteFileList.add(file);</span>
+<span class="fc" id="L105">        }</span>
+<span class="fc" id="L106">        setFileListAndFetchPermissions(deleteFileList, users);</span>
+
+<span class="fc" id="L108">        return &quot;deleteFilesConfirm&quot;;</span>
+    }
+
+    public String deleteFiles() {
+
+        // check AGAIN that the files are valid to delete (watch out for resubmit of old form...)
+
+        // do the deletion
+<span class="fc" id="L116">        int deleted = 0;</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">        for (Long deleteId : selectId) {</span>
+<span class="pc bpc" id="L118" title="1 of 2 branches missed.">            if (fileManager.deleteFile(getLoggedInEHRRequestContext(), deleteId)) {</span>
+<span class="fc" id="L119">                deleted++;</span>
+            }
+<span class="fc" id="L121">            logActivityByOthers(Activity.Action.DELETED_FILE, dateTimeService.now(), true, new FileDTO(new SourceDetails()), getLoggedInEHRRequestContext());</span>
+<span class="fc" id="L122">        }</span>
+        // warn if some weren't found / were already deleted?
+        // show number deleted?
+
+        // success message
+<span class="fc" id="L127">        addActionMessage(getText(&quot;myFilesAction.msg.deletion_complete&quot;));</span>
+
+<span class="fc" id="L129">        return RELOAD;</span>
+    }
+
+    public String cancelDelete() {
+
+<span class="fc" id="L134">        return RELOAD;</span>
+    }
+
+    /** called from main form submission (click button &quot;edit&quot;) */
+    public String editFile() {
+        // if they DON'T have at least one existing file selected, addActionError and return
+<span class="nc bnc" id="L140" title="All 4 branches missed.">        if ((selectId == null) || selectId.isEmpty()) {</span>
+<span class="nc" id="L141">            addActionError(getText(&quot;myFilesAction.err.select_at_least_one_to_discuss&quot;));</span>
+<span class="nc" id="L142">            return RELOAD;</span>
+        }
+<span class="nc" id="L144">        return &quot;editFile&quot;;</span>
+    }
+
+    /** called from main form submission (click button &quot;discuss&quot;) */
+    public String discussFiles() {
+        // if they DON'T have at least one existing file selected, addActionError and return
+<span class="pc bpc" id="L150" title="2 of 4 branches missed.">        if ((selectId == null) || selectId.isEmpty()) {</span>
+<span class="nc" id="L151">            addActionError(getText(&quot;myFilesAction.err.select_at_least_one_to_discuss&quot;));</span>
+<span class="nc" id="L152">            return RELOAD;</span>
+        }
+
+<span class="fc" id="L155">        long userId = loggedInUserUtil.getLoggedInUserId();</span>
+
+<span class="fc" id="L157">        int nonExistentFiles = countInvalidFiles();</span>
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">        if (nonExistentFiles &gt; 0) {</span>
+<span class="nc" id="L159">            addActionError(getText(&quot;myFilesAction.err.already_deleted_n&quot;, new String[] { &quot;&quot; + nonExistentFiles }));</span>
+<span class="nc" id="L160">            return RELOAD;</span>
+        }
+
+        // validation passed: process
+
+
+<span class="fc" id="L166">        List&lt;Long&gt; fileDocIds = new ArrayList&lt;&gt;();</span>
+        // Struts own List doesn't unserialize!
+<span class="fc" id="L168">        fileDocIds.addAll(selectId);</span>
+
+<span class="fc" id="L170">        List&lt;Attachment&gt; attachments = fileManager.copyFilesForDiscussion(getLoggedInEHRRequestContext(), userId, fileDocIds);</span>
+
+<span class="fc" id="L172">        discussAttachments = attachments;</span>
+<span class="fc" id="L173">        discussTopic = ComposeMessageAction.TOPIC_FILES;</span>
+
+<span class="fc" id="L175">        sessionUtil.setContextRecipientId(getLoggedInEHRRequestContext());</span>
+
+<span class="fc" id="L177">        return DISCUSS;</span>
+    }
+
+    @Override
+    public String input() {
+<span class="fc" id="L182">        var users = getContextAndLoggedInUsers();</span>
+<span class="fc" id="L183">        Long accountId = userManager.getDefaultAccountId(users.loggedInUser().getId());</span>
+<span class="fc" id="L184">        setDefaultFlag();</span>
+        // update (may be already set)
+<span class="fc" id="L186">        getPager().setRecordCount((int) fileManager.getFileCount(getLoggedInEHRRequestContext(), accountId, defaultFileType()));</span>
+<span class="fc" id="L187">        List&lt;FileDTO&gt; files = retrieveFileList(users.loggedInUser().getId(), getPager().getPerPage(), getPager().getOffset(), defaultFileType());</span>
+<span class="fc" id="L188">        setFileListAndFetchPermissions(files, users);</span>
+<span class="fc" id="L189">        return INPUT;</span>
+    }
+
+    private List&lt;FileDTO&gt; retrieveFileList(Long userId, int perPage, int offset, FileDtoType fileDtoType) {
+<span class="fc" id="L193">        return userFileTransformer.transformUserFile(fileManager.getFileList(getLoggedInEHRRequestContext(), userId, perPage, offset, fileDtoType));</span>
+    }
+
+    private void setFileListAndFetchPermissions(List&lt;FileDTO&gt; files, BaseAction.Users users) {
+<span class="fc" id="L197">        setFileList(dataPointManager.getPermissions(files, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam()));</span>
+<span class="fc" id="L198">    }</span>
+
+    protected int countInvalidFiles() {
+<span class="fc" id="L201">        int invalidCount = 0;</span>
+
+<span class="fc bfc" id="L203" title="All 2 branches covered.">        for (Long id : selectId) {</span>
+            // make sure file exists (not already deleted)... user might be hitting an old page
+<span class="fc" id="L205">            boolean fetchContent = false;</span>
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">            if (retrieveFile(id, fetchContent) == null) {</span>
+<span class="nc" id="L207">                invalidCount++;</span>
+            }
+<span class="fc" id="L209">        }</span>
+
+<span class="fc" id="L211">        return invalidCount;</span>
+    }
+
+    private FileDTO retrieveFile(Long id, boolean fetchContent) {
+<span class="fc" id="L215">        return fileManager.getFile(getLoggedInEHRRequestContext(), id, fetchContent)</span>
+<span class="fc" id="L216">                .map(fileDTO -&gt; userFileTransformer.transformUserFile(fileDTO))</span>
+<span class="fc" id="L217">                .orElse(null);</span>
+    }
+
+    public FileManager getFileManager() {
+<span class="nc" id="L221">        return fileManager;</span>
+    }
+
+    public void setFileManager(FileManager fileManager) {
+<span class="fc" id="L225">        this.fileManager = fileManager;</span>
+<span class="fc" id="L226">    }</span>
+
+    public List&lt;DataWithUIPermissions&lt;FileDTO&gt;&gt; getFileList() {
+<span class="fc" id="L229">        return fileList;</span>
+    }
+
+    public void setFileList(List&lt;DataWithUIPermissions&lt;FileDTO&gt;&gt; fileList) {
+<span class="fc" id="L233">        this.fileList = fileList;</span>
+<span class="fc" id="L234">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L237">        return TAB_NAME;</span>
+    }
+
+    public List&lt;Long&gt; getSelectId() {
+<span class="fc" id="L241">        return selectId;</span>
+    }
+
+    public void setSelectId(List&lt;Long&gt; selectId) {
+<span class="fc" id="L245">        this.selectId = selectId;</span>
+<span class="fc" id="L246">    }</span>
+
+    public IMessageWebBean getMessageWebBean() {
+<span class="fc" id="L249">        return messageWebBean;</span>
+    }
+
+    public void setMessageWebBean(IMessageWebBean messageWebBean) {
+<span class="fc" id="L253">        this.messageWebBean = messageWebBean;</span>
+<span class="fc" id="L254">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L257">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L261">        this.userManager = userManager;</span>
+<span class="fc" id="L262">    }</span>
+
+    public Pager getPager() {
+<span class="fc bfc" id="L265" title="All 2 branches covered.">        if (pager == null) {</span>
+<span class="fc" id="L266">            pager = new Pager();</span>
+<span class="fc" id="L267">            pager.setPerPage(getConfig().getPatientFilesPerPage());</span>
+        }
+<span class="fc" id="L269">        return pager;</span>
+    }
+
+    public void setPager(Pager pager) {
+<span class="nc" id="L273">        this.pager = pager;</span>
+<span class="nc" id="L274">    }</span>
+
+    public List&lt;Attachment&gt; getDiscussAttachments() {
+<span class="fc" id="L277">        return discussAttachments;</span>
+    }
+
+    public void setDiscussAttachments(List&lt;Attachment&gt; discussAttachments) {
+<span class="nc" id="L281">        this.discussAttachments = discussAttachments;</span>
+<span class="nc" id="L282">    }</span>
+    public String getDiscussTopic() {
+<span class="fc" id="L284">        return discussTopic;</span>
+    }
+
+    public void setDiscussTopic(String discussTopic) {
+<span class="nc" id="L288">        this.discussTopic = discussTopic;</span>
+<span class="nc" id="L289">    }</span>
+
+
+    protected FileDtoType defaultFileType() {
+<span class="fc" id="L293">        return FileDtoType.FILE;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,273 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisEsMissingCodeHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisEsMissingCodeHelper.java</span></div><h1>EmisEsMissingCodeHelper.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.pkb.coding.entity.CodingReceived;
+import com.pkb.common.ClearableInternalState;
+import com.pkb.dataupload.emis.esv2.EmisArtifactType;
+import com.pkb.dataupload.emis.esv2.EmisJobArtifact;
+import com.pkb.dataupload.emis.esv2.csv.EmisEsCodingClinicalCode;
+import com.pkb.dataupload.emis.esv2.csv.EmisEsCodingDrugCode;
+import com.pkb.service.dataupload.emis.esv2.model.LoincCodeAndUnit;
+import com.pkb.service.dataupload.emis.esv2.repository.EmisJobArtifactRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.math.BigInteger;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
+
+import static org.apache.commons.lang3.StringUtils.join;
+
+/**
+ * Whilst processing clinical data, we sometimes run into problems where we can't find the referenced code, or we've
+ * not done mapping of the code yet.
+ * We cache the problem codes here here so we can see if we find the referenced codes in later files etc.
+ */
+public class EmisEsMissingCodeHelper implements ClearableInternalState {
+<span class="fc" id="L40">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L41">    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();</span>
+
+<span class="fc" id="L43">    private static String TAG_TYPE = &quot;type&quot;;</span>
+<span class="fc" id="L44">    private static String TAG_POSSIBLE = &quot;possible&quot;;</span>
+<span class="fc" id="L45">    private static String TAG_FOUND = &quot;found&quot;;</span>
+<span class="fc" id="L46">    private static String TAG_TOTAL = &quot;total&quot;;</span>
+
+<span class="fc" id="L48">    private static String MISSING_CODE_NAME = &quot;pkb_phr_integration_emis_csv_processor_missing_clinical_codes&quot;;</span>
+<span class="fc" id="L49">    private static final Counter MISSING_CLINICAL_CODES = Counter.builder(MISSING_CODE_NAME)</span>
+<span class="fc" id="L50">            .tag(TAG_TYPE, &quot;&quot;)</span>
+<span class="fc" id="L51">            .description(&quot;Missing clinical codes (STILL THE EMIS BUG)&quot;)</span>
+<span class="fc" id="L52">            .register(Metrics.globalRegistry);</span>
+
+    private static final String MISSING_DRUG_CODE_NAME = &quot;pkb_phr_integration_emis_csv_processor_missing_drug_codes&quot;;
+<span class="fc" id="L55">    private static final Counter MISSING_DRUG_CODES = Counter.builder(MISSING_DRUG_CODE_NAME)</span>
+<span class="fc" id="L56">            .tag(TAG_TYPE, &quot;&quot;)</span>
+<span class="fc" id="L57">            .description(&quot;Missing drug codes (STILL THE EMIS BUG)&quot;)</span>
+<span class="fc" id="L58">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L60">    private static final Counter UNMATCHED_CLINICAL_CODES = Counter.builder(&quot;pkb_phr_integration_emis_csv_processor_unmatched_codes&quot;)</span>
+<span class="fc" id="L61">            .description(&quot;Unmatched clinical codes, we need to add it (might contain duplicates)&quot;)</span>
+<span class="fc" id="L62">            .register(Metrics.globalRegistry);</span>
+
+    private static final String UNMATCHED_CLINICAL_CODES_BY_TYPE_NAME = &quot;pkb_phr_integration_emis_csv_processor_unmatched_code_types&quot;;
+<span class="fc" id="L65">    private static final Counter UNMATCHED_CLINICAL_CODES_BY_TYPE = Counter.builder(UNMATCHED_CLINICAL_CODES_BY_TYPE_NAME)</span>
+<span class="fc" id="L66">            .tag(TAG_TYPE, &quot;&quot;)</span>
+<span class="fc" id="L67">            .description(&quot;Unmatched clinical codes, by code system, we need to add these&quot;)</span>
+<span class="fc" id="L68">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L70">    private static final Counter MISSING_LOINC_TESTS = Counter.builder(&quot;pkb_phr_integration_emis_csv_processor_missing_loinc_tests&quot;)</span>
+<span class="fc" id="L71">            .description(&quot;Missing LoincTests by Loinc Code and Unit&quot;)</span>
+<span class="fc" id="L72">            .register(Metrics.globalRegistry);</span>
+
+    private final ConcurrentMap&lt;BigInteger, List&lt;String&gt;&gt; missingClinicalCodeCache; //codes we're missing from emis
+    private final ConcurrentMap&lt;BigInteger, String&gt; missingDrugCodeCache; //drug codes we're missing from emis
+    private final ConcurrentMap&lt;CodingReceived, Object&gt; unmatchedClinicalCodeCache; //codes product need to add CodingMatch for
+    private final ConcurrentMap&lt;Tuple2&lt;String, String&gt;, CodingReceived&gt; unmatchedCodeTypes; //codes types product need to add CodingMatch for
+
+    private final ConcurrentMap&lt;LoincCodeAndUnit, Integer&gt; missingLoincTestCache; //missing LoincTests by LoincCode and Unit
+
+    private final EmisJobArtifactRepository emisJobArtifactRepository;
+
+<span class="fc" id="L83">    public EmisEsMissingCodeHelper(EmisJobArtifactRepository emisJobArtifactRepository) {</span>
+<span class="fc" id="L84">        this.emisJobArtifactRepository = emisJobArtifactRepository;</span>
+<span class="fc" id="L85">        this.missingClinicalCodeCache = new ConcurrentHashMap&lt;&gt;(100);</span>
+<span class="fc" id="L86">        this.missingDrugCodeCache = new ConcurrentHashMap&lt;&gt;(100);</span>
+<span class="fc" id="L87">        this.unmatchedClinicalCodeCache = new ConcurrentHashMap&lt;&gt;(1000);</span>
+<span class="fc" id="L88">        this.unmatchedCodeTypes = new ConcurrentHashMap&lt;&gt;(1000);</span>
+<span class="fc" id="L89">        this.missingLoincTestCache = new ConcurrentHashMap&lt;&gt;(1000);</span>
+<span class="fc" id="L90">    }</span>
+
+    @Override
+    public void clearState() {
+<span class="fc" id="L94">        missingClinicalCodeCache.clear();</span>
+<span class="fc" id="L95">        unmatchedClinicalCodeCache.clear();</span>
+<span class="fc" id="L96">        missingDrugCodeCache.clear();</span>
+<span class="fc" id="L97">        unmatchedCodeTypes.clear();</span>
+<span class="fc" id="L98">        missingLoincTestCache.clear();</span>
+<span class="fc" id="L99">    }</span>
+
+    public void trackMissingLoincTests(LoincCodeAndUnit loincCodeAndUnit) {
+<span class="nc" id="L102">        Integer numberOfOccurrences = missingLoincTestCache.get(loincCodeAndUnit);</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">        if (numberOfOccurrences == null) {</span>
+<span class="nc" id="L104">            MISSING_LOINC_TESTS.increment();</span>
+<span class="nc" id="L105">            missingLoincTestCache.put(loincCodeAndUnit, 1);</span>
+        }
+        else {
+<span class="nc" id="L108">            missingLoincTestCache.put(loincCodeAndUnit, numberOfOccurrences + 1);</span>
+        }
+<span class="nc" id="L110">    }</span>
+
+    public void trackMissingClinicalCode(BigInteger codeId, List&lt;String&gt; orgOdsCodes) {
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        if (missingClinicalCodeCache.get(codeId) == null) {</span>
+<span class="fc" id="L114">            Metrics.counter(MISSING_CODE_NAME, TAG_TYPE, TAG_POSSIBLE).increment();</span>
+<span class="fc" id="L115">            missingClinicalCodeCache.put(codeId, orgOdsCodes);</span>
+        }
+<span class="fc" id="L117">    }</span>
+
+    public void removeMissingClinicalCodesIfPreviouslyAdded(Collection&lt;EmisEsCodingClinicalCode&gt; codes) {
+<span class="fc" id="L120">        codes.forEach(code -&gt; removeMissingClinicalCodeIdIfPreviouslyAdded(code.getCodeId()));</span>
+<span class="fc" id="L121">    }</span>
+
+    private void removeMissingClinicalCodeIdIfPreviouslyAdded(BigInteger codeId) {
+<span class="fc bfc" id="L124" title="All 2 branches covered.">        if (missingClinicalCodeCache.get(codeId) != null) {</span>
+<span class="fc" id="L125">            Metrics.counter(MISSING_CODE_NAME, TAG_TYPE, TAG_FOUND).increment();</span>
+<span class="fc" id="L126">            LOGGER.info(&quot;code {} was previously added as a missing clinical code, but found in a later processed file&quot;, codeId);</span>
+<span class="fc" id="L127">            missingClinicalCodeCache.remove(codeId);</span>
+        }
+<span class="fc" id="L129">    }</span>
+
+    public void trackUnmatchedCodingReceived(CodingReceived codingReceived) {
+<span class="fc bfc" id="L132" title="All 2 branches covered.">        if (unmatchedClinicalCodeCache.get(codingReceived) == null) {</span>
+<span class="fc" id="L133">            UNMATCHED_CLINICAL_CODES.increment();</span>
+<span class="fc" id="L134">            LOGGER.error(&quot;New unmatched code {}&quot;, codingReceived);</span>
+<span class="fc" id="L135">            unmatchedClinicalCodeCache.put(codingReceived, codingReceived);</span>
+<span class="fc" id="L136">            trackUnmatchedCodeType(codingReceived);</span>
+        }
+<span class="fc" id="L138">    }</span>
+
+    private void trackUnmatchedCodeType(CodingReceived codingReceived) {
+<span class="fc" id="L141">        getCoding(codingReceived, CodingReceived::getCode1, CodingReceived::getCodeSystem1).ifPresent(t -&gt; trackUnmatchedCodeType(t, codingReceived));</span>
+<span class="fc" id="L142">        getCoding(codingReceived, CodingReceived::getCode2, CodingReceived::getCodeSystem2).ifPresent(t -&gt; trackUnmatchedCodeType(t, codingReceived));</span>
+<span class="fc" id="L143">    }</span>
+
+    private void trackUnmatchedCodeType(Tuple2&lt;String, String&gt; code, CodingReceived codingReceived) {
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">        if (unmatchedCodeTypes.get(code) == null) {</span>
+<span class="fc" id="L147">            Metrics.counter(UNMATCHED_CLINICAL_CODES_BY_TYPE_NAME, TAG_TYPE, code._2).increment();</span>
+<span class="fc" id="L148">            unmatchedCodeTypes.put(code, codingReceived);</span>
+        }
+<span class="fc" id="L150">    }</span>
+
+    private Optional&lt;Tuple2&lt;String, String&gt;&gt; getCoding(CodingReceived codingReceived, Function&lt;CodingReceived, String&gt; getCode, Function&lt;CodingReceived, String&gt; getCodeSystem) {
+<span class="fc" id="L153">        String code = getCode.apply(codingReceived);</span>
+<span class="fc bfc" id="L154" title="All 2 branches covered.">        if (code == null) {</span>
+<span class="fc" id="L155">            return Optional.empty();</span>
+        }
+<span class="fc" id="L157">        String codeSystem = getCodeSystem.apply(codingReceived);</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">        if (StringUtils.isBlank(codeSystem)) {</span>
+<span class="fc" id="L159">            codeSystem = &quot;ReadV2 / Emis custom&quot;;</span>
+        }
+<span class="fc" id="L161">        return Optional.of(Tuple.of(code, codeSystem));</span>
+    }
+
+    public void trackMissingDrugCode(BigInteger codeId, String drugRecordGuid) {
+<span class="fc bfc" id="L165" title="All 2 branches covered.">        if (missingDrugCodeCache.get(codeId) == null) {</span>
+<span class="fc" id="L166">            missingDrugCodeCache.put(codeId, drugRecordGuid);</span>
+<span class="fc" id="L167">            Metrics.counter(MISSING_DRUG_CODE_NAME, TAG_TYPE, TAG_POSSIBLE).increment();</span>
+        }
+<span class="fc" id="L169">    }</span>
+
+    public void removeMissingDrugCodesIfPreviouslyAdded(Collection&lt;EmisEsCodingDrugCode&gt; codes) {
+<span class="fc" id="L172">        codes.forEach(code -&gt; removeMissingDrugCodeIdIfPreviouslyAdded(code.getCodeId()));</span>
+<span class="fc" id="L173">    }</span>
+
+    private void removeMissingDrugCodeIdIfPreviouslyAdded(BigInteger codeId) {
+<span class="fc bfc" id="L176" title="All 2 branches covered.">        if (missingDrugCodeCache.get(codeId) != null) {</span>
+<span class="fc" id="L177">            Metrics.counter(MISSING_DRUG_CODE_NAME, TAG_TYPE, TAG_FOUND).increment();</span>
+<span class="fc" id="L178">            LOGGER.info(&quot;code {} was previously added as a missing drug code, but found in a later processed file&quot;, codeId);</span>
+<span class="fc" id="L179">            missingDrugCodeCache.remove(codeId);</span>
+        }
+<span class="fc" id="L181">    }</span>
+
+    /**
+     * @return true if there were no errors OR all errors were logged
+     * false if some errors may have been missed
+     */
+    public void logAnyEmisCodeProblemsAndThenClearCaches(long jobId) {
+
+<span class="fc" id="L189">        LOGGER.info(&quot;EMIS missing code summary:&quot;);</span>
+<span class="fc" id="L190">        ConcurrentMap&lt;BigInteger, List&lt;String&gt;&gt; missingCodesMap = getMissingCodesMap();</span>
+<span class="fc" id="L191">        ConcurrentMap&lt;BigInteger, String&gt; missingDrugCodesMap = getMissingDrugCodesMap();</span>
+<span class="fc" id="L192">        ConcurrentMap&lt;CodingReceived, Object&gt; unmatchedCodesMap = getUnmatchedCodesMap();</span>
+<span class="fc" id="L193">        ConcurrentMap&lt;LoincCodeAndUnit, Integer&gt; missingLoincTestMap = getMissingLoincTestCache();</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">        if (missingCodesMap.size() + missingDrugCodesMap.size() + unmatchedCodesMap.size() == 0) {</span>
+<span class="fc" id="L195">            LOGGER.info(&quot;No missing or unmatched codes found&quot;);</span>
+<span class="fc" id="L196">            return;</span>
+        }
+
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        if (!missingCodesMap.isEmpty()) {</span>
+<span class="fc" id="L200">            LOGGER.error(&quot;EMIS ES missing clinical code (EMIS code ID, org ODS / OrganisationGuid ): \n{}&quot;, join(missingCodesMap.entrySet(), &quot;\n&quot;));</span>
+<span class="fc" id="L201">            Metrics.counter(MISSING_CODE_NAME, TAG_TYPE, TAG_TOTAL).increment(missingCodesMap.size());</span>
+            //Every actually missing code is an unmatched code too...
+<span class="fc" id="L203">            UNMATCHED_CLINICAL_CODES.increment(missingCodesMap.size());</span>
+        }
+<span class="fc bfc" id="L205" title="All 2 branches covered.">        if (!missingDrugCodesMap.isEmpty()) {</span>
+<span class="fc" id="L206">            LOGGER.error(&quot;EMIS ES missing drug code (EMIS code ID, PrescrbingDrugRecord guid: \n{}&quot;, join(missingDrugCodesMap.entrySet(), &quot;\n&quot;));</span>
+<span class="fc" id="L207">            Metrics.counter(MISSING_DRUG_CODE_NAME, TAG_TYPE, TAG_TOTAL).increment(missingDrugCodesMap.size());</span>
+        }
+<span class="fc bfc" id="L209" title="All 2 branches covered.">        if (!unmatchedCodesMap.isEmpty()) {</span>
+<span class="fc" id="L210">            LOGGER.error(&quot;EMIS ES unmatched clinical code (CodingReceived): \n{}&quot;, join(unmatchedCodesMap.keySet(), &quot;\n&quot;));</span>
+            //We don't increment the unmatched codes counter here, we can increment as we go instead.
+            // unlike missing codes, unmatched codes can't be fixed by processing later files
+        }
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">        if (!missingLoincTestMap.isEmpty()) {</span>
+<span class="nc" id="L215">            LOGGER.error(&quot;EMIS ES missing LoincTests by Code: \n{}&quot;, join(missingLoincTestMap.keySet(), &quot;\n&quot;));</span>
+        }
+
+<span class="pc bpc" id="L218" title="3 of 8 branches missed.">        if (!missingCodesMap.isEmpty() || !missingDrugCodesMap.isEmpty() || !unmatchedCodesMap.isEmpty() || !missingLoincTestMap.isEmpty()) {</span>
+            try {
+<span class="fc" id="L220">                String resultJson = OBJECT_MAPPER.writer().writeValueAsString(Map.of(</span>
+                                                                                &quot;missingClinicalCodes&quot;, missingCodesMap,
+                                                                                &quot;missingDrugCodes&quot;, missingDrugCodesMap,
+                                                                                &quot;unmatchedCodes&quot;, unmatchedCodesMap,
+                                                                                &quot;missingLoincTests&quot;, missingLoincTestMap));
+<span class="fc" id="L225">                emisJobArtifactRepository.save(new EmisJobArtifact(jobId, EmisArtifactType.CODE_RESULT, resultJson));</span>
+<span class="nc" id="L226">            } catch (Exception e) {</span>
+<span class="nc" id="L227">                throw new RuntimeException(e);</span>
+<span class="fc" id="L228">            }</span>
+        }
+<span class="fc" id="L230">        clearState();</span>
+<span class="fc" id="L231">    }</span>
+
+    @VisibleForTesting
+    ConcurrentMap&lt;CodingReceived, Object&gt; getUnmatchedCodesMap() {
+<span class="fc" id="L235">        return unmatchedClinicalCodeCache;</span>
+    }
+
+    @VisibleForTesting
+    ConcurrentMap&lt;BigInteger, List&lt;String&gt;&gt; getMissingCodesMap() {
+<span class="fc" id="L240">        return missingClinicalCodeCache;</span>
+    }
+
+    @VisibleForTesting
+    ConcurrentMap&lt;BigInteger, String&gt; getMissingDrugCodesMap() {
+<span class="fc" id="L245">        return missingDrugCodeCache;</span>
+    }
+
+    @VisibleForTesting
+    ConcurrentMap&lt;LoincCodeAndUnit, Integer&gt; getMissingLoincTestCache() {
+<span class="fc" id="L250">        return missingLoincTestCache;</span>
+    }
+
+    public Map&lt;String, Integer&gt; getCodingProblemReport() {
+<span class="fc" id="L254">        var builder = ImmutableMap.&lt;String, Integer&gt;builder();</span>
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">        if (!missingClinicalCodeCache.isEmpty()) {</span>
+<span class="nc" id="L256">            builder.put(&quot;missingClinicalCode&quot;, missingClinicalCodeCache.size());</span>
+        }
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">        if (!missingDrugCodeCache.isEmpty()) {</span>
+<span class="nc" id="L259">            builder.put(&quot;missingDrugCode&quot;, missingDrugCodeCache.size());</span>
+        }
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">        if (!unmatchedClinicalCodeCache.isEmpty()) {</span>
+<span class="nc" id="L262">            builder.put(&quot;unmatchedClinicalCode&quot;, unmatchedClinicalCodeCache.size());</span>
+        }
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">        if (!unmatchedCodeTypes.isEmpty()) {</span>
+<span class="nc" id="L265">            builder.put(&quot;unmatchedCodeTypes&quot;, unmatchedCodeTypes.size());</span>
+        }
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">        if (!missingLoincTestCache.isEmpty()) {</span>
+<span class="nc" id="L268">            builder.put(&quot;missingLoincTests&quot;, missingLoincTestCache.size());</span>
+        }
+<span class="fc" id="L270">        return builder.build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

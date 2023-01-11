@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MetricsInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir.interceptors</a> &gt; <span class="el_source">MetricsInterceptor.java</span></div><h1>MetricsInterceptor.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir.interceptors;
+
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.server.exceptions.AuthenticationException;
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import ca.uhn.fhir.rest.server.interceptor.InterceptorAdapter;
+import ca.uhn.fhir.rest.server.servlet.ServletRequestDetails;
+import com.pkb.api.fhir.service.AuthenticationService;
+import com.pkb.authentication.AccessToken;
+import com.pkb.authentication.AccessTokenMapper;
+import com.pkb.domain.repository.ApiAuthSessionRepository;
+import io.jsonwebtoken.Jwts;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Timer;
+import io.vavr.control.Option;
+import org.hl7.fhir.dstu3.model.ResourceType;
+import org.slf4j.Logger;
+
+import javax.servlet.ServletException;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.Objects;
+import java.util.regex.Pattern;
+
+import static com.pkb.api.fhir.util.FhirAccessToken.extractAccessToken;
+import static com.pkb.authentication.ImmutableAccessToken.accessToken;
+import static io.vavr.API.List;
+import static io.vavr.API.None;
+import static io.vavr.API.Option;
+import static io.vavr.API.Try;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.apache.commons.lang3.StringUtils.lowerCase;
+import static org.apache.commons.lang3.StringUtils.trim;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class MetricsInterceptor extends InterceptorAdapter {
+<span class="fc" id="L41">    private static final Logger LOG = getLogger(lookup().lookupClass());</span>
+
+<span class="fc" id="L43">    private static final Pattern METRIC_PATTERN = Pattern.compile(&quot;\\W&quot;);</span>
+<span class="fc" id="L44">    private static final AccessToken UNAVAILABLE_TOKEN = accessToken(&quot;unknown&quot;.getBytes(), &quot;unknown&quot;.getBytes());</span>
+
+<span class="fc" id="L46">    private static final Counter.Builder RESPONSE_CODES_BUILDER = Counter.builder(&quot;fhirApiHttpResponseCodes&quot;)</span>
+<span class="fc" id="L47">            .description(&quot;Counts of HTTP response codes for FHIR API requests&quot;);</span>
+
+<span class="fc" id="L49">    private static final String USER_DATA_TIMER_KEY = lookup().lookupClass().getName() + &quot;_timerKey&quot;;</span>
+
+    private ApiAuthSessionRepository apiAuthSessionRepository;
+    private AccessTokenMapper accessTokenMapper;
+    private MeterRegistry registry;
+
+    public MetricsInterceptor(
+            ApiAuthSessionRepository apiAuthSessionRepository,
+            AccessTokenMapper accessTokenMapper,
+<span class="fc" id="L58">            MeterRegistry registry) {</span>
+<span class="fc" id="L59">        this.apiAuthSessionRepository = apiAuthSessionRepository;</span>
+<span class="fc" id="L60">        this.accessTokenMapper = accessTokenMapper;</span>
+<span class="fc" id="L61">        this.registry = registry;</span>
+<span class="fc" id="L62">    }</span>
+
+
+    @Override
+    public boolean incomingRequestPostProcessed(RequestDetails details,
+                                                HttpServletRequest theRequest,
+                                                HttpServletResponse theResponse) throws AuthenticationException {
+<span class="fc" id="L69">        doSafe(() -&gt; details.getUserData().put(USER_DATA_TIMER_KEY, Timer.start(registry)));</span>
+<span class="fc" id="L70">        return super.incomingRequestPostProcessed(details, theRequest, theResponse);</span>
+    }
+    
+    @Override
+    public void processingCompletedNormally(ServletRequestDetails theRequestDetails) {
+<span class="fc" id="L75">        doSafe(() -&gt; {</span>
+<span class="fc" id="L76">            stopTimer(theRequestDetails);</span>
+<span class="fc" id="L77">            countResponseCodes(theRequestDetails, theRequestDetails.getServletResponse());</span>
+<span class="fc" id="L78">        });</span>
+<span class="fc" id="L79">        super.processingCompletedNormally(theRequestDetails);</span>
+<span class="fc" id="L80">    }</span>
+
+    @Override
+    public boolean handleException(RequestDetails theRequestDetails,
+                                   BaseServerResponseException theException,
+                                   HttpServletRequest theServletRequest,
+                                   HttpServletResponse theServletResponse) throws ServletException, IOException {
+<span class="fc" id="L87">        doSafe(() -&gt; {</span>
+<span class="fc" id="L88">            stopTimer(theRequestDetails);</span>
+<span class="fc" id="L89">            countResponseCodes(theRequestDetails, theServletResponse);</span>
+<span class="fc" id="L90">        });</span>
+<span class="fc" id="L91">        return super.handleException(theRequestDetails, theException, theServletRequest, theServletResponse);</span>
+    }
+
+    private void stopTimer(RequestDetails details) {
+<span class="fc" id="L95">        var sample = (Timer.Sample) details.getUserData().get(USER_DATA_TIMER_KEY);</span>
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        if (sample == null) {</span>
+<span class="fc" id="L97">            LOG.error(&quot;sample was null on request {}&quot;, details.toString());</span>
+<span class="fc" id="L98">            return;</span>
+        }
+<span class="fc" id="L100">        sample.stop(Timer.builder(&quot;fhirApiDurationHistogram&quot;)</span>
+<span class="fc" id="L101">                .description(&quot;Histogram of FHIR API call processing times&quot;)</span>
+                // Ideally, we don't have anything that takes anywhere near 30 minutes, but document reference 
+                // read-reciept operation might do, and we'd like to be able to track it in metrics also. 
+<span class="fc" id="L104">                .maximumExpectedValue(Duration.ofMinutes(30))</span>
+<span class="fc" id="L105">                .publishPercentileHistogram()</span>
+<span class="fc" id="L106">                .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L107">                .tags(List(</span>
+<span class="fc" id="L108">                        Tag.of(&quot;resource&quot;, Option.of(toResourceType(details)).map(this::normalize).getOrElse(&quot;unknown&quot;)),</span>
+<span class="fc" id="L109">                        Tag.of(&quot;operation_type&quot;, Option.of(details.getRestOperationType()).map(this::normalize).getOrElse(&quot;unknown&quot;)),</span>
+<span class="fc" id="L110">                        Tag.of(&quot;name&quot;, Option.of(details.getOperation()).map(this::normalize).getOrElse(&quot;none&quot;)),</span>
+<span class="fc" id="L111">                        Tag.of(&quot;client&quot;, Option.of(details.getHeader(AuthenticationService.ORG_PUBLIC_ID_HEADER_NAME))</span>
+                                // Look for client details in the JWT
+<span class="fc" id="L113">                                .map(ignored -&gt; extractAccessToken(details).toOption()</span>
+<span class="fc" id="L114">                                        .map(token -&gt; token.substring(0, token.lastIndexOf(&quot;.&quot;) + 1))</span>
+<span class="fc" id="L115">                                        .flatMap(tokenWithoutSignature -&gt;</span>
+<span class="fc" id="L116">                                                Try(() -&gt; Jwts.parser().parseClaimsJwt(tokenWithoutSignature))</span>
+<span class="fc" id="L117">                                                        .map(claims -&gt; claims.getBody().get(&quot;client_name&quot;) + &quot; [&quot; + claims.getBody().get(&quot;client_id&quot;) + &quot;]&quot;)</span>
+<span class="fc" id="L118">                                                        .toOption())</span>
+<span class="fc" id="L119">                                        .getOrElse(&quot;unknown&quot;))</span>
+                                // Look for client details from ApiAuthSession
+<span class="fc" id="L121">                                .getOrElse(() -&gt; apiAuthSessionRepository.findClientNameAndApiId(extractAccessToken(details).toOption()</span>
+<span class="fc" id="L122">                                        .flatMap(accessTokenMapper::toAccessToken)</span>
+<span class="fc" id="L123">                                        .getOrElse(UNAVAILABLE_TOKEN))))</span>
+<span class="fc" id="L124">                )).register(registry));</span>
+<span class="fc" id="L125">    }</span>
+
+    private void countResponseCodes(RequestDetails details, HttpServletResponse response) {
+<span class="fc" id="L128">        RESPONSE_CODES_BUILDER.tags(List(</span>
+<span class="fc" id="L129">                        Tag.of(&quot;resource&quot;, Option.of(toResourceType(details)).map(this::normalize).getOrElse(&quot;unknown&quot;)),</span>
+<span class="fc" id="L130">                        Tag.of(&quot;operation_type&quot;, Option.of(details.getRestOperationType()).map(this::normalize).getOrElse(&quot;unknown&quot;)),</span>
+<span class="fc" id="L131">                        Tag.of(&quot;name&quot;, Option.of(details.getOperation()).map(this::normalize).getOrElse(&quot;none&quot;)),</span>
+<span class="fc" id="L132">                        Tag.of(&quot;code&quot;, Objects.toString(response.getStatus()))</span>
+                ))
+<span class="fc" id="L134">                .register(registry)</span>
+<span class="fc" id="L135">                .increment();</span>
+<span class="fc" id="L136">    }</span>
+
+    private String normalize(Object label) {
+<span class="fc" id="L139">        return METRIC_PATTERN.matcher(trim(lowerCase(Objects.toString(label)))).replaceAll(&quot;_&quot;);</span>
+    }
+
+    private ResourceType toResourceType(RequestDetails details) {
+<span class="fc" id="L143">        return Option(details.getResourceName())</span>
+<span class="fc" id="L144">                .flatMap(resourceName -&gt; Try(() -&gt; Option(ResourceType.valueOf(resourceName)))</span>
+<span class="fc" id="L145">                        .recover(IllegalArgumentException.class, None())</span>
+<span class="fc" id="L146">                        .get())</span>
+<span class="fc" id="L147">                .getOrElse((ResourceType) null);</span>
+    }
+
+    private void doSafe(Runnable r) {
+<span class="fc" id="L151">        Try(() -&gt; {</span>
+<span class="fc" id="L152">            r.run();</span>
+<span class="fc" id="L153">            return null;</span>
+<span class="pc" id="L154">        }).toEither().peekLeft(t -&gt; LOG.error(&quot;Error recording metrics&quot;, t));</span>
+<span class="fc" id="L155">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

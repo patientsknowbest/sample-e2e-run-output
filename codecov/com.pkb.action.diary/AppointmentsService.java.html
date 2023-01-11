@@ -1,0 +1,1460 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AppointmentsService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.diary</a> &gt; <span class="el_source">AppointmentsService.java</span></div><h1>AppointmentsService.java</h1><pre class="source lang-java linenums">package com.pkb.action.diary;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.pkb.action.AbstractService;
+import com.pkb.action.emis.pfs.EmisMessageHelper;
+import com.pkb.action.message.ParticipantSelectorService;
+import com.pkb.action.support.AppointmentTransformer;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.calendar.entity.AppointmentDTO;
+import com.pkb.calendar.entity.AppointmentRequestDTO;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.consent.PatientConsentDTO;
+import com.pkb.datamodel.consent.RequiresConsent;
+import com.pkb.datamodel.ui.ResponseMeta;
+import com.pkb.datamodel.ui.UIDto;
+import com.pkb.domain.appointment.AppointmentMessagingSettingsService;
+import com.pkb.domain.appointment.EmisAppointmentService;
+import com.pkb.dto.AppointmentActionsDto;
+import com.pkb.dto.AppointmentEntryDto;
+import com.pkb.dto.ImmutablePageActionDto;
+import com.pkb.dto.ImmutableUrlDto;
+import com.pkb.dto.PageActionDto;
+import com.pkb.dto.UrlDto;
+import com.pkb.emis.appointment.service.EmisAppointmentManager;
+import com.pkb.emis.appointment.service.ErrorCode;
+import com.pkb.encounter.entity.Message;
+import com.pkb.entities.enums.AppointmentStatus;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.Route;
+import com.pkb.integrations.emis.model.EmisAppointment;
+import com.pkb.mappers.AppointmentActionsMapper;
+import com.pkb.mappers.AppointmentEntityDependency;
+import com.pkb.mappers.AppointmentEntryMapper;
+import com.pkb.mappers.AppointmentViewMapper;
+import com.pkb.mappers.ImmutableAppointmentEntityDependency;
+import com.pkb.notification.entity.Activity;
+import com.pkb.repository.util.EmisContextHolder;
+import com.pkb.repository.util.ImmutableEmisContextHolder;
+import com.pkb.service.calendar.impl.CalendarManager;
+import com.pkb.service.datapoint.DataWithUIPermissions;
+import com.pkb.service.datapoint.impl.DataPointManager;
+import com.pkb.service.encounter.impl.tolven.EncounterManager;
+import com.pkb.service.integration.AppointmentManagementPartnerService;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.user.impl.PrimaryEmailContactManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.Constants;
+import com.pkb.util.DateUtil;
+import com.pkb.util.UrlUtil;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import io.vavr.control.Either;
+import io.vavr.control.Try;
+import org.apache.commons.lang3.NotImplementedException;
+import org.apache.commons.lang3.StringUtils;
+import org.immutables.value.Value.Default;
+import org.immutables.value.Value.Immutable;
+import org.immutables.value.Value.Style;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.MessageSource;
+
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+
+import static com.opensymphony.xwork2.Action.ERROR;
+import static com.opensymphony.xwork2.Action.INPUT;
+import static com.opensymphony.xwork2.Action.SUCCESS;
+import static com.pkb.action.BaseAction.RETURN_TO_APPOINTMENT;
+import static com.pkb.action.diary.AppointmentUtility.getInvitedCarerIds;
+import static com.pkb.action.diary.AppointmentUtility.prepareMultiline;
+import static com.pkb.action.diary.AppointmentsService.AppointmentRequestType.RESCHEDULE;
+import static com.pkb.action.emis.pfs.EmisMessageHelper.AccessType.PRIMARY;
+import static com.pkb.action.emis.pfs.EmisMessageHelper.AccessType.VIEWING;
+import static com.pkb.datamodel.ui.ResponseMeta.of;
+import static com.pkb.datamodel.ui.ResponseMeta.ofActionError;
+import static com.pkb.datamodel.ui.ResponseMeta.ofFieldErrors;
+import static com.pkb.datamodel.ui.ResponseMeta.ofInfoMessage;
+import static com.pkb.entities.enums.AppointmentStatus.ACTIVE;
+import static com.pkb.entities.enums.PrivacyFlag.GENERAL;
+import static com.pkb.entities.enums.Route.EMIS_PFS;
+import static com.pkb.notification.entity.Activity.Action.EDITED_APPOINTMENT;
+import static com.pkb.notification.entity.Activity.Action.INVITED_TO_APPOINTMENT;
+import static com.pkb.notification.entity.Activity.Action.UNINVITED_FROM_APPOINTMENT;
+import static com.pkb.util.UrlUtil.buildHref;
+import static com.pkb.util.WebNamespace.AUTH;
+import static com.pkb.util.WebNamespace.DIARY;
+import static com.pkb.util.WebNamespace.LIBRARY;
+import static com.pkb.util.WebNamespace.TEST;
+import static io.vavr.control.Either.right;
+import static java.lang.Boolean.FALSE;
+import static java.lang.Boolean.TRUE;
+import static java.lang.String.format;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptyMap;
+import static java.util.Collections.singletonList;
+import static java.util.stream.Collectors.partitioningBy;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.containsAny;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.apache.commons.lang3.ObjectUtils.defaultIfNull;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+import static org.apache.commons.lang3.StringUtils.trimToEmpty;
+import static org.springframework.util.CollectionUtils.isEmpty;
+
+public class AppointmentsService extends AbstractService {
+
+<span class="fc" id="L140">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String CANCEL = &quot;cancel&quot;;
+    private static final String LINK_PAGE_ACTIONS = &quot;link-page-actions-&quot;;
+    private static final String ADD_APPOINTMENT = &quot;add_appointment&quot;;
+    private static final String BOOK_GP_APPOINTMENT = &quot;book_gp_appointment&quot;;
+    private static final String UNIQUE_ID = &quot;uniqueId&quot;;
+    private static final String REQUEST_TYPE = &quot;requestType&quot;;
+
+    private static final int APPOINTMENT_RESULT_LIMIT = 10;
+    private static final int DATE_MAX_LENGTH = 10;
+    private static final int TIME_MAX_LENGTH = 5;
+
+    private static final String NHS_EXTENDED = &quot;nhsExtendedFullDayAnd12HourTime&quot;;
+    private static final String EXTENDED_12 = &quot;extendedFullDayAnd12HourTime&quot;;
+    private static final String EXTENDED = &quot;extendedFullDayAndTime&quot;;
+    private static final String NHS_TIME_AM_PM = &quot;nhsTimeAmPm&quot;;
+    private static final String TIME_AM_PM = &quot;timeAmPm&quot;;
+    private static final String TIME_HOUR_MIN = &quot;timeHourMin&quot;;
+
+    private static final String APPOINTMENTS_SERVICE_TIMER_NAME = &quot;pkb_phr_appointments_service&quot;;
+<span class="fc" id="L161">    private static final Timer APPOINTMENTS_SERVICE_TIMER = Timer.builder(APPOINTMENTS_SERVICE_TIMER_NAME)</span>
+<span class="fc" id="L162">            .description(&quot;Latency of appointments service operations&quot;)</span>
+<span class="fc" id="L163">            .publishPercentileHistogram()</span>
+<span class="fc" id="L164">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L165">            .tags(SERVICE_OPERATION, &quot;&quot;)</span>
+<span class="fc" id="L166">            .register(Metrics.globalRegistry);</span>
+
+    private final AppointmentActionsMapper appointmentActionsMapper;
+    private final AppointmentEntryMapper appointmentEntryMapper;
+    private final AppointmentTransformer appointmentTransformer;
+    private final AppointmentViewMapper appointmentViewMapper;
+    private final CalendarManager calendarManager;
+    private final DateTimeService dateTimeService;
+    private final DateUtil dateUtil;
+    private final EmisAppointmentManager emisAppointmentManager;
+    private final EmisAppointmentService emisAppointmentService;
+    private final EmisMessageHelper emisMessageHelper;
+    private final INotificationManager notificationManager;
+    private final PrimaryEmailContactManager primaryEmailContactManager;
+    private final PhrConfig phrConfig;
+    private final PatientConsentManager patientConsentManager;
+    private final UserManager userManager;
+    private final EncounterManager encounterManager;
+    private final ParticipantSelectorService participantSelectorService;
+    private final UUIDProvider uuidProvider;
+    private final AppointmentManagementPartnerService appointmentManagementPartnerService;
+    private final AppointmentMessagingSettingsService appointmentMessagingSettingService;
+
+    public AppointmentsService(AppointmentActionsMapper appointmentActionsMapper,
+                               AppointmentEntryMapper appointmentEntryMapper,
+                               AppointmentTransformer appointmentTransformer,
+                               AppointmentViewMapper appointmentViewMapper,
+                               CalendarManager calendarManager,
+                               DataPointManager dataPointManager,
+                               DateTimeService dateTimeService,
+                               DateUtil dateUtil,
+                               EmisAppointmentManager emisAppointmentManager,
+                               EmisAppointmentService emisAppointmentService,
+                               EmisMessageHelper emisMessageHelper,
+                               INotificationManager notificationManager,
+                               MessageSource messageSource,
+                               PrimaryEmailContactManager primaryEmailContactManager,
+                               PhrConfig phrConfig,
+                               PatientConsentManager patientConsentManager,
+                               UserManager userManager,
+                               EncounterManager encounterManager,
+                               ParticipantSelectorService participantSelectorService,
+                               UUIDProvider uuidProvider,
+                               AppointmentManagementPartnerService appointmentManagementPartnerService,
+                               AppointmentMessagingSettingsService appointmentMessagingSettingsService) {
+<span class="fc" id="L211">        super(dataPointManager, messageSource);</span>
+<span class="fc" id="L212">        this.appointmentActionsMapper = appointmentActionsMapper;</span>
+<span class="fc" id="L213">        this.appointmentEntryMapper = appointmentEntryMapper;</span>
+<span class="fc" id="L214">        this.appointmentTransformer = appointmentTransformer;</span>
+<span class="fc" id="L215">        this.appointmentViewMapper = appointmentViewMapper;</span>
+<span class="fc" id="L216">        this.calendarManager = calendarManager;</span>
+<span class="fc" id="L217">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L218">        this.dateUtil = dateUtil;</span>
+<span class="fc" id="L219">        this.emisAppointmentManager = emisAppointmentManager;</span>
+<span class="fc" id="L220">        this.emisAppointmentService = emisAppointmentService;</span>
+<span class="fc" id="L221">        this.emisMessageHelper = emisMessageHelper;</span>
+<span class="fc" id="L222">        this.notificationManager = notificationManager;</span>
+<span class="fc" id="L223">        this.primaryEmailContactManager = primaryEmailContactManager;</span>
+<span class="fc" id="L224">        this.phrConfig = phrConfig;</span>
+<span class="fc" id="L225">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L226">        this.userManager = userManager;</span>
+<span class="fc" id="L227">        this.encounterManager = encounterManager;</span>
+<span class="fc" id="L228">        this.participantSelectorService = participantSelectorService;</span>
+<span class="fc" id="L229">        this.uuidProvider = uuidProvider;</span>
+<span class="fc" id="L230">        this.appointmentManagementPartnerService = appointmentManagementPartnerService;</span>
+<span class="fc" id="L231">        this.appointmentMessagingSettingService = appointmentMessagingSettingsService;</span>
+<span class="fc" id="L232">    }</span>
+
+<span class="fc" id="L234">    public enum AppointmentRequestType {</span>
+<span class="fc" id="L235">        RESCHEDULE,</span>
+<span class="fc" id="L236">        CANCEL</span>
+    }
+
+    private class Partitioner {
+        private final Map&lt;Boolean, List&lt;EmisAppointment&gt;&gt; partitions;
+
+<span class="fc" id="L242">        Partitioner(List&lt;EmisAppointment&gt; appointments, LocalDateTime date) {</span>
+<span class="fc" id="L243">            partitions = appointments.stream()</span>
+<span class="fc" id="L244">                    .collect(partitioningBy(appointment -&gt; appointment.getStartTime().isAfter(date)));</span>
+<span class="fc" id="L245">        }</span>
+
+        protected List&lt;EmisAppointment&gt; getPast() {
+<span class="fc" id="L248">            return partitions.get(FALSE);</span>
+        }
+
+        List&lt;EmisAppointment&gt; getUpcoming() {
+<span class="fc" id="L252">            return partitions.get(TRUE);</span>
+        }
+    }
+
+    interface BaseAppointmentRequestMessageRequest extends BaseRequest {
+        UUID getUniqueId();
+        AppointmentRequestType requestType();
+    }
+
+    @Immutable
+    public interface ListAppointmentRequest extends BaseRequest {
+        int getPastPageCount();
+        int getUpcomingPageCount();
+        boolean isFromPartner();
+    }
+
+    @Immutable
+    public interface CreateAppointmentFormRequest extends BaseRequest {}
+
+    @Immutable
+    public interface ViewAppointmentRequest extends BaseRequest, NhsStyleRequest {
+        UUID getUniqueId();
+    }
+
+    @Immutable
+    public interface ViewEmisAppointmentRequest extends BaseRequest, NhsStyleRequest {
+        long getEmisSlotId();
+    }
+
+    @Immutable
+    public interface SaveAppointmentRequest extends BaseRequest, NhsStyleRequest {
+        UIAppointmentDto getDto();
+        Optional&lt;String&gt; getPrivacy();
+        String getActivityUrl();
+        Optional&lt;UUID&gt; getUniqueId();
+        boolean getReturnToAppointment();
+    }
+
+    @Immutable
+    public interface EditAppointmentRequest extends BaseRequest {
+        UUID getUniqueId();
+    }
+
+    @Immutable
+    @Style(get = { &quot;is*&quot;, &quot;get*&quot; })
+    interface PartialAppointmentDto {
+        @Default
+        default boolean isDisplayBookGpAppointmentButton() {
+<span class="nc" id="L300">            return false;</span>
+        }
+        @Default
+        default int getPastAppointmentsCount() {
+<span class="fc" id="L304">            return 0;</span>
+        }
+        @Default
+        default int getUpcomingAppointmentsCount() {
+<span class="fc" id="L308">            return 0;</span>
+        }
+        @Default
+<span class="fc" id="L311">        default List&lt;String&gt; getActionErrors() { return emptyList(); }</span>
+    }
+
+    @Immutable
+    public interface IntroduceAppointmentRequestRequest extends BaseAppointmentRequestMessageRequest, NhsStyleRequest { }
+
+    @Immutable
+    public interface ComposeAppointmentRequestMessageRequest extends BaseAppointmentRequestMessageRequest, NhsStyleRequest {
+        Optional&lt;UIComposeAppointmentRequestDto&gt; dto();
+    }
+
+    @Immutable
+    public interface ReviewAppointmentRequestMessageRequest extends BaseAppointmentRequestMessageRequest, NhsStyleRequest {
+        UIComposeAppointmentRequestDto dto();
+    }
+
+    @Immutable
+    public interface SendAppointmentRequestMessageRequest extends BaseAppointmentRequestMessageRequest {
+        UIComposeAppointmentRequestDto dto();
+    }
+
+    @Immutable
+    public interface ConfirmAppointmentRequestRequest extends BaseAppointmentRequestMessageRequest, NhsStyleRequest { }
+
+    @Immutable
+    public interface FinishAppointmentRequestRequest extends BaseAppointmentRequestMessageRequest { }
+
+    public ListAppointmentDto listAppointments(ListAppointmentRequest request) {
+<span class="fc" id="L339">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;list&quot;).record(() -&gt;</span>
+<span class="fc" id="L340">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L341">                    var users = getUsers(loggedInContext);</span>
+<span class="fc" id="L342">                    Long contextUserId = request.getEHRRequestContext().getContextUserId().orElse(null);</span>
+<span class="fc" id="L343">                    long accountId = users.get(loggedInContext.getContextOrAccessingUserId()).getDefaultAccountId();</span>
+<span class="fc" id="L344">                    int pastResultLimit = resultLimit(request.getPastPageCount());</span>
+<span class="fc" id="L345">                    int upcomingResultLimit = resultLimit(request.getUpcomingPageCount());</span>
+
+<span class="fc" id="L347">                    List&lt;AppointmentDTO&gt; pastAppointments = appointmentTransformer</span>
+<span class="fc" id="L348">                            .transformAppointment(calendarManager.getPastAppointments(loggedInContext, accountId, pastResultLimit));</span>
+<span class="fc" id="L349">                    List&lt;AppointmentDTO&gt; upcomingAppointments = appointmentTransformer</span>
+<span class="fc" id="L350">                            .transformAppointment(calendarManager.getUpcomingAppointments(loggedInContext, accountId, upcomingResultLimit));</span>
+
+<span class="fc" id="L352">                    long pastAppointmentsCount = getAppointmentsCount(pastAppointments,</span>
+                            pastResultLimit,
+<span class="fc" id="L354">                            () -&gt; calendarManager.countPastAppointments(loggedInContext, accountId));</span>
+<span class="fc" id="L355">                    long upcomingAppointmentsCount = getAppointmentsCount(upcomingAppointments,</span>
+                            upcomingResultLimit,
+<span class="fc" id="L357">                            () -&gt; calendarManager.countUpcomingAppointments(loggedInContext, accountId));</span>
+
+<span class="fc" id="L359">                    PartialAppointmentDto partialDto = configureGpAppointmentBooking(loggedInContext, users, request.getLocale(), pastAppointments, upcomingAppointments);</span>
+<span class="fc" id="L360">                    Map&lt;String, PKBPerson&gt; participantsById = loadParticipants(pastAppointments, upcomingAppointments);</span>
+<span class="fc" id="L361">                    Map&lt;UUID, Boolean&gt; appointmentUuidToHasManagementUrl = checkForManagementUrls(pastAppointments, upcomingAppointments);</span>
+
+<span class="fc" id="L363">                    var pastAppointmentList = setParticipants(pastAppointments, participantsById, loggedInContext);</span>
+<span class="fc" id="L364">                    var upcomingAppointmentList = setParticipants(upcomingAppointments, participantsById, loggedInContext);</span>
+
+<span class="fc" id="L366">                    var dependency = ImmutableAppointmentEntityDependency.&lt;AppointmentDTO&gt;builder()</span>
+<span class="fc" id="L367">                            .locale(request.getLocale())</span>
+<span class="fc" id="L368">                            .loggedInRequestContext(loggedInContext)</span>
+<span class="fc" id="L369">                            .appointmentUuidToHasManagementUrl(appointmentUuidToHasManagementUrl)</span>
+<span class="fc" id="L370">                            .build();</span>
+
+<span class="fc" id="L372">                    var dto = new ListAppointmentDto();</span>
+<span class="fc" id="L373">                    dto.setPageActionList(buildPageActions(loggedInContext, partialDto.isDisplayBookGpAppointmentButton(), request.getLocale()));</span>
+<span class="fc" id="L374">                    dto.setPastEntryDtoList(mapToDtos(pastAppointmentList, dependency, resultLimit(request.getPastPageCount())));</span>
+<span class="fc" id="L375">                    dto.setUpcomingEntryDtoList(mapToDtos(upcomingAppointmentList, dependency, resultLimit(request.getUpcomingPageCount())));</span>
+<span class="fc" id="L376">                    dto.setPastAppointmentsCount(pastAppointmentsCount + partialDto.getPastAppointmentsCount());</span>
+<span class="fc" id="L377">                    dto.setUpcomingAppointmentsCount(upcomingAppointmentsCount + partialDto.getUpcomingAppointmentsCount());</span>
+<span class="fc bfc" id="L378" title="All 2 branches covered.">                    dto.setLoadMorePastAppointments(pastAppointmentsCount &gt; pastResultLimit);</span>
+<span class="fc bfc" id="L379" title="All 2 branches covered.">                    dto.setLoadMoreUpcomingAppointments(upcomingAppointmentsCount &gt; upcomingResultLimit);</span>
+<span class="fc" id="L380">                    dto.setLoadMorePastAppointmentsUrl(buildLoadMoreUrlDto(request.getPastPageCount() + 1, request.getUpcomingPageCount(), contextUserId,</span>
+<span class="fc" id="L381">                                    messageSource.getMessage(&quot;listAppointments.txt.load_more&quot;, null, request.getLocale())));</span>
+<span class="fc" id="L382">                    dto.setLoadMoreUpcomingAppointmentsUrl(buildLoadMoreUrlDto(request.getPastPageCount(), request.getUpcomingPageCount() + 1, contextUserId,</span>
+<span class="fc" id="L383">                                    messageSource.getMessage(&quot;listAppointments.txt.load_more&quot;, null, request.getLocale())));</span>
+<span class="fc" id="L384">                    dto.setDisplayBookGpAppointmentButton(partialDto.isDisplayBookGpAppointmentButton());</span>
+<span class="fc" id="L385">                    dto.setPatient(loggedInContext.isPatient());</span>
+<span class="fc" id="L386">                    dto.setActionResult(SUCCESS);</span>
+<span class="fc bfc" id="L387" title="All 2 branches covered.">                    dto.setResponseMeta(of(request.isFromPartner() ? Arrays.asList(messageSource.getMessage(&quot;listAppointments.txt.from_partner&quot;, null, request.getLocale())) : emptyList(),</span>
+<span class="fc" id="L388">                            emptyList(), partialDto.getActionErrors(), emptyMap()));</span>
+<span class="fc" id="L389">                    return dto;</span>
+                })
+<span class="fc" id="L391">                .orElseThrow(loggedInContextNotFoundException(&quot;list appointments&quot;)));</span>
+    }
+
+    public UIAppointmentDto createAppointmentForm(CreateAppointmentFormRequest request) {
+<span class="fc" id="L395">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;create&quot;).record(() -&gt;</span>
+<span class="fc" id="L396">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L397">                    var users = getUsers(loggedInContext);</span>
+<span class="fc" id="L398">                    List&lt;PKBPerson&gt; caregivers = patientConsentManager.getCaregivers(loggedInContext.getContextOrAccessingUserId());</span>
+<span class="fc" id="L399">                    UIAppointmentDto dto = new UIAppointmentDto(singletonList(loggedInContext.getContextOrAccessingUserId()));</span>
+<span class="fc" id="L400">                    dto.setHeading(messageSource.getMessage(&quot;listAppointments.txt.add_appointment&quot;, null, request.getLocale()));</span>
+<span class="fc" id="L401">                    dto.setCarers(mapPKBPersonToUICarerDto(caregivers, dto.getParticipantIds(), ($1, $2) -&gt; true));</span>
+<span class="fc bfc" id="L402" title="All 2 branches covered.">                    dto.setGuestlistAvailable(!caregivers.isEmpty());</span>
+<span class="fc" id="L403">                    dto.setActionResult(SUCCESS);</span>
+<span class="fc" id="L404">                    dto.setUserZoneId(users.get(loggedInContext.getAccessingUserId()).getZoneId());</span>
+<span class="fc" id="L405">                    dto.setEditPrivacy(true);</span>
+<span class="fc" id="L406">                    return dto;</span>
+                })
+<span class="fc" id="L408">                .orElseThrow(loggedInContextNotFoundException(&quot;create appointment&quot;)));</span>
+    }
+
+    public UIAppointmentViewDto viewAppointment(ViewAppointmentRequest request) {
+<span class="fc" id="L412">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;view&quot;).record(() -&gt;</span>
+<span class="fc" id="L413">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L414">                            var users = getUsers(loggedInContext);</span>
+<span class="fc" id="L415">                            PKBPerson loggedInUser = users.get(loggedInContext.getAccessingUserId());</span>
+<span class="fc" id="L416">                            boolean nhsStyle = request.nhsStyle();</span>
+
+<span class="fc" id="L418">                            return retrieveAppointment(loggedInContext, request.getUniqueId(), users.get(loggedInContext.getContextOrAccessingUserId()).getDefaultAccountId())</span>
+<span class="fc" id="L419">                                    .map(appointment -&gt; {</span>
+<span class="fc" id="L420">                                        appointment.setReturnToAppointment(true);</span>
+<span class="fc" id="L421">                                        UIAppointmentViewDto dto = new UIAppointmentViewDto(singletonList(loggedInContext.getContextOrAccessingUserId()));</span>
+
+<span class="fc" id="L423">                                        Set&lt;Long&gt; participantIds = getParticipantIdsFrom(appointment);</span>
+<span class="fc" id="L424">                                        UUID appointmentUniqueId = appointment.getBaseFields().getUniqueId();</span>
+
+<span class="fc bfc" id="L426" title="All 2 branches covered.">                                        if (appointment.getSource().getOrgId() != null) {</span>
+<span class="fc" id="L427">                                            calendarManager.updateAppointmentSpeciality(appointment);</span>
+                                        }
+
+<span class="fc" id="L430">                                        dto.setStartTimestamp(appointment.getStartTimestamp());</span>
+<span class="fc" id="L431">                                        dto.setEndTimestamp(Optional.ofNullable(appointment.getEndTimestamp()));</span>
+
+<span class="fc" id="L433">                                        List&lt;PKBPerson&gt; caregivers = getCareGivers(appointment, loggedInUser);</span>
+<span class="fc" id="L434">                                        dto.setSubject(appointment.getSubject());</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">                                        dto.setStatus(messageSource.getMessage(appointment.isCancelledAppointment() ? &quot;saveAppointment.txt.cancelled&quot; : &quot;saveAppointment.txt.dna&quot;,</span>
+<span class="fc" id="L436">                                                null, request.getLocale()));</span>
+<span class="fc" id="L437">                                        dto.setCancelled(appointment.isCancelledAppointment());</span>
+<span class="fc" id="L438">                                        dto.setDidNotAttend(appointment.isDidNotAttendAppointment());</span>
+<span class="fc" id="L439">                                        dto.setNhsStatus(messageSource.getMessage(buildNhsStatus(appointment), null, request.getLocale()));</span>
+<span class="fc" id="L440">                                        dto.setSpeciality(getOptionalStringField(appointment.getUpdatedSpeciality()));</span>
+<span class="fc" id="L441">                                        dto.setLocation(appointment.getLocation());</span>
+<span class="fc" id="L442">                                        dto.setTypeCode(getOptionalStringField(appointment.getTypeCode()));</span>
+<span class="fc" id="L443">                                        dto.setSource(getOptionalStringField(appointmentTransformer.transformAppointment(appointment).getSource().getDisplayTextFull()));</span>
+<span class="fc" id="L444">                                        dto.setDescription(getOptionalStringField(prepareMultiline(appointment.getDescription())));</span>
+<span class="fc" id="L445">                                        dto.setCarers(mapPKBPersonToUICarerDto(caregivers, participantIds, (participants, person) -&gt; participants.contains(person.getId())));</span>
+<span class="fc" id="L446">                                        dto.setParticipants(appointment.getNonPkbParticipants());</span>
+<span class="fc" id="L447">                                        dto.setGuestlistAvailable(isGuestListAvailable(appointment, participantIds, caregivers));</span>
+
+<span class="fc" id="L449">                                        dto.setAppointmentRequestConversationHref(buildConversationHref(appointment, loggedInContext));</span>
+<span class="fc" id="L450">                                        dto.setActionResult(SUCCESS);</span>
+<span class="fc" id="L451">                                        dto.setShowStatus(appointment.isNotActive());</span>
+<span class="fc" id="L452">                                        dto.setLibraryLabel(libraryLabel(nhsStyle, request.getLocale()));</span>
+
+<span class="fc" id="L454">                                        var appointmentViewMapperDependency = ImmutableAppointmentEntityDependency.&lt;AppointmentDTO&gt;builder()</span>
+<span class="fc" id="L455">                                                .locale(request.getLocale())</span>
+<span class="fc" id="L456">                                                .loggedInRequestContext(loggedInContext)</span>
+<span class="fc" id="L457">                                                .appointmentUuidToHasManagementUrl(Map.of(appointmentUniqueId, appointmentManagementPartnerService.hasManagementUrl(appointmentUniqueId)))</span>
+<span class="fc" id="L458">                                                .build();</span>
+<span class="fc" id="L459">                                        dto.setViewDto(appointmentViewMapper.entityToDto(dataPointManager.getPermission(appointment, loggedInContext), appointmentViewMapperDependency));</span>
+<span class="fc" id="L460">                                        setUrlDtos(dto, loggedInContext);</span>
+<span class="fc" id="L461">                                        dto.setNhsStyle(nhsStyle);</span>
+<span class="fc" id="L462">                                        setButtonBooleans(dto, nhsStyle);</span>
+<span class="fc" id="L463">                                        setDateAndTimeFormats(request.getLocale(), nhsStyle, dto);</span>
+<span class="fc" id="L464">                                        return dto;</span>
+<span class="fc" id="L465">                                    }).orElseGet(() -&gt; {</span>
+<span class="fc" id="L466">                                        UIAppointmentViewDto dto = new UIAppointmentViewDto();</span>
+<span class="fc" id="L467">                                        LOGGER.warn(&quot;Appointment not found by id-{}&quot;, request.getUniqueId());</span>
+<span class="fc" id="L468">                                        dto.setResponseMeta(ofActionError(messageSource.getMessage(&quot;viewAppointment.err.notFound&quot;, new UUID[]{request.getUniqueId()}, request.getLocale())));</span>
+<span class="fc" id="L469">                                        dto.setActionResult(ERROR);</span>
+<span class="fc" id="L470">                                        return dto;</span>
+                                    });
+                        })
+<span class="fc" id="L473">                        .orElseThrow(loggedInContextNotFoundException(&quot;view appointment&quot;)));</span>
+    }
+
+    private void setDateAndTimeFormats(Locale locale, boolean nhsStyle, UIAppointmentViewDto dto) {
+<span class="fc bfc" id="L477" title="All 2 branches covered.">        if (locale.equals(Locale.ENGLISH)) {</span>
+<span class="fc bfc" id="L478" title="All 2 branches covered.">            if (nhsStyle) {</span>
+<span class="fc" id="L479">                dto.setDateAndTimeFormat(NHS_EXTENDED);</span>
+<span class="fc" id="L480">                dto.setTimeFormat(NHS_TIME_AM_PM);</span>
+            } else {
+<span class="fc" id="L482">                dto.setDateAndTimeFormat(EXTENDED_12);</span>
+<span class="fc" id="L483">                dto.setTimeFormat(TIME_AM_PM);</span>
+            }
+        } else {
+<span class="fc" id="L486">            dto.setDateAndTimeFormat(EXTENDED);</span>
+<span class="fc" id="L487">            dto.setTimeFormat(TIME_HOUR_MIN);</span>
+        }
+<span class="fc" id="L489">    }</span>
+
+    private void setButtonBooleans(UIAppointmentViewDto dto, boolean nhsStyle) {
+<span class="fc" id="L492">        boolean showChangeButton = dto.getViewDto().getChangeUrl().isPresent();</span>
+<span class="fc" id="L493">        boolean showCancelButton = dto.getViewDto().getCancelUrl().isPresent();</span>
+<span class="fc" id="L494">        dto.setShowChangeButton(showChangeButton);</span>
+<span class="fc" id="L495">        dto.setShowCancelButton(showCancelButton);</span>
+<span class="pc bpc" id="L496" title="1 of 8 branches missed.">        dto.setShowButtons(showChangeButton || showCancelButton || (dto.getViewDto().getMoreNhsUrl().isPresent() &amp;&amp; nhsStyle));</span>
+<span class="fc" id="L497">    }</span>
+
+    private Optional&lt;String&gt; buildConversationHref(AppointmentDTO appointment, LoggedInEHRRequestContext loggedInContext) {
+<span class="fc bfc" id="L500" title="All 4 branches covered.">        if (appointment.getAppointmentRequestConversationId() == null || !loggedInContext.isUserInOwnAccount()) {</span>
+<span class="fc" id="L501">            return Optional.empty();</span>
+        } else {
+<span class="fc" id="L503">            return Optional.of(UrlUtil.buildHref(AUTH, &quot;showConversation&quot;,</span>
+<span class="fc" id="L504">                                    ImmutableMap.of(&quot;conversationId&quot;, appointment.getAppointmentRequestConversationId()),</span>
+<span class="fc" id="L505">                                    loggedInContext.getContextOrAccessingUserId()));</span>
+        }
+    }
+
+    private String buildNhsStatus(AppointmentDTO appointment) {
+<span class="fc bfc" id="L510" title="All 2 branches covered.">        if (appointment.isDidNotAttendAppointment()) {</span>
+<span class="fc" id="L511">            return &quot;saveAppointment.txt.dna&quot;;</span>
+<span class="fc bfc" id="L512" title="All 2 branches covered.">        } else if (appointment.isCancelledAppointment()) {</span>
+<span class="fc" id="L513">            return &quot;saveAppointment.txt.cancelled&quot;;</span>
+        } else {
+<span class="fc" id="L515">            return &quot;viewAppointment.txt.booked&quot;;</span>
+        }
+    }
+
+    public AppointmentActionsDto appointmentActions(ViewAppointmentRequest request) {
+<span class="fc" id="L520">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;actions&quot;).record(() -&gt;</span>
+<span class="fc" id="L521">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L522">                            var users = getUsers(loggedInContext);</span>
+<span class="fc" id="L523">                            return retrieveAppointment(loggedInContext, request.getUniqueId(), users.get(loggedInContext.getContextOrAccessingUserId()).getDefaultAccountId())</span>
+<span class="fc" id="L524">                                    .map(appointment -&gt; {</span>
+<span class="fc" id="L525">                                        appointment.setReturnToAppointment(true);</span>
+<span class="fc" id="L526">                                        UUID appointmentUniqueId = appointment.getBaseFields().getUniqueId();</span>
+<span class="fc" id="L527">                                        var appointmentDependency = ImmutableAppointmentEntityDependency.&lt;AppointmentDTO&gt;builder()</span>
+<span class="fc" id="L528">                                                .locale(request.getLocale())</span>
+<span class="fc" id="L529">                                                .loggedInRequestContext(loggedInContext)</span>
+<span class="fc" id="L530">                                                .appointmentUuidToHasManagementUrl(Map.of(appointmentUniqueId, appointmentManagementPartnerService.hasManagementUrl(appointmentUniqueId)))</span>
+<span class="fc" id="L531">                                                .build();</span>
+<span class="fc" id="L532">                                        return appointmentActionsMapper.entityToDto(dataPointManager.getPermission(appointment, loggedInContext), appointmentDependency);</span>
+                                    })
+<span class="fc" id="L534">                                    .orElseThrow(appointmentNotFoundException(request.getUniqueId()));</span>
+                        })
+<span class="fc" id="L536">                        .orElseThrow(loggedInContextNotFoundException(&quot;show appointment actions&quot;)));</span>
+    }
+
+    public UIAppointmentViewDto viewEmisAppointment(ViewEmisAppointmentRequest request) {
+<span class="fc" id="L540">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;viewEmis&quot;).record(() -&gt;</span>
+<span class="fc" id="L541">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L542">                    var dto = new UIAppointmentViewDto();</span>
+<span class="fc" id="L543">                    EmisContextHolder emisContextHolder = getEmisContextHolder(loggedInContext);</span>
+<span class="fc" id="L544">                            return emisAppointmentManager.retrieveAppointments(emisContextHolder, null, null)</span>
+<span class="fc" id="L545">                            .map(appointments -&gt; {</span>
+<span class="fc" id="L546">                                appointments.stream()</span>
+<span class="fc bfc" id="L547" title="All 2 branches covered.">                                        .filter(emisAppointment -&gt; emisAppointment.getSlotId() == request.getEmisSlotId())</span>
+<span class="fc" id="L548">                                        .findFirst()</span>
+<span class="fc" id="L549">                                        .ifPresentOrElse(emisAppointment -&gt; {</span>
+<span class="fc" id="L550">                                            boolean nhsStyle = request.nhsStyle();</span>
+<span class="pc bpc" id="L551" title="1 of 2 branches missed.">                                            EmisMessageHelper.AccessType accessType = loggedInContext.isUserInOwnAccount() ? PRIMARY : VIEWING;</span>
+<span class="fc" id="L552">                                            String practiceName = emisMessageHelper.getPracticeNameForPersonId(request.getLocale(), emisContextHolder);</span>
+<span class="fc" id="L553">                                            AppointmentDTO appointment = emisMessageHelper.convertToAppointmentDTO(emisAppointment, dateTimeService.now(), PrivacyFlag.GENERAL,</span>
+                                                    Route.EMIS_PFS, accessType, practiceName);
+
+<span class="fc" id="L556">                                            dto.setSubject(appointment.getSubject());</span>
+<span class="fc" id="L557">                                            dto.setStartTimestamp(appointment.getStartTimestamp());</span>
+<span class="fc" id="L558">                                            dto.setEndTimestamp(Optional.ofNullable(appointment.getEndTimestamp()));</span>
+<span class="fc" id="L559">                                            dto.setSource(getOptionalStringField(emisMessageHelper.getEmisAppointmentSourceText(request.getLocale(), emisContextHolder, emisAppointment)));</span>
+<span class="fc" id="L560">                                            dto.setSpeciality(getOptionalStringField(appointment.getUpdatedSpeciality()));</span>
+<span class="fc" id="L561">                                            dto.setLocation(appointment.getLocation());</span>
+<span class="fc" id="L562">                                            dto.setTypeCode(getOptionalStringField(appointment.getTypeCode()));</span>
+<span class="fc" id="L563">                                            dto.setDescription(getOptionalStringField(prepareMultiline(appointment.getDescription())));</span>
+<span class="fc" id="L564">                                            dto.setParticipants(appointment.getNonPkbParticipants());</span>
+<span class="fc" id="L565">                                            dto.setGuestlistAvailable(appointment.isAttendedByNonPKBParticipants());</span>
+<span class="fc" id="L566">                                            dto.setActionResult(SUCCESS);</span>
+<span class="fc" id="L567">                                            dto.setShowStatus(true);</span>
+<span class="fc" id="L568">                                            dto.setStatus(messageSource.getMessage(&quot;viewAppointment.txt.active&quot;, null, request.getLocale()));</span>
+<span class="fc" id="L569">                                            dto.setLibraryLabel(libraryLabel(nhsStyle, request.getLocale()));</span>
+<span class="fc" id="L570">                                            setDateAndTimeFormats(request.getLocale(), nhsStyle, dto);</span>
+<span class="fc" id="L571">                                            var dependency = ImmutableAppointmentEntityDependency.&lt;AppointmentDTO&gt;builder()</span>
+<span class="fc" id="L572">                                                    .locale(request.getLocale())</span>
+<span class="fc" id="L573">                                                    .loggedInRequestContext(loggedInContext)</span>
+<span class="fc" id="L574">                                                    .appointmentUuidToHasManagementUrl(emptyMap())</span>
+<span class="fc" id="L575">                                                    .build();</span>
+<span class="fc" id="L576">                                            dto.setViewDto(appointmentViewMapper.entityToDto(dataPointManager.getPermission(appointment, loggedInContext), dependency));</span>
+<span class="fc" id="L577">                                            setUrlDtos(dto, loggedInContext);</span>
+<span class="fc" id="L578">                                            setEmisButtonBooleans(dto);</span>
+<span class="fc" id="L579">                                        }, () -&gt; {</span>
+<span class="fc" id="L580">                                            dto.setResponseMeta(ofActionError(messageSource.getMessage(&quot;err.emis.appt.pkb.view.issue&quot;, null, request.getLocale())));</span>
+<span class="fc" id="L581">                                            dto.setActionResult(CANCEL);</span>
+<span class="fc" id="L582">                                        });</span>
+<span class="fc" id="L583">                                return dto;</span>
+                            })
+<span class="fc" id="L585">                            .getOrElseGet(error -&gt; {</span>
+                                // Only possible if EMIS down or user session expired
+<span class="nc" id="L587">                                LOGGER.error(&quot;Failed to get appointment for emisSlotId-{}&quot;,request.getEmisSlotId());</span>
+<span class="nc" id="L588">                                dto.setResponseMeta(ofActionError(emisMessageHelper.retrieveAppointmentsError(error, request.getLocale(), emisContextHolder)));</span>
+<span class="nc" id="L589">                                dto.setActionResult(SUCCESS);</span>
+<span class="nc" id="L590">                                return dto;</span>
+                            });
+                })
+<span class="fc" id="L593">                .orElseThrow(loggedInContextNotFoundException(&quot;view EMIS appointment&quot;)));</span>
+    }
+
+    private void setEmisButtonBooleans(UIAppointmentViewDto dto) {
+<span class="fc" id="L597">        boolean cancelIsPresent = dto.getViewDto().getCancelUrl().isPresent();</span>
+<span class="fc" id="L598">        dto.setShowChangeButton(false);</span>
+<span class="fc" id="L599">        dto.setShowCancelButton(cancelIsPresent);</span>
+<span class="fc" id="L600">        dto.setShowButtons(cancelIsPresent);</span>
+<span class="fc" id="L601">    }</span>
+
+    public UIAppointmentDto editAppointment(EditAppointmentRequest request) {
+<span class="fc" id="L604">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;edit&quot;).record(() -&gt;</span>
+<span class="fc" id="L605">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L606">                    var users = getUsers(loggedInContext);</span>
+<span class="fc" id="L607">                    PKBPerson loggedInUser = users.get(loggedInContext.getAccessingUserId());</span>
+<span class="fc" id="L608">                    return retrieveAppointment(loggedInContext, request.getUniqueId(), users.get(loggedInContext.getContextOrAccessingUserId()).getDefaultAccountId())</span>
+<span class="fc" id="L609">                            .map(appointment -&gt; {</span>
+<span class="fc" id="L610">                                List&lt;PKBPerson&gt; caregivers = patientConsentManager.getCaregivers(loggedInContext.getContextOrAccessingUserId());</span>
+<span class="fc" id="L611">                                UIAppointmentDto dto = new UIAppointmentDto();</span>
+<span class="fc bfc" id="L612" title="All 2 branches covered.">                                if (hasNotPermissionsToEditDatapoint(appointment, loggedInContext)) {</span>
+<span class="fc" id="L613">                                    LOGGER.error(&quot;Logged in user id [{}] can't edit data point [{}]&quot;, loggedInContext.getMaybeAccessingUserId(), appointment.getId());</span>
+<span class="fc" id="L614">                                    dto.setResponseMeta(ofActionError(messageSource.getMessage(&quot;saveDatapoint.txt.noAccess&quot;, null, request.getLocale())));</span>
+<span class="fc" id="L615">                                    dto.setActionResult(ERROR);</span>
+<span class="fc" id="L616">                                    return dto;</span>
+                                }
+
+<span class="fc" id="L619">                                Set&lt;Long&gt; participantIds = getParticipantIdsFrom(appointment);</span>
+
+<span class="fc" id="L621">                                DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern(messageSource.getMessage(&quot;global.format.date_input&quot;, null, request.getLocale()));</span>
+<span class="fc" id="L622">                                DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern(messageSource.getMessage(&quot;global.format.time_output&quot;, null, request.getLocale()));</span>
+
+<span class="fc" id="L624">                                LocalDateTime localDateTime = LocalDateTime.ofInstant(appointment.getStartTimestamp(), Objects.requireNonNull(loggedInUser.getZoneId()));</span>
+<span class="fc" id="L625">                                dto.setStartDate(localDateTime.format(dateFormatter));</span>
+<span class="fc" id="L626">                                dto.setStartTime(localDateTime.format(timeFormatter));</span>
+
+<span class="fc bfc" id="L628" title="All 2 branches covered.">                                if (appointment.getEndTimestamp() != null) {</span>
+<span class="fc" id="L629">                                    localDateTime = LocalDateTime.ofInstant(appointment.getEndTimestamp(), loggedInUser.getZoneId());</span>
+<span class="fc" id="L630">                                    dto.setEndDate(localDateTime.format(dateFormatter));</span>
+<span class="fc" id="L631">                                    dto.setEndTime(localDateTime.format(timeFormatter));</span>
+                                }
+
+<span class="fc" id="L634">                                dto.setHeading(messageSource.getMessage(&quot;saveAppointment.txt.edit_appointment&quot;,null, request.getLocale()));</span>
+<span class="fc" id="L635">                                dto.setSubject(appointment.getSubject());</span>
+<span class="fc" id="L636">                                dto.setSaved(true);</span>
+<span class="fc bfc" id="L637" title="All 2 branches covered.">                                dto.setStatus(messageSource.getMessage(appointment.isCancelledAppointment() ? &quot;saveAppointment.txt.cancelled&quot; : &quot;saveAppointment.txt.dna&quot;,</span>
+<span class="fc" id="L638">                                        null, request.getLocale()));</span>
+<span class="fc" id="L639">                                dto.setCancelled(appointment.isCancelledAppointment());</span>
+<span class="fc" id="L640">                                dto.setDidNotAttend(appointment.isDidNotAttendAppointment());</span>
+<span class="fc" id="L641">                                dto.setLocation(appointment.getLocation());</span>
+<span class="fc" id="L642">                                dto.setTypeCode(getOptionalStringField(appointment.getTypeCode()));</span>
+<span class="fc" id="L643">                                dto.setUserZoneId(loggedInUser.getZoneId());</span>
+<span class="fc" id="L644">                                dto.setDescription(getOptionalStringField(prepareMultiline(appointment.getDescription())));</span>
+<span class="fc" id="L645">                                dto.setCarers(mapPKBPersonToUICarerDto(caregivers, participantIds, ($1, $2) -&gt; true).stream()</span>
+<span class="fc" id="L646">                                        .map(carerDto -&gt; ImmutableUIAppointmentCarerDto.copyOf(carerDto)</span>
+<span class="fc" id="L647">                                                .withChecked(participantIds.contains(carerDto.getId()))</span>
+<span class="fc" id="L648">                                        ).collect(toList()));</span>
+<span class="fc bfc" id="L649" title="All 2 branches covered.">                                dto.setGuestlistAvailable(!caregivers.isEmpty());</span>
+<span class="fc" id="L650">                                dto.setEditPrivacy(false);</span>
+<span class="fc" id="L651">                                dto.setActionResult(SUCCESS);</span>
+<span class="fc" id="L652">                                return dto;</span>
+<span class="fc" id="L653">                            }).orElseGet(() -&gt; {UIAppointmentDto dto = new UIAppointmentDto();</span>
+<span class="fc" id="L654">                                LOGGER.warn(&quot;Appointment not found by id-{}&quot;,request.getUniqueId());</span>
+<span class="fc" id="L655">                                dto.setResponseMeta(ofActionError(messageSource.getMessage(&quot;editAppointment.err.notFound&quot;, new UUID[]{request.getUniqueId()}, request.getLocale())));</span>
+<span class="fc" id="L656">                                dto.setActionResult(ERROR);</span>
+<span class="fc" id="L657">                                return dto;</span>
+                            });
+                })
+<span class="fc" id="L660">                .orElseThrow(loggedInContextNotFoundException(&quot;edit appointment&quot;)));</span>
+    }
+
+    public UIAppointmentDto saveAppointment(SaveAppointmentRequest request) {
+<span class="fc" id="L664">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;save&quot;).record(() -&gt;</span>
+<span class="fc" id="L665">                request.getEHRRequestContext().getLoggedInContext()</span>
+<span class="fc" id="L666">                .map(loggedInContext -&gt; {</span>
+<span class="fc" id="L667">                    var users = getUsers(loggedInContext);</span>
+<span class="fc" id="L668">                    PKBPerson loggedInUser = users.get(loggedInContext.getAccessingUserId());</span>
+<span class="fc" id="L669">                    PKBPerson contextOrAccessingUser = users.get(loggedInContext.getContextOrAccessingUserId());</span>
+
+<span class="fc" id="L671">                    long patientId = loggedInContext.getContextOrAccessingUserId();</span>
+<span class="fc" id="L672">                    UIAppointmentDto dto = request.getDto();</span>
+<span class="fc bfc" id="L673" title="All 2 branches covered.">                    dto.setHeading(messageSource.getMessage(request.getUniqueId().isPresent() ? &quot;saveAppointment.txt.edit_appointment&quot; : &quot;saveAppointment.txt.add_appointment&quot;,</span>
+<span class="fc" id="L674">                            null, request.getLocale()));</span>
+<span class="fc" id="L675">                    dto.setUserZoneId(loggedInUser.getZoneId());</span>
+<span class="fc" id="L676">                    dto.setEditPrivacy(request.getUniqueId().isEmpty());</span>
+
+<span class="pc bpc" id="L678" title="1 of 2 branches missed.">                    Set&lt;Long&gt; participantIds = new HashSet&lt;&gt;(dto.getParticipantIds() != null ? dto.getParticipantIds() : Set.of(patientId));</span>
+<span class="fc" id="L679">                    participantIds.add(patientId);</span>
+
+<span class="fc" id="L681">                    SourceDetails source = new SourceDetails(loggedInContext);</span>
+<span class="fc" id="L682">                    AppointmentDTO appointment = request.getUniqueId()</span>
+<span class="fc" id="L683">                            .flatMap(uniqueId -&gt; retrieveAppointment(loggedInContext, uniqueId, contextOrAccessingUser.getDefaultAccountId()))</span>
+<span class="fc" id="L684">                            .orElseGet(() -&gt; new AppointmentDTO(source));</span>
+<span class="fc" id="L685">                    DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern(messageSource.getMessage(&quot;global.format.date_input&quot;, null, request.getLocale()))</span>
+<span class="fc" id="L686">                            .withZone(loggedInUser.getZoneId());</span>
+<span class="fc" id="L687">                    DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern(messageSource.getMessage(&quot;format.dateInputWithHHmm&quot;, null, request.getLocale()))</span>
+<span class="fc" id="L688">                            .withZone(loggedInUser.getZoneId());</span>
+<span class="fc" id="L689">                    DateTimeFormatter timeFormatter = DateTimeFormatter.ofPattern(messageSource.getMessage(&quot;global.format.time_output&quot;, null, request.getLocale()))</span>
+<span class="fc" id="L690">                            .withZone(loggedInUser.getZoneId());</span>
+
+<span class="fc" id="L692">                    String startDate = trimToEmpty(request.getDto().getStartDate());</span>
+<span class="fc" id="L693">                    String startTime = trimToEmpty(request.getDto().getStartTime());</span>
+<span class="fc" id="L694">                    parseDateAndTime(startDate, startTime, dateFormatter, timeFormatter, dateTimeFormatter, &quot;dto.start&quot;, request.getLocale())</span>
+<span class="fc" id="L695">                            .peekLeft(dto::setResponseMeta)</span>
+<span class="fc" id="L696">                            .peek(appointment::setStartTimestamp);</span>
+
+<span class="fc bfc" id="L698" title="All 4 branches covered.">                    if (StringUtils.isNotEmpty(dto.getEndDate()) &amp;&amp; StringUtils.isNotEmpty(dto.getEndTime())) {</span>
+<span class="fc" id="L699">                        String endDate = trimToEmpty(request.getDto().getEndDate());</span>
+<span class="fc" id="L700">                        String endTime = trimToEmpty(request.getDto().getEndTime());</span>
+<span class="fc" id="L701">                        parseDateAndTime(endDate, endTime, dateFormatter, timeFormatter, dateTimeFormatter,&quot;dto.end&quot;, request.getLocale())</span>
+<span class="pc" id="L702">                                .peekLeft(errors -&gt; dto.getResponseMeta().merge(errors))</span>
+<span class="fc" id="L703">                                .peek(appointment::setEndTimestamp);</span>
+<span class="fc bfc" id="L704" title="All 2 branches covered.">                    } else if (isNotBlank(dto.getEndTime())) {</span>
+<span class="fc" id="L705">                        dto.getResponseMeta().addFieldError(&quot;dto.endDate&quot;, messageSource.getMessage(&quot;saveAppointment.err.endTime_with_no_date&quot;, null, request.getLocale()));</span>
+<span class="fc bfc" id="L706" title="All 2 branches covered.">                    } else if (isNotBlank(dto.getEndDate())) {</span>
+<span class="fc" id="L707">                        dto.getResponseMeta().addFieldError(&quot;dto.endTime&quot;, messageSource.getMessage(&quot;saveAppointment.err.endDate_with_no_time&quot;, null, request.getLocale()));</span>
+                    }
+
+<span class="fc" id="L710">                    dto.setNhsStyle(request.nhsStyle());</span>
+
+<span class="fc bfc" id="L712" title="All 2 branches covered.">                    if (!dto.getResponseMeta().getFieldErrors().isEmpty()) {</span>
+<span class="fc" id="L713">                        dto.setActionResult(INPUT);</span>
+<span class="fc" id="L714">                        return dto;</span>
+                    }
+
+<span class="fc" id="L717">                    appointment.setSubject(dto.getSubject());</span>
+<span class="fc" id="L718">                    appointment.setLocation(dto.getLocation());</span>
+<span class="fc" id="L719">                    dto.getTypeCode().ifPresent(appointment::setTypeCode);</span>
+<span class="fc" id="L720">                    dto.getDescription().ifPresent(appointment::setDescription);</span>
+<span class="fc" id="L721">                    appointment.setPersonId(String.valueOf(patientId));</span>
+<span class="fc" id="L722">                    appointment.setPatientId(String.valueOf(patientId));</span>
+
+<span class="fc" id="L724">                    request.getUniqueId().ifPresentOrElse(uniqueId -&gt; {</span>
+<span class="pc bpc" id="L725" title="1 of 2 branches missed.">                        AppointmentStatus status = dto.getStatus() == null ? ACTIVE : AppointmentStatus.valueOf(dto.getStatus());</span>
+<span class="fc" id="L726">                        appointment.setAppointmentRequestList(mergeRequestsAndNotify(appointment, participantIds, loggedInContext, request.getActivityUrl()));</span>
+<span class="fc" id="L727">                        appointment.setStatus(status);</span>
+<span class="fc" id="L728">                        calendarManager.updateAppointment(loggedInContext, appointment, contextOrAccessingUser.getDefaultAccountId());</span>
+<span class="fc" id="L729">                    }, () -&gt; {</span>
+<span class="fc" id="L730">                        participantIds.forEach(participantId -&gt; {</span>
+<span class="fc" id="L731">                            AppointmentRequestDTO req = new AppointmentRequestDTO(source);</span>
+<span class="fc" id="L732">                            req.setParticipantId(participantId.toString());</span>
+<span class="fc" id="L733">                            req.setCommonId(uuidProvider.randomUUID().toString());</span>
+<span class="fc" id="L734">                            appointment.getAppointmentRequestList().add(req);</span>
+<span class="fc" id="L735">                        });</span>
+<span class="fc" id="L736">                        request.getPrivacy().ifPresent(privacy -&gt; appointment.getBaseFields().setPrivacyFlag(PrivacyFlag.valueOf(privacy)));</span>
+<span class="fc" id="L737">                        appointment.setCommonId(uuidProvider.randomUUID().toString());</span>
+<span class="fc" id="L738">                        UUID uniqueId = calendarManager.transactional(() -&gt;</span>
+<span class="fc" id="L739">                            calendarManager.createAppointment(source, loggedInContext, appointment, contextOrAccessingUser.getDefaultAccountId())._2()</span>
+                        );
+
+<span class="fc" id="L742">                        List&lt;Long&gt; invitedCarerIds = getInvitedCarerIds(patientId, appointment, participantIds, primaryEmailContactManager);</span>
+<span class="fc" id="L743">                        participantIds.stream()</span>
+<span class="fc" id="L744">                                .filter(Objects::nonNull)</span>
+<span class="fc bfc" id="L745" title="All 2 branches covered.">                                .filter(id -&gt; !invitedCarerIds.contains(id))</span>
+<span class="fc" id="L746">                                .forEach(id -&gt; {</span>
+<span class="fc" id="L747">                                    Either&lt;MalformedURLException, Activity&gt; activityOrError = getActivity(INVITED_TO_APPOINTMENT,</span>
+<span class="fc" id="L748">                                            appointment.getStartTimestamp(),</span>
+                                            id,
+                                            loggedInContext,
+<span class="fc" id="L751">                                            request.getActivityUrl(),</span>
+                                            uniqueId);
+<span class="fc bfc" id="L753" title="All 2 branches covered.">                                    if (id.equals(patientId)) {</span>
+<span class="fc bfc" id="L754" title="All 4 branches covered.">                                        logActivity(activityOrError, !id.equals(loggedInContext.getAccessingUserId()) || !invitedCarerIds.isEmpty(),</span>
+<span class="fc" id="L755">                                                loggedInContext, appointment, invitedCarerIds.toArray(new Long[0]));</span>
+                                    } else {
+<span class="pc bpc" id="L757" title="1 of 2 branches missed.">                                        logActivity(activityOrError, !id.equals(loggedInContext.getAccessingUserId()), loggedInContext, appointment);</span>
+                                    }
+<span class="fc" id="L759">                                });</span>
+<span class="fc" id="L760">                    });</span>
+
+<span class="fc bfc" id="L762" title="All 2 branches covered.">                    dto.setActionResult(request.getReturnToAppointment() ? RETURN_TO_APPOINTMENT : SUCCESS);</span>
+
+<span class="fc" id="L764">                    return dto;</span>
+                })
+<span class="fc" id="L766">                .orElseThrow(loggedInContextNotFoundException(&quot;save appointment&quot;)));</span>
+    }
+
+    public UIIntroduceAppointmentRequestDto introduceAppointmentRequest(IntroduceAppointmentRequestRequest request) {
+<span class="fc" id="L770">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;introduceAppointmentRequest&quot;).record(() -&gt;</span>
+<span class="fc" id="L771">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L772">                    Map&lt;Long, PKBPerson&gt; users = getUsers(loggedInContext);</span>
+<span class="fc" id="L773">                    PKBPerson loggedInUser = users.get(loggedInContext.getAccessingUserId());</span>
+<span class="fc" id="L774">                    PKBPerson contextOrAccessingUser = users.get(loggedInContext.getContextOrAccessingUserId());</span>
+<span class="fc" id="L775">                    long contextOrAccessingUserId = contextOrAccessingUser.getId();</span>
+
+<span class="fc" id="L777">                    return retrieveAppointment(loggedInContext, request.getUniqueId(), contextOrAccessingUser.getDefaultAccountId())</span>
+<span class="fc" id="L778">                            .map(appointment -&gt; {</span>
+<span class="fc" id="L779">                                UIIntroduceAppointmentRequestDto dto = new UIIntroduceAppointmentRequestDto();</span>
+<span class="fc" id="L780">                                dto.setUiAppointmentDetailsDto(buildUiAppointmentDetailsDto(appointment, loggedInUser, request.getLocale(), request.nhsStyle()));</span>
+<span class="fc" id="L781">                                dto.setImportantText(buildImportantText(request, contextOrAccessingUserId));</span>
+<span class="fc" id="L782">                                dto.setStartUrl(buildStartUrl(request, contextOrAccessingUserId));</span>
+<span class="fc" id="L783">                                dto.setRequestType(request.requestType());</span>
+<span class="fc" id="L784">                                dto.setActionResult(SUCCESS);</span>
+<span class="fc" id="L785">                                return dto;</span>
+<span class="fc" id="L786">                            }).orElseThrow(appointmentNotFoundException(request.getUniqueId()));</span>
+<span class="fc" id="L787">                }).orElseThrow(loggedInContextNotFoundException(&quot;introduce appointment request&quot;)));</span>
+    }
+
+    @NotNull
+    private UIAppointmentDetailsDto buildUiAppointmentDetailsDto(AppointmentDTO appointment, PKBPerson loggedInUser, Locale locale, boolean nhsStyle) {
+<span class="fc" id="L792">        UIAppointmentDetailsDto uiAppointmentDetailsDto = new UIAppointmentDetailsDto();</span>
+<span class="fc" id="L793">        List&lt;PKBPerson&gt; caregivers = getCareGivers(appointment, loggedInUser);</span>
+<span class="fc" id="L794">        Set&lt;Long&gt; participantIds = getParticipantIdsFrom(appointment);</span>
+
+<span class="fc" id="L796">        uiAppointmentDetailsDto.setSubject(appointment.getSubject());</span>
+<span class="fc" id="L797">        uiAppointmentDetailsDto.setStartTimestamp(appointment.getStartTimestamp());</span>
+<span class="fc" id="L798">        uiAppointmentDetailsDto.setLocation(appointment.getLocation());</span>
+<span class="fc" id="L799">        uiAppointmentDetailsDto.setCarers(mapPKBPersonToUICarerDto(caregivers, participantIds, (participants, person) -&gt; participants.contains(person.getId())));</span>
+<span class="fc" id="L800">        uiAppointmentDetailsDto.setParticipants(appointment.getNonPkbParticipants());</span>
+<span class="fc" id="L801">        uiAppointmentDetailsDto.setGuestlistAvailable(isGuestListAvailable(appointment, participantIds, caregivers));</span>
+<span class="fc" id="L802">        uiAppointmentDetailsDto.setAttendeesLabel(attendeesLabel(participantIds,appointment.getNonPkbParticipants(), locale));</span>
+<span class="pc bpc" id="L803" title="1 of 4 branches missed.">        uiAppointmentDetailsDto.setTimeFormat(locale.equals(Locale.ENGLISH) ? (nhsStyle ? NHS_TIME_AM_PM : TIME_AM_PM) : TIME_HOUR_MIN);</span>
+
+<span class="fc" id="L805">        return uiAppointmentDetailsDto;</span>
+    }
+
+    private UrlDto buildStartUrl(IntroduceAppointmentRequestRequest request, long contextOrAccessingUserId) {
+<span class="fc" id="L809">        return buildAppointmentRequestUrlDto(request, &quot;composeAppointmentRequest&quot;,</span>
+                &quot;introduceAppointmentRequest.txt.start&quot;, contextOrAccessingUserId);
+    }
+
+    private String buildImportantText(IntroduceAppointmentRequestRequest request, long contextUserId) {
+<span class="pc bpc" id="L814" title="1 of 3 branches missed.">        switch (request.requestType()) {</span>
+            case RESCHEDULE:
+<span class="fc" id="L816">                return messageSource.getMessage(&quot;introduceAppointmentRequest.txt.reschedule.cancel_instead&quot;,</span>
+<span class="fc" id="L817">                        new String[]{ buildIntroduceLink(request, contextUserId, AppointmentRequestType.CANCEL) },</span>
+<span class="fc" id="L818">                        request.getLocale());</span>
+            case CANCEL:
+<span class="fc" id="L820">                return messageSource.getMessage(&quot;introduceAppointmentRequest.txt.cancel.reschedule_instead&quot;,</span>
+<span class="fc" id="L821">                        new String[]{ buildIntroduceLink(request, contextUserId, RESCHEDULE )},</span>
+<span class="fc" id="L822">                        request.getLocale());</span>
+            default:
+<span class="nc" id="L824">                throw operationNotImplementedException(request.requestType()).get();</span>
+        }
+    }
+
+    private String buildSubmitText(ReviewAppointmentRequestMessageRequest request) {
+<span class="pc bpc" id="L829" title="1 of 3 branches missed.">        switch (request.requestType()) {</span>
+            case RESCHEDULE:
+<span class="fc" id="L831">                return messageSource.getMessage(&quot;reviewAppointmentRequest.txt.submit_request&quot;,</span>
+<span class="fc" id="L832">                        null, request.getLocale());</span>
+            case CANCEL:
+<span class="fc" id="L834">                return messageSource.getMessage(&quot;reviewAppointmentRequest.txt.cancel.request&quot;,</span>
+<span class="fc" id="L835">                        null, request.getLocale());</span>
+            default:
+<span class="nc" id="L837">                throw operationNotImplementedException(request.requestType()).get();</span>
+        }
+    }
+
+    private String buildIntroduceLink(IntroduceAppointmentRequestRequest request, long contextUserId, AppointmentRequestType requestType) {
+<span class="fc" id="L842">        return buildHref(DIARY, &quot;introduceAppointmentRequest&quot;,</span>
+                new ImmutableMap.Builder&lt;String, String&gt;()
+<span class="fc" id="L844">                        .put(UNIQUE_ID, request.getUniqueId().toString())</span>
+<span class="fc" id="L845">                        .put(REQUEST_TYPE, requestType.toString().toLowerCase())</span>
+<span class="fc" id="L846">                        .put(&quot;tab&quot;, &quot;diary&quot;)</span>
+<span class="fc" id="L847">                        .put(&quot;subTab&quot;, &quot;calendar&quot;)</span>
+<span class="fc" id="L848">                        .build(),</span>
+<span class="fc" id="L849">                contextUserId);</span>
+    }
+
+
+    public UIComposeAppointmentRequestDto composeAppointmentRequestMessage(ComposeAppointmentRequestMessageRequest request) {
+<span class="fc" id="L854">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;composeAppointmentRequest&quot;).record(() -&gt;</span>
+<span class="fc" id="L855">                request.getEHRRequestContext().getLoggedInContext()</span>
+<span class="fc" id="L856">                        .map(loggedInContext -&gt; {</span>
+<span class="fc" id="L857">                            var users = getUsers(loggedInContext);</span>
+<span class="fc" id="L858">                            PKBPerson loggedInUser = users.get(loggedInContext.getAccessingUserId());</span>
+<span class="fc" id="L859">                            PKBPerson contextOrAccessingUser = users.get(loggedInContext.getContextOrAccessingUserId());</span>
+
+<span class="fc" id="L861">                            return retrieveAppointment(loggedInContext, request.getUniqueId(), contextOrAccessingUser.getDefaultAccountId())</span>
+<span class="fc" id="L862">                                    .map(appointment -&gt; {</span>
+<span class="fc" id="L863">                                        UIComposeAppointmentRequestDto dto = request.dto().orElse(new UIComposeAppointmentRequestDto());</span>
+<span class="fc" id="L864">                                        ZoneId zoneId = defaultIfNull(loggedInUser.getZoneId(), Constants.APPLICATION_TZ);</span>
+
+<span class="fc" id="L866">                                        dto.setMessageSubject(buildMessageSubject(appointment, request, zoneId));</span>
+<span class="fc" id="L867">                                        dto.setContinueUrl(buildContinueUrl(request, contextOrAccessingUser.getId()));</span>
+<span class="fc" id="L868">                                        dto.setRequestType(request.requestType());</span>
+
+<span class="fc bfc" id="L870" title="All 2 branches covered.">                                        if (phrConfig.isAppointmentMessagingEnabled()) {</span>
+<span class="fc" id="L871">                                            Optional.ofNullable(appointment.getSource().getOrgId()).ifPresentOrElse(orgId -&gt; {</span>
+<span class="fc" id="L872">                                                appointmentMessagingSettingService.getAppointmentMessaging(orgId).ifPresentOrElse(messagingSettings -&gt; {</span>
+<span class="fc" id="L873">                                                    messagingSettings.getAppointmentMessagingTeamId().ifPresentOrElse(messagingTeamId -&gt; {</span>
+                                                        try {
+<span class="fc" id="L875">                                                            participantSelectorService</span>
+<span class="fc" id="L876">                                                                    .setupSingleTeamSelector((LoggedInEHRRequestContext) request.getEHRRequestContext(),</span>
+                                                                            messagingTeamId,
+<span class="fc" id="L878">                                                                            DateTimeFormatter.ofPattern(&quot;dd MMM yy&quot;).withLocale(request.getLocale()).withZone(zoneId))</span>
+<span class="fc" id="L879">                                                                    .ifPresentOrElse(dto::setParticipantSelectorParams,</span>
+                                                                            () -&gt; {
+<span class="fc" id="L881">                                                                                LOGGER.warn(&quot;AppointmentMessaging is turned off&quot;);</span>
+<span class="fc" id="L882">                                                                                dto.setResponseMeta(ofActionError(messageSource.getMessage(&quot;err.appointment.messaging.turned.off&quot;, null, request.getLocale())));</span>
+<span class="fc" id="L883">                                                                                dto.setActionResult(ERROR);</span>
+<span class="fc" id="L884">                                                                            });</span>
+<span class="nc" id="L885">                                                        } catch (Exception e) {</span>
+<span class="nc" id="L886">                                                            LOGGER.error(&quot;Unable to load accepted clinicians for {}&quot;, loggedInUser.getId(), e);</span>
+<span class="nc" id="L887">                                                            dto.setResponseMeta(ofActionError(messageSource.getMessage(&quot;error.load.accepted.clinicians&quot;, null, request.getLocale())));</span>
+<span class="nc" id="L888">                                                            dto.setActionResult(ERROR);</span>
+<span class="fc" id="L889">                                                        }</span>
+<span class="fc" id="L890">                                                    }, () -&gt; {</span>
+<span class="nc" id="L891">                                                        LOGGER.warn(&quot;AppointmentMessaging is turned off&quot;);</span>
+<span class="nc" id="L892">                                                        dto.setResponseMeta(ofActionError(messageSource.getMessage(&quot;err.appointment.messaging.turned.off&quot;, null, request.getLocale())));</span>
+<span class="nc" id="L893">                                                        dto.setActionResult(ERROR);</span>
+<span class="nc" id="L894">                                                    });</span>
+<span class="fc" id="L895">                                                }, () -&gt; {</span>
+<span class="nc" id="L896">                                                    throw new IllegalStateException(&quot;No appointment settings record&quot;);</span>
+                                                });
+<span class="fc" id="L898">                                            }, () -&gt; {</span>
+<span class="nc" id="L899">                                                throw new IllegalStateException(&quot;Appointment does not have a source org&quot;);</span>
+                                            });
+                                        } else {
+<span class="fc" id="L902">                                            LOGGER.warn(&quot;AppointmentMessaging is turned off&quot;);</span>
+<span class="fc" id="L903">                                            dto.setResponseMeta(ofActionError(messageSource.getMessage(&quot;err.appointment.messaging.turned.off&quot;, null, request.getLocale())));</span>
+<span class="fc" id="L904">                                            dto.setActionResult(ERROR);</span>
+                                        }
+
+<span class="fc bfc" id="L907" title="All 2 branches covered.">                                        if (!dto.getResponseMeta().hasErrors()) {</span>
+<span class="fc" id="L908">                                            dto.setActionResult(SUCCESS);</span>
+                                        }
+<span class="fc" id="L910">                                        return dto;</span>
+<span class="fc" id="L911">                                    }).orElseThrow(appointmentNotFoundException(request.getUniqueId()));</span>
+                            }
+<span class="fc" id="L913">                        ).orElseThrow(loggedInContextNotFoundException(&quot;compose appointment request message&quot;)));</span>
+    }
+
+    private UrlDto buildContinueUrl(ComposeAppointmentRequestMessageRequest request, long contextOrAccessingUserId) {
+<span class="fc" id="L917">        return buildAppointmentRequestUrlDto(request, &quot;reviewAppointmentRequest&quot;,</span>
+                &quot;composeAppointmentRequest.txt.continue&quot;, contextOrAccessingUserId);
+    }
+
+    private String buildMessageSubject(AppointmentDTO appointment, ComposeAppointmentRequestMessageRequest request, ZoneId zoneId) {
+<span class="fc bfc" id="L922" title="All 2 branches covered.">        String englishFormat = request.nhsStyle() ? &quot;global.format.date_full_with_day_and_time_twelve_hr_nhs&quot; : &quot;global.format.date_full_with_day_and_time_twelve_hr&quot;;</span>
+<span class="fc" id="L923">        LocalDateTime localDateTime = LocalDateTime.ofInstant(appointment.getStartTimestamp(), Objects.requireNonNull(zoneId));</span>
+<span class="fc" id="L924">        String dateAndTime = dateUtil.nhsDateTime(localDateTime, request.getLocale(),</span>
+<span class="fc" id="L925">                messageSource.getMessage(englishFormat, null, request.getLocale()),</span>
+<span class="fc" id="L926">                messageSource.getMessage(&quot;global.format.date_full_with_day_and_time&quot;, null, request.getLocale()));</span>
+
+<span class="fc" id="L928">        String[] args = { dateAndTime, appointment.getSubject() };</span>
+<span class="pc bpc" id="L929" title="1 of 3 branches missed.">        switch (request.requestType()) {</span>
+            case RESCHEDULE:
+<span class="fc" id="L931">                return messageSource.getMessage(&quot;composeAppointmentRequest.txt.reschedule.message_subject&quot;,</span>
+<span class="fc" id="L932">                        args, request.getLocale());</span>
+            case CANCEL:
+<span class="fc" id="L934">                return messageSource.getMessage(&quot;composeAppointmentRequest.txt.cancel.message_subject&quot;,</span>
+<span class="fc" id="L935">                        args, request.getLocale());</span>
+            default:
+<span class="nc" id="L937">                throw operationNotImplementedException(request.requestType()).get();</span>
+        }
+    }
+
+    public UIComposeAppointmentRequestDto reviewAppointmentRequestMessage(ReviewAppointmentRequestMessageRequest request) {
+<span class="fc" id="L942">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;reviewAppointmentRequestMessage&quot;).record(() -&gt;</span>
+<span class="fc" id="L943">                request.getEHRRequestContext().getLoggedInContext()</span>
+<span class="fc" id="L944">                        .map(loggedInContext -&gt; validateReviewRequestInputs(request)</span>
+<span class="fc" id="L945">                                .map(dto -&gt; {</span>
+<span class="fc" id="L946">                                    var users = getUsers(loggedInContext);</span>
+<span class="fc" id="L947">                                    PKBPerson loggedInUser = users.get(loggedInContext.getAccessingUserId());</span>
+
+<span class="fc" id="L949">                                    return retrieveAppointment(loggedInContext, request.getUniqueId(),</span>
+<span class="fc" id="L950">                                            users.get(loggedInContext.getContextOrAccessingUserId()).getDefaultAccountId())</span>
+<span class="fc" id="L951">                                                    .map(appointment -&gt; {</span>
+<span class="fc" id="L952">                                                        dto.setUiAppointmentDetailsDto(buildUiAppointmentDetailsDto(appointment, loggedInUser, request.getLocale(), request.nhsStyle()));</span>
+<span class="fc" id="L953">                                                        dto.setRequestType(request.requestType());</span>
+<span class="fc" id="L954">                                                        dto.setSubmitText(buildSubmitText(request));</span>
+<span class="fc bfc" id="L955" title="All 2 branches covered.">                                                        if (!dto.getResponseMeta().hasErrors()) {</span>
+<span class="fc" id="L956">                                                            dto.setActionResult(SUCCESS);</span>
+                                                        }
+<span class="fc" id="L958">                                                        return dto;</span>
+<span class="fc" id="L959">                                                    }).orElseThrow(appointmentNotFoundException(request.getUniqueId()));</span>
+<span class="fc" id="L960">                                }).getOrElseGet(dto -&gt; {</span>
+<span class="fc" id="L961">                                    dto.setActionResult(ERROR);</span>
+<span class="fc" id="L962">                                    return dto;</span>
+                                }))
+<span class="fc" id="L964">                        .orElseThrow(loggedInContextNotFoundException(&quot;review appointment request&quot;)));</span>
+    }
+
+    private Either&lt;UIComposeAppointmentRequestDto, UIComposeAppointmentRequestDto&gt; validateReviewRequestInputs(ReviewAppointmentRequestMessageRequest request) {
+<span class="fc" id="L968">        Map&lt;String, List&lt;String&gt;&gt; fieldErrors = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L969" title="All 2 branches covered.">        if (isBlank(request.dto().getMessage())) {</span>
+<span class="fc" id="L970">            fieldErrors.put(&quot;dto.message&quot;, List.of(messageSource.getMessage(&quot;composeAppointmentRequest.error.message_empty&quot;, null, request.getLocale())));</span>
+        }
+<span class="fc bfc" id="L972" title="All 2 branches covered.">        if (isEmpty(request.dto().getRecipientIds())) {</span>
+<span class="fc" id="L973">            fieldErrors.put(&quot;recipientId&quot;, List.of(messageSource.getMessage(&quot;composeAppointmentRequest.error.recipient_not_selected&quot;, null, request.getLocale())));</span>
+        }
+<span class="fc" id="L975">        return fieldErrorsToEither(fieldErrors, request.dto());</span>
+    }
+
+    public UIComposeAppointmentRequestDto sendAppointmentRequestMessage(SendAppointmentRequestMessageRequest request) {
+<span class="fc" id="L979">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;sendAppointmentRequestMessage&quot;).record(() -&gt;</span>
+<span class="fc" id="L980">                request.getEHRRequestContext().getLoggedInContext()</span>
+<span class="fc" id="L981">                        .map(loggedInContext -&gt; validateSendRequestInputs(request)</span>
+<span class="fc" id="L982">                                .map(dto -&gt; {</span>
+<span class="fc" id="L983">                                    PKBPerson contextOrAccessingUser = userManager.getPKBPerson(loggedInContext.getContextOrAccessingUserId());</span>
+
+<span class="fc" id="L985">                                    return retrieveAppointment(loggedInContext, request.getUniqueId(), contextOrAccessingUser.getDefaultAccountId())</span>
+<span class="fc" id="L986">                                            .map(appointment -&gt; {</span>
+<span class="fc" id="L987">                                                dto.setRequestType(request.requestType());</span>
+<span class="fc" id="L988">                                                Try.of(() -&gt; sendAppointmentRequestMessage(loggedInContext, dto))</span>
+<span class="fc" id="L989">                                                        .toEither()</span>
+<span class="fc" id="L990">                                                        .peek(conversationId -&gt; {</span>
+<span class="fc" id="L991">                                                            appointment.setAppointmentRequestConversationId(conversationId.toString());</span>
+<span class="fc" id="L992">                                                            calendarManager.updateAppointment(loggedInContext, appointment, contextOrAccessingUser.getDefaultAccountId());</span>
+<span class="fc" id="L993">                                                            dto.setActionResult(SUCCESS);</span>
+<span class="fc" id="L994">                                                        })</span>
+<span class="fc" id="L995">                                                        .peekLeft(e -&gt; {</span>
+<span class="fc" id="L996">                                                            LOGGER.error(&quot;Failed to send appointment request message for appointment [{}].&quot;, request.getUniqueId(), e);</span>
+<span class="fc" id="L997">                                                            dto.setResponseMeta(ofActionError(</span>
+<span class="fc" id="L998">                                                                    messageSource.getMessage(&quot;reviewAppointmentRequest.error.could_not_send_the_message&quot;, null,</span>
+<span class="fc" id="L999">                                                                            request.getLocale())));</span>
+<span class="fc" id="L1000">                                                            dto.setActionResult(ERROR);</span>
+<span class="fc" id="L1001">                                                        });</span>
+<span class="fc" id="L1002">                                                return dto;</span>
+<span class="fc" id="L1003">                                            }).orElseThrow(appointmentNotFoundException(request.getUniqueId()));</span>
+<span class="fc" id="L1004">                                }).getOrElseGet(dto -&gt; {</span>
+<span class="fc" id="L1005">                                    dto.setActionResult(ERROR);</span>
+<span class="fc" id="L1006">                                    return dto;</span>
+                                }))
+<span class="fc" id="L1008">                        .orElseThrow(loggedInContextNotFoundException(&quot;send appointment request message&quot;)));</span>
+    }
+
+    private Either&lt;UIComposeAppointmentRequestDto, UIComposeAppointmentRequestDto&gt; validateSendRequestInputs(SendAppointmentRequestMessageRequest request) {
+<span class="fc" id="L1012">        Map&lt;String, List&lt;String&gt;&gt; fieldErrors = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L1013" title="All 2 branches covered.">        if (!request.dto().isConfirm()) {</span>
+<span class="fc" id="L1014">            fieldErrors.put(&quot;dto.confirm&quot;, List.of(messageSource</span>
+<span class="fc" id="L1015">                    .getMessage(&quot;reviewAppointmentRequest.error.please_click_confirm&quot;, null, request.getLocale())));</span>
+        }
+<span class="fc" id="L1017">        return fieldErrorsToEither(fieldErrors, request.dto());</span>
+    }
+
+    private Either&lt;UIComposeAppointmentRequestDto, UIComposeAppointmentRequestDto&gt; fieldErrorsToEither(Map&lt;String, List&lt;String&gt;&gt; fieldErrors, UIComposeAppointmentRequestDto dto) {
+<span class="fc bfc" id="L1021" title="All 2 branches covered.">        if (isEmpty(fieldErrors)) {</span>
+<span class="fc" id="L1022">            return Either.right(dto);</span>
+        } else {
+<span class="fc" id="L1024">            dto.setResponseMeta(ofFieldErrors(fieldErrors));</span>
+<span class="fc" id="L1025">            return Either.left(dto);</span>
+        }
+    }
+
+    private UUID sendAppointmentRequestMessage(LoggedInEHRRequestContext loggedInContext, UIComposeAppointmentRequestDto dto) {
+<span class="fc" id="L1030">        UUID conversationId = UUID.randomUUID();</span>
+<span class="fc" id="L1031">        Message message = encounterManager.createMessage(String.valueOf(loggedInContext.getContextOrAccessingUserId()),</span>
+                conversationId,
+                true,
+<span class="fc" id="L1034">                String.valueOf(loggedInContext.getAccessingUserId()),</span>
+<span class="fc" id="L1035">                dto.getMessageSubject(),</span>
+<span class="fc" id="L1036">                dto.getMessage(),</span>
+<span class="fc" id="L1037">                PrivacyFlag.valueOf(dto.getPrivacy()),</span>
+                loggedInContext);
+<span class="fc" id="L1039">        message.setParticipants(dto.getRecipientIds());</span>
+<span class="fc" id="L1040">        encounterManager.saveMessage(loggedInContext, loggedInContext.getAccessingUserId(), message, null,</span>
+<span class="fc" id="L1041">                loggedInContext.getContextUserId().orElse(null), true);</span>
+<span class="fc" id="L1042">        return conversationId;</span>
+    }
+
+    public UIConfirmAppointmentRequestDto confirmAppointmentRequest(ConfirmAppointmentRequestRequest request) {
+<span class="fc" id="L1046">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;confirmAppointmentRequest&quot;).record(() -&gt;</span>
+<span class="fc" id="L1047">                request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L1048">                    Map&lt;Long, PKBPerson&gt; users = getUsers(loggedInContext);</span>
+<span class="fc" id="L1049">                    PKBPerson loggedInUser = users.get(loggedInContext.getAccessingUserId());</span>
+<span class="fc" id="L1050">                    PKBPerson contextOrAccessingUser = users.get(loggedInContext.getContextOrAccessingUserId());</span>
+<span class="fc" id="L1051">                    return retrieveAppointment(loggedInContext, request.getUniqueId(), contextOrAccessingUser.getDefaultAccountId())</span>
+<span class="fc" id="L1052">                            .map(appointment -&gt; {</span>
+<span class="fc" id="L1053">                                UIConfirmAppointmentRequestDto dto = new UIConfirmAppointmentRequestDto();</span>
+<span class="fc" id="L1054">                                dto.setRequestType(request.requestType());</span>
+<span class="fc" id="L1055">                                dto.setUiAppointmentDetailsDto(buildUiAppointmentDetailsDto(appointment, loggedInUser, request.getLocale(), request.nhsStyle()));</span>
+<span class="fc" id="L1056">                                dto.setFinishUrl(buildFinishUrlDto(request, request.requestType().toString().toLowerCase()));</span>
+<span class="fc" id="L1057">                                dto.setActionResult(SUCCESS);</span>
+<span class="fc" id="L1058">                                return dto;</span>
+<span class="fc" id="L1059">                            }).orElseThrow(appointmentNotFoundException(request.getUniqueId()));</span>
+<span class="fc" id="L1060">                }).orElseThrow(loggedInContextNotFoundException(&quot;confirm appointment request&quot;)));</span>
+    }
+
+    private ImmutableUrlDto buildFinishUrlDto(ConfirmAppointmentRequestRequest request, String requestTypeString) {
+<span class="fc" id="L1064">        return ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1065">                .href(UrlUtil.buildHref(DIARY, &quot;finishAppointmentRequest&quot;,</span>
+<span class="fc" id="L1066">                        ImmutableMap.of(UNIQUE_ID, request.getUniqueId().toString(),</span>
+                                REQUEST_TYPE, requestTypeString),
+<span class="fc" id="L1068">                        request.getEHRRequestContext().getLoggedInContext()</span>
+<span class="fc" id="L1069">                                .map(LoggedInEHRRequestContext::getContextOrAccessingUserId)</span>
+<span class="fc" id="L1070">                                .orElseThrow()))</span>
+<span class="fc" id="L1071">                .content(messageSource.getMessage(&quot;confirmAppointmentRequest.txt.finish&quot;, null, request.getLocale()))</span>
+<span class="fc" id="L1072">                .build();</span>
+    }
+
+    public UIDto finishAppointmentRequest(FinishAppointmentRequestRequest request) {
+<span class="fc" id="L1076">        return Metrics.timer(APPOINTMENTS_SERVICE_TIMER_NAME, SERVICE_OPERATION, &quot;finishAppointmentRequest&quot;).record(() -&gt;</span>
+<span class="fc" id="L1077">            request.getEHRRequestContext().getLoggedInContext().map(loggedInContext -&gt; {</span>
+<span class="fc" id="L1078">                PKBPerson contextOrAccessingUser = userManager.getPKBPerson(loggedInContext.getContextOrAccessingUserId());</span>
+<span class="fc" id="L1079">                return retrieveAppointment(loggedInContext, request.getUniqueId(), contextOrAccessingUser.getDefaultAccountId())</span>
+<span class="fc" id="L1080">                        .map(appointment -&gt; {</span>
+<span class="fc" id="L1081">                            UIDto dto = new UIDto();</span>
+<span class="fc" id="L1082">                            String requestHref = buildConversationHref(appointment, loggedInContext)</span>
+<span class="pc" id="L1083">                                    .orElseThrow(() -&gt; new IllegalStateException(format(&quot;Appointment request not found for provided unique ID (%s)&quot;,</span>
+<span class="nc" id="L1084">                                            request.getUniqueId().toString())));</span>
+<span class="fc" id="L1085">                            dto.setResponseMeta(ofInfoMessage(messageSource.getMessage(&quot;confirmAppointmentRequest.txt.&quot; +</span>
+<span class="fc" id="L1086">                                                            request.requestType().toString().toLowerCase() + &quot;.request_sent&quot;,</span>
+<span class="fc" id="L1087">                                                    new String[]{requestHref}, request.getLocale())));</span>
+<span class="fc" id="L1088">                            dto.setActionResult(SUCCESS);</span>
+<span class="fc" id="L1089">                            return dto;</span>
+<span class="fc" id="L1090">                        }).orElseThrow(appointmentNotFoundException(request.getUniqueId()));</span>
+<span class="fc" id="L1091">            }).orElseThrow(loggedInContextNotFoundException(&quot;finish appointment request&quot;)));</span>
+    }
+
+    public Optional&lt;AppointmentDTO&gt; retrieveAppointment(LoggedInEHRRequestContext context, UUID uniqueId, Long accountId) {
+<span class="fc" id="L1095">        return calendarManager.getAppointmentByUniqueId(context, uniqueId, accountId, true);</span>
+    }
+
+    private int resultLimit(int pageCount) {
+<span class="fc" id="L1099">        return APPOINTMENT_RESULT_LIMIT * pageCount;</span>
+    }
+
+    private long getAppointmentsCount(List&lt;AppointmentDTO&gt; appointments, int resultLimit, Supplier&lt;Long&gt; countAppointments) {
+<span class="fc bfc" id="L1103" title="All 2 branches covered.">        return appointments.size() &lt; resultLimit ? appointments.size() : countAppointments.get();</span>
+    }
+
+    private EmisContextHolder getEmisContextHolder(LoggedInEHRRequestContext loggedInContext) {
+<span class="fc" id="L1107">        return getEmisContextHolder(getUsers(loggedInContext), loggedInContext);</span>
+    }
+
+    private EmisContextHolder getEmisContextHolder(Map&lt;Long, PKBPerson&gt; users, LoggedInEHRRequestContext loggedInContext) {
+<span class="fc" id="L1111">        return ImmutableEmisContextHolder.builder()</span>
+<span class="fc" id="L1112">                .personId(loggedInContext.getContextOrAccessingUserId())</span>
+<span class="fc" id="L1113">                .accountId(users.get(loggedInContext.getContextOrAccessingUserId()).getDefaultAccountId())</span>
+<span class="fc" id="L1114">                .actorPersonId(loggedInContext.getAccessingUserId())</span>
+
+<span class="fc" id="L1116">                .build();</span>
+    }
+
+    private PartialAppointmentDto configureGpAppointmentBooking(LoggedInEHRRequestContext context,
+                                                                Map&lt;Long, PKBPerson&gt; users,
+                                                                Locale locale,
+                                                                List&lt;AppointmentDTO&gt; pastAppointments,
+                                                                List&lt;AppointmentDTO&gt; upcomingAppointments) {
+<span class="fc" id="L1124">        var dto = ImmutablePartialAppointmentDto.builder();</span>
+<span class="pc bpc" id="L1125" title="1 of 2 branches missed.">        if (phrConfig.isGpAppointmentBookingEnabled()) {</span>
+<span class="fc" id="L1126">            dto.displayBookGpAppointmentButton(true);</span>
+<span class="fc" id="L1127">            EmisContextHolder emisContextHolder = getEmisContextHolder(users, context);</span>
+<span class="fc bfc" id="L1128" title="All 2 branches covered.">            if (isRegisteredForAppointmentBooking(users.get(context.getContextOrAccessingUserId()), emisContextHolder)) {</span>
+<span class="fc" id="L1129">                ZonedDateTime fromDate = dateTimeService.nowZonedDateTime();</span>
+                Either&lt;ErrorCode, ImmutableList&lt;EmisAppointment&gt;&gt; result;
+                // TODO currently all appointments have GENERAL privacy flag (change once we will have per patient/clinic settings)
+<span class="fc" id="L1132">                PatientConsentDTO consent = context.getConsentStatus().getConsent().orElse(null);</span>
+<span class="fc bfc" id="L1133" title="All 4 branches covered.">                if (isPatient(context.isUserInOwnAccount(), consent) || isOtherUserWithConsent(consent)) {</span>
+<span class="fc" id="L1134">                    result = emisAppointmentManager.retrieveAppointments(emisContextHolder, fromDate, null);</span>
+                } else {
+<span class="fc" id="L1136">                    result = right(ImmutableList.of());</span>
+                }
+
+<span class="fc" id="L1139">                result.peek(emisAppointments -&gt; {</span>
+<span class="fc" id="L1140">                    var now = dateTimeService.now();</span>
+<span class="fc" id="L1141">                    var appointments = new Partitioner(emisAppointments, dateTimeService.nowLocalDateTime());</span>
+
+<span class="fc" id="L1143">                    dto.pastAppointmentsCount(appointments.getPast().size());</span>
+<span class="fc" id="L1144">                    dto.upcomingAppointmentsCount(appointments.getUpcoming().size());</span>
+
+<span class="fc bfc" id="L1146" title="All 2 branches covered.">                    EmisMessageHelper.AccessType accessType = context.isUserInOwnAccount() ? PRIMARY : VIEWING;</span>
+<span class="fc" id="L1147">                    emisMessageHelper.addEmisAppointmentsToAppointments(locale, pastAppointments, appointments.getPast(), now, GENERAL, EMIS_PFS,</span>
+                            accessType, emisContextHolder);
+<span class="fc" id="L1149">                    emisMessageHelper.addEmisAppointmentsToAppointments(locale, upcomingAppointments, appointments.getUpcoming(), now, GENERAL, EMIS_PFS,</span>
+                            accessType, emisContextHolder);
+<span class="fc" id="L1151">                }).peekLeft(error -&gt; dto.actionErrors(List.of(emisMessageHelper.retrieveAppointmentsError(error, locale, emisContextHolder))));</span>
+            }
+        }
+<span class="fc" id="L1154">        return dto.build();</span>
+    }
+
+    private boolean isRegisteredForAppointmentBooking(PKBPerson contextUser, EmisContextHolder emisContextHolder) {
+<span class="pc bpc" id="L1158" title="1 of 4 branches missed.">        return contextUser.isPatient() &amp;&amp; isNotEmpty(emisAppointmentService.findEmisRegistrationDetailsByPersonId(emisContextHolder));</span>
+    }
+
+    private boolean isOtherUserWithConsent(PatientConsentDTO consent) {
+<span class="pc bpc" id="L1162" title="1 of 4 branches missed.">        return consent != null &amp;&amp; consent.generalHealthConsentGranted();</span>
+    }
+
+    private boolean isPatient(boolean userInOwnAccount, PatientConsentDTO consent) {
+<span class="pc bpc" id="L1166" title="1 of 4 branches missed.">        return consent == null &amp;&amp; userInOwnAccount;</span>
+    }
+
+    private Map&lt;String, PKBPerson&gt; loadParticipants(List&lt;AppointmentDTO&gt; pastAppointments, List&lt;AppointmentDTO&gt; upcomingAppointments) {
+<span class="fc" id="L1170">        List&lt;String&gt; participantIds = Stream.concat(pastAppointments.stream(), upcomingAppointments.stream())</span>
+<span class="fc" id="L1171">                .map(AppointmentDTO::getAppointmentRequestList)</span>
+<span class="fc" id="L1172">                .flatMap(appointmentRequests -&gt; appointmentRequests.stream().map(AppointmentRequestDTO::getParticipantId))</span>
+<span class="fc" id="L1173">                .distinct()</span>
+<span class="fc" id="L1174">                .collect(toList());</span>
+
+<span class="fc" id="L1176">        return userManager.getPKBPersonMap(participantIds);</span>
+    }
+
+    private Map&lt;UUID, Boolean&gt; checkForManagementUrls(List&lt;AppointmentDTO&gt; pastAppointments, List&lt;AppointmentDTO&gt; upcomingAppointments) {
+<span class="fc" id="L1180">        Set&lt;UUID&gt; appointmentUniqueIds = Stream.concat(pastAppointments.stream(), upcomingAppointments.stream())</span>
+<span class="fc" id="L1181">                .map(appointmentDTO -&gt; appointmentDTO.getBaseFields().getUniqueId())</span>
+<span class="fc" id="L1182">                .filter(Objects::nonNull) //because e.g. emis sso appts won't have unique ids</span>
+<span class="fc" id="L1183">                .collect(toSet());</span>
+
+<span class="fc" id="L1185">        return appointmentManagementPartnerService.hasManagementUrl(appointmentUniqueIds);</span>
+    }
+
+    private List&lt;DataWithUIPermissions&lt;AppointmentDTO&gt;&gt; setParticipants(List&lt;AppointmentDTO&gt; appointments,
+                                                                        Map&lt;String, PKBPerson&gt; participantsById,
+                                                                        LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L1191">        appointments.forEach(appointment -&gt; {</span>
+<span class="fc bfc" id="L1192" title="All 2 branches covered.">            if (appointment.getSource().getOrgId() != null) {</span>
+<span class="fc" id="L1193">                calendarManager.updateAppointmentSpeciality(appointment);</span>
+            }
+
+            // fill in PKBPerson objects for display
+<span class="fc" id="L1197">            appointment.getAppointmentRequestList().forEach(request -&gt; request.setParticipant(participantsById.get(request.getParticipantId())));</span>
+<span class="fc" id="L1198">        });</span>
+
+<span class="fc" id="L1200">        return dataPointManager.getPermissions(appointments, requestContext);</span>
+    }
+
+    private List&lt;PageActionDto&gt; buildPageActions(LoggedInEHRRequestContext context, boolean displayBookGpAppointmentButton, Locale locale) {
+<span class="fc" id="L1204">        List&lt;PageActionDto&gt; actions = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L1205" title="All 2 branches covered.">        if (context.isUserInOwnAccount()) {</span>
+<span class="pc bpc" id="L1206" title="1 of 2 branches missed.">            if (context.isPatient()) {</span>
+<span class="fc" id="L1207">                actions.add(addAppointmentPageActionDto(context, locale));</span>
+
+<span class="pc bpc" id="L1209" title="1 of 2 branches missed.">                if (displayBookGpAppointmentButton) {</span>
+<span class="fc" id="L1210">                    actions.add(ImmutablePageActionDto.builder()</span>
+<span class="fc" id="L1211">                            .actionUrl(ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1212">                                    .href(UrlUtil.buildHref(DIARY, &quot;bookAppointment&quot;, context.getContextOrAccessingUserId()))</span>
+<span class="fc" id="L1213">                                    .content(messageSource.getMessage(&quot;listAppointments.txt.book_gp_appointment&quot;, null, locale))</span>
+<span class="fc" id="L1214">                                    .build())</span>
+<span class="fc" id="L1215">                            .urlId(LINK_PAGE_ACTIONS + BOOK_GP_APPOINTMENT)</span>
+<span class="fc" id="L1216">                            .cssClass(BOOK_GP_APPOINTMENT)</span>
+<span class="fc" id="L1217">                            .build());</span>
+                }
+            }
+        } else {
+<span class="fc" id="L1221">            actions.add(addAppointmentPageActionDto(context, locale));</span>
+        }
+<span class="fc" id="L1223">        return actions;</span>
+    }
+
+    @NotNull
+    private ImmutablePageActionDto addAppointmentPageActionDto(LoggedInEHRRequestContext context, Locale locale) {
+<span class="fc" id="L1228">        return ImmutablePageActionDto.builder()</span>
+<span class="fc" id="L1229">                .actionUrl(ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1230">                        .href(UrlUtil.buildHref(DIARY, &quot;saveAppointmentForm&quot;, context.getContextOrAccessingUserId()))</span>
+<span class="fc" id="L1231">                        .content(messageSource.getMessage(&quot;listAppointments.txt.add_appointment&quot;, null, locale))</span>
+<span class="fc" id="L1232">                        .build())</span>
+<span class="fc" id="L1233">                .urlId(LINK_PAGE_ACTIONS + ADD_APPOINTMENT)</span>
+<span class="fc" id="L1234">                .cssClass(ADD_APPOINTMENT)</span>
+<span class="fc" id="L1235">                .build();</span>
+    }
+
+    private List&lt;AppointmentEntryDto&gt; mapToDtos(List&lt;DataWithUIPermissions&lt;AppointmentDTO&gt;&gt; appointmentList, AppointmentEntityDependency&lt;AppointmentDTO&gt; dependency, int resultLimit) {
+<span class="fc" id="L1239">        var entryDtos = appointmentEntryMapper.entitiesToDtos(appointmentList, dependency);</span>
+<span class="pc bpc" id="L1240" title="1 of 2 branches missed.">        return entryDtos.size() &gt; resultLimit ? entryDtos.subList(0, resultLimit) : entryDtos;</span>
+    }
+
+    private UrlDto buildLoadMoreUrlDto(int pastPageCount, int upcomingPageCount, Long contextUserId, String loadMoreText) {
+<span class="fc" id="L1244">        return ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1245">                .href(UrlUtil.buildHref(DIARY, &quot;listAppointments&quot;,</span>
+<span class="fc" id="L1246">                        ImmutableMap.of(&quot;upcomingPageCount&quot;, String.valueOf(upcomingPageCount),</span>
+<span class="fc" id="L1247">                                &quot;pastPageCount&quot;, String.valueOf(pastPageCount)),</span>
+                        contextUserId))
+<span class="fc" id="L1249">                .content(loadMoreText)</span>
+<span class="fc" id="L1250">                .build();</span>
+    }
+
+    private UrlDto buildAppointmentRequestUrlDto(BaseAppointmentRequestMessageRequest request,
+                                                 String action,
+                                                 String messageKey,
+                                                 long contextOrAccessingUserId) {
+<span class="fc" id="L1257">        return ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1258">                .href(UrlUtil.buildHref(DIARY, action,</span>
+<span class="fc" id="L1259">                        ImmutableMap.of(UNIQUE_ID, request.getUniqueId().toString(),</span>
+<span class="fc" id="L1260">                                REQUEST_TYPE, request.requestType().toString().toLowerCase()),</span>
+<span class="fc" id="L1261">                        contextOrAccessingUserId))</span>
+<span class="fc" id="L1262">                .content(messageSource.getMessage(messageKey, null, request.getLocale()))</span>
+<span class="fc" id="L1263">                .build();</span>
+    }
+
+    private Map&lt;Long, PKBPerson&gt; getUsers(LoggedInEHRRequestContext loggedInContext) {
+<span class="fc" id="L1267">        return userManager.getPKBPersonMapById(loggedInContext.getContextAndAccessingUserIds());</span>
+    }
+
+    private boolean isGuestListAvailable(AppointmentDTO appointment, Set&lt;Long&gt; participantIds, List&lt;PKBPerson&gt; caregivers) {
+<span class="fc bfc" id="L1271" title="All 2 branches covered.">        return appointment.isAttendedByNonPKBParticipants() ||</span>
+<span class="fc bfc" id="L1272" title="All 2 branches covered.">                containsAny(participantIds, caregivers.stream().map(PKBPerson::getId).collect(toList()));</span>
+    }
+
+    private List&lt;UIAppointmentCarerDto&gt; mapPKBPersonToUICarerDto(List&lt;PKBPerson&gt; persons, Collection&lt;Long&gt; participantIds, BiFunction&lt;Collection&lt;Long&gt;, PKBPerson, Boolean&gt; isParticipant) {
+<span class="fc" id="L1276">        return persons.stream()</span>
+<span class="fc" id="L1277">                .filter(person -&gt; isParticipant.apply(participantIds, person))</span>
+<span class="fc" id="L1278">                .map(person -&gt; ImmutableUIAppointmentCarerDto.builder()</span>
+<span class="fc" id="L1279">                        .id(person.getId())</span>
+<span class="fc" id="L1280">                        .firstName(person.getFirstName())</span>
+<span class="fc" id="L1281">                        .lastName(person.getLastName())</span>
+<span class="fc" id="L1282">                        .title(person.getTitle())</span>
+<span class="fc" id="L1283">                        .build())</span>
+<span class="fc" id="L1284">                .collect(toList());</span>
+    }
+
+    private List&lt;PKBPerson&gt; getCareGivers(AppointmentDTO appointment, PKBPerson loggedInUser) {
+<span class="fc bfc" id="L1288" title="All 2 branches covered.">        return Long.parseLong(appointment.getPatientId()) == loggedInUser.getId() ?</span>
+<span class="fc" id="L1289">                patientConsentManager.getCaregivers(loggedInUser.getId()) :</span>
+<span class="fc" id="L1290">                patientConsentManager.getCaregivers(Long.parseLong(appointment.getPatientId()));</span>
+    }
+
+    private void setUrlDtos(UIAppointmentViewDto dto, LoggedInEHRRequestContext loggedInContext) {
+<span class="fc" id="L1294">        dto.setLibrary(ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1295">                .href(UrlUtil.buildHref(LIBRARY, &quot;manageLibrary&quot;, loggedInContext.getContextOrAccessingUserId()))</span>
+<span class="fc" id="L1296">                .build());</span>
+<span class="fc" id="L1297">        dto.setDiary(ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1298">                .href(UrlUtil.buildHref(DIARY, &quot;viewDiary&quot;, loggedInContext.getContextOrAccessingUserId()))</span>
+<span class="fc" id="L1299">                .build());</span>
+<span class="fc" id="L1300">        dto.setSymptoms(ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1301">                .href(UrlUtil.buildHref(TEST, &quot;mySymptoms&quot;, loggedInContext.getContextOrAccessingUserId()))</span>
+<span class="fc" id="L1302">                .build());</span>
+<span class="fc" id="L1303">        dto.setInbox(ImmutableUrlDto.builder()</span>
+<span class="fc" id="L1304">                .href(UrlUtil.buildHref(AUTH, &quot;getInbox&quot;,</span>
+<span class="fc" id="L1305">                        ImmutableMap.of(&quot;tab&quot;, &quot;messages&quot;), loggedInContext.getContextOrAccessingUserId()))</span>
+<span class="fc" id="L1306">                .build());</span>
+<span class="fc" id="L1307">    }</span>
+
+    @NotNull
+    private Set&lt;Long&gt; getParticipantIdsFrom(AppointmentDTO appointment) {
+<span class="fc" id="L1311">        return appointment.getAppointmentRequestList()</span>
+<span class="fc" id="L1312">                .stream()</span>
+<span class="fc" id="L1313">                .map(AppointmentRequestDTO::getParticipantId)</span>
+<span class="fc" id="L1314">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L1315">                .map(Long::parseLong)</span>
+<span class="fc" id="L1316">                .collect(toSet());</span>
+    }
+
+    @NotNull
+    private Supplier&lt;IllegalStateException&gt; appointmentNotFoundException(UUID uniqueId) {
+<span class="pc" id="L1321">        return () -&gt; new IllegalStateException(format(&quot;Appointment not found for provided unique ID (%s)&quot;, uniqueId.toString()));</span>
+    }
+
+    @NotNull
+    private Supplier&lt;NotImplementedException&gt; operationNotImplementedException(AppointmentRequestType requestType) {
+<span class="nc" id="L1326">        return () -&gt; new NotImplementedException(format(&quot;No operation implemented for requestType [%s]&quot;, requestType));</span>
+    }
+
+    private Optional&lt;String&gt; getOptionalStringField(String appointmentField) {
+<span class="fc bfc" id="L1330" title="All 2 branches covered.">        return isBlank(appointmentField) ? Optional.empty() : Optional.of(appointmentField);</span>
+    }
+
+    private boolean hasNotPermissionsToEditDatapoint(AppointmentDTO dto, EHRRequestContext requestContext) {
+<span class="fc bfc" id="L1334" title="All 2 branches covered.">        return !dataPointManager.getPermission(dto, requestContext).isEditOrDeletable();</span>
+    }
+
+    private List&lt;AppointmentRequestDTO&gt; mergeRequestsAndNotify(AppointmentDTO appointment,
+                                                               Set&lt;Long&gt; newParticipantIds,
+                                                               LoggedInEHRRequestContext context,
+                                                               String activityUrl) {
+<span class="fc" id="L1341">        List&lt;AppointmentRequestDTO&gt; mergedList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L1342">        Set&lt;Long&gt; oldParticipantIds = getParticipantIdsFrom(appointment);</span>
+
+        // carry over old reqs still in the new list
+<span class="fc bfc" id="L1345" title="All 2 branches covered.">        for (AppointmentRequestDTO oldReq : appointment.getAppointmentRequestList()) {</span>
+<span class="pc bpc" id="L1346" title="1 of 2 branches missed.">            if (oldReq.getParticipantId() == null) { // external email: different path to remove these</span>
+<span class="nc" id="L1347">                mergedList.add(oldReq);</span>
+                // TODO: notify email-only recipient of updated appt
+<span class="fc bfc" id="L1349" title="All 2 branches covered.">            } else if (newParticipantIds.contains(Long.valueOf(oldReq.getParticipantId()))) {</span>
+<span class="fc" id="L1350">                mergedList.add(oldReq);</span>
+<span class="fc" id="L1351">                notifyParticipantOfAppointmentActivity(EDITED_APPOINTMENT, appointment, Long.valueOf(oldReq.getParticipantId()), context, activityUrl);</span>
+            } else {
+                // notify removed participant  UNINVITED_FROM_APPOINTMENT
+<span class="fc" id="L1354">                notifyParticipantOfAppointmentActivity(UNINVITED_FROM_APPOINTMENT, appointment, Long.valueOf(oldReq.getParticipantId()), context, activityUrl);</span>
+            }
+<span class="fc" id="L1356">        }</span>
+
+        // add in new reqs that weren't in the old list
+        // initial default
+        // notify new participant
+
+<span class="fc bfc" id="L1362" title="All 2 branches covered.">        newParticipantIds.stream().filter(newId -&gt; !oldParticipantIds.contains(newId)).forEach(newId -&gt; {</span>
+<span class="fc" id="L1363">            AppointmentRequestDTO newReq = new AppointmentRequestDTO(new SourceDetails(context));</span>
+<span class="fc" id="L1364">            newReq.setParticipantId(newId.toString());</span>
+<span class="fc" id="L1365">            newReq.setCommonId(uuidProvider.randomUUID().toString());</span>
+<span class="fc" id="L1366">            newReq.generateNewRandomUniqueId();</span>
+<span class="fc" id="L1367">            mergedList.add(newReq);</span>
+
+            // notify new participant
+<span class="fc" id="L1370">            notifyParticipantOfAppointmentActivity(INVITED_TO_APPOINTMENT, appointment, newId, context, activityUrl);</span>
+<span class="fc" id="L1371">        });</span>
+<span class="fc" id="L1372">        return mergedList;</span>
+    }
+
+    private void notifyParticipantOfAppointmentActivity(Activity.Action invitedToAppointment, AppointmentDTO appointment, Long targetId, LoggedInEHRRequestContext context,
+                                                        String activityUrl) {
+<span class="fc" id="L1377">        Either&lt;MalformedURLException, Activity&gt; activityOrError = getActivity(invitedToAppointment, appointment.getStartTimestamp(), targetId, context, activityUrl,</span>
+<span class="fc" id="L1378">                appointment.getBaseFields().getUniqueId());</span>
+<span class="fc" id="L1379">        logActivity(activityOrError, true, context, appointment);</span>
+<span class="fc" id="L1380">    }</span>
+
+    private Either&lt;ResponseMeta, Instant&gt; parseDateAndTime(String date, String time, DateTimeFormatter dateFormatter, DateTimeFormatter timeFormatter,
+                                                           DateTimeFormatter dateTimeFormatter,
+                                                           String fieldPrefix,
+                                                           Locale locale) {
+<span class="fc" id="L1386">        Map&lt;String, List&lt;String&gt;&gt; fieldErrors = new HashMap&lt;&gt;();</span>
+
+<span class="fc bfc" id="L1388" title="All 2 branches covered.">        if (date.length() &gt; DATE_MAX_LENGTH) {</span>
+<span class="fc" id="L1389">            fieldErrors.put(fieldPrefix + &quot;Date&quot;, List.of(messageSource.getMessage(&quot;saveAppointment.err.enter_date&quot;, null, locale)));</span>
+        }
+
+        try {
+<span class="fc" id="L1393">            dateFormatter.parse(date);</span>
+<span class="fc" id="L1394">        } catch (DateTimeParseException ignored) {</span>
+<span class="fc" id="L1395">            fieldErrors.put(fieldPrefix + &quot;Date&quot;, List.of(messageSource.getMessage(&quot;saveAppointment.err.enter_date&quot;, null, locale)));</span>
+<span class="fc" id="L1396">        }</span>
+
+<span class="fc bfc" id="L1398" title="All 2 branches covered.">        if (time.length() &gt; TIME_MAX_LENGTH) {</span>
+<span class="fc" id="L1399">            fieldErrors.put(fieldPrefix + &quot;Time&quot;, List.of(messageSource.getMessage(&quot;saveAppointment.err.enter_time&quot;, null, locale)));</span>
+        }
+
+        try {
+
+<span class="fc bfc" id="L1404" title="All 2 branches covered.">            if (fieldErrors.isEmpty()) {</span>
+<span class="fc" id="L1405">                return Either.right(dateTimeService.parseToInstantBackwardCompatibleWay(date + &quot; &quot; + time, dateTimeFormatter)._1);</span>
+            } else {
+<span class="nc" id="L1407">                timeFormatter.parse(time);</span>
+            }
+<span class="fc" id="L1409">        } catch (DateTimeParseException ignored) {</span>
+<span class="fc" id="L1410">            fieldErrors.put(fieldPrefix + &quot;Time&quot;, List.of(messageSource.getMessage(&quot;saveAppointment.err.enter_time&quot;, null, locale)));</span>
+<span class="nc" id="L1411">        }</span>
+
+<span class="fc" id="L1413">        return Either.left(ofFieldErrors(fieldErrors));</span>
+    }
+
+    private Either&lt;MalformedURLException, Activity&gt; getActivity(Activity.Action action, Instant timestampOfActivity, Long targetId, LoggedInEHRRequestContext context,
+                                                                String activityUrl, Object... queryParams) {
+<span class="fc" id="L1418">        Activity activity = new Activity(timestampOfActivity, action, context.getOrgId().orElse(null));</span>
+<span class="fc" id="L1419">        activity.setTargetId(targetId);</span>
+<span class="fc" id="L1420">        activity.setActorId(String.valueOf(context.getAccessingUserId()));</span>
+<span class="fc" id="L1421">        activity.populateUserQueryParams(queryParams);</span>
+        try {
+<span class="fc" id="L1423">            activity.setUrl(new URL(activityUrl));</span>
+<span class="nc" id="L1424">        } catch (MalformedURLException e) {</span>
+<span class="nc" id="L1425">            return Either.left(e);</span>
+<span class="fc" id="L1426">        }</span>
+<span class="fc" id="L1427">        return Either.right(activity);</span>
+    }
+
+    private void logActivity(Either&lt;MalformedURLException, Activity&gt; activityOrError, boolean notify,
+                             LoggedInEHRRequestContext context, RequiresConsent consent, Long... altActionTextPersonIds) {
+        try {
+<span class="fc" id="L1433">            Activity activity = activityOrError.getOrElseThrow(Function.identity());</span>
+            // Log the activity in actor account
+<span class="fc bfc" id="L1435" title="All 4 branches covered.">            if (!activity.getActorId().equals(Objects.toString(activity.getTargetId(), null)) || altActionTextPersonIds.length &gt; 0) {</span>
+<span class="pc bpc" id="L1436" title="1 of 4 branches missed.">                if (notify &amp;&amp; activity.sendHistorical(dateTimeService.now())) {</span>
+<span class="fc" id="L1437">                    notificationManager.notifyUserAboutActivityByOtherUser(context, activity, consent, altActionTextPersonIds);</span>
+                }
+            }
+<span class="nc" id="L1440">        } catch (MalformedURLException e1) {</span>
+<span class="nc" id="L1441">            LOGGER.info(&quot;Logging activity failed due to -{}&quot;, e1.getMessage(), e1);</span>
+<span class="nc" id="L1442">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L1443">            LOGGER.info(&quot;Ignoring exception-{}&quot;, e.getMessage(), e);</span>
+<span class="pc" id="L1444">        }</span>
+<span class="fc" id="L1445">    }</span>
+
+    private String attendeesLabel(Set&lt;Long&gt; participantIds,List&lt;String&gt; nonPkbParticipants, Locale locale) {
+<span class="fc bfc" id="L1448" title="All 2 branches covered.">        if (participantIds.size()-1 + nonPkbParticipants.size() == 1) { // -1 because patient is not listed among attendees</span>
+<span class="fc" id="L1449">            return messageSource.getMessage(&quot;viewAppointment.txt.attendee&quot;,null, locale);</span>
+        } else {
+<span class="fc" id="L1451">            return messageSource.getMessage(&quot;viewAppointment.txt.attendees&quot;, null, locale);</span>
+        }
+    }
+
+    private String libraryLabel(boolean nhsStyle,Locale locale) {
+<span class="fc bfc" id="L1456" title="All 2 branches covered.">        return messageSource.getMessage( nhsStyle ? &quot;viewAppointment.txt.view_PKB_library&quot; : &quot;viewAppointment.txt.view_library&quot;, null, locale);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

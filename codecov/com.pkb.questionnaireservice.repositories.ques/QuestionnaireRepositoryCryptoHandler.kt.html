@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QuestionnaireRepositoryCryptoHandler.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.questionnaireservice.repositories.ques</a> &gt; <span class="el_source">QuestionnaireRepositoryCryptoHandler.kt</span></div><h1>QuestionnaireRepositoryCryptoHandler.kt</h1><pre class="source lang-java linenums">package com.pkb.questionnaireservice.repositories.ques
+
+import com.fasterxml.jackson.core.JsonParser
+import com.fasterxml.jackson.core.JsonToken
+import com.fasterxml.jackson.databind.DeserializationContext
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.ObjectReader
+import com.fasterxml.jackson.databind.deser.impl.PropertyBasedObjectIdGenerator
+import com.pkb.crypto.SymmetricKey
+import com.pkb.crypto.dto.DplKeyDTO
+import com.pkb.kms.client.core.Kms
+import com.pkb.kms.shared.representation.DplKeyId
+import com.pkb.kms.shared.representation.DplKeyRequest
+import com.pkb.kms.shared.representation.KmsError
+import com.pkb.questionnaireservice.ErrorException
+import com.pkb.questionnaireservice.OrgPublicId
+import com.pkb.questionnaireservice.PersonPublicId
+import com.pkb.questionnaireservice.TeamPublicId
+import com.pkb.questionnaireservice.config.QuestionnaireServiceProperties
+import com.pkb.questionnaireservice.entities.DecryptedQuestionnaireResponse
+import com.pkb.questionnaireservice.entities.QuestionnaireResponseEntity
+import com.pkb.questionnaireservice.mapper.mapKmsError
+import com.pkb.questionnaireservice.modelv2.Answer
+import com.pkb.questionnaireservice.modelv2.Question
+import com.pkb.questionnaireservice.modelv2.QuestionnaireComponent
+import com.pkb.questionnaireservice.modelv2.QuestionnaireResponse
+import com.pkb.questionnaireservice.modelv2.QuestionnaireServiceError
+import com.pkb.questionnaireservice.util.RequestIdUtils
+import io.vavr.control.Either
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import reactor.core.publisher.Flux
+import java.lang.invoke.MethodHandles
+
+<span class="fc" id="L35">class QuestionnaireRepositoryCryptoHandler(</span>
+<span class="fc" id="L36">        private val kms: Kms,</span>
+<span class="fc" id="L37">        private val mapper: ObjectMapper,</span>
+<span class="fc" id="L38">        private val objectIdResolver: EntityManagerResolver,</span>
+<span class="fc" id="L39">        private val requestIdUtils: RequestIdUtils,</span>
+<span class="fc" id="L40">        private val properties: QuestionnaireServiceProperties) {</span>
+
+<span class="fc" id="L42">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    fun encrypt(questionnaireResponse: DecryptedQuestionnaireResponse): Either&lt;QuestionnaireServiceError, EncryptionDetails&gt; {
+<span class="fc" id="L45">        val jsonBytes = mapper.writeValueAsBytes(questionnaireResponse.answers)</span>
+<span class="fc" id="L46">        val patientId = questionnaireResponse.questionnaireRequest.patientId</span>
+<span class="fc" id="L47">        val teamId = questionnaireResponse.questionnaireRequest.requestingTeamId</span>
+<span class="fc" id="L48">        return kms.createDplKey(requestIdUtils.getRequestId(), DplKeyRequest(listOf(patientId), listOf(teamId)))</span>
+<span class="pc" id="L49">                .mapLeft {</span>
+<span class="nc" id="L50">                    log.error(&quot;Error attempting to get dpl key from KMS for patient $patientId and team $teamId : ${it.description}&quot;)</span>
+<span class="nc" id="L51">                    it.mapKmsError()</span>
+                }
+<span class="fc" id="L53">                .map {</span>
+<span class="fc" id="L54">                    val encryptedBytesAndNonce = SymmetricKey.symmetricKey(it.keyBytes, it.algorithm).encrypt(jsonBytes)</span>
+<span class="fc" id="L55">                    EncryptionDetails(encryptedBytesAndNonce.encryptedBytes(), encryptedBytesAndNonce.nonce(), it.id)</span>
+                }
+
+    }
+
+
+    fun decryptResponses(entityList: List&lt;QuestionnaireResponseEntity&gt;, loggedInUserId: PersonPublicId): Flux&lt;QuestionnaireResponse&gt; =
+<span class="fc" id="L62">            decryptResponses(entityList, getDplKeyFetcherForUser(loggedInUserId))</span>
+
+
+    fun decryptResponsesForOrg(entityList: List&lt;QuestionnaireResponseEntity&gt;, orgId: OrgPublicId): Flux&lt;QuestionnaireResponse&gt; =
+<span class="fc" id="L66">            decryptResponses(entityList, getDplKeyFetcherForOrg(orgId))</span>
+
+
+    fun decryptResponses(entityList: List&lt;QuestionnaireResponseEntity&gt;, dplKeyFetcher: DplKeyFetcher) =
+<span class="fc" id="L70">            Flux.fromIterable(entityList).window(properties.decryptionBatchSize).flatMap { responseList -&gt; decryptBatch(responseList, dplKeyFetcher) }</span>
+
+
+    private fun decryptBatch(responses: Flux&lt;QuestionnaireResponseEntity&gt;, dplKeyFetcher: DplKeyFetcher): Flux&lt;QuestionnaireResponse&gt; =
+<span class="fc" id="L74">            responses.collectList().flatMapMany { responseList -&gt;</span>
+<span class="fc" id="L75">                getDplKeys(responseList, dplKeyFetcher)</span>
+<span class="fc" id="L76">                        .flatMap { keys -&gt; decryptBatch(responseList, keys).map { Flux.fromIterable(it) } }</span>
+<span class="pc" id="L77">                        .getOrElseGet { Flux.error(ErrorException(it)) }</span>
+<span class="fc" id="L78">            }</span>
+
+    private fun decryptBatch(questionnaireResponses: List&lt;QuestionnaireResponseEntity&gt;, keys: Map&lt;DplKeyId, DplKeyDTO&gt;): Either&lt;QuestionnaireServiceError, List&lt;QuestionnaireResponse&gt;&gt; =
+<span class="fc" id="L81">            Either.sequenceRight(questionnaireResponses.map { decrypt(it, keys) }).map { it.toJavaList() }</span>
+
+
+    private fun decrypt(questionnaireResponse: QuestionnaireResponseEntity, keys: Map&lt;DplKeyId, DplKeyDTO&gt;): Either&lt;QuestionnaireServiceError, QuestionnaireResponse&gt; =
+<span class="pc" id="L85">            kotlin.runCatching {</span>
+<span class="fc" id="L86">                keys[questionnaireResponse.dplKeyId]!!.let { SymmetricKey.symmetricKey(it.keyBytes, it.algorithm) }</span>
+<span class="fc" id="L87">                        .decrypt(questionnaireResponse.dplEncryptedAnswers!!, questionnaireResponse.nonce)</span>
+<span class="fc" id="L88">                        .let { makeDecryptedResponse(it, questionnaireResponse) }</span>
+            }
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">                    .map { Either.right&lt;QuestionnaireServiceError, QuestionnaireResponse&gt;(it) }</span>
+<span class="pc bpc" id="L91" title="1 of 2 branches missed.">                    .getOrElse { error -&gt;</span>
+<span class="nc" id="L92">                        log.error(&quot;Error decrypting response with id {}&quot;, questionnaireResponse.id)</span>
+<span class="nc" id="L93">                        log.error(&quot;Error: &quot;, error)</span>
+<span class="nc bnc" id="L94" title="All 2 branches missed.">                        Either.left(QuestionnaireServiceError.UnexpectedError(error.message ?: &quot;&quot;))</span>
+<span class="fc" id="L95">                    }</span>
+
+
+    private fun makeDecryptedResponse(decrypted: ByteArray, questionnaireResponse: QuestionnaireResponseEntity): QuestionnaireResponse {
+<span class="fc" id="L99">        val reader = QuestionExtractingObjectReader(mapper, questionnaireResponse.questionnaireRequest.questionnaire.components.filterIsInstance&lt;Question&gt;(), objectIdResolver)</span>
+<span class="fc" id="L100">        val answerObjects: List&lt;Answer&gt; = reader.readValue(decrypted)</span>
+<span class="fc" id="L101">        return DecryptedQuestionnaireResponse(questionnaireResponse, answerObjects)</span>
+    }
+
+
+<span class="fc" id="L105">    private fun getDplKeyFetcherForUser(personPublicId: PersonPublicId) = { keys: List&lt;DplKeyId&gt;, forTeam: TeamPublicId -&gt;</span>
+<span class="fc" id="L106">        log.debug(&quot;Fetching dpl keys from KMS for ids: {}&quot;, keys)</span>
+<span class="fc" id="L107">        kms.getDplKeysForTeam(requestIdUtils.getRequestId(), keys, personPublicId, forTeam)</span>
+<span class="fc" id="L108">    }</span>
+
+<span class="fc" id="L110">    private fun getDplKeyFetcherForOrg(orgPublicId: OrgPublicId) = { keys: List&lt;DplKeyId&gt;, forTeam: TeamPublicId -&gt;</span>
+<span class="fc" id="L111">        kms.getDplKeysForTeamAsOrg(requestIdUtils.getRequestId(), keys, orgPublicId, forTeam)</span>
+<span class="fc" id="L112">    }</span>
+
+    private fun getDplKeys(responses: List&lt;QuestionnaireResponseEntity&gt;, fetcher: DplKeyFetcher): Either&lt;QuestionnaireServiceError, Map&lt;DplKeyId, DplKeyDTO&gt;&gt; =
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">            (responses.groupBy { it.questionnaireRequest.requestingTeamId }.map {</span>
+<span class="fc" id="L116">                fetcher.invoke(it.value.map { it.dplKeyId!! }, it.key)</span>
+<span class="fc" id="L117">            }.reduceOrNull { acc, e -&gt;</span>
+<span class="nc" id="L118">                acc.flatMap { list1 -&gt; e.map { list2 -&gt; list1 + list2 } }</span>
+<span class="pc bpc" id="L119" title="1 of 2 branches missed.">            }?.map { it.associateBy(DplKeyDTO::getId) } ?: Either.right(emptyMap()))</span>
+<span class="pc" id="L120">                    .mapLeft { it.mapKmsError() }</span>
+
+}
+
+
+/**
+ * Decrypting a collection of answers outside of the context of the rest of the object model poses another problem: we haven't seen the Question objects
+ * from which to resolve the Question ids on the answers. This Reader handles injecting a list of questions into Jackson's id cache up front.
+ *
+ * Unfortunately Jackson provides few mechanisms for passing state to an ObjectMapper without rebuilding the whole mapper, which is a comparatively expensive
+ * operation that also throws away a bunch of useful caches (deserializers for types etc). In principle once the Jackson bug is fixed we could look at
+ * creating an override of ObjectMapper that has methods which permit passing in of state so that we could e.g. override the HandlerInstantiator with a delegate
+ * that will return an ObjectIdResolver that is pre-loaded with the questions, which is probably a more formally correct way of doing what I'm doing below. But it's
+ * still going to be fiddly and thanks to the way the ObjectMapper is written we'd potentially have to provide overloads of a lot of different methods.
+ *
+ * Really Jackson needs to provide a way to pass in state from the stack, or a way to make cheap copies of the ObjectMapper that share most of its state so we can just
+ * clone it and inject the relevant state before using it.
+ */
+<span class="fc" id="L138">class QuestionExtractingObjectReader(mapper: ObjectMapper, private val questions: List&lt;Question&gt;, private val objectResolver: EntityManagerResolver) :</span>
+<span class="fc" id="L139">        ObjectReader(mapper, mapper.deserializationConfig, mapper.typeFactory.constructCollectionType(List::class.java, Answer::class.java), null, null, mapper.injectableValues) {</span>
+
+<span class="fc" id="L141">    private val generator = PropertyBasedObjectIdGenerator(QuestionnaireComponent::class.java)</span>
+
+    override fun _initForReading(ctxt: DeserializationContext, p: JsonParser): JsonToken {
+<span class="fc" id="L144">        val retVal = super._initForReading(ctxt, p)</span>
+<span class="fc" id="L145">        questions.forEach { ctxt.findObjectId(it.id, generator, objectResolver).bindItem(it) }</span>
+<span class="fc" id="L146">        return retVal</span>
+    }
+
+}
+
+typealias DplKeyFetcher = (keys: List&lt;DplKeyId&gt;, forTeam: TeamPublicId) -&gt; Either&lt;KmsError, List&lt;DplKeyDTO&gt;&gt;
+
+<span class="fc" id="L153">data class EncryptionDetails(val encryptedBytes: ByteArray, val nonce: ByteArray, val dplKeyId: DplKeyId)</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResourceUpdateRouteBuilder.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel.routing.resource</a> &gt; <span class="el_source">ResourceUpdateRouteBuilder.kt</span></div><h1>ResourceUpdateRouteBuilder.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel.routing.resource
+
+import ca.uhn.fhir.rest.server.exceptions.ResourceGoneException
+import ca.uhn.fhir.rest.server.exceptions.ResourceNotFoundException
+import com.pkb.aggregator.camel.NEXT_ROUTE_PROPERTY
+import com.pkb.aggregator.camel.UPSTREAM_SOURCE_ID_PROPERTY
+import com.pkb.aggregator.camel.bean.process.ResourcePreProcessor
+import com.pkb.aggregator.camel.beanMethod
+import com.pkb.aggregator.camel.routing.AbstractAggregatorRouteBuilder
+import com.pkb.aggregator.camel.routing.RouteResolver
+import com.pkb.common.testcontrol.services.PubSubNamespaceService
+import org.apache.camel.LoggingLevel
+import org.springframework.stereotype.Component
+
+@Component
+<span class="fc" id="L16">class ResourceUpdateRouteBuilder(pubSubNamespaceService: PubSubNamespaceService) :</span>
+<span class="fc" id="L17">    AbstractAggregatorRouteBuilder(pubSubNamespaceService) {</span>
+
+    companion object {
+        const val INCOMING_UPDATE_NOTIFICATION = &quot;direct:aggregator/incoming&quot;
+
+        const val REQUEST_CREATE = &quot;direct:aggregator/create&quot;
+        const val REQUEST_UPDATE = &quot;direct:aggregator/update&quot;
+        const val REQUEST_DELETE = &quot;direct:aggregator/delete&quot;
+
+        private const val ROUTE_ID = &quot;resource-change-notification&quot;
+        private const val ROUTE_ID_CREATE = &quot;$ROUTE_ID-create&quot;
+        private const val ROUTE_ID_UPDATE = &quot;$ROUTE_ID-update&quot;
+        private const val ROUTE_ID_DELETE = &quot;$ROUTE_ID-delete&quot;
+    }
+
+    override fun configure() {
+
+<span class="fc" id="L34">        registerDeadLetter()</span>
+<span class="fc" id="L35">        registerDownstreamDuplicateHandler()</span>
+
+        // Take an incoming message and reroute it based on create/update/delete operation type
+<span class="fc" id="L38">        from(INCOMING_UPDATE_NOTIFICATION).routeId(ROUTE_ID)</span>
+<span class="fc" id="L39">            .beanMethod(RouteResolver::resolvePubsubUpdateAction).id(&quot;$ROUTE_ID-resolve-action&quot;)</span>
+<span class="fc" id="L40">            .toD(&quot;\${exchangeProperty[$NEXT_ROUTE_PROPERTY]}&quot;).id(&quot;$ROUTE_ID-process&quot;)</span>
+
+        // We can treat updates and creates the same, since the downstream route knows how to handle both
+<span class="fc" id="L43">        from(REQUEST_CREATE).routeId(ROUTE_ID_CREATE)</span>
+<span class="fc" id="L44">            .to(REQUEST_UPDATE).id(&quot;$ROUTE_ID_CREATE-route-to-update&quot;)</span>
+
+        // For an update, we need the upstream resource. So we resolve a read route, get the resource, convert to R4
+        // if needed, apply a source tag, and send it off to the correct route for the resource type. If the resource
+        // isn't present in the upstream we'll log it but otherwise do nothing; if it's missing in the upstream it means
+        // that it's been deleted at some point subsequent to the operation we're currently processing, and since the
+        // aggregated store is meant to be a snapshot of the state of the world, we can just ignore it.
+<span class="fc" id="L51">        from(REQUEST_UPDATE).routeId(ROUTE_ID_UPDATE)</span>
+<span class="fc" id="L52">            .onException(ResourceGoneException::class.java, ResourceNotFoundException::class.java)</span>
+<span class="fc" id="L53">                .handled(true)</span>
+<span class="fc" id="L54">                .log(LoggingLevel.WARN, &quot;\${exchangeProperty.$UPSTREAM_SOURCE_ID_PROPERTY} missing from upstream; skipping&quot;)</span>
+<span class="fc" id="L55">            .end()</span>
+<span class="fc" id="L56">            .beanMethod(RouteResolver::resolveUpstreamRouteForNotification).id(&quot;$ROUTE_ID_UPDATE-resolve-upstream&quot;)</span>
+<span class="fc" id="L57">            .toD(&quot;\${exchangeProperty[$NEXT_ROUTE_PROPERTY]}&quot;, -1).id(&quot;$ROUTE_ID_UPDATE-retrieve-upstream&quot;)</span>
+<span class="fc" id="L58">            .beanMethod(ResourcePreProcessor::associateWithSource).id(&quot;$ROUTE_ID_UPDATE-associate-with-source&quot;)</span>
+<span class="fc" id="L59">            .beanMethod(RouteResolver::resolveResourceProcessor).id(&quot;$ROUTE_ID_UPDATE-resolve-processor&quot;)</span>
+<span class="fc" id="L60">            .toD(&quot;\${exchangeProperty[$NEXT_ROUTE_PROPERTY]}&quot;).id(&quot;$ROUTE_ID_UPDATE-process&quot;)</span>
+
+        // Resolve a deleter based on resource type and reroute to it
+<span class="fc" id="L63">        from(REQUEST_DELETE).routeId(ROUTE_ID_DELETE)</span>
+<span class="fc" id="L64">            .beanMethod(RouteResolver::resolveResourceDeleter).id(&quot;$ROUTE_ID_DELETE-resolve-deleter&quot;)</span>
+<span class="fc" id="L65">            .toD(&quot;\${exchangeProperty[$NEXT_ROUTE_PROPERTY]}&quot;).id(&quot;$ROUTE_ID_DELETE-process&quot;)</span>
+<span class="fc" id="L66">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

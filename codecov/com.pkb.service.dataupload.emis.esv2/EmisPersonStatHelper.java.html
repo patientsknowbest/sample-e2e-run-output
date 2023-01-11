@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisPersonStatHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisPersonStatHelper.java</span></div><h1>EmisPersonStatHelper.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.pkb.common.ClearableInternalState;
+import com.pkb.service.dataupload.emis.esv2.batch.FileProcessor;
+import com.pkb.service.dataupload.emis.esv2.model.AdminPatient;
+import com.pkb.service.dataupload.emis.esv2.model.PKBPersonInfo;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Metrics;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Arrays;
+import java.util.EnumMap;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+
+public class EmisPersonStatHelper implements ClearableInternalState {
+
+<span class="fc" id="L23">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private static final String PERSON_ID_METRIC_NAME = &quot;pkb_phr_integration_emis_csv_batch_patient_identifiers_final&quot;;
+    private static final String PERSON_ID_JOB_METRIC_NAME = &quot;pkb_phr_integration_emis_csv_job_patient_identifiers_final&quot;;
+    private static final String PERSON_ID_JOB_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_job_patient_identifiers&quot;;
+    private static final String PERSON_METRIC_TAG = &quot;codeType&quot;;
+    private static final String PROCESSOR_TYPE_TAG = &quot;processorType&quot;;
+
+    private static final String TYPE_GUID = &quot;GUID&quot;;
+    private static final String TYPE_PERSON_ID = &quot;PERSON_ID&quot;;
+    private static final String TYPE_PERSON_NOT_FOUND = &quot;PERSON_NOT_FOUND&quot;;
+
+    private final ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;String&gt;&gt; personGuidSeenInRun;
+    private final ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;String&gt;&gt; personGuidSeenInBatch;
+    private final ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;Long&gt;&gt; personIdSeenInRun;
+    private final ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;Long&gt;&gt; personIdSeenInBatch;
+    private final ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;String&gt;&gt; personGuidUnexpectedlyUnableToFindPatientForInRun;
+    private final ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;String&gt;&gt; personGuidUnexpectedlyUnableToFindPatientForInBatch;
+
+<span class="fc" id="L41">    public EmisPersonStatHelper() {</span>
+<span class="fc" id="L42">        personGuidSeenInRun = initializeMap();</span>
+<span class="fc" id="L43">        personGuidSeenInBatch = initializeMap();</span>
+<span class="fc" id="L44">        personIdSeenInRun = initializeMap();</span>
+<span class="fc" id="L45">        personIdSeenInBatch = initializeMap();</span>
+<span class="fc" id="L46">        personGuidUnexpectedlyUnableToFindPatientForInRun = initializeMap();</span>
+<span class="fc" id="L47">        personGuidUnexpectedlyUnableToFindPatientForInBatch = initializeMap();</span>
+<span class="fc" id="L48">    }</span>
+
+    @Override
+    public void clearState() {
+<span class="fc" id="L52">        personGuidSeenInRun.values().forEach(Set::clear);</span>
+<span class="fc" id="L53">        personGuidSeenInBatch.values().forEach(Set::clear);</span>
+<span class="fc" id="L54">        personIdSeenInRun.values().forEach(Set::clear);</span>
+<span class="fc" id="L55">        personIdSeenInBatch.values().forEach(Set::clear);</span>
+<span class="fc" id="L56">        personGuidUnexpectedlyUnableToFindPatientForInRun.values().forEach(Set::clear);</span>
+<span class="fc" id="L57">        personGuidUnexpectedlyUnableToFindPatientForInBatch.values().forEach(Set::clear);</span>
+<span class="fc" id="L58">    }</span>
+
+    private &lt;T&gt; ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;T&gt;&gt; initializeMap() {
+<span class="fc" id="L61">        EnumMap&lt;FileProcessor.ProcessorType, Set&lt;T&gt;&gt; enumMap = new EnumMap&lt;&gt;(FileProcessor.ProcessorType.class);</span>
+<span class="fc" id="L62">        Arrays.stream(FileProcessor.ProcessorType.values()).forEach(processorType -&gt; enumMap.put(processorType, ConcurrentHashMap.newKeySet()));</span>
+<span class="fc" id="L63">        return Maps.immutableEnumMap(enumMap);</span>
+    }
+
+    public void reportBatchEnd() {
+<span class="fc" id="L67">        report(personGuidSeenInBatch, processorType -&gt; Metrics.summary(PERSON_ID_METRIC_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_GUID));</span>
+<span class="fc" id="L68">        report(personIdSeenInBatch, processorType -&gt; Metrics.summary(PERSON_ID_METRIC_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_PERSON_ID));</span>
+<span class="fc" id="L69">        report(personGuidUnexpectedlyUnableToFindPatientForInBatch, processorType -&gt; Metrics.summary(PERSON_ID_METRIC_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_PERSON_NOT_FOUND));</span>
+<span class="fc" id="L70">    }</span>
+
+    public void reportJobFinished() {
+<span class="fc" id="L73">        report(personGuidSeenInRun, processorType -&gt; Metrics.summary(PERSON_ID_JOB_METRIC_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_GUID));</span>
+<span class="fc" id="L74">        report(personIdSeenInRun, processorType -&gt; Metrics.summary(PERSON_ID_JOB_METRIC_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_PERSON_ID));</span>
+<span class="fc" id="L75">        report(personGuidUnexpectedlyUnableToFindPatientForInRun, processorType -&gt; Metrics.summary(PERSON_ID_METRIC_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_PERSON_NOT_FOUND));</span>
+<span class="fc" id="L76">        clearState();</span>
+<span class="fc" id="L77">    }</span>
+
+    private &lt;T&gt; void report(ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;T&gt;&gt; input, Function&lt;FileProcessor.ProcessorType, DistributionSummary&gt; metricSupplier) {
+<span class="fc" id="L80">        input.forEach((processorType, set) -&gt; {</span>
+<span class="fc bfc" id="L81" title="All 2 branches covered.">            if (!set.isEmpty()) {</span>
+<span class="fc" id="L82">                metricSupplier.apply(processorType).record(set.size());</span>
+<span class="fc" id="L83">                set.clear();</span>
+            }
+<span class="fc" id="L85">        });</span>
+<span class="fc" id="L86">    }</span>
+
+    public void reportPatient(FileProcessor.ProcessorType processorType, AdminPatient patient) {
+<span class="fc" id="L89">        reportPatient(processorType, patient.personGuid());</span>
+<span class="fc" id="L90">    }</span>
+
+    private void reportPatient(FileProcessor.ProcessorType processorType, String personGuid) {
+<span class="fc bfc" id="L93" title="All 2 branches covered.">        if (personGuidSeenInRun.get(processorType).add(personGuid)) {</span>
+<span class="fc" id="L94">            Metrics.counter(PERSON_ID_JOB_COUNTER_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_GUID).increment();</span>
+        }
+<span class="fc" id="L96">        personGuidSeenInBatch.get(processorType).add(personGuid);</span>
+<span class="fc" id="L97">    }</span>
+
+    public void reportPatient(FileProcessor.ProcessorType processorType, PKBPersonInfo patient) {
+<span class="fc" id="L100">        reportPatient(processorType, patient.id());</span>
+<span class="fc" id="L101">    }</span>
+
+    private void reportPatient(FileProcessor.ProcessorType processorType, Long personId) {
+<span class="fc bfc" id="L104" title="All 2 branches covered.">        if (personIdSeenInRun.get(processorType).add(personId)) {</span>
+<span class="fc" id="L105">            Metrics.counter(PERSON_ID_JOB_COUNTER_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_PERSON_ID).increment();</span>
+        }
+<span class="fc" id="L107">        personIdSeenInBatch.get(processorType).add(personId);</span>
+<span class="fc" id="L108">    }</span>
+
+    public void reportMissingPatient(FileProcessor.ProcessorType processorType, AdminPatient patient) {
+<span class="fc" id="L111">        reportMissingPatient(processorType, patient.personGuid());</span>
+<span class="fc" id="L112">    }</span>
+
+    private void reportMissingPatient(FileProcessor.ProcessorType processorType, String personGuid) {
+<span class="fc bfc" id="L115" title="All 2 branches covered.">        if (personGuidUnexpectedlyUnableToFindPatientForInRun.get(processorType).add(personGuid)) {</span>
+<span class="fc" id="L116">            Metrics.counter(PERSON_ID_JOB_COUNTER_NAME, PROCESSOR_TYPE_TAG, processorType.name(), PERSON_METRIC_TAG, TYPE_PERSON_NOT_FOUND).increment();</span>
+        }
+<span class="fc" id="L118">        personGuidUnexpectedlyUnableToFindPatientForInBatch.get(processorType).add(personGuid);</span>
+<span class="fc" id="L119">    }</span>
+
+    @VisibleForTesting
+    ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;String&gt;&gt; getPersonGuidSeenInRun() {
+<span class="nc" id="L123">        return personGuidSeenInRun;</span>
+    }
+
+    @VisibleForTesting
+    ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;String&gt;&gt; getPersonGuidSeenInBatch() {
+<span class="nc" id="L128">        return personGuidSeenInBatch;</span>
+    }
+
+    @VisibleForTesting
+    ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;Long&gt;&gt; getPersonIdSeenInRun() {
+<span class="nc" id="L133">        return personIdSeenInRun;</span>
+    }
+
+    @VisibleForTesting
+    ImmutableMap&lt;FileProcessor.ProcessorType, Set&lt;Long&gt;&gt; getPersonIdSeenInBatch() {
+<span class="nc" id="L138">        return personIdSeenInBatch;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

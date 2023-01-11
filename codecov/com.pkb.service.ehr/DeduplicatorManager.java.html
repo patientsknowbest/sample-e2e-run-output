@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DeduplicatorManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.ehr</a> &gt; <span class="el_source">DeduplicatorManager.java</span></div><h1>DeduplicatorManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.ehr;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ArrayTable;
+import com.google.common.collect.MapDifference;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.interfaces.EncryptedDataPoint;
+import com.pkb.app.interfaces.IBaseDTO;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.data.EHRRemote;
+import com.pkb.emis.es.dto.DeduplicationCandidateDto;
+import com.pkb.util.EHRDataComparatorUtil;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+
+import static com.google.common.base.Preconditions.checkState;
+import static java.util.Collections.emptySet;
+import static java.util.Objects.nonNull;
+import static java.util.stream.Collectors.toSet;
+
+public class DeduplicatorManager {
+
+<span class="fc" id="L37">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private PhrConfig config;
+    private TolvenBeanFactory beanFactory;
+
+<span class="fc" id="L42">    public DeduplicatorManager(TolvenBeanFactory beanFactory, PhrConfig config) {</span>
+<span class="fc" id="L43">        this.beanFactory = beanFactory;</span>
+<span class="fc" id="L44">        this.config = config;</span>
+<span class="fc" id="L45">    }</span>
+
+    public &lt;T extends EncryptedDataPoint &amp; IBaseDTO&gt; Set&lt;UUID&gt; filterDuplicates(io.vavr.collection.List&lt;DeduplicationCandidateDto&lt;T&gt;&gt; deduplicationCandidates, io.vavr.collection.Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys) {
+<span class="fc bfc" id="L48" title="All 2 branches covered.">        if (!config.isEmisDeduplicationEnabled()) {</span>
+<span class="fc" id="L49">            LOGGER.trace(&quot;Deduplication disabled, returning empty deduplication result&quot;);</span>
+<span class="fc" id="L50">            return emptySet();</span>
+        }
+
+<span class="fc" id="L53">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+
+        // Be very strict about what we are passed
+<span class="pc bpc" id="L56" title="1 of 2 branches missed.">        checkState(!deduplicationCandidates.isEmpty(), &quot;empty candidate list passed to deduplicator&quot;);</span>
+
+<span class="fc" id="L58">        List&lt;UUID&gt; duplicates = new ArrayList&lt;&gt;(deduplicationCandidates.size());</span>
+<span class="fc" id="L59">        List&lt;Tuple2&lt;EHRData, DeduplicationCandidateDto&lt;T&gt;&gt;&gt; data = new ArrayList&lt;&gt;(deduplicationCandidates.size());</span>
+<span class="fc" id="L60">        Set&lt;UUID&gt; uniqueIds = new HashSet&lt;&gt;(deduplicationCandidates.size());</span>
+<span class="fc" id="L61">        Set&lt;Long&gt; accountIds = new HashSet&lt;&gt;(deduplicationCandidates.size());</span>
+
+<span class="fc bfc" id="L63" title="All 2 branches covered.">        for (var actual : deduplicationCandidates) {</span>
+<span class="fc" id="L64">            var candidate = actual.candidateEntity();</span>
+<span class="fc" id="L65">            EHRData populated = ehrBean.convert(candidate, actual.recordContext());</span>
+<span class="fc" id="L66">            data.add(Tuple.of(populated, actual));</span>
+<span class="fc" id="L67">            uniqueIds.add(candidate.getBaseFields().getUniqueId());</span>
+<span class="fc" id="L68">            accountIds.add(candidate.getPatientAccountId());</span>
+<span class="fc" id="L69">        }</span>
+
+        // Load all existing data
+<span class="fc" id="L72">        List&lt;EHRData&gt; existingData = ehrBean.findAllNonDeletedVersionsByAccountIdsAndUniqueIds(accountIds, uniqueIds, accountIdToAccountKeys);</span>
+<span class="fc" id="L73">        ArrayTable&lt;Long, UUID, List&lt;EHRData&gt;&gt; dataByAccountAndUniqueId = ArrayTable.create(accountIds, uniqueIds);</span>
+
+<span class="fc bfc" id="L75" title="All 2 branches covered.">        for (EHRData actual : existingData) {</span>
+<span class="fc" id="L76">            List&lt;EHRData&gt; currentList = dataByAccountAndUniqueId.get(actual.getAccountId(), actual.getUniqueId());</span>
+<span class="fc bfc" id="L77" title="All 2 branches covered.">            if (currentList == null) {</span>
+<span class="fc" id="L78">                currentList = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L79">                dataByAccountAndUniqueId.put(actual.getAccountId(), actual.getUniqueId(), currentList);</span>
+            }
+<span class="fc" id="L81">            currentList.add(actual);</span>
+<span class="fc" id="L82">        }</span>
+
+        // Iterate over data, separating new data from duplicates
+<span class="fc" id="L85">        data.forEach(dataAndDto -&gt; {</span>
+<span class="fc" id="L86">            EHRData ehrData = dataAndDto._1; // Destructure just for readability</span>
+<span class="fc" id="L87">            DeduplicationCandidateDto&lt;T&gt; dto = dataAndDto._2;</span>
+
+<span class="fc" id="L89">            var existingRecords = dataByAccountAndUniqueId.get(ehrData.getAccountId(), ehrData.getUniqueId());</span>
+<span class="fc bfc" id="L90" title="All 4 branches covered.">            if (existingRecords != null &amp;&amp; isDuplicate(ehrData, existingRecords)) {</span>
+<span class="fc" id="L91">                duplicates.add(dto.emisDtoTransientId());</span>
+            }
+<span class="fc" id="L93">        });</span>
+
+<span class="fc" id="L95">        return duplicates.stream().filter(Objects::nonNull).collect(toSet());</span>
+    }
+
+
+    @VisibleForTesting
+    boolean isDuplicate(EHRData newData, List&lt;EHRData&gt; existingData) {
+<span class="fc" id="L101">        return existingData.stream().anyMatch(ed -&gt; compare(ed, newData));</span>
+    }
+
+    private boolean compare(EHRData ed, EHRData newData) {
+
+<span class="fc" id="L106">        MapDifference&lt;String, Object&gt; difference = EHRDataComparatorUtil.compareEncryptedFields(ed, newData);</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">        if (difference.areEqual()) {</span>
+<span class="fc bfc" id="L108" title="All 2 branches covered.">            boolean result = compareDates(ed.getEnteredDate(), newData.getEnteredDate())</span>
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">                    &amp;&amp; ed.getRoute() == newData.getRoute()</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">                    &amp;&amp; Objects.equals(ed.getSourceOrgId(), newData.getSourceOrgId())</span>
+<span class="pc bpc" id="L111" title="1 of 2 branches missed.">                    &amp;&amp; Objects.equals(ed.getConnectingOrgId(), newData.getConnectingOrgId());</span>
+
+<span class="pc bpc" id="L113" title="1 of 4 branches missed.">            if (nonNull(ed.getDate01()) &amp;&amp; nonNull(newData.getDate01())) {</span>
+<span class="fc" id="L114">                result &amp;= ed.getDate01().toInstant().equals(newData.getDate01().toInstant());</span>
+            }
+
+<span class="fc" id="L117">            return result;</span>
+        } else {
+<span class="fc" id="L119">            Set&lt;String&gt; strings = difference.entriesDiffering().keySet();</span>
+<span class="fc" id="L120">            LOGGER.trace(&quot;Non-duplicate data for {}: {}&quot;, ed.getUniqueId(), strings);</span>
+<span class="fc" id="L121">            return false;</span>
+        }
+    }
+
+    private boolean compareDates(Date originalDate, Date newDate) {
+<span class="pc bpc" id="L126" title="3 of 4 branches missed.">        if (originalDate == null &amp;&amp; newDate == null) {</span>
+<span class="nc" id="L127">            return true;</span>
+        }
+
+<span class="pc bpc" id="L130" title="1 of 4 branches missed.">        if (originalDate == null || newDate == null) {</span>
+<span class="fc" id="L131">            return false;</span>
+        }
+
+<span class="fc" id="L134">        return originalDate.toInstant().equals(newDate.toInstant());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

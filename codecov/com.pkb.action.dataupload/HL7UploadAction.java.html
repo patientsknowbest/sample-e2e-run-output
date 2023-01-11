@@ -1,0 +1,1244 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HL7UploadAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.dataupload</a> &gt; <span class="el_source">HL7UploadAction.java</span></div><h1>HL7UploadAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.dataupload;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Lists;
+import com.pkb.action.BaseAction;
+import com.pkb.allergy.entity.Allergy;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.util.FrameFilter;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.datamodel.consent.RequiresConsent;
+import com.pkb.dataupload.entity.FieldMismatch;
+import com.pkb.dataupload.entity.UploadedData.Destination;
+import com.pkb.dataupload.entity.UploadedData.Format;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.diagnosis.entity.Diagnosis;
+import com.pkb.document.entity.Attachment;
+import com.pkb.document.entity.ChunkedDocDTO;
+import com.pkb.domain.ReferenceDatumService;
+import com.pkb.encounter.entity.EncounterEvent;
+import com.pkb.entities.enums.EncounterClass;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.exception.PKBException;
+import com.pkb.medication.entity.Medication;
+import com.pkb.notification.entity.Activity.Action;
+import com.pkb.radiology.entity.RadiologyResult;
+import com.pkb.service.allergy.impl.AllergyManager;
+import com.pkb.service.dataupload.hl7.HL7ApiHelper;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.dataupload.hl7.HL7MessageType;
+import com.pkb.service.dataupload.hl7.HL7ParsingManager;
+import com.pkb.service.dataupload.hl7.HL7SoftMatchService;
+import com.pkb.service.dataupload.hl7.HL7TeamService;
+import com.pkb.service.dataupload.hl7.HL7Wrapper;
+import com.pkb.service.dataupload.hl7.HL7XmlDoc;
+import com.pkb.service.dataupload.hl7.processor.MdmT02Processor;
+import com.pkb.service.dataupload.hl7.processor.MdmT11Processor;
+import com.pkb.service.dataupload.hl7.processor.QryA19Processor;
+import com.pkb.service.dataupload.hl7.processor.SiuProcessor;
+import com.pkb.service.dataupload.hl7.segment.HL7Allergy;
+import com.pkb.service.dataupload.hl7.segment.HL7Diagnosis;
+import com.pkb.service.dataupload.hl7.segment.HL7Medication;
+import com.pkb.service.dataupload.hl7.segment.HL7Patient;
+import com.pkb.service.dataupload.hl7.validation.HL7ValueExpectation;
+import com.pkb.service.dataupload.hl7.value.HL7String;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import com.pkb.service.diagnosis.DiagnosisManager;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.service.medication.MedicationManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.radiology.RadiologyManager;
+import com.pkb.service.reference.ReferenceDataManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.test.LoincManager;
+import com.pkb.service.test.MeasurementManager;
+import com.pkb.test.UploadedDataDeletionMetadata;
+import com.pkb.test.entity.MeasurementDTO;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.util.DataDelayService;
+import io.prometheus.client.Counter;
+import io.prometheus.client.Histogram;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.lang.invoke.MethodHandles;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.SocketException;
+import java.net.UnknownHostException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import static com.pkb.dataupload.entity.UploadedData.Destination.ALLERGY_UPDATE;
+import static com.pkb.dataupload.entity.UploadedData.Destination.DIAGNOSIS_UPDATE;
+import static com.pkb.dataupload.entity.UploadedData.Destination.ENCOUNTER;
+import static com.pkb.dataupload.entity.UploadedData.Destination.MEASUREMENT;
+import static com.pkb.dataupload.entity.UploadedData.Destination.MEDICATION_UPDATE;
+import static com.pkb.dataupload.entity.UploadedData.Destination.PATIENT_INFO_UPDATE;
+import static com.pkb.dataupload.entity.UploadedData.Destination.RADIOLOGY;
+import static com.pkb.dataupload.entity.UploadedData.Destination.TEST_RESULT;
+import static com.pkb.dataupload.entity.UploadedData.Status.COMPLETED;
+import static com.pkb.dataupload.entity.UploadedData.Status.NEW;
+import static com.pkb.dataupload.entity.UploadedData.Status.PATIENT_INFO_MISMATCH;
+import static com.pkb.dataupload.entity.UploadedData.Status.REJECTED;
+import static com.pkb.entities.enums.NationalIdType.NHS_NUMBER;
+import static com.pkb.entities.enums.Route.HL7_API;
+import static com.pkb.service.dataupload.hl7.HL7MessageType.ADT_A05;
+import static com.pkb.service.dataupload.hl7.HL7MessageType.ADT_A14;
+import static com.pkb.service.dataupload.hl7.HL7MessageType.ADT_A28;
+import static com.pkb.service.dataupload.hl7.HL7MessageType.ADT_A31;
+import static com.pkb.service.dataupload.hl7.HL7MessageType.QRY_A19;
+import static com.pkb.service.dataupload.hl7.HL7SoftMatchService.ProcessingDecision;
+import static com.pkb.service.dataupload.hl7.HL7SoftMatchService.ProcessingDecision.CONTINUE;
+import static com.pkb.service.dataupload.hl7.validation.HL7ValueChecker.enforceMandatoryValue;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * This is the entry point for all HL7 messages. Any HL7 message sent to our HL7 API is converted to XML by the PKB
+ * Integration Engine (PIE) before passed to this Struts Action.
+ *
+ * https://dev.patientsknowbest.com/home/hl7-api/
+ */
+<span class="fc" id="L126">public class HL7UploadAction extends BaseAction {</span>
+
+    private static final long serialVersionUID = -1L;
+
+    private static final String SUCCESS_STREAM = &quot;successStream&quot;;
+
+    private static final String EMPTY_LABEL = &quot;-&quot;;
+
+<span class="fc" id="L134">    private static final Histogram actionHistograms = Histogram.build()</span>
+<span class="fc" id="L135">            .exponentialBuckets(0.03, 1.5, 15)</span>
+<span class="fc" id="L136">            .name(&quot;hl7MessageDurationHistogram&quot;)</span>
+<span class="fc" id="L137">            .help(&quot;Histogram of HL7 message processing times&quot;)</span>
+<span class="fc" id="L138">            .labelNames(&quot;messageType&quot;, &quot;team&quot;, &quot;org&quot;, &quot;partner&quot;)</span>
+<span class="fc" id="L139">            .register();</span>
+
+<span class="fc" id="L141">    private static final Counter counterAckResponseSent = Counter.build()</span>
+<span class="fc" id="L142">            .name(&quot;pkb_phr_hl7_message_ack_response_sent&quot;)</span>
+<span class="fc" id="L143">            .help(&quot;Number of ack responses sent&quot;)</span>
+<span class="fc" id="L144">            .labelNames(&quot;messageType&quot;, &quot;team&quot;, &quot;org&quot;, &quot;partner&quot;, &quot;ackCode&quot;, &quot;processingDecision&quot;)</span>
+<span class="fc" id="L145">            .register();</span>
+
+<span class="fc" id="L147">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L148">    private static final CopyOnWriteArrayList&lt;InetAddress&gt; localAddresses = new CopyOnWriteArrayList&lt;&gt;();</span>
+    private String xml;
+    private InputStream responseInputStream;
+    private int responseContentLength;
+
+    @Autowired
+    private HL7ApiHelper apiHelper;
+    @Autowired
+    private TeamUserManager teamUserManager;
+    @Autowired
+    private RadiologyManager radiologyManager;
+    @Autowired
+    private ChunkedDocManager chunkedDocManager;
+    @Autowired
+    private MeasurementManager measurementManager;
+    @Autowired
+    private DataUploadManager dataUploadManager;
+    @Autowired
+    private AllergyManager allergyManager;
+    @Autowired
+    private DiagnosisManager diagnosisManager;
+    @Autowired
+    private MedicationManager medicationManager;
+    @Autowired
+    private ReferenceDataManager referenceDataManager;
+    @Autowired
+    private QryA19Processor qryA19Processor;
+    @Autowired
+    private MdmT02Processor mdmT02Processor;
+    @Autowired
+    private MdmT11Processor mdmT11Processor;
+    @Autowired
+    private HL7ParsingManager hl7ParsingManager;
+    @Autowired
+    private HL7TeamService hl7TeamService;
+    @Autowired
+    private ReferenceDatumService referenceDatumService;
+    @Autowired
+    private LoincManager loincManager;
+    @Autowired
+    private PatientConsentManager patientConsentManager;
+    @Autowired
+    private HL7SoftMatchService hl7SoftMatchService;
+    @Autowired
+    private DataDelayService dataDelayService;
+    @Autowired
+    private SiuProcessor siuProcessor;
+
+    static boolean isLocalAddress(InetAddress address) {
+<span class="pc bpc" id="L197" title="5 of 6 branches missed.">        if (address.isSiteLocalAddress() || address.isAnyLocalAddress() || address.isLoopbackAddress()</span>
+<span class="nc bnc" id="L198" title="All 2 branches missed.">                || localAddresses.contains(address)) {</span>
+<span class="fc" id="L199">            return true;</span>
+        } else {
+            try {
+<span class="nc bnc" id="L202" title="All 2 branches missed.">                if (NetworkInterface.getByInetAddress(address) != null) {</span>
+<span class="nc" id="L203">                    localAddresses.add(address);</span>
+<span class="nc" id="L204">                    return true;</span>
+                }
+<span class="nc" id="L206">            } catch (SocketException ignored) {</span>
+<span class="nc" id="L207">                return false;</span>
+<span class="nc" id="L208">            }</span>
+<span class="nc" id="L209">            return false;</span>
+        }
+    }
+
+    public String uploadHl7() {
+        InetAddress requestSource;
+        try {
+<span class="fc" id="L216">            requestSource = InetAddress.getByName(request.getRemoteAddr());</span>
+<span class="nc" id="L217">        } catch (UnknownHostException e) {</span>
+<span class="nc" id="L218">            throw new PKBException(&quot;Remote address is either not a valid IP or it is an unknown hostname: &quot; + request.getRemoteAddr(), e);</span>
+<span class="fc" id="L219">        }</span>
+
+<span class="fc" id="L221">        HL7XmlDoc hl7 = null;</span>
+<span class="fc" id="L222">        HL7ConnContext hl7ConnContext = null;</span>
+<span class="fc" id="L223">        ProcessingDecision processingDecision = null;</span>
+
+        try {
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">            if (!isLocalAddress(requestSource)) {</span>
+<span class="nc" id="L227">                throw new PKBException(</span>
+                        &quot;HL7 input is only permitted from the HL7 engine on the local network (10/8, 192.168/16, 172.16/12) or localhost,&quot; +
+                                &quot; got &quot; + requestSource);
+            }
+<span class="fc" id="L231">            HL7Wrapper wrapper = hl7ParsingManager.processXmlData(xml, getEHRRequestContext());</span>
+<span class="fc" id="L232">            hl7 = wrapper.getHL7Xml();</span>
+<span class="fc" id="L233">            hl7ConnContext = wrapper.getHl7ConnContext();</span>
+<span class="fc" id="L234">            HL7MessageType messageType = hl7.getMessageType();</span>
+
+            // Find the target patient, if present, and validate PID fields, if present.
+            // If there were PID mismatches, we'll handle them AFTER validating the message and choosing destination(s).
+<span class="fc" id="L238">            List&lt;FieldMismatch&gt; pidMismatches = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L239">            PKBPerson patient = getPatientAndValidatePidSegment(hl7, messageType, hl7ConnContext, pidMismatches);</span>
+
+<span class="fc" id="L241">            Histogram.Timer histogramTimer = initActionHistogram(hl7ConnContext, messageType.getCode()).startTimer();</span>
+            try {
+                // We're ready! Go ahead and actually process the message.
+
+<span class="fc" id="L245">                validateMshSegment(hl7, hl7ConnContext);</span>
+<span class="pc bpc" id="L246" title="1 of 9 branches missed.">                switch (messageType) {</span>
+                    case QRY_A19:
+<span class="fc" id="L248">                        String response = qryA19Processor.process(hl7, hl7ConnContext, nowInHL7Format());</span>
+<span class="fc" id="L249">                        return sendAdrA19Response(response);</span>
+                    case ADT_A28:
+                    case ADT_A31:
+<span class="fc" id="L252">                        List&lt;FieldMismatch&gt; nhsNumberMismatches = List.of();</span>
+<span class="fc bfc" id="L253" title="All 2 branches covered.">                        if (patient != null) {</span>
+                            // Since this is a demographic update, we cannot soft match using
+                            // existing demographics. Instead, we can check NHS number status.
+<span class="fc" id="L256">                            HL7Patient hl7Patient = hl7.parsePatient(hl7ConnContext);</span>
+<span class="fc" id="L257">                            nhsNumberMismatches = checkNhsNumberStatus(hl7ConnContext, hl7Patient, patient);</span>
+<span class="fc" id="L258">                            pidMismatches.addAll(nhsNumberMismatches);</span>
+                        }
+<span class="fc" id="L260">                        processingDecision = processDemographics(hl7, hl7ConnContext, patient, nhsNumberMismatches);</span>
+<span class="fc" id="L261">                        return sendAckResponse(hl7, hl7ConnContext, null, processingDecision);</span>
+                    case ADT_A08:
+<span class="fc" id="L263">                        processingDecision = processEncounterUpdate(hl7, hl7ConnContext, patient, pidMismatches);</span>
+<span class="fc" id="L264">                        return sendAckResponse(hl7, hl7ConnContext, null, processingDecision);</span>
+                    case ADT_A01:
+                    case ADT_A02:
+                    case ADT_A03:
+                    case ADT_A05:
+                    case ADT_A11:
+                    case ADT_A12:
+                    case ADT_A13:
+                    case ADT_A14:
+                    case ADT_A27:
+                    case ADT_A38:
+<span class="fc" id="L275">                        processingDecision = processEncounter(hl7, hl7ConnContext, patient, pidMismatches);</span>
+<span class="fc" id="L276">                        return sendAckResponse(hl7, hl7ConnContext, null, processingDecision);</span>
+                    case ORU_R01:
+<span class="fc" id="L278">                        processingDecision = processOruR01(hl7, hl7ConnContext, patient, pidMismatches);</span>
+<span class="fc" id="L279">                        return sendAckResponse(hl7, hl7ConnContext, null, processingDecision);</span>
+                    case MDM_T02:
+<span class="fc" id="L281">                        processingDecision = mdmT02Processor.process(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+<span class="fc" id="L282">                        return sendAckResponse(hl7, hl7ConnContext, null, processingDecision);</span>
+                    case MDM_T11:
+<span class="fc" id="L284">                        processingDecision = mdmT11Processor.process(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+<span class="fc" id="L285">                        return sendAckResponse(hl7, hl7ConnContext, null, processingDecision);</span>
+                    case SIU_S12:
+                    case SIU_S13:
+                    case SIU_S14:
+                    case SIU_S15:
+                    case SIU_S26:
+<span class="fc" id="L291">                        processingDecision = siuProcessor.process(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+<span class="fc" id="L292">                        return sendAckResponse(hl7, hl7ConnContext, null, processingDecision);</span>
+                    default:
+<span class="nc" id="L294">                        throw new ApiCallMalformedException(&quot;Unhandled HL7 message type: &quot; + messageType.getCode());</span>
+                }
+            } finally {
+<span class="fc bfc" id="L297" title="All 2 branches covered.">                if (pidMismatches.isEmpty()) {</span>
+<span class="fc" id="L298">                    hl7TeamService.addToTeams(patient, hl7, hl7ConnContext);</span>
+                }
+<span class="fc" id="L300">                histogramTimer.observeDuration();</span>
+            }
+<span class="fc" id="L302">        } catch (ApiCallMalformedException acme) {</span>
+<span class="fc" id="L303">            LOGGER.error(&quot;{}, HL7 request malformed: {}&quot;, acme.getMessage(),</span>
+<span class="pc bpc" id="L304" title="1 of 2 branches missed.">                    (getConfig().isDisplayOfSensitiveErrorInformationEnabled() ? xml : HL7XmlDoc.sanitiseXml(xml)));</span>
+<span class="fc" id="L305">            return sendAckResponse(hl7, hl7ConnContext, acme, processingDecision);</span>
+<span class="nc" id="L306">        } catch (Exception e) {</span>
+<span class="nc" id="L307">            LOGGER.error(&quot;HL7 XML processing failed: {}&quot;,</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">                    (getConfig().isDisplayOfSensitiveErrorInformationEnabled() ? xml : HL7XmlDoc.sanitiseXml(xml)), FrameFilter.filter(e));</span>
+<span class="nc" id="L309">            return sendAckResponse(hl7, hl7ConnContext, e, processingDecision);</span>
+        }
+    }
+
+    private Histogram.Child initActionHistogram(HL7ConnContext hl7ConnContext, String messageType) {
+<span class="fc" id="L314">        return actionHistograms.labels(messageType, apiHelper.getTeamLabel(hl7ConnContext), apiHelper.getOrgLabel(hl7ConnContext),</span>
+<span class="fc" id="L315">                apiHelper.getPartnerLabel(hl7ConnContext));</span>
+    }
+
+    @NotNull
+    private String getProcessingDecisionLabel(ProcessingDecision processingDecision) {
+<span class="fc bfc" id="L320" title="All 2 branches covered.">        return processingDecision == null ? &quot;?&quot; : processingDecision.name();</span>
+    }
+
+    /**
+     * This can be used to extract the PID field from the HL7 XML message,
+     * retrieve the corresponding patient (hard match), and then check
+     * each demographic field which has been configured for this Org or Team
+     * (soft match).
+     * There are some unusual cases, though. For example, an ORU^R01 can have
+     * patient information contained in DeviceInfo instead.
+     *
+     * @param hl7            The HL7 message.
+     * @param messageType    The type of HL7 message.
+     * @param hl7ConnContext The Org and/or Team for this inbound connection.
+     * @param pidMismatches  Populated with any PID mismatches found
+     * @return A {@code PKBPerson} representing the target patient.
+     */
+    private PKBPerson getPatientAndValidatePidSegment(HL7XmlDoc hl7, HL7MessageType messageType, HL7ConnContext hl7ConnContext,
+                                                      List&lt;FieldMismatch&gt; pidMismatches) {
+
+<span class="fc bfc" id="L340" title="All 2 branches covered.">        if (QRY_A19 == messageType) {</span>
+            // This message does not contain a PID segment, so don't look for one.
+<span class="fc" id="L342">            return null;</span>
+        }
+
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">        if (!hl7.containsPID()) {</span>
+            // The HL7 XML doc doesn't contain a PID segment, so there's
+            // nothing to check.
+<span class="nc" id="L348">            throw new ApiCallMalformedException(&quot;No PID segment found in &quot; + messageType + &quot; message.&quot;);</span>
+        }
+
+<span class="fc" id="L351">        Set&lt;String&gt; validatePidFieldList = hl7ConnContext.hl7UploadValidatePidList();</span>
+
+<span class="fc" id="L353">        HL7Patient pidPatient = hl7.parsePatient(hl7ConnContext);</span>
+<span class="fc" id="L354">        PKBPerson patient = apiHelper.getHardMatchPKBPerson(hl7ConnContext, pidPatient);</span>
+
+<span class="fc bfc" id="L356" title="All 2 branches covered.">        if (patient == null) {</span>
+            // If we have a message that might be trying to create a patient,
+            // then it is not an error that we haven't found one
+<span class="fc bfc" id="L359" title="All 4 branches covered.">            if (ADT_A28 == messageType || ADT_A31 == messageType) {</span>
+<span class="fc" id="L360">                return null;</span>
+            }
+            // Or, if we have a different message, but hl7AutoCreateRecords has
+            // been enabled, then we will create the record now
+<span class="pc bpc" id="L364" title="1 of 2 branches missed.">            if (hl7ConnContext.getHl7AutoCreateRecords()) {</span>
+<span class="fc" id="L365">                LOGGER.info(&quot;patient not found; auto creating for {}&quot;, hl7ConnContext.toString());</span>
+<span class="fc" id="L366">                return createNewPatient(hl7, hl7ConnContext, patient);</span>
+            }
+            // Otherwise, it is an error that we haven't found a record
+<span class="nc" id="L369">            String details = &quot;: &quot;;</span>
+<span class="nc bnc" id="L370" title="All 2 branches missed.">            for (NationalId nationalId : pidPatient.getNationalIds()) {</span>
+<span class="nc" id="L371">                details += &quot;National ID: &quot; + nationalId.getType() + &quot; &quot; + nationalId.getValue() + &quot;; &quot;;</span>
+<span class="nc" id="L372">            }</span>
+<span class="nc bnc" id="L373" title="All 2 branches missed.">            for (OrgLevelId olid : pidPatient.getOrgLevelIds()) {</span>
+<span class="nc" id="L374">                details += &quot;Org local ID: &quot; + olid.getOrg().getName() + &quot; &quot; + olid.getValue() + &quot;; &quot;;</span>
+<span class="nc" id="L375">            }</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">            for (TeamLevelId tlid : pidPatient.getTeamLevelIds()) {</span>
+<span class="nc" id="L377">                details += &quot;Team local ID: &quot; + tlid.getTeam().getName() + &quot; &quot; + tlid.getValue() + &quot;; &quot;;</span>
+<span class="nc" id="L378">            }</span>
+<span class="nc" id="L379">            details = details.substring(0, details.length() - 2);</span>
+<span class="nc" id="L380">            throw new ApiCallMalformedException(&quot;no patient found for PID segment&quot; + details);</span>
+        }
+
+<span class="fc" id="L383">        apiHelper.softMatch(validatePidFieldList, pidPatient, patient, pidMismatches);</span>
+
+<span class="fc bfc" id="L385" title="All 2 branches covered.">        if (!pidMismatches.isEmpty()) {</span>
+            // Don't error. Subsequent handlers will add this message to the queue with status UploadedData.Status.PATIENT_INFO_MISMATCH
+<span class="fc" id="L387">            LOGGER.warn(&quot;PID field mismatch count: {}&quot;, pidMismatches.size());</span>
+<span class="pc bpc" id="L388" title="1 of 2 branches missed.">            if (getConfig().isDisplayOfSensitiveErrorInformationEnabled()) {</span>
+<span class="fc" id="L389">                LOGGER.warn(&quot;PID field mismatches: {}&quot;, pidMismatches);</span>
+            }
+        }
+
+<span class="fc" id="L393">        return patient;</span>
+    }
+
+    /**
+     * Originally introduced as part of the NWL numbering strategy (see for
+     * more info).
+     * &lt;p&gt;
+     * When updating the demographics of an existing medical record, or
+     * creating a new medical record, we are not able to soft-match against the
+     * patient's demographics in the usual manner.
+     * &lt;p&gt;
+     * As an alternative, PKB can be configured to check the status of the NHS
+     * number.
+     *
+     * @param hl7ConnContext  The connecting Org or Team.
+     * @param hl7Patient      The patient being created or updated.
+     * @param existingPatient The existing patient in PKB (will be null if a
+     *                        patient is being created).
+     * @return A list of validation problems, using the existing FieldMismatch
+     * mechanism.
+     */
+    private List&lt;FieldMismatch&gt; checkNhsNumberStatus(HL7ConnContext hl7ConnContext,
+                                                     HL7Patient hl7Patient, PKBPerson existingPatient) {
+<span class="fc" id="L416">        List&lt;FieldMismatch&gt; mismatches = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L418" title="All 2 branches covered.">        if (hl7ConnContext.getHl7CheckNhsNumberStatus()) {</span>
+<span class="fc" id="L419">            boolean nhsNumberProvided = false;</span>
+<span class="fc" id="L420">            List&lt;NationalId&gt; nIdsToRemove = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L421" title="All 2 branches covered.">            for (NationalId nId : hl7Patient.getNationalIds()) {</span>
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">                if (nId.getType() == NHS_NUMBER) {</span>
+<span class="fc" id="L423">                    String tcJson = nId.getTypeCodeJson();</span>
+<span class="fc" id="L424">                    Pattern p = Pattern.compile(&quot;\\{status:(.*)\\}&quot;);</span>
+<span class="fc" id="L425">                    Matcher m = p.matcher(tcJson);</span>
+<span class="fc" id="L426">                    boolean statusCorrect = false;</span>
+<span class="fc" id="L427">                    String statusStr = &quot;&quot;;</span>
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">                    if (m.find()) {</span>
+<span class="fc" id="L429">                        statusStr = m.group(1);</span>
+<span class="pc bpc" id="L430" title="1 of 2 branches missed.">                        if (statusStr.equals(&quot;01&quot;)) {</span>
+<span class="nc" id="L431">                            statusCorrect = true;</span>
+                        }
+                    }
+<span class="pc bpc" id="L434" title="1 of 2 branches missed.">                    if (!statusCorrect) {</span>
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">                        if (existingPatient != null) {</span>
+                            // Trying to update a patient but did not provide
+                            // a valid NHS number status.
+<span class="fc" id="L438">                            mismatches.add(new FieldMismatch(&quot;NHS number status&quot;, &quot;N/A&quot;, statusStr));</span>
+                        } else {
+                            // Creating a new patient, but NHS number was not
+                            // valid. Remove it and continue as if it hadn't
+                            // been provided.
+<span class="nc" id="L443">                            nIdsToRemove.add(nId);</span>
+                        }
+                    }
+<span class="fc" id="L446">                    nhsNumberProvided = true;</span>
+                }
+<span class="fc" id="L448">            }</span>
+<span class="fc bfc" id="L449" title="All 2 branches covered.">            if (!nhsNumberProvided) {</span>
+<span class="pc bpc" id="L450" title="1 of 2 branches missed.">                if (existingPatient != null) {</span>
+<span class="pc bpc" id="L451" title="1 of 2 branches missed.">                    for (NationalId nId : existingPatient.getNationalIds()) {</span>
+<span class="nc bnc" id="L452" title="All 4 branches missed.">                        if (nId.getType() == NHS_NUMBER &amp;&amp; isNotBlank(nId.getValue())) {</span>
+                            // Trying to update an existing patient that does
+                            // have an NHS number, but have not provided that
+                            // NHS number in this message. Queue.
+<span class="nc" id="L456">                            mismatches.add(new FieldMismatch(&quot;NHS number&quot;, nId.getValue(), &quot;&quot;));</span>
+                        }
+<span class="nc" id="L458">                    }</span>
+                }
+            }
+<span class="fc" id="L461">            hl7Patient.getNationalIds().removeAll(nIdsToRemove);</span>
+        }
+
+<span class="fc" id="L464">        return mismatches;</span>
+    }
+
+    private String sendAckResponse(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, Exception errorIfAny, ProcessingDecision processingDecision) {
+        // defaults, in case doc was unparseable
+<span class="fc" id="L469">        String ackType = &quot;ACK&quot;;</span>
+<span class="fc" id="L470">        String msgType = &quot;parse_failed&quot;;</span>
+<span class="fc" id="L471">        String messageId = &quot;parse_failed&quot;;</span>
+<span class="fc" id="L472">        String sendingApp = &quot;parse_failed&quot;;</span>
+<span class="fc" id="L473">        String sendingFacility = &quot;parse_failed&quot;;</span>
+        try {
+<span class="fc" id="L475">            messageId = hl7.getMessageIdString();</span>
+<span class="fc" id="L476">            sendingApp = hl7.getSendingApp().toHl7();</span>
+<span class="fc" id="L477">            sendingFacility = hl7.getSendingFacility();</span>
+<span class="fc" id="L478">            msgType = hl7.getMessageType().getCode();</span>
+<span class="fc" id="L479">            ackType = &quot;ACK&quot; + msgType.substring(msgType.indexOf('^'));</span>
+<span class="fc" id="L480">        } catch (Exception ignored) {</span>
+            // we're already failing/logging... ignore this
+<span class="fc" id="L482">        }</span>
+
+<span class="fc" id="L484">        String ts = nowInHL7Format();</span>
+
+        // ack codes:
+        //  AA – Application Accept
+        //  AE – Application Error
+        //  AR – Application Reject
+<span class="fc" id="L490">        String ackCode = &quot;AA&quot;; // no error</span>
+<span class="fc" id="L491">        String errorMessage = &quot;&quot;;</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">        if (errorIfAny instanceof ApiCallMalformedException) {</span>
+<span class="fc" id="L493">            ackCode = &quot;AR&quot;;</span>
+<span class="fc" id="L494">            errorMessage = &quot;Parsing or validation error: &quot; + errorIfAny.getMessage(); // or toString()? Uglier, but perhaps more informative</span>
+<span class="pc bpc" id="L495" title="1 of 2 branches missed.">        } else if (errorIfAny != null) {</span>
+<span class="nc" id="L496">            ackCode = &quot;AE&quot;;</span>
+<span class="nc" id="L497">            errorMessage = &quot;Unexpected error while processing: &quot; + errorIfAny.getMessage();</span>
+        }
+<span class="fc" id="L499">        errorMessage = HL7XmlDoc.hl7Escape(errorMessage); // in case it has HL7 special chars in it...</span>
+
+<span class="fc" id="L501">        String response = &quot;MSH|^~\\&amp;|HL7API|PKB|&quot; + sendingApp + &quot;|&quot; + sendingFacility + &quot;|&quot; + ts + &quot;||&quot; + ackType + &quot;|PKB-&quot; + ts</span>
+                + &quot;|P|2.4&quot;
+                + &quot;\nMSA|&quot; + ackCode + &quot;|&quot; + messageId + &quot;|&quot; + errorMessage + &quot;|&quot;;
+<span class="fc" id="L504">        byte[] bytes = response.getBytes();</span>
+
+<span class="fc" id="L506">        responseInputStream = new ByteArrayInputStream(bytes);</span>
+<span class="fc" id="L507">        responseContentLength = bytes.length;</span>
+
+<span class="fc" id="L509">        counterAckResponseSent.labels(msgType, apiHelper.getTeamLabel(hl7ConnContext), apiHelper.getOrgLabel(hl7ConnContext),</span>
+<span class="fc" id="L510">                apiHelper.getPartnerLabel(hl7ConnContext), ackCode, getProcessingDecisionLabel(processingDecision)).inc();</span>
+<span class="fc" id="L511">        LOGGER.info(&quot;SENDING RESPONSE [{}] processingDecision={}: {}&quot;, ackCode, processingDecision, response);</span>
+
+<span class="fc" id="L513">        return SUCCESS_STREAM;</span>
+    }
+
+    /**
+     * @param response
+     * @return
+     */
+    private String sendAdrA19Response(String response) {
+<span class="fc" id="L521">        byte[] bytes = response.getBytes();</span>
+<span class="fc" id="L522">        responseInputStream = new ByteArrayInputStream(bytes);</span>
+<span class="fc" id="L523">        responseContentLength = bytes.length;</span>
+<span class="fc" id="L524">        return SUCCESS_STREAM;</span>
+    }
+
+    private ProcessingDecision processOruR01(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches) {
+        // If the sending app matches one of the whitelisted values for radiology - parse for radiology reports.
+        // Otherwise - parse for lab results and measurements.
+<span class="fc bfc" id="L530" title="All 2 branches covered.">        if (HL7XmlDoc.RADIOLOGY_SYSTEMS.contains(StringUtils.upperCase(hl7.getSendingApp().getNamespaceId().getString()))) {</span>
+            // this throws an exception already if missing data
+<span class="fc" id="L532">            return processOruR01Radiology(hl7, hl7ConnContext, patient, pidMismatches);</span>
+        } else {
+<span class="fc" id="L534">            return processOruR01Observations(hl7, hl7ConnContext, patient, pidMismatches);</span>
+        }
+    }
+
+    /**
+     * A28 and A31 messages are handled exactly the same. If the patient does
+     * not exist, they will be created. If they do exist, they will be updated.
+     *
+     * @param hl7            The HL7 message.
+     * @param hl7ConnContext The Org or Team associated with this inbound connection.
+     * @param patient        The patient. May be null.
+     * @param loginContext
+     */
+    private ProcessingDecision processDemographics(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; nhsNumberMismatches) {
+<span class="fc bfc" id="L548" title="All 2 branches covered.">        if (patient == null) {</span>
+            // If patient not found, then we should create a new medical record
+<span class="fc" id="L550">            createNewPatient(hl7, hl7ConnContext, patient);</span>
+<span class="fc" id="L551">            return CONTINUE;</span>
+        } else {
+            // If medical record already exists, then update it
+<span class="fc" id="L554">            return processUpdatedPatient(hl7, hl7ConnContext, patient, nhsNumberMismatches);</span>
+        }
+    }
+
+    private ProcessingDecision processUpdatedPatient(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches) {
+
+        // Parse the data to ensure it is valid; it is the responsibility of
+        // the parse method to throw an error if the input is not valid.
+<span class="fc" id="L562">        HL7Patient hl7Patient = hl7.parsePatient(hl7ConnContext);</span>
+<span class="fc" id="L563">        List&lt;HL7Allergy&gt; hl7AllergyList = hl7.parseHL7Allergies();</span>
+<span class="fc" id="L564">        List&lt;HL7Diagnosis&gt; hl7DiagnosisList = hl7.parseHL7Diagnoses();</span>
+<span class="fc" id="L565">        List&lt;HL7Medication&gt; hl7MedicationList = hl7.parseHL7Medications();</span>
+
+<span class="fc" id="L567">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(PATIENT_INFO_UPDATE,</span>
+<span class="fc" id="L568">                hl7ConnContext.getSourceOrgId(), null/*externalDataId*/, patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L569" title="3 of 5 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE: {
+                // Record data has been processed
+<span class="fc" id="L572">                UploadedDataDTO dto = dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, null/*externalMessageId*/, PATIENT_INFO_UPDATE,</span>
+                        COMPLETED, pidMismatches, patient, null/*subsetOf*/);
+
+                // TODO: PHR-9274: Extra validation is performed in updatePatientDemographics,
+                // which won't be returned to sender if message is queued.
+
+                // Update the demographics...
+<span class="fc" id="L579">                Instant messageDate = Optional.ofNullable(hl7.getMessageDate())</span>
+<span class="fc" id="L580">                        .flatMap(md -&gt; Optional.ofNullable(md.getInstant()))</span>
+<span class="fc" id="L581">                        .orElse(dateTimeService.now());</span>
+<span class="fc" id="L582">                boolean demographicsChanged = apiHelper.updatePatientDemographics(hl7ConnContext.getEHRRequestContext(), messageDate, hl7ConnContext, patient, hl7Patient);</span>
+
+                // update medical data like allergies , diagnosis , medications
+<span class="fc" id="L585">                updatePatientMedicalData(hl7, hl7ConnContext, patient, hl7AllergyList, hl7DiagnosisList,</span>
+                        hl7MedicationList, dto, pidMismatches);
+
+                // Log and notify
+<span class="fc bfc" id="L589" title="All 2 branches covered.">                if (demographicsChanged) {</span>
+                    //TODO:PHR-2817 these notifications need to respect consent level. See Jira ticket
+<span class="fc" id="L591">                    apiHelper.logActivityAndNotifyPatient(hl7ConnContext, Action.UPLOADED_PATIENT_PROFILE_UPDATE, patient,</span>
+<span class="fc" id="L592">                            new NoConsentsRequired(), dateTimeService.now(), hl7.getMessageType());</span>
+                }
+            }
+<span class="fc" id="L595">            break;</span>
+            case FORCE_NEW: {
+<span class="nc" id="L597">                throw new IllegalStateException(String.format(&quot;Invalid processing decision of FORCE_NEW for PATIENT_INFO_UPDATE message %s from %s&quot;, hl7.getMessageIdString(), hl7ConnContext));</span>
+            }
+            case QUARANTINE: {
+                // Queue for manual review
+<span class="fc" id="L601">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, null/*externalMessageId*/, PATIENT_INFO_UPDATE,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L604">            break;</span>
+            case REJECT: {
+<span class="nc" id="L606">                throw new IllegalStateException(String.format(&quot;Invalid processing decision of REJECT for PATIENT_INFO_UPDATE message %s from %s&quot;, hl7.getMessageIdString(), hl7ConnContext));</span>
+            }
+            default: {
+<span class="nc" id="L609">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L612">        return processingDecision;</span>
+    }
+
+    private void updatePatientMedicalData(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient,
+                                             List&lt;HL7Allergy&gt; hl7AllergyList, List&lt;HL7Diagnosis&gt; hl7DiagnosisList, List&lt;HL7Medication&gt; hl7MedicationList,
+                                             UploadedDataDTO dto, List&lt;FieldMismatch&gt; pidMismatches) {
+        // ...then queue any clinical data included with the demographics
+<span class="fc bfc" id="L619" title="All 2 branches covered.">        if (!hl7AllergyList.isEmpty()) {</span>
+<span class="fc" id="L620">            dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, null/*externalMessageId*/, ALLERGY_UPDATE,</span>
+<span class="fc" id="L621">                    NEW, pidMismatches, patient, dto.getId());</span>
+        }
+<span class="fc bfc" id="L623" title="All 2 branches covered.">        if (!hl7DiagnosisList.isEmpty()) {</span>
+<span class="fc" id="L624">            dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, null/*externalMessageId*/, DIAGNOSIS_UPDATE,</span>
+<span class="fc" id="L625">                    NEW, pidMismatches, patient, dto.getId());</span>
+        }
+<span class="fc bfc" id="L627" title="All 2 branches covered.">        if (!hl7MedicationList.isEmpty()) {</span>
+<span class="fc" id="L628">            dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, null/*externalMessageId*/, MEDICATION_UPDATE,</span>
+<span class="fc" id="L629">                    NEW, pidMismatches, patient, dto.getId());</span>
+        }
+
+<span class="fc" id="L632">    }</span>
+
+    /**
+     * Creates a new patient based on the information in either an A28 or A31
+     * message.
+     *
+     * @param hl7            The HL7 message.
+     * @param hl7ConnContext The organisation or team which sent the HL7 message.
+     * @param patient        Expected to be null
+     * @param loginContext
+     * @return
+     */
+    private PKBPerson createNewPatient(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient) {
+
+<span class="pc bpc" id="L646" title="1 of 2 branches missed.">        if (patient != null) {</span>
+<span class="nc" id="L647">            throw new ApiCallMalformedException(&quot;patient already exists in PKB: &quot; + hl7.getPidIdFields(hl7ConnContext));</span>
+        }
+
+<span class="fc" id="L650">        HL7Patient hl7Patient = hl7.parsePatient(hl7ConnContext);</span>
+
+<span class="fc" id="L652">        checkNhsNumberStatus(hl7ConnContext, hl7Patient, patient);</span>
+
+        // Check at least one ID was provided
+<span class="fc bfc" id="L655" title="All 2 branches covered.">        if (hl7Patient.getNationalIds().isEmpty()</span>
+<span class="pc bpc" id="L656" title="1 of 2 branches missed.">                &amp;&amp; hl7Patient.getOrgLevelIds().isEmpty()</span>
+<span class="nc bnc" id="L657" title="All 2 branches missed.">                &amp;&amp; hl7Patient.getTeamLevelIds().isEmpty()) {</span>
+<span class="nc" id="L658">            throw new ApiCallMalformedException(&quot;no valid IDs provided for patient&quot;);</span>
+        }
+
+        // handle add patient acct
+<span class="fc" id="L662">        return addNewPatient(hl7, hl7ConnContext, hl7Patient);</span>
+    }
+
+    private ProcessingDecision processEncounter(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches) {
+        // Parse the data to ensure it is valid; it is the responsibility of
+        // the parse method to throw an error if the input is not valid.
+<span class="fc" id="L668">        EncounterEvent encounterEvent = hl7.parseEncounterMessage(new SourceDetails(hl7ConnContext.getEHRRequestContext()));</span>
+
+        // PHR-7705: Encounter events that create an appointment (A05, A14) should have a location
+<span class="fc" id="L671">        HL7MessageType messageType = hl7.getMessageType();</span>
+<span class="fc bfc" id="L672" title="All 4 branches covered.">        if (ADT_A05 == messageType || ADT_A14 == messageType) {</span>
+<span class="fc bfc" id="L673" title="All 2 branches covered.">            if (StringUtils.isBlank(encounterEvent.getLocation().getDescription())) {</span>
+                // PHR-7706: Before we reject, log an error to see if this is happening
+<span class="fc" id="L675">                LOGGER.error(&quot;PHR-7706: Encounter appointment had no location in {}. Message {} from {}&quot;,</span>
+<span class="fc" id="L676">                        messageType, hl7.getMessageIdString(), hl7ConnContext);</span>
+            }
+        }
+
+<span class="fc" id="L680">        checkEncounterClass(hl7, encounterEvent, hl7ConnContext);</span>
+
+<span class="fc" id="L682">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(ENCOUNTER,</span>
+<span class="fc" id="L683">                hl7ConnContext.getSourceOrgId(), encounterEvent.getExternalEncounterId(), patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L684" title="2 of 4 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE:
+            case FORCE_NEW: {
+                // Queue for processing
+<span class="fc" id="L688">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, encounterEvent.getExternalEncounterId(), ENCOUNTER,</span>
+                        NEW, pidMismatches, patient, null);
+
+                // Log and notify
+<span class="fc" id="L692">                apiHelper.logActivityAndNotifyPatient(hl7ConnContext, Action.SENT_MESSAGE, patient, encounterEvent,</span>
+<span class="fc" id="L693">                        dateTimeService.now(), messageType);</span>
+            }
+<span class="fc" id="L695">            break;</span>
+            case QUARANTINE: {
+<span class="fc" id="L697">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, encounterEvent.getExternalEncounterId(), ENCOUNTER,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L700">            break;</span>
+            case REJECT: {
+<span class="nc" id="L702">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, encounterEvent.getExternalEncounterId(), ENCOUNTER,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="nc" id="L705">            break;</span>
+            default: {
+<span class="nc" id="L707">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L710">        return processingDecision;</span>
+    }
+
+    private ProcessingDecision processEncounterUpdate(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches) {
+        // Parse the data to ensure it is valid; it is the responsibility of
+        // the parse method to throw an error if the input is not valid.
+<span class="fc" id="L716">        EncounterEvent encounterEvent = hl7.parseEncounterMessage(new SourceDetails(hl7ConnContext.getEHRRequestContext()));</span>
+
+<span class="fc" id="L718">        checkEncounterClass(hl7, encounterEvent, hl7ConnContext);</span>
+
+<span class="fc" id="L720">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(ENCOUNTER,</span>
+<span class="fc" id="L721">                hl7ConnContext.getSourceOrgId(), encounterEvent.getExternalEncounterId(), patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L722" title="3 of 4 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE:
+            case FORCE_NEW: {
+                // Queue for processing
+<span class="fc" id="L726">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, encounterEvent.getExternalEncounterId(), ENCOUNTER,</span>
+                        NEW, pidMismatches, patient, null);
+
+                // An A08 will not create a new encounter, so only notify if we've already accepted a non-A08 message about this encounter before
+<span class="fc" id="L730">                if(dataUploadManager.searchHl7UploadedData(ENCOUNTER, hl7ConnContext.getSourceOrgId(), encounterEvent.getExternalEncounterId(), patient.getId())</span>
+<span class="pc bpc" id="L731" title="1 of 4 branches missed.">                        .stream().filter(ud -&gt; (NEW == ud.getStatus() || COMPLETED == ud.getStatus())</span>
+<span class="fc bfc" id="L732" title="All 4 branches covered.">                                &amp;&amp; (ud.getHl7MessageType() != com.pkb.entities.enums.HL7MessageType.ADT_A08)).count() &gt; 0) {</span>
+                    // Log and notify
+<span class="fc" id="L734">                    apiHelper.logActivityAndNotifyPatient(hl7ConnContext, Action.SENT_MESSAGE, patient, encounterEvent,</span>
+<span class="fc" id="L735">                            dateTimeService.now(), hl7.getMessageType());</span>
+                }
+            }
+            break;
+            case QUARANTINE: {
+<span class="nc" id="L740">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, encounterEvent.getExternalEncounterId(), ENCOUNTER,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="nc" id="L743">            break;</span>
+            case REJECT: {
+<span class="nc" id="L745">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, encounterEvent.getExternalEncounterId(), ENCOUNTER,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="nc" id="L748">            break;</span>
+            default: {
+<span class="nc" id="L750">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L753">        return processingDecision;</span>
+    }
+
+    private void checkEncounterClass(HL7XmlDoc hl7, EncounterEvent encounterEvent, HL7ConnContext hl7ConnContext) {
+        // PHR-7699: Log which customers are not providing PV1-2
+<span class="fc" id="L758">        HL7String patientClass = hl7.getPatientClass();</span>
+<span class="fc bfc" id="L759" title="All 2 branches covered.">        if (patientClass.isBlank()) {</span>
+<span class="fc" id="L760">            LOGGER.error(&quot;PHR-7699: PV1-2 was not provided for {}. Message {} from {}&quot;,</span>
+<span class="fc" id="L761">                    hl7.getMessageType(), hl7.getMessageIdString(), hl7ConnContext);</span>
+<span class="pc bpc" id="L762" title="1 of 2 branches missed.">        } else if (EncounterClass.OTHER == encounterEvent.getEncounterClass()) {</span>
+<span class="nc" id="L763">            LOGGER.error(&quot;PHR-7699: PV1-2 Encounter Class in {} not valid [{}]. Message {} from {}&quot;,</span>
+<span class="nc" id="L764">                    hl7.getMessageType(), patientClass.getString(), hl7.getMessageIdString(), hl7ConnContext);</span>
+        }
+<span class="fc" id="L766">    }</span>
+
+    private ProcessingDecision processOruR01Observations(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches) {
+        // TODO: Since both measurements and lab results are extracted from the same message they should have the same
+        // processing decision. However, this is complicated because measurements need to be extracted first, but it
+        // makes more sense to have the lab result handler determine the processing decision since measurements do not
+        // yet mandate external IDs. For now, allow them to make their own decisions (but don't report the measurement
+        // decision) until we can unify the processing.
+        // We don't currently have any customers sending us lab results and measurements in a single R01, so this is
+        // safe for now. PHR-8117 is a good candidate for unifying the parsing into a single accept/reject decision.
+<span class="fc" id="L776">        ProcessingDecision processingDecisionMeasurements = processOruR01Measurements(hl7, hl7ConnContext, patient, pidMismatches);</span>
+<span class="fc" id="L777">        ProcessingDecision processingDecisionLabs = processOruR01LabResults(hl7, hl7ConnContext, patient, pidMismatches);</span>
+<span class="fc" id="L778">        return processingDecisionLabs;</span>
+    }
+
+    private ProcessingDecision processOruR01Measurements(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches) {
+<span class="fc" id="L782">        EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+        // First check for any OBR groups to be deleted, then parse measurements from the remaining groups
+<span class="fc" id="L784">        Optional&lt;UploadedDataDeletionMetadata&gt; maybeDeletionInfo = hl7.parseMeasurementDeletions(hl7ConnContext, null);</span>
+<span class="fc" id="L785">        List&lt;MeasurementDTO&gt; measurementList = hl7.parseMeasurements(hl7ConnContext, referenceDataManager);</span>
+<span class="fc" id="L786">        boolean anyDeletionsPresent = maybeDeletionInfo.isPresent();</span>
+
+<span class="fc bfc" id="L788" title="All 4 branches covered.">        if (!anyDeletionsPresent &amp;&amp; measurementList.isEmpty()) {</span>
+<span class="fc" id="L789">            return CONTINUE;</span>
+        }
+
+<span class="fc" id="L792">        Set&lt;String&gt; measurementFons = measurementList.stream()</span>
+<span class="fc" id="L793">                .map(MeasurementDTO::getLabOrderId)</span>
+<span class="fc" id="L794">                .filter(StringUtils::isNotBlank)</span>
+<span class="fc" id="L795">                .collect(Collectors.toSet());</span>
+<span class="fc" id="L796">        String fillerOrderNumber = getSingleFillerOrderNumber(measurementFons, maybeDeletionInfo);</span>
+
+<span class="fc" id="L798">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(MEASUREMENT,</span>
+<span class="fc" id="L799">                hl7ConnContext.getSourceOrgId(), fillerOrderNumber, patient.getId(), pidMismatches);</span>
+        // If there are deletions then we need to force a queue because decryption access is needed
+<span class="fc bfc" id="L801" title="All 4 branches covered.">        if (CONTINUE == processingDecision &amp;&amp; anyDeletionsPresent) {</span>
+<span class="fc" id="L802">            processingDecision = ProcessingDecision.FORCE_NEW;</span>
+        }
+<span class="pc bpc" id="L804" title="1 of 5 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE: {
+                // Record data has been processed
+<span class="fc" id="L807">                UploadedDataDTO dto = dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, MEASUREMENT,</span>
+                        COMPLETED, pidMismatches, patient, null/*subsetOf*/);
+
+<span class="fc bfc" id="L810" title="All 2 branches covered.">                for (MeasurementDTO measurement : measurementList) {</span>
+<span class="fc" id="L811">                    measurement.getBaseFields().setUploadedDataId(dto.getId());</span>
+<span class="fc" id="L812">                }</span>
+
+                // Save now (updates not yet supported)
+<span class="fc" id="L815">                measurementManager.saveMeasurements(ehrRequestContext.withConsentNotRequired(),</span>
+<span class="fc" id="L816">                        measurementList, patient.getId());</span>
+
+                // Log and notify
+<span class="fc" id="L819">                notifyBatch(Action.UPLOADED_MEASUREMENTS, patient, measurementList, hl7ConnContext, hl7.getMessageType());</span>
+            }
+<span class="fc" id="L821">            break;</span>
+            case FORCE_NEW: {
+<span class="fc" id="L823">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, MEASUREMENT,</span>
+                        NEW, pidMismatches, patient, null/*subsetOf*/);
+<span class="fc bfc" id="L825" title="All 2 branches covered.">                if (!measurementList.isEmpty()) {</span>
+<span class="fc" id="L826">                    notifyBatch(Action.UPLOADED_MEASUREMENTS, patient, measurementList, hl7ConnContext, hl7.getMessageType());</span>
+                }
+            }
+            break;
+            case QUARANTINE: {
+<span class="fc" id="L831">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, MEASUREMENT,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L834">            break;</span>
+            case REJECT: {
+<span class="fc" id="L836">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, MEASUREMENT,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L839">            break;</span>
+            default: {
+<span class="nc" id="L841">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L844">        return processingDecision;</span>
+    }
+
+    private ProcessingDecision processOruR01LabResults(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches) {
+<span class="fc" id="L848">        EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+
+        // First check for any OBR groups to be deleted, then parse lab results from the remaining groups
+<span class="fc" id="L851">        Optional&lt;UploadedDataDeletionMetadata&gt; maybeDeletionInfo = hl7.parseLabBulkDeletions(hl7ConnContext, null);</span>
+<span class="fc" id="L852">        List&lt;TestResultDTO&gt; testResultList = hl7.parseLabResults(hl7ConnContext, referenceDatumService, loincManager, HL7XmlDoc.CallReason.VALIDATION_ONLY);</span>
+<span class="fc" id="L853">        boolean anyDeletionsPresent = maybeDeletionInfo.isPresent();</span>
+
+<span class="fc bfc" id="L855" title="All 4 branches covered.">        if (!anyDeletionsPresent &amp;&amp; testResultList.isEmpty()) {</span>
+<span class="fc" id="L856">            return CONTINUE;</span>
+        }
+
+<span class="fc" id="L859">        Set&lt;String&gt; testResultFons = testResultList.stream()</span>
+<span class="fc" id="L860">                .map(TestResultDTO::getLabOrderId)</span>
+<span class="fc" id="L861">                .filter(StringUtils::isNotBlank)</span>
+<span class="fc" id="L862">                .collect(Collectors.toSet());</span>
+<span class="fc" id="L863">        String fillerOrderNumber = getSingleFillerOrderNumber(testResultFons, maybeDeletionInfo);</span>
+
+<span class="fc" id="L865">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(TEST_RESULT,</span>
+<span class="fc" id="L866">                hl7ConnContext.getSourceOrgId(), fillerOrderNumber, patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L867" title="1 of 4 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE:
+            case FORCE_NEW: {
+                // Queue for processing
+<span class="fc" id="L871">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, TEST_RESULT,</span>
+                        NEW, pidMismatches, patient, null/*subsetOf*/);
+
+                // This logic is a little convoluted due to the overarching limitation of how we generate HL7
+                // notifications - whereby we notify before we've processed the message, so it's essentially a best
+                // guess at what is likely to happen.
+                // It is normal for a lab result message to include both final (additions) and not final (deletions)
+                // results in a single message. The real world workflow in that case is most likely to be adding new
+                // results in a partially completed order whereby the not final results haven't actually been added to
+                // PKB so won't really be there to delete. As such, we only notify of deletions if there were definitely
+                // no test results that might be added to increase the chance our best guess is correct.
+<span class="fc bfc" id="L882" title="All 2 branches covered.">                if (testResultList.isEmpty()) {</span>
+                    // The consent filtering in notifyBatch requires a dummy entity to pull the privacy label from, which for now we just default to GENERAL.
+                    // See PHR-2817 for details on making this better.
+<span class="fc" id="L885">                    TestResultDTO consentPlaceholder = new TestResultDTO(new SourceDetails(ehrRequestContext));</span>
+<span class="fc" id="L886">                    consentPlaceholder.getBaseFields().setPrivacyFlag(PrivacyFlag.GENERAL);</span>
+<span class="fc" id="L887">                    notifyBatch(Action.DELETED_LAB_RESULTS, patient, Lists.newArrayList(consentPlaceholder), hl7ConnContext, hl7.getMessageType());</span>
+<span class="fc" id="L888">                } else {</span>
+<span class="fc bfc" id="L889" title="All 2 branches covered.">                    Action template = testResultList.stream().anyMatch(result -&gt; dataDelayService.findWhenBecomesVisibleForUserType(result, UserType.PATIENT).isPresent())</span>
+<span class="fc" id="L890">                            ? Action.UPLOADED_LAB_RESULTS_WITH_DELAY</span>
+<span class="fc" id="L891">                            : Action.UPLOADED_LAB_RESULTS;</span>
+<span class="fc" id="L892">                    notifyBatch(template, patient, testResultList, hl7ConnContext, hl7.getMessageType());</span>
+                }
+            }
+<span class="fc" id="L895">            break;</span>
+            case QUARANTINE: {
+<span class="fc" id="L897">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, TEST_RESULT,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L900">            break;</span>
+            case REJECT: {
+<span class="fc" id="L902">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, TEST_RESULT,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L905">            break;</span>
+            default: {
+<span class="nc" id="L907">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L910">        return processingDecision;</span>
+    }
+
+    @VisibleForTesting
+    static String getSingleFillerOrderNumber(Set&lt;String&gt; observationFons, Optional&lt;UploadedDataDeletionMetadata&gt; maybeDeletionInfo) {
+<span class="fc" id="L915">        Set&lt;String&gt; fillerOrderNumbers = new TreeSet&lt;&gt;();</span>
+<span class="fc" id="L916">        maybeDeletionInfo.stream()</span>
+<span class="fc" id="L917">                .map(x -&gt; x.getMaybeFillerOrderNumber())</span>
+<span class="fc" id="L918">                .filter(StringUtils::isNotBlank)</span>
+<span class="fc" id="L919">                .forEach(fillerOrderNumbers::add);</span>
+<span class="fc" id="L920">        fillerOrderNumbers.addAll(observationFons);</span>
+<span class="pc bpc" id="L921" title="1 of 2 branches missed.">        if (fillerOrderNumbers.size() &gt; 1) {</span>
+<span class="nc" id="L922">            throw new IllegalStateException(&quot;More than 1 Filler Order Number found in single message&quot;);</span>
+        }
+<span class="fc" id="L924">        return fillerOrderNumbers.stream().findFirst().orElse(&quot;&quot;);</span>
+    }
+
+    /**
+     * An upload of one or more radiology results for a patient.
+     * Parse out info; validate; add to patient's account.
+     *
+     * @param hl7
+     * @param hl7ConnContext
+     * @param patient
+     */
+    private ProcessingDecision processOruR01Radiology(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches) {
+
+        // Parse fails if data is invalid.
+        // Result includes deletion requests
+<span class="fc" id="L939">        List&lt;RadiologyResult&gt; resultList = hl7.parseRadiologyResults(hl7ConnContext);</span>
+
+<span class="pc bpc" id="L941" title="1 of 2 branches missed.">        if (resultList.isEmpty()) {</span>
+<span class="nc" id="L942">            throw new ApiCallMalformedException(&quot;radiology message &quot; + hl7.getMessageIdString() + &quot;: no content found&quot;);</span>
+        }
+
+<span class="fc" id="L945">        Set&lt;String&gt; fillerOrderNumbers = new TreeSet&lt;&gt;();</span>
+<span class="fc bfc" id="L946" title="All 2 branches covered.">        for (RadiologyResult foundResult : resultList) {</span>
+<span class="fc" id="L947">            fillerOrderNumbers.add(foundResult.getLabOrderId());</span>
+<span class="fc" id="L948">        }</span>
+
+<span class="fc" id="L950">        String fillerOrderNumber = null;</span>
+<span class="pc bpc" id="L951" title="1 of 2 branches missed.">        if (fillerOrderNumbers.size() == 1) {</span>
+<span class="fc" id="L952">            fillerOrderNumber = resultList.get(0).getLabOrderId();</span>
+        } else {
+            // This should be an unreachable error.
+            // See: PHR-364, PHR-7690
+<span class="nc" id="L956">            LOGGER.error(&quot;PHR-7690: Not recording FON because there were {} values for {} results. Message {} from {}&quot;,</span>
+<span class="nc" id="L957">                    fillerOrderNumbers.size(), resultList.size(), hl7.getMessageIdString(), hl7ConnContext);</span>
+        }
+
+<span class="fc" id="L960">        EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+
+<span class="fc" id="L962">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(RADIOLOGY,</span>
+<span class="fc" id="L963">                hl7ConnContext.getSourceOrgId(), fillerOrderNumber, patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L964" title="1 of 5 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE: {
+                // Record data has been processed
+<span class="fc" id="L967">                UploadedDataDTO dto = dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, RADIOLOGY,</span>
+                        COMPLETED, pidMismatches, patient, null/*subsetOf*/);
+
+<span class="fc" id="L970">                Long accountId = userManager.getDefaultAccountId(patient.getId());</span>
+
+<span class="fc bfc" id="L972" title="All 2 branches covered.">                for (RadiologyResult result : resultList) {</span>
+<span class="fc" id="L973">                    result.setPatientId(patient.getId());</span>
+<span class="fc" id="L974">                    result.getBaseFields().setUploadedDataId(dto.getId());</span>
+
+                    // Apply privacy labels
+<span class="fc" id="L977">                    referenceDataManager.applyPrivacyLabels(result, result.getObrServiceCode());</span>
+<span class="fc" id="L978">                }</span>
+
+                // need to upload any attachment in chunks first
+<span class="fc" id="L981">                long maxChunkSize = getFileChunkSizeInBytes();</span>
+
+<span class="fc bfc" id="L983" title="All 2 branches covered.">                for (RadiologyResult result : resultList) {</span>
+<span class="fc bfc" id="L984" title="All 2 branches covered.">                    if (!result.getBaseFields().isDeleted()) {</span>
+<span class="fc bfc" id="L985" title="All 2 branches covered.">                        for (Attachment att : result.getAttachments()) {</span>
+<span class="fc" id="L986">                            byte[] content = att.getContent();</span>
+<span class="fc" id="L987">                            int index = 0;</span>
+<span class="fc" id="L988">                            int chunkCount = 0;</span>
+<span class="fc" id="L989">                            UUID firstChunkId = null;</span>
+
+<span class="fc bfc" id="L991" title="All 2 branches covered.">                            while (index &lt; content.length) {</span>
+
+<span class="fc" id="L993">                                int to = (int) Math.min(index + maxChunkSize, content.length);</span>
+<span class="fc" id="L994">                                byte[] chunkBytes = Arrays.copyOfRange(content, index, to);</span>
+<span class="fc" id="L995">                                index = to;</span>
+
+<span class="fc" id="L997">                                ChunkedDocDTO chunkDTO = new ChunkedDocDTO();</span>
+<span class="fc" id="L998">                                chunkDTO.setMediaType(att.getMediaType());</span>
+<span class="fc" id="L999">                                chunkDTO.setContent(chunkBytes);</span>
+<span class="fc" id="L1000">                                chunkDTO.setName(att.getFilename());</span>
+<span class="fc bfc" id="L1001" title="All 2 branches covered.">                                if (firstChunkId != null) {</span>
+<span class="fc" id="L1002">                                    chunkDTO.setParentMetadataId(firstChunkId);</span>
+<span class="fc" id="L1003">                                    chunkDTO.setName(chunkDTO.getName() + &quot;.part&quot; + chunkCount);</span>
+                                }
+
+<span class="fc" id="L1006">                                UUID savedChunkId = chunkedDocManager.addChunk(ehrRequestContext, chunkDTO, patient.getId(), accountId);</span>
+
+<span class="fc bfc" id="L1008" title="All 2 branches covered.">                                if (firstChunkId == null) {</span>
+<span class="fc" id="L1009">                                    firstChunkId = savedChunkId;</span>
+                                }
+
+<span class="fc" id="L1012">                                chunkCount++;</span>
+<span class="fc" id="L1013">                            }</span>
+
+                            // content uploaded: remove from attachment (and add ref to docId)
+<span class="fc" id="L1016">                            att.setDocMetadataId(firstChunkId);</span>
+                            // Do we need to save this, or not? We should be consistent.
+                            // See discharge summaries, for example.
+                            //att.setContent( null );
+<span class="fc" id="L1020">                        }</span>
+                    }
+<span class="fc" id="L1022">                }</span>
+
+<span class="fc" id="L1024">                radiologyManager.saveRadiologyResults(ehrRequestContext.withConsentNotRequired(), patient.getId(), accountId, resultList);</span>
+
+                // Log and notify
+<span class="fc" id="L1027">                notifyBatch(Action.UPLOADED_RADIOLOGY, patient,</span>
+<span class="fc bfc" id="L1028" title="All 2 branches covered.">                        resultList.stream().filter(r -&gt; !r.getBaseFields().isDeleted()).collect(toList()), hl7ConnContext, hl7.getMessageType());</span>
+<span class="fc" id="L1029">                notifyBatch(Action.DELETED_RADIOLOGY, patient,</span>
+<span class="fc" id="L1030">                        resultList.stream().filter(r -&gt; r.getBaseFields().isDeleted()).collect(toList()), hl7ConnContext, hl7.getMessageType());</span>
+            }
+<span class="fc" id="L1032">            break;</span>
+            case FORCE_NEW: {
+<span class="fc" id="L1034">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, RADIOLOGY,</span>
+                        NEW, pidMismatches, patient, null/*subsetOf*/);
+
+                // Log and notify
+<span class="fc" id="L1038">                notifyBatch(Action.UPLOADED_RADIOLOGY, patient,</span>
+<span class="pc bpc" id="L1039" title="1 of 2 branches missed.">                        resultList.stream().filter(r -&gt; !r.getBaseFields().isDeleted()).collect(toList()), hl7ConnContext, hl7.getMessageType());</span>
+<span class="fc" id="L1040">                notifyBatch(Action.DELETED_RADIOLOGY, patient,</span>
+<span class="fc" id="L1041">                        resultList.stream().filter(r -&gt; r.getBaseFields().isDeleted()).collect(toList()), hl7ConnContext, hl7.getMessageType());</span>
+            }
+<span class="fc" id="L1043">            break;</span>
+            case QUARANTINE: {
+<span class="fc" id="L1045">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, RADIOLOGY,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L1048">            break;</span>
+            case REJECT: {
+<span class="fc" id="L1050">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, fillerOrderNumber, RADIOLOGY,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L1053">            break;</span>
+            default: {
+<span class="nc" id="L1055">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L1058">        return processingDecision;</span>
+    }
+
+    private &lt;T extends RequiresConsent&gt; void notifyBatch(Action action, PKBPerson patient, Collection&lt;T&gt; batch, HL7ConnContext hl7ConnContext, HL7MessageType hl7MessageType) {
+        //We have a batch of processed data which may contain different consent levels.
+        //Look through the batch for each different consent level and generate one notification for each different level (including data with no consent level):
+
+<span class="fc" id="L1065">        batch.stream().filter(</span>
+<span class="pc bpc" id="L1066" title="2 of 8 branches missed.">                b -&gt; !b.getRequireGeneral() &amp;&amp; !b.getRequireMentalHealth() &amp;&amp; !b.getRequireSexualHealth() &amp;&amp; !b.getRequireSocialCare())</span>
+<span class="fc" id="L1067">                .findFirst().ifPresent(item -&gt; apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, item, dateTimeService.now(), hl7MessageType));</span>
+
+<span class="fc" id="L1069">        batch.stream().filter(T::getRequireGeneral).findFirst()</span>
+<span class="fc" id="L1070">                .ifPresent(item -&gt; apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, item, dateTimeService.now(), hl7MessageType));</span>
+
+<span class="fc" id="L1072">        batch.stream().filter(T::getRequireMentalHealth).findFirst()</span>
+<span class="fc" id="L1073">                .ifPresent(item -&gt; apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, item, dateTimeService.now(), hl7MessageType));</span>
+
+<span class="fc" id="L1075">        batch.stream().filter(T::getRequireSexualHealth).findFirst()</span>
+<span class="pc" id="L1076">                .ifPresent(item -&gt; apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, item, dateTimeService.now(), hl7MessageType));</span>
+
+<span class="fc" id="L1078">        batch.stream().filter(T::getRequireSocialCare).findFirst()</span>
+<span class="pc" id="L1079">                .ifPresent(item -&gt; apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, item, dateTimeService.now(), hl7MessageType));</span>
+<span class="fc" id="L1080">    }</span>
+
+    /**
+     * Once createNewPatient has done the preliminary checks, this method is
+     * called to actually add the patient to the system.
+     *
+     * @param hl7            The original HL7 message.
+     * @param hl7ConnContext The organisation or team which sent the HL7 message.
+     * @param hl7Patient     The patient to add.
+     * @return PKBPerson     {@link PKBPerson}
+     */
+    private PKBPerson addNewPatient(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, HL7Patient hl7Patient) {
+        // First, make sure we know which team is the source/data controller. Even if a ZTM
+        // segment is supplied, the source team will be used as team which created this patient.
+<span class="fc" id="L1094">        var creationTeamsResponse = hl7TeamService.getCreationTeams(hl7, hl7ConnContext);</span>
+<span class="fc" id="L1095">        var result = apiHelper.populatePKBPersonDTOForNewPatient(hl7ConnContext, hl7Patient);</span>
+<span class="pc bpc" id="L1096" title="1 of 2 branches missed.">        if (result.isLeft()) {</span>
+<span class="nc" id="L1097">            throw result.getLeft();</span>
+        }
+<span class="fc" id="L1099">        var patientDto = result.get();</span>
+<span class="fc" id="L1100">        var authBy = hl7ConnContext.getName() + &quot; (&quot; + hl7ConnContext.getId() + &quot;)&quot;;</span>
+
+        // parse these to validate, and see what we have
+<span class="fc" id="L1103">        var hl7AllergyList = hl7.parseHL7Allergies();</span>
+<span class="fc" id="L1104">        var hl7DiagnosisList = hl7.parseHL7Diagnoses();</span>
+<span class="fc" id="L1105">        var hl7MedicationList = hl7.parseHL7Medications();</span>
+
+<span class="fc" id="L1107">        return teamUserManager.transactional(() -&gt; {</span>
+<span class="fc" id="L1108">            var dateAdded = dateTimeService.now();</span>
+<span class="pc bpc" id="L1109" title="2 of 4 branches missed.">            if (hl7.getMessageDate() != null &amp;&amp; hl7.getMessageDate().getInstant() != null) {</span>
+<span class="fc" id="L1110">                dateAdded = hl7.getMessageDate().getInstant();</span>
+            }
+<span class="fc" id="L1112">            var ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+<span class="fc" id="L1113">            var newPatient = teamUserManager.createPatientForHL7API(ehrRequestContext, patientDto, creationTeamsResponse,</span>
+<span class="fc" id="L1114">                    hl7Patient.getNationalIds(), hl7Patient.getOrgLevelIds(), hl7Patient.getTeamLevelIds(),</span>
+                    authBy, dateAdded, hl7ConnContext);
+<span class="fc" id="L1116">            var defaultAccountId = userManager.getDefaultAccountId(newPatient.getId());</span>
+
+<span class="fc" id="L1118">            LOGGER.info(&quot;created patient id {} for {}&quot;, newPatient.getId(), hl7ConnContext);</span>
+
+            // add to queue -- as &quot;COMPLETED&quot;
+<span class="fc" id="L1121">            var udDto = new UploadedDataDTO();</span>
+<span class="fc" id="L1122">            udDto.setSourceOrg(hl7ConnContext.getSourceOrg());</span>
+<span class="fc" id="L1123">            udDto.setConnectingOrg(hl7ConnContext.getConnectingOrg());</span>
+<span class="fc" id="L1124">            udDto.setHl7PartnerId(hl7ConnContext.getHl7Partner().flatMap(hl7p -&gt; hl7p.getId().toJavaOptional()).orElse(null));</span>
+<span class="fc" id="L1125">            udDto.setResponsibleOrganisationIdentifier(hl7ConnContext.getMaybeResponsibleOrganisationIdentifier().orElse(null));</span>
+<span class="fc" id="L1126">            hl7ConnContext.getSourceTeam().ifPresent(udDto::setSourceTeam);</span>
+<span class="fc" id="L1127">            udDto.setData(xml);</span>
+<span class="fc" id="L1128">            udDto.setEmbeddedId(hl7.getMessageIdString());</span>
+<span class="fc" id="L1129">            udDto.setDestination(Destination.PATIENT_ADD);</span>
+<span class="fc" id="L1130">            udDto.setFormat(Format.HL7);</span>
+<span class="fc" id="L1131">            udDto.setStatus(COMPLETED);</span>
+<span class="fc" id="L1132">            udDto.setHl7MessageType(hl7.getMessageType().getCode());</span>
+            // replace with the version returned (which has IDs set)
+<span class="fc" id="L1134">            var savedUdDto = dataUploadManager.addUploadedData(udDto, newPatient, ehrRequestContext);</span>
+
+            // Set implied consent
+<span class="fc" id="L1137">            creationTeamsResponse.getCreationTeams()</span>
+<span class="fc" id="L1138">                    .forEach(team -&gt; patientConsentManager.grantDefaultConsentToTeam(hl7ConnContext,</span>
+                            newPatient,
+                            team,
+<span class="fc" id="L1141">                            savedUdDto.getId(),</span>
+                            HL7_API));
+
+<span class="fc" id="L1144">            addPatientHistory(newPatient,</span>
+                    defaultAccountId,
+                    savedUdDto,
+                    hl7ConnContext,
+                    hl7AllergyList,
+                    hl7DiagnosisList,
+                    hl7MedicationList);
+
+<span class="fc" id="L1152">            return newPatient;</span>
+        });
+    }
+
+    private void addPatientHistory(PKBPerson patient, Long patientAccountId, UploadedDataDTO origUdDto,
+                                   HL7ConnContext hl7ConnContext,
+                                   List&lt;HL7Allergy&gt; hl7AllergyList, List&lt;HL7Diagnosis&gt; hl7DiagnosisList, List&lt;HL7Medication&gt; hl7MedicationList) {
+<span class="fc" id="L1159">        EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+<span class="fc bfc" id="L1160" title="All 2 branches covered.">        if (!hl7AllergyList.isEmpty()) {</span>
+<span class="fc" id="L1161">            UploadedDataDTO dto = origUdDto.copyToNew();</span>
+<span class="fc" id="L1162">            dto.setDestination(ALLERGY_UPDATE);</span>
+<span class="fc" id="L1163">            dto.setStatus(COMPLETED);</span>
+<span class="fc" id="L1164">            dto.setSubsetOfParentId(origUdDto.getId());</span>
+
+<span class="fc" id="L1166">            dto = dataUploadManager.addUploadedData(dto, patient, ehrRequestContext);</span>
+
+<span class="fc" id="L1168">            List&lt;Allergy&gt; dtoList = HL7XmlDoc.convertAllergies(hl7AllergyList, dto.getId(), patientAccountId, hl7ConnContext);</span>
+<span class="fc" id="L1169">            allergyManager.addAllergies(ehrRequestContext.withConsentNotRequired(), dtoList);</span>
+
+        }
+
+<span class="fc bfc" id="L1173" title="All 2 branches covered.">        if (!hl7DiagnosisList.isEmpty()) {</span>
+<span class="fc" id="L1174">            UploadedDataDTO dto = origUdDto.copyToNew();</span>
+<span class="fc" id="L1175">            dto.setDestination(DIAGNOSIS_UPDATE);</span>
+<span class="fc" id="L1176">            dto.setStatus(COMPLETED);</span>
+<span class="fc" id="L1177">            dto.setSubsetOfParentId(origUdDto.getId());</span>
+<span class="fc" id="L1178">            dto = dataUploadManager.addUploadedData(dto, patient, ehrRequestContext);</span>
+
+<span class="fc" id="L1180">            List&lt;Diagnosis&gt; dtoList = HL7XmlDoc.convertDiagnoses(hl7DiagnosisList, dto.getId(), patient.getId(), patientAccountId, hl7ConnContext);</span>
+<span class="fc" id="L1181">            diagnosisManager.addDiagnoses(dtoList, ehrRequestContext.withConsentNotRequired());</span>
+        }
+
+<span class="fc bfc" id="L1184" title="All 2 branches covered.">        if (!hl7MedicationList.isEmpty()) {</span>
+<span class="fc" id="L1185">            UploadedDataDTO dto = origUdDto.copyToNew();</span>
+<span class="fc" id="L1186">            dto.setDestination(MEDICATION_UPDATE);</span>
+<span class="fc" id="L1187">            dto.setStatus(COMPLETED);</span>
+<span class="fc" id="L1188">            dto.setSubsetOfParentId(origUdDto.getId());</span>
+<span class="fc" id="L1189">            dto = dataUploadManager.addUploadedData(dto, patient, ehrRequestContext);</span>
+
+<span class="fc" id="L1191">            List&lt;Medication&gt; dtoList = HL7XmlDoc.convertMedications(hl7MedicationList, dto.getId(), patient.getId(), patientAccountId, hl7ConnContext);</span>
+<span class="fc" id="L1192">            medicationManager.addMedications(ehrRequestContext.withConsentNotRequired(), dtoList);</span>
+        }
+<span class="fc" id="L1194">    }</span>
+
+    public void setXml(String xml) {
+<span class="fc" id="L1197">        this.xml = xml;</span>
+<span class="fc" id="L1198">    }</span>
+
+    public InputStream getResponseInputStream() {
+<span class="fc" id="L1201">        return responseInputStream;</span>
+    }
+
+    public int getResponseContentLength() {
+<span class="fc" id="L1205">        return responseContentLength;</span>
+    }
+
+    String nowInHL7Format() {
+<span class="fc" id="L1209">        return HL7XmlDoc.formatTimestamp(dateTimeService.nowZonedDateTime());</span>
+    }
+
+    /**
+     * Input validation for values provided in the MSH segment.
+     *
+     * @param hl7            The HL7 message
+     * @param hl7ConnContext The context information
+     */
+    private void validateMshSegment(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext) {
+        // PHR-5364: Check a timestamp has been provided in MSH-7
+<span class="fc" id="L1220">        HL7ValueExpectation expectation_MSH_7_1 = HL7ValueExpectation.builder()</span>
+<span class="fc" id="L1221">                .withId(&quot;MSH-7.1&quot;)</span>
+<span class="fc" id="L1222">                .withName(&quot;message timestamp&quot;)</span>
+<span class="fc" id="L1223">                .withProvidedHL7Value(hl7.getMSH().getDateTimeOfMessage())</span>
+<span class="fc" id="L1224">                .build();</span>
+<span class="fc" id="L1225">        enforceMandatoryValue(expectation_MSH_7_1);</span>
+
+        // PHR-5344: Check a message control ID has been provided in MSH-10
+<span class="fc" id="L1228">        HL7ValueExpectation expectation_MSH_10_1 = HL7ValueExpectation.builder()</span>
+<span class="fc" id="L1229">                .withId(&quot;MSH-10.1&quot;)</span>
+<span class="fc" id="L1230">                .withName(&quot;message control ID&quot;)</span>
+<span class="fc" id="L1231">                .withProvidedHL7Value(hl7.getMSH().getMessageControlId())</span>
+<span class="fc" id="L1232">                .build();</span>
+<span class="fc" id="L1233">        enforceMandatoryValue(expectation_MSH_10_1);</span>
+
+        // PHR-7703: Check a processing ID has been provided in MSH-11
+<span class="fc" id="L1236">        HL7ValueExpectation expectation_MSH_11_1 = HL7ValueExpectation.builder()</span>
+<span class="fc" id="L1237">                .withId(&quot;MSH-11.1&quot;)</span>
+<span class="fc" id="L1238">                .withName(&quot;processing ID&quot;)</span>
+<span class="fc" id="L1239">                .withProvidedHL7Value(hl7.getMSH().getProcessingId())</span>
+<span class="fc" id="L1240">                .build();</span>
+<span class="fc" id="L1241">        enforceMandatoryValue(expectation_MSH_11_1);</span>
+<span class="fc" id="L1242">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

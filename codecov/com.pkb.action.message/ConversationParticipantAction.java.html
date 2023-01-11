@@ -1,0 +1,468 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConversationParticipantAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.message</a> &gt; <span class="el_source">ConversationParticipantAction.java</span></div><h1>ConversationParticipantAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.message;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.encounter.entity.Encounter;
+import com.pkb.encounter.entity.Message;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.enums.messaging.MessageStatus;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.InstituteUserEntity;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.Constants;
+import com.pkb.util.PKBConstants;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.StringEscapeUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.UUID;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
+
+<span class="fc" id="L39">public class ConversationParticipantAction extends MessageBaseAction {</span>
+
+    private static final String ERROR_MESSAGE = &quot;errorMessage&quot;;
+
+    private static final long serialVersionUID = 1L;
+
+    private static final String TYPE_MESSAGE_HERE = &quot;Type message here....&quot;;
+<span class="fc" id="L46">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    // From discussionCenter.jsp
+    private UUID conversationId;
+    // To discussionCenterAddUser.jsp
+    private int columnSize;
+    private String json; // used for autosave
+    // From discussionCenterAddUser.jsp
+    private List&lt;String&gt; recipientId;
+    private String subject;
+    private String message;
+    private UserAccessManager userAccessManager;
+    private InputStream autoSaveResult;
+    private String messageId;
+    private String patientId;
+    private String fileUploadErrorMessage;
+    private ParticipantSelectorParams participantSelectorParams;
+
+    @Override
+    public String input() {
+<span class="fc" id="L65">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L66">        long loggedInUserId = loggedInUserUtil.getLoggedInUserId();</span>
+<span class="fc" id="L67">        Long contextUserId = contextUserUtil.getContextUserId();</span>
+<span class="fc" id="L68">        long accountIdLoggedInUser = messageWebBean.getDefaultAccountId(loggedInUserId);</span>
+<span class="fc" id="L69">        long accountIdForExistingMessages = accountIdLoggedInUser;</span>
+<span class="fc bfc" id="L70" title="All 2 branches covered.">        if (contextUserId != null) {</span>
+<span class="fc" id="L71">            accountIdForExistingMessages = messageWebBean.getDefaultAccountId(contextUserId);</span>
+        }
+
+<span class="fc" id="L74">        attachments = generateAttachmentsFromInputs();</span>
+
+        //
+        //  If user is clinician
+        //    If participants includes patient
+        //       do not list any patients
+        //       list contactable clinician's with access to the patient + all clinicians from my users's instituation
+        //    else
+        //       list all users's contactable patients + all clinicians from my users's instituation
+        //  Else
+        //     only list contactable clinicians with access to user
+
+        // TODO: For messaging refacor: We're currently using multiple variables (contextUserId, first recipient who is a patient) to get the recipient.
+        //  This should always use contextUserId in the future, and we should use getContextAndLoggedInUsers()
+        //  This is also completely different from ComposeMessageAction, which is causing bugs.
+<span class="fc" id="L89">        PKBPerson referredPatient = loggedInUserUtil.getLoggedInPerson();</span>
+
+        //retrieve the conversation from the logged in users account so we can see if there's an existing draft message.
+        // there may be nothing (e.g. non-participant joining message from context)
+
+<span class="fc" id="L94">        var conversationLoggedInUsersAccount = encounterManager.getOptionalConversation(loggedInEHRRequestContext, conversationId, loggedInUserId, accountIdLoggedInUser);</span>
+
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        if (conversationLoggedInUsersAccount.isPresent()) {</span>
+
+<span class="fc" id="L98">            Message latestMessageLoggedInUsersAccount = conversationLoggedInUsersAccount.get().getLatestMessage();</span>
+
+<span class="fc bfc" id="L100" title="All 2 branches covered.">            if (latestMessageLoggedInUsersAccount.isDraft()) {</span>
+                //some of these recipients can be amended, they're draft.
+<span class="fc" id="L102">                recipientId = new ArrayList&lt;&gt;(latestMessageLoggedInUsersAccount.getParticipants());</span>
+            }
+
+<span class="fc bfc" id="L105" title="All 2 branches covered.">            if (contextUserId == null) {</span>
+                //check if there's a patientId set on the message, if so we should retrieve the conversation
+                //from the patients account as there's a chance this user doesn't have any messages themself yet
+                // (e.g. in the patients record they created a draft in a conversation they're not a participant in,
+                // but then re-opened the draft from their own inbox)
+<span class="fc" id="L110">                String patientId = latestMessageLoggedInUsersAccount.getPatientId();</span>
+<span class="pc bpc" id="L111" title="1 of 2 branches missed.">                if (StringUtils.isNotEmpty(patientId)) {</span>
+<span class="fc" id="L112">                    accountIdForExistingMessages = userManager.getDefaultAccountId(Long.parseLong(latestMessageLoggedInUsersAccount.getPatientId()));</span>
+                }
+            }
+
+        }
+
+<span class="fc bfc" id="L118" title="All 2 branches covered.">        boolean isCaregiver = (contextUserUtil.getContextUserId() != null)</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">                &amp;&amp; getLoggedInEHRRequestContext().isPatient();</span>
+
+<span class="fc" id="L121">        long userIdToRetrieveAs = loggedInUserId;</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">        if (isCaregiver) {</span>
+<span class="fc" id="L123">            userIdToRetrieveAs = contextUserId;</span>
+<span class="fc" id="L124">            referredPatient = userManager.getPKBPerson(userIdToRetrieveAs, PKBPerson.Lazy.PROPERTIES);</span>
+        }
+
+<span class="fc" id="L127">        Encounter conversationForNonDrafts = conversationLoggedInUsersAccount.orElse(null);</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">        if (accountIdForExistingMessages != accountIdLoggedInUser) {</span>
+<span class="fc" id="L129">            conversationForNonDrafts = encounterManager.getOptionalConversation(loggedInEHRRequestContext,</span>
+                            conversationId,
+                            userIdToRetrieveAs,
+                            accountIdForExistingMessages)
+<span class="fc" id="L133">                    .orElse(null);</span>
+        }
+
+        //sometimes we don't care too much which conversation we get info from.
+<span class="fc" id="L137">        Encounter conversationMaybeOwnOrPatient = conversationForNonDrafts;</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">        if (conversationMaybeOwnOrPatient == null) {</span>
+<span class="nc" id="L139">            conversationMaybeOwnOrPatient = conversationLoggedInUsersAccount.orElse(null);</span>
+        }
+
+<span class="fc" id="L142">        int conversationParticipantCount = CollectionUtils.size(conversationMaybeOwnOrPatient.getParticipants());</span>
+<span class="fc" id="L143">        LOGGER.debug(&quot;conversation {} has {} participants and {} messages&quot;,</span>
+                conversationId,
+<span class="fc" id="L145">                conversationParticipantCount,</span>
+<span class="fc" id="L146">                conversationForNonDrafts.getMessageCount());</span>
+
+<span class="fc" id="L148">        Message latestMessagePossiblyDraft = conversationMaybeOwnOrPatient.getLatestMessage();</span>
+<span class="fc" id="L149">        patientId = latestMessagePossiblyDraft.getPatientId();</span>
+
+<span class="pc bpc" id="L151" title="3 of 4 branches missed.">        if ((subject != null) &amp;&amp; !subject.isEmpty()) {</span>
+            // this is coming from reply screen and there could be some subject already
+<span class="nc" id="L153">            subject = StringEscapeUtils.unescapeHtml4(subject);</span>
+        } else {
+<span class="fc" id="L155">            subject = latestMessagePossiblyDraft.getSubject();</span>
+        }
+
+<span class="fc" id="L158">        Set&lt;String&gt; existingParticipants = new TreeSet&lt;&gt;();</span>
+<span class="fc" id="L159">        Message lastNonDraftMessage = latestMessagePossiblyDraft;</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">        if (latestMessagePossiblyDraft.isDraft()) {</span>
+<span class="fc" id="L161">            lastNonDraftMessage = encounterManager.getLastNonDraftMessage(loggedInEHRRequestContext, userIdToRetrieveAs, accountIdForExistingMessages, conversationForNonDrafts);</span>
+        }
+
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if (lastNonDraftMessage != null) {</span>
+<span class="fc" id="L165">            existingParticipants.addAll(lastNonDraftMessage.getParticipants());</span>
+<span class="fc" id="L166">            int messageParticipantCount = CollectionUtils.size(lastNonDraftMessage.getParticipants());</span>
+<span class="fc bfc" id="L167" title="All 2 branches covered.">            if (messageParticipantCount != conversationParticipantCount) {</span>
+<span class="fc" id="L168">                LOGGER.warn(&quot;participant count mismatch! conversation(id={}, participants={}), message(id={}, participants={})&quot;,</span>
+<span class="fc" id="L169">                        conversationId, conversationParticipantCount, lastNonDraftMessage.getId(), messageParticipantCount);</span>
+            }
+        }
+
+<span class="fc bfc" id="L173" title="All 2 branches covered.">        if (UserType.REG_CLINICIAN == loggedInUserUtil.getLoggedInUserType()) {</span>
+<span class="fc" id="L174">            referredPatient = null;</span>
+<span class="pc bpc" id="L175" title="1 of 2 branches missed.">            for (String participantId : latestMessagePossiblyDraft.getParticipants()) {</span>
+<span class="fc" id="L176">                PKBPerson participantPerson = userManager.getPKBPerson(Long.parseLong(participantId), PKBPerson.Lazy.PROPERTIES);</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">                if (participantPerson.isPatient()) {</span>
+<span class="fc" id="L178">                    referredPatient = participantPerson;</span>
+<span class="fc" id="L179">                    break;</span>
+                }
+<span class="fc" id="L181">            }</span>
+        } else {
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">            if (!isEmpty(patientId)) {</span>
+<span class="fc bfc" id="L184" title="All 2 branches covered.">                if (!referredPatient.getIdString().equals(patientId)) {</span>
+                    // clinicians and carers should be w.r.t patient in conversation
+<span class="fc" id="L186">                    referredPatient = userManager.getPKBPerson(Long.parseLong(patientId), PKBPerson.Lazy.PROPERTIES);</span>
+                }
+            }
+        }
+
+<span class="fc" id="L191">        PKBPerson currentUser = loggedInUserUtil.getLoggedInUser(PKBPerson.Lazy.PROPERTIES);</span>
+<span class="fc" id="L192">        LoggedInEHRRequestContext ehrRequestContextSingleAccess = null;</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">        if (!currentUser.isPatient()) {</span>
+<span class="fc" id="L194">            Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam(getEHRRequestContext());</span>
+            //TODO PHR-7205: This breaks for pro-to-pro messaging as there's no referredPatient (existing bug)
+<span class="fc" id="L196">            ehrRequestContextSingleAccess = getEHRRequestContextSingleAccess(referredPatient.getId(), team);</span>
+        }
+
+        try {
+<span class="fc" id="L200">            ZoneId zoneId = loggedInUserUtil.getLoggedInUserZoneId();</span>
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">            zoneId = zoneId == null ? Constants.APPLICATION_TZ : zoneId;</span>
+<span class="fc" id="L202">            DateTimeFormatter dateFormatter = DateTimeFormatter.ofPattern(&quot;dd MMM yy&quot;).withLocale(getLocale()).withZone(zoneId);</span>
+<span class="fc" id="L203">            participantSelectorParams = participantSelectorService.setupParticipantSelectorParams(false, null,</span>
+<span class="fc" id="L204">                    currentUser, referredPatient, isLoggedInUserProfessional(), InstituteUserEntity.ContactOptions.Messages_Only, loggedInUserUtil.getLoggedInUserPrimaryTeam(),</span>
+                    loggedInEHRRequestContext, ehrRequestContextSingleAccess,
+                    dateFormatter);
+<span class="fc" id="L207">            participantSelectorService.filterResults(participantSelectorParams, existingParticipants, dateFormatter);</span>
+<span class="nc" id="L208">        } catch (PKBException e) {</span>
+<span class="nc" id="L209">            LOGGER.error(&quot;unable to load accepted cliniciants for {}&quot;, referredPatient.getId(), e);</span>
+<span class="nc" id="L210">            addActionError(getText(&quot;error.load.accepted.clinicians&quot;));</span>
+<span class="fc" id="L211">        }</span>
+
+<span class="fc" id="L213">        columnSize = getConfig().getRecipientColumnSize();</span>
+
+<span class="fc" id="L215">        String errorMessage = (String) session.get(ERROR_MESSAGE);</span>
+<span class="pc bpc" id="L216" title="1 of 4 branches missed.">        if ((errorMessage != null) &amp;&amp; !errorMessage.isEmpty()) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="fc" id="L218">            addActionError(errorMessage);</span>
+<span class="fc" id="L219">            session.remove(ERROR_MESSAGE);</span>
+        }
+<span class="fc" id="L221">        return Action.SUCCESS;</span>
+    }
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L225">        return userAccessManager;</span>
+    }
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L229">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L230">    }</span>
+
+    public String addUser() {
+<span class="pc bpc" id="L233" title="1 of 4 branches missed.">        if ((recipientId == null) || recipientId.isEmpty()) {</span>
+            //addFieldError(&quot;recipientId&quot;,getText(&quot;composeMessage.no.recipients&quot;));
+<span class="fc" id="L235">            session.put(ERROR_MESSAGE, getText(&quot;composeMessage.no.recipients&quot;));</span>
+<span class="fc" id="L236">            return RELOAD;</span>
+        }
+
+<span class="pc bpc" id="L239" title="1 of 4 branches missed.">        if ((this.message == null) || (this.message.trim().length() &lt; 1)</span>
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">                || TYPE_MESSAGE_HERE.equals(this.message.trim())) {</span>
+<span class="fc" id="L241">            session.put(ERROR_MESSAGE, getText(&quot;error.empty.message&quot;));</span>
+<span class="fc" id="L242">            return RELOAD;</span>
+        }
+
+<span class="pc bpc" id="L245" title="1 of 2 branches missed.">        if ((this.message == null)</span>
+<span class="pc bpc" id="L246" title="1 of 2 branches missed.">                || (this.message.trim().length() &gt; PKBConstants.MSG_CONTENT_CHAR_LIMIT)) {</span>
+<span class="nc bnc" id="L247" title="All 4 branches missed.">            if ((this.message == null) || this.message.isEmpty()) {</span>
+<span class="nc" id="L248">                session.put(ERROR_MESSAGE, getText(&quot;error.empty.message&quot;));</span>
+            } else {
+<span class="nc" id="L250">                session.put(ERROR_MESSAGE, getText(&quot;message.too.long&quot;));</span>
+            }
+<span class="nc" id="L252">            return RELOAD;</span>
+        }
+
+        try {
+<span class="fc" id="L256">            addParticipantsToConversation(MessageStatus.SENT);</span>
+<span class="nc" id="L257">        } catch (Exception e) {</span>
+<span class="nc" id="L258">            LOGGER.error(&quot;&quot;, e);</span>
+<span class="fc" id="L259">        }</span>
+
+<span class="fc" id="L261">        return Action.SUCCESS;</span>
+    }
+
+    /**
+     * This method is used by two different flows the regular add participant flow and autosave
+     * For autosave the MessageStatus is INDRAFT and for regular it is taken care
+     * by the code in plugin layer
+     *
+     * @param messageStatus
+     * @throws IOException
+     */
+    private Long addParticipantsToConversation(MessageStatus messageStatus) {
+<span class="fc" id="L273">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L274">        String composerId = Long.toString(loggedInUserUtil.getLoggedInUserId());</span>
+
+<span class="fc" id="L276">        List&lt;String&gt; participantIds = new LinkedList&lt;&gt;();</span>
+<span class="fc bfc" id="L277" title="All 2 branches covered.">        for (String id : recipientId) {</span>
+<span class="fc" id="L278">            PKBPerson person = userManager.getPKBPerson(Long.parseLong(id));</span>
+            // check if the patient is new added participant
+<span class="fc bfc" id="L280" title="All 2 branches covered.">            if (person.isPatient()) {</span>
+                // but only if it is not already in the conversation
+                // for when the clinician sends message to colleagues only
+                // and later adds the patient
+<span class="pc bpc" id="L284" title="2 of 4 branches missed.">                if ((patientId == null) || patientId.isEmpty()) {</span>
+
+                    //I don't think the comment about adding patient to a message between colleagues
+                    // is possible (at least now). This also isn't hit in e2es.
+                    // Add some basic logging so we can see if this ever happens before trashing.
+<span class="nc" id="L289">                    LOGGER.error(&quot;PHR-7263: Adding first patient participant as patientId. Message Id {} conversation Id {} composerId {}&quot;, messageId, conversationId, composerId);</span>
+
+<span class="nc" id="L291">                    patientId = person.getIdString();</span>
+                }
+            }
+<span class="fc" id="L294">            participantIds.add(person.getIdString());</span>
+<span class="fc" id="L295">        }</span>
+
+<span class="fc" id="L297">        attachments = generateAttachmentsFromInputs();</span>
+
+<span class="fc" id="L299">        Message messageObj = buildMessage(composerId, null, messageStatus);</span>
+        try {
+<span class="fc" id="L301">            Long messageId = encounterManager.addParticipants(loggedInEHRRequestContext, messageObj,</span>
+<span class="fc" id="L302">                    participantIds, attachments, contextUserUtil.getContextUserId());</span>
+
+<span class="fc" id="L304">            return messageId;</span>
+<span class="nc" id="L305">        } catch (Exception e) {</span>
+<span class="nc" id="L306">            throw new PKBException(&quot;Exception while adding participants&quot;, e);</span>
+        }
+    }
+
+    public String removeCurrentUser() {
+
+<span class="fc" id="L312">        PKBPerson user = userManager.getPKBPerson(loggedInUserUtil.getLoggedInUserId());</span>
+<span class="fc" id="L313">        Long accountId = userManager.getDefaultAccountId(user.getId());</span>
+<span class="fc" id="L314">        String text = user.getTitle() + &quot; &quot; + user.getFirstName() + &quot; &quot;</span>
+<span class="fc" id="L315">                + user.getLastName() + &quot; has left this discussion&quot;;</span>
+        try {
+<span class="fc" id="L317">            encounterManager.removeParticipant(getLoggedInEHRRequestContext(), user.getId(), accountId, conversationId, user.getId(), accountId, text);</span>
+<span class="fc" id="L318">            addActionWarning(getText(&quot;composemessage.removed.user&quot;));</span>
+<span class="nc" id="L319">        } catch (Exception e) {</span>
+<span class="nc" id="L320">            LOGGER.error(&quot;Error attempting to leave the discussion&quot;, e);</span>
+<span class="nc" id="L321">            addActionError(getText(&quot;conversationParticipantAction.err.error_leaving&quot;));</span>
+<span class="fc" id="L322">        }</span>
+<span class="fc" id="L323">        return Action.SUCCESS;</span>
+    }
+
+    public String autoSaveAddUserMessage() {
+<span class="fc" id="L327">        LOGGER.info(&quot;autoSaveAddUserMessage:start&quot;);</span>
+
+        try {
+<span class="fc" id="L330">            Message jsonMessage = MESSAGE_READER.readValue(json);</span>
+
+            // load the message details into instance variables... TODO must be a cleaner way to do this
+<span class="fc bfc" id="L333" title="All 2 branches covered.">            messageId = jsonMessage.getId() != null ? &quot;&quot; + jsonMessage.getId() : null;</span>
+<span class="fc" id="L334">            LOGGER.info(&quot;messageId={}&quot;, messageId);</span>
+
+<span class="fc" id="L336">            conversationId = jsonMessage.getEncounterUniqueId();</span>
+<span class="pc bpc" id="L337" title="1 of 2 branches missed.">            if (conversationId == null) {</span>
+<span class="nc" id="L338">                conversationId = UUID.randomUUID();</span>
+            }
+
+<span class="fc" id="L341">            subject = jsonMessage.getSubject();</span>
+<span class="fc" id="L342">            message = jsonMessage.getContent();</span>
+<span class="fc" id="L343">            patientId = jsonMessage.getPatientId();</span>
+
+<span class="fc" id="L345">            recipientId = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">            if (jsonMessage.getParticipants() != null) {</span>
+<span class="fc" id="L347">                recipientId.addAll(jsonMessage.getParticipants());</span>
+            }
+
+<span class="fc" id="L350">            Long msgId = addParticipantsToConversation(MessageStatus.INDRAFT);</span>
+<span class="fc" id="L351">            byte[] resultArray = (&quot;&quot; + conversationId + &quot;,&quot; + msgId).getBytes(UTF_8);</span>
+<span class="fc" id="L352">            autoSaveResult = new ByteArrayInputStream(resultArray);</span>
+<span class="nc" id="L353">        } catch (Exception e) {</span>
+<span class="nc" id="L354">            LOGGER.error(&quot;problem with JSON autosave for {}&quot;, loggedInUserUtil.getLoggedInUserId(), e);</span>
+<span class="nc" id="L355">            autoSaveResult = new ByteArrayInputStream(Action.ERROR.getBytes(UTF_8));</span>
+<span class="fc" id="L356">        }</span>
+<span class="fc" id="L357">        LOGGER.info(&quot;autoSaveAddUserMessage:end&quot;);</span>
+<span class="fc" id="L358">        return Action.SUCCESS;</span>
+    }
+
+    private Message buildMessage(String inviterId, Long onBehalfAuthorId, MessageStatus messageStatus) {
+<span class="fc" id="L362">        Long msgId = null;</span>
+<span class="fc bfc" id="L363" title="All 4 branches covered.">        if ((messageId != null) &amp;&amp; !messageId.isEmpty()) {</span>
+<span class="fc" id="L364">            msgId = Long.parseLong(messageId);</span>
+        }
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">        Message joinMessage = encounterManager.createMessage(patientId,</span>
+                conversationId,
+                conversationId == null,
+                inviterId,
+<span class="fc" id="L370">                StringEscapeUtils.unescapeHtml4(subject),</span>
+                message,
+                PrivacyFlag.GENERAL,
+<span class="fc" id="L373">                getEHRRequestContext());</span>
+<span class="fc" id="L374">        joinMessage.setId(msgId);</span>
+<span class="fc" id="L375">        joinMessage.setOnBehalfAuthorId(Objects.toString(onBehalfAuthorId, null));</span>
+<span class="fc" id="L376">        joinMessage.setMessageStatus(messageStatus);</span>
+<span class="fc" id="L377">        return joinMessage;</span>
+    }
+
+    public UUID getConversationId() {
+<span class="fc" id="L381">        return conversationId;</span>
+    }
+
+    public void setConversationId(UUID conversationId) {
+<span class="fc" id="L385">        this.conversationId = conversationId;</span>
+<span class="fc" id="L386">    }</span>
+
+    public List&lt;String&gt; getRecipientId() {
+<span class="fc" id="L389">        return recipientId;</span>
+    }
+
+    public void setRecipientId(List&lt;String&gt; recipientId) {
+<span class="fc" id="L393">        this.recipientId = recipientId;</span>
+<span class="fc" id="L394">    }</span>
+
+    public String getMessage() {
+<span class="fc" id="L397">        return message;</span>
+    }
+
+    public void setMessage(String message) {
+<span class="fc" id="L401">        this.message = message;</span>
+<span class="fc" id="L402">    }</span>
+
+    public String getInitialMessage() {
+<span class="fc" id="L405">        return message;</span>
+    }
+
+    public int getColumnSize() {
+<span class="nc" id="L409">        return columnSize;</span>
+    }
+
+    public void setColumnSize(int columnSize) {
+<span class="nc" id="L413">        this.columnSize = columnSize;</span>
+<span class="nc" id="L414">    }</span>
+
+    public String getSubject() {
+<span class="fc" id="L417">        return subject;</span>
+    }
+
+    public void setSubject(String subject) {
+<span class="fc" id="L421">        this.subject = subject;</span>
+<span class="fc" id="L422">    }</span>
+
+    public InputStream getAutoSaveResult() {
+<span class="fc" id="L425">        return autoSaveResult;</span>
+    }
+
+    public void setAutoSaveResult(InputStream autoSaveResult) {
+<span class="nc" id="L429">        this.autoSaveResult = autoSaveResult;</span>
+<span class="nc" id="L430">    }</span>
+
+    public String getMessageId() {
+<span class="fc" id="L433">        return messageId;</span>
+    }
+
+    public void setMessageId(String messageId) {
+<span class="fc" id="L437">        this.messageId = messageId;</span>
+<span class="fc" id="L438">    }</span>
+
+    public void setJson(String json) {
+<span class="fc" id="L441">        this.json = json;</span>
+<span class="fc" id="L442">    }</span>
+
+    public String getPatientId() {
+<span class="fc" id="L445">        return patientId;</span>
+    }
+
+    public void setPatientId(String patientId) {
+<span class="fc" id="L449">        this.patientId = patientId;</span>
+<span class="fc" id="L450">    }</span>
+
+    public String getFileUploadErrorMessage() {
+<span class="fc" id="L453">        return fileUploadErrorMessage;</span>
+    }
+
+    public void setFileUploadErrorMessage(String fileUploadErrorMessage) {
+<span class="fc" id="L457">        this.fileUploadErrorMessage = fileUploadErrorMessage;</span>
+<span class="fc" id="L458">    }</span>
+
+    public ParticipantSelectorParams getParticipantSelectorParams() {
+<span class="fc" id="L461">        return participantSelectorParams;</span>
+    }
+
+    public void setParticipantSelectorParams(ParticipantSelectorParams participantSelectorParams) {
+<span class="nc" id="L465">        this.participantSelectorParams = participantSelectorParams;</span>
+<span class="nc" id="L466">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,282 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SiuProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.hl7.processor</a> &gt; <span class="el_source">SiuProcessor.java</span></div><h1>SiuProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.hl7.processor;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.calendar.entity.AppointmentDTO;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.dataupload.entity.FieldMismatch;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.calendar.impl.CalendarManager;
+import com.pkb.service.dataupload.hl7.HL7ApiHelper;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.dataupload.hl7.HL7MessageType;
+import com.pkb.service.dataupload.hl7.HL7SoftMatchService;
+import com.pkb.service.dataupload.hl7.HL7XmlDoc;
+import com.pkb.service.dataupload.hl7.segment.HL7DatapointExternalIntegrationUrl;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import com.pkb.service.reference.ReferenceDataManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.Tuple2;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.dataupload.entity.UploadedData.Destination.APPOINTMENT;
+import static com.pkb.dataupload.entity.UploadedData.Status.COMPLETED;
+import static com.pkb.dataupload.entity.UploadedData.Status.NEW;
+import static com.pkb.dataupload.entity.UploadedData.Status.PATIENT_INFO_MISMATCH;
+import static com.pkb.dataupload.entity.UploadedData.Status.REJECTED;
+import static com.pkb.service.dataupload.hl7.HL7MessageType.SIU_S13;
+import static com.pkb.service.dataupload.hl7.HL7MessageType.SIU_S14;
+import static com.pkb.service.dataupload.hl7.HL7SoftMatchService.ProcessingDecision;
+
+public class SiuProcessor {
+
+    private DataUploadManager dataUploadManager;
+    private HL7SoftMatchService hl7SoftMatchService;
+    private CalendarManager calendarManager;
+    private ReferenceDataManager referenceDataManager;
+    private UserManager userManager;
+
+    public SiuProcessor(DataUploadManager dataUploadManager, HL7SoftMatchService hl7SoftMatchService, CalendarManager calendarManager,
+<span class="fc" id="L47">                        ReferenceDataManager referenceDataManager, UserManager userManager) {</span>
+<span class="fc" id="L48">        this.dataUploadManager = dataUploadManager;</span>
+<span class="fc" id="L49">        this.hl7SoftMatchService = hl7SoftMatchService;</span>
+<span class="fc" id="L50">        this.calendarManager = calendarManager;</span>
+<span class="fc" id="L51">        this.referenceDataManager = referenceDataManager;</span>
+<span class="fc" id="L52">        this.userManager = userManager;</span>
+<span class="fc" id="L53">    }</span>
+
+    public ProcessingDecision process(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient,
+                                      List&lt;FieldMismatch&gt; pidMismatches, HL7ApiHelper apiHelper) {
+<span class="fc" id="L57">        HL7MessageType messageType = hl7.getMessageType();</span>
+<span class="pc bpc" id="L58" title="1 of 5 branches missed.">        switch (messageType) {</span>
+            case SIU_S12:
+<span class="fc" id="L60">                return processSiuS12(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+            case SIU_S13:
+            case SIU_S14:
+<span class="fc" id="L63">                return processSiuS13S14(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+            case SIU_S15:
+<span class="fc" id="L65">                return processSiuS15(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+            case SIU_S26:
+<span class="fc" id="L67">                return processSiuS26(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+            default:
+<span class="nc" id="L69">                throw new ApiCallMalformedException(&quot;Unhandled HL7 message type: &quot; + messageType.getCode());</span>
+        }
+    }
+
+    /**
+     * Processes an SIU^S12 message to invite a single patient to an appointment.
+     *
+     * @param hl7            The HL7 SIU^S12 message.
+     * @param hl7ConnContext The Org and/or Team of the patient to be invited.
+     * @param patient
+     */
+    private ProcessingDecision processSiuS12(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches, HL7ApiHelper apiHelper) {
+<span class="fc" id="L81">        EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+        // Parse the data to ensure it is valid; it is the responsibility of
+        // the parse method to throw an error if the input is not valid.
+<span class="fc" id="L84">        AppointmentDTO appointmentDTO = hl7.parseNewAppointment(patient, new SourceDetails(ehrRequestContext));</span>
+
+<span class="fc" id="L86">        Long accountId = userManager.getDefaultAccountId(patient.getId());</span>
+        // check if there is an existing Appointment that matches the Placer ID (SCH-1.1)
+        // we store this in the DTO externalId field
+<span class="fc" id="L89">        AppointmentDTO existingAppointment = getExistingAppointment(ehrRequestContext.withConsentNotRequired(),</span>
+<span class="fc" id="L90">                appointmentDTO.getExternalId(), accountId, hl7ConnContext);</span>
+<span class="fc bfc" id="L91" title="All 2 branches covered.">        Activity.Action action = existingAppointment == null ? Activity.Action.INVITED_TO_APPOINTMENT : Activity.Action.EDITED_APPOINTMENT;</span>
+
+<span class="fc" id="L93">        Optional&lt;HL7DatapointExternalIntegrationUrl&gt; externalIntegrationUrl = hl7.parseHL7DatapointExternalIntegrationUrl();</span>
+
+<span class="fc" id="L95">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(APPOINTMENT,</span>
+<span class="fc" id="L96">                hl7ConnContext.getSourceOrgId(), appointmentDTO.getExternalId(), patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L97" title="3 of 5 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE: {
+<span class="fc" id="L99">                UUID uniqueId = dataUploadManager.transactional(() -&gt; {</span>
+                    UUID uuid;
+<span class="fc bfc" id="L101" title="All 2 branches covered.">                    if (existingAppointment != null) {</span>
+                        // found existing appointment for the placerID provided
+                        // we treat the new version as a complete replacement of the existing
+                        // not handling the same as a normal update that respects, for example, HL7 null value handling
+                        // queue for processing when keys available
+<span class="fc" id="L106">                        dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, appointmentDTO.getExternalId(), APPOINTMENT,</span>
+                                NEW, pidMismatches, patient, null/*subsetOf*/);
+<span class="fc" id="L108">                        uuid = existingAppointment.getBaseFields().getUniqueId();</span>
+                    } else {
+<span class="fc" id="L110">                        uuid = createAppointment(hl7, appointmentDTO, hl7ConnContext, patient, accountId, pidMismatches)._2();</span>
+<span class="fc" id="L111">                        saveExternalIntegrationUrlIfPresent(externalIntegrationUrl, ehrRequestContext, uuid);</span>
+                    }
+<span class="fc" id="L113">                    return uuid;</span>
+                });
+
+                // Log and notify
+<span class="fc" id="L117">                apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, appointmentDTO, appointmentDTO.getStartTimestamp(), uniqueId);</span>
+            }
+<span class="fc" id="L119">            break;</span>
+            case FORCE_NEW: {
+<span class="nc" id="L121">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, appointmentDTO.getExternalId(), APPOINTMENT,</span>
+                        NEW, pidMismatches, patient, null/*subsetOf*/);
+<span class="nc bnc" id="L123" title="All 2 branches missed.">                String uniqueId = (existingAppointment == null) ? &quot;&quot; : existingAppointment.getBaseFields().getUniqueId().toString();</span>
+<span class="nc" id="L124">                apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, appointmentDTO, appointmentDTO.getStartTimestamp(), uniqueId);</span>
+            }
+<span class="nc" id="L126">            break;</span>
+            case QUARANTINE: {
+<span class="fc" id="L128">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, appointmentDTO.getExternalId(), APPOINTMENT,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L131">            break;</span>
+            case REJECT: {
+<span class="nc" id="L133">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, appointmentDTO.getExternalId(), APPOINTMENT,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="nc" id="L136">            break;</span>
+            default: {
+<span class="nc" id="L138">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L141">        return processingDecision;</span>
+    }
+
+    /**
+     * SIU S13 and SIU S14 messages are treated as equivalent by PKB. Both are considered to be an update to a single
+     * appointment for a single patient.
+     */
+    private ProcessingDecision processSiuS13S14(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches, HL7ApiHelper apiHelper) {
+<span class="fc" id="L149">        return processSiuUpdate(hl7, hl7ConnContext, patient, pidMismatches, Activity.Action.EDITED_APPOINTMENT, apiHelper);</span>
+    }
+
+    /**
+     * Processes an SIU S15 message to cancel a single appointment for a single patient.
+     */
+    private ProcessingDecision processSiuS15(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches, HL7ApiHelper apiHelper) {
+<span class="fc" id="L156">        return processSiuUpdate(hl7, hl7ConnContext, patient, pidMismatches, Activity.Action.CANCELLED_APPOINTMENT, apiHelper);</span>
+    }
+
+    /**
+     * SIU S26 is used to indicate a patient Did Not Attend (DNA) a previously scheduled appointment.
+     */
+    private ProcessingDecision processSiuS26(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches, HL7ApiHelper apiHelper) {
+<span class="fc" id="L163">        return processSiuUpdate(hl7, hl7ConnContext, patient, pidMismatches, Activity.Action.EDITED_APPOINTMENT, apiHelper);</span>
+    }
+
+    private ProcessingDecision processSiuUpdate(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches, Activity.Action action, HL7ApiHelper apiHelper) {
+<span class="fc" id="L167">        EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+
+<span class="fc" id="L169">        String externalId = hl7.parseMandatoryAppointmentId();</span>
+
+<span class="fc" id="L171">        Long accountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="fc" id="L172">        AppointmentDTO existingAppointment = getExistingAppointment(ehrRequestContext.withConsentNotRequired(),</span>
+                externalId, accountId, hl7ConnContext);
+
+        // If the message type was S13 or S14 then we should parse the appointment content to ensure validation failures
+        // trigger an error to be returned to the sender. S15 or S26 do not need to be validated because we only use
+        // the appointment ID; the other attributes are not updated.
+<span class="fc" id="L178">        boolean appointmentUpdated = false;</span>
+<span class="fc bfc" id="L179" title="All 4 branches covered.">        if ((SIU_S13 == hl7.getMessageType() || (SIU_S14 == hl7.getMessageType()))) {</span>
+<span class="fc bfc" id="L180" title="All 2 branches covered.">            if (existingAppointment != null) {</span>
+<span class="fc" id="L181">                appointmentUpdated = hl7.parseUpdatedAppointment(existingAppointment);</span>
+            }
+        }
+
+<span class="fc" id="L185">        Optional&lt;HL7DatapointExternalIntegrationUrl&gt; externalIntegrationUrl = hl7.parseHL7DatapointExternalIntegrationUrl();</span>
+
+        // Check if only URL was added/changed
+<span class="pc bpc" id="L188" title="1 of 6 branches missed.">        if (action == Activity.Action.EDITED_APPOINTMENT &amp;&amp; externalIntegrationUrl.isPresent() &amp;&amp; !appointmentUpdated) {</span>
+<span class="fc" id="L189">            action = Activity.Action.URL_ADDED_TO_APPOINTMENT;</span>
+        }
+
+<span class="fc" id="L192">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(APPOINTMENT,</span>
+<span class="fc" id="L193">                hl7ConnContext.getSourceOrgId(), externalId, patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L194" title="3 of 5 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE: {
+<span class="fc" id="L196">                AppointmentDTO appointmentDTO = dataUploadManager.transactional(() -&gt; {</span>
+                    AppointmentDTO dto;
+<span class="fc bfc" id="L198" title="All 2 branches covered.">                    if (existingAppointment == null) {</span>
+                        // Appointment does not exist
+<span class="fc" id="L200">                        dto = hl7.parseNewAppointment(patient, new SourceDetails(ehrRequestContext));</span>
+<span class="fc" id="L201">                        Tuple2&lt;Long, UUID&gt; appointmentIdAndUUID = createAppointment(hl7, dto, hl7ConnContext, patient, accountId, pidMismatches);</span>
+<span class="fc" id="L202">                        Long id = appointmentIdAndUUID._1();</span>
+<span class="fc" id="L203">                        UUID uuid = appointmentIdAndUUID._2();</span>
+<span class="fc" id="L204">                        dto.setId(id);</span>
+<span class="fc" id="L205">                        saveExternalIntegrationUrlIfPresent(externalIntegrationUrl, ehrRequestContext, uuid);</span>
+<span class="fc" id="L206">                    } else {</span>
+<span class="fc" id="L207">                        dto = existingAppointment;</span>
+                    }
+
+                    // Queue for processing
+<span class="fc" id="L211">                    dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, externalId, APPOINTMENT,</span>
+                            NEW, pidMismatches, patient, null/*subsetOf*/);
+<span class="fc" id="L213">                    return dto;</span>
+                });
+
+                // Log and notify
+<span class="fc" id="L217">                apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, new NoConsentsRequired(),</span>
+<span class="fc" id="L218">                        appointmentDTO.getStartTimestamp(),</span>
+<span class="fc" id="L219">                        appointmentDTO.getBaseFields().getUniqueId());</span>
+            }
+<span class="fc" id="L221">            break;</span>
+            case FORCE_NEW: {
+<span class="fc" id="L223">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, externalId, APPOINTMENT,</span>
+                        NEW, pidMismatches, patient, null/*subsetOf*/);
+<span class="pc bpc" id="L225" title="1 of 2 branches missed.">                Instant timestampOfActivity = (existingAppointment == null) ? hl7.getMessageDate().getInstant() : existingAppointment.getStartTimestamp();</span>
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">                String uniqueId = (existingAppointment == null) ? &quot;&quot; : existingAppointment.getBaseFields().getUniqueId().toString();</span>
+<span class="fc" id="L227">                apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action, patient, new NoConsentsRequired(),</span>
+<span class="fc" id="L228">                        timestampOfActivity, hl7.getMessageType(), uniqueId);</span>
+            }
+<span class="fc" id="L230">            break;</span>
+            case QUARANTINE: {
+<span class="nc" id="L232">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, externalId, APPOINTMENT,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="nc" id="L235">            break;</span>
+            case REJECT: {
+<span class="nc" id="L237">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, externalId, APPOINTMENT,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="nc" id="L240">            break;</span>
+            default: {
+<span class="nc" id="L242">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L245">        return processingDecision;</span>
+    }
+
+    /**
+     * Creates an appointment (for SIU^S12 message or SIU^S13, SIU^S14, SIU^S15 and SIU^S26 when
+     * updating an appointment that does not exist).
+     *
+     * @param hl7            The HL7 message.
+     * @param appointmentDTO Parsed new appointment.
+     * @param hl7ConnContext The Org and/or Team of the patient to be invited.
+     * @param patient        The patient.
+     * @param accountId      Account id of the patient.
+     */
+    private Tuple2&lt;Long, UUID&gt; createAppointment(HL7XmlDoc hl7, AppointmentDTO appointmentDTO, HL7ConnContext hl7ConnContext, PKBPerson patient, Long accountId, List&lt;FieldMismatch&gt; pidMismatches) {
+        // Record data has been processed
+<span class="fc" id="L260">        EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+<span class="fc" id="L261">        UploadedDataDTO dto = dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, appointmentDTO.getExternalId(), APPOINTMENT,</span>
+                COMPLETED, pidMismatches, patient, null/*subsetOf*/);
+
+<span class="fc" id="L264">        appointmentDTO.getBaseFields().setUploadedDataId(dto.getId());</span>
+<span class="fc" id="L265">        appointmentDTO.getBaseFields().generateNewRandomUniqueId();</span>
+
+        // Apply privacy labels
+<span class="fc" id="L268">        referenceDataManager.applyPrivacyLabels(appointmentDTO);</span>
+<span class="fc" id="L269">        SourceDetails sourceDetails = new SourceDetails(dto);</span>
+<span class="fc" id="L270">        return calendarManager.createAppointment(sourceDetails, ehrRequestContext.withConsentNotRequired(), appointmentDTO, accountId);</span>
+    }
+
+    private AppointmentDTO getExistingAppointment(EHRRequestContext context, String externalId, Long accountId, HL7ConnContext hl7ConnContext) {
+<span class="fc" id="L274">        return calendarManager.getAppointmentByExternalId(context, externalId, accountId, hl7ConnContext.getSourceOrgId());</span>
+    }
+
+    private void saveExternalIntegrationUrlIfPresent(Optional&lt;HL7DatapointExternalIntegrationUrl&gt; url, EHRRequestContext requestContext, UUID appointmentUniqueId) {
+<span class="fc" id="L278">        url.ifPresent(hl7DatapointExternalIntegrationUrl -&gt; calendarManager.saveAppointmentExternalIntegrationUrl(appointmentUniqueId,</span>
+<span class="fc" id="L279">                hl7DatapointExternalIntegrationUrl.getUrl().getString(), requestContext));</span>
+<span class="fc" id="L280">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MissingReferenceProcessor.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel.routing.resource</a> &gt; <span class="el_source">MissingReferenceProcessor.kt</span></div><h1>MissingReferenceProcessor.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel.routing.resource
+
+import ca.uhn.fhir.rest.server.exceptions.UnprocessableEntityException
+import com.pkb.aggregator.R4IdType
+import com.pkb.aggregator.camel.EXTRACTED_REFERENCE_MAP
+import com.pkb.aggregator.camel.GooglePubSubHelper.Companion.ATTRIBUTE_ACTION
+import com.pkb.aggregator.camel.GooglePubSubHelper.Companion.ATTRIBUTE_RESOURCE_TYPE
+import com.pkb.aggregator.camel.GooglePubSubHelper.Companion.PUBSUB_ACTION_CREATE_RESOURCE
+import com.pkb.aggregator.camel.routing.dto.UpstreamChangeNotification
+import com.pkb.aggregator.camel.routing.resource.ResourceUpdateRouteBuilder.Companion.INCOMING_UPDATE_NOTIFICATION
+import com.pkb.aggregator.configuration.FhirConfiguration
+import com.pkb.aggregator.configuration.MissingReferenceConfiguration
+import com.pkb.aggregator.extension.simpleResourceId
+import com.pkb.aggregator.service.dto.ResourceWithSourceId
+import com.pkb.aggregator.service.exception.UpstreamReferenceException
+import com.pkb.aggregator.service.reference.ReferenceExtractor.IdentifierMap
+import org.apache.camel.Exchange
+import org.apache.camel.Processor
+import org.apache.camel.ProducerTemplate
+import org.apache.camel.RuntimeCamelException
+import org.hl7.fhir.instance.model.api.IAnyResource
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Component
+import java.lang.invoke.MethodHandles
+
+/**
+ * This processor can be optionally invoked in cases where an exception is thrown, to try and load the missing
+ * resource.
+ *
+ * poll2pub, which propagates upstream changes onto pubsub, cannot guarantee ordering. This means that, for
+ * instance, it is possible to receive a notification of a new Appointment resource that has as a participant a
+ * new Patient that for whom we have not been notified yet. Under normal circumstances a simple retry would work
+ * since poll2pub will probably send the Patient in the next batch of messages, but if we have a lot of backpressure
+ * we could be unlucky and the message we want is still some way down the list.
+ *
+ * So instead, we try to be proactive and load the missing resource immediately, such that when the Appointment is
+ * next retried the Patient will now be resolvable. We do this by creating a 'fake' create notification for the
+ * resource and sending it onto the existing route as if the pubsub notification had arrived.
+ *
+ * A side effect of this is that when the 'real' notification arrives, the resource will have already been
+ * processed. We rely on the idempotent behaviour of the PUT operation on the downstream to deal with this, albeit
+ * at the cost of a little unnecessary processing.
+ */
+<span class="fc" id="L44">@Component</span>
+<span class="fc" id="L45">class MissingReferenceProcessor(</span>
+<span class="fc" id="L46">    private val fhirConfiguration: FhirConfiguration,</span>
+<span class="fc" id="L47">    private val missingReferenceConfiguration: MissingReferenceConfiguration,</span>
+<span class="fc" id="L48">    private val producerTemplate: ProducerTemplate,</span>
+) : Processor {
+
+<span class="fc" id="L51">    private val log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+<span class="pc" id="L53">    val resourceExtractorRegex = &quot;&quot;&quot;Referenced resource (.*) does not exist&quot;&quot;&quot;.toRegex()</span>
+
+    val maxRedeliveries: Int
+<span class="fc" id="L56">        get() = missingReferenceConfiguration.maxRedeliveries</span>
+
+    val redeliveryDelayMS: Long
+<span class="fc" id="L59">        get() = missingReferenceConfiguration.redeliveryDelayMS</span>
+
+    val backoffMultiplier: Double
+<span class="fc" id="L62">        get() = missingReferenceConfiguration.backoffMultiplier</span>
+
+    /**
+     * Create a notification based on the type of exception that got thrown
+     */
+    override fun process(exchange: Exchange) {
+
+<span class="fc" id="L69">        val notification = when (val ex = exchange.getProperty(Exchange.EXCEPTION_CAUGHT)) {</span>
+<span class="fc bfc" id="L70" title="All 2 branches covered.">            is UpstreamReferenceException -&gt; handleReferenceException(exchange, ex)</span>
+<span class="pc bpc" id="L71" title="1 of 2 branches missed.">            is RuntimeCamelException -&gt; handleCamelException(exchange, ex)</span>
+<span class="fc" id="L72">            else -&gt; throw RuntimeException(&quot;Unexpected exception type ${ex.javaClass.canonicalName}&quot;)</span>
+        }
+
+<span class="fc" id="L75">        producerTemplate.sendBody(INCOMING_UPDATE_NOTIFICATION, notification)</span>
+<span class="fc" id="L76">    }</span>
+
+    /**
+     * [UpstreamReferenceException] is thrown when we fail to look up a downstream resource id in our database for a
+     * given upstream id. This happens for resources where identifiers are tracked, such as Patient, Organization etc
+     */
+    private fun handleReferenceException(exchange: Exchange, exception: UpstreamReferenceException): UpstreamChangeNotification {
+<span class="fc" id="L83">        val resource = exchange.message.getBody(ResourceWithSourceId::class.java)</span>
+<span class="fc" id="L84">        val needle = exception.needle</span>
+<span class="fc" id="L85">        val resourceType = R4IdType(needle.upstreamResourceId).resourceType</span>
+<span class="fc" id="L86">        val upstream = fhirConfiguration.upstream.endpoints.first { it.sourceId == needle.upstreamSource }</span>
+
+<span class="fc" id="L88">        log.warn(&quot;Upstream resource {} references {} which doesn't exist downstream; triggering immediate load&quot;,</span>
+<span class="fc" id="L89">            resource.resource.simpleResourceId(), needle.upstreamResourceId)</span>
+
+<span class="fc" id="L91">        return UpstreamChangeNotification(</span>
+<span class="fc" id="L92">            &quot;${upstream.serverUrl}${needle.upstreamResourceId}&quot;,</span>
+<span class="fc" id="L93">            mapOf(</span>
+<span class="fc" id="L94">                ATTRIBUTE_ACTION to PUBSUB_ACTION_CREATE_RESOURCE,</span>
+<span class="fc" id="L95">                ATTRIBUTE_RESOURCE_TYPE to resourceType</span>
+            )
+        )
+    }
+
+    private fun handleCamelException(exchange: Exchange, exception: RuntimeCamelException) =
+<span class="nc" id="L101">        when (val cause = exception.cause) {</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">            is UnprocessableEntityException -&gt; handleUnprocessableEntityException(exchange, cause)</span>
+<span class="nc" id="L103">            else -&gt; throw RuntimeException(&quot;Unexpected exception type ${exception.javaClass.canonicalName}&quot;)</span>
+<span class="nc" id="L104">        }</span>
+
+    /**
+     * [UnprocessableEntityException] can be thrown as a result of the downstream FHIR store returning a 422 code.
+     *
+     * This can happen if we have not yet seen a clinical resource (i.e. one for which we do not track identifiers). In
+     * these cases, we deterministically derive a downstream id from the upstream id rather than look it up in thee
+     * database. Because of this, we won't know the resource is missing from the downstream until the downstream
+     * complains about it, and it's only at that point we can load the reference and retry.
+     *
+     * This is unfortunately ugly as the exception is not structured very usefully, so we have to parse out the
+     * information we need from the exception message (yes, ugh, I know)
+     */
+    private fun handleUnprocessableEntityException(
+        exchange: Exchange,
+        exception: UnprocessableEntityException
+    ): UpstreamChangeNotification {
+
+        // Parse the exception message to find the failed resource id
+<span class="nc bnc" id="L123" title="All 2 branches missed.">        val message = exception.message</span>
+<span class="nc" id="L124">            ?: throw RuntimeException(&quot;Exception $exception has no message&quot;)</span>
+<span class="nc bnc" id="L125" title="All 6 branches missed.">        val resourceId = resourceExtractorRegex.find(message)?.groups?.get(1)?.value</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">            ?.let { R4IdType(it) }</span>
+<span class="nc" id="L127">            ?: throw RuntimeException(&quot;Could not extract resource id from $message&quot;)</span>
+
+        // We need to reverse-lookup the _upstream_ resource id from the downstream id included in the error message
+<span class="nc" id="L130">        val references = exchange.getProperty(EXTRACTED_REFERENCE_MAP, IdentifierMap::class.java)</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">        val upstreamResourceId = references.findByDownstreamResourceId(resourceId)</span>
+<span class="nc" id="L132">            ?: throw RuntimeException(&quot;Could not find upstream resource id corresponding to $resourceId&quot;)</span>
+<span class="nc" id="L133">        val upstream = fhirConfiguration.upstream.endpoints.first { it.sourceId == upstreamResourceId.upstream.upstreamSource }</span>
+
+<span class="nc" id="L135">        val upstreamResource = exchange.message.getBody(IAnyResource::class.java)</span>
+<span class="nc" id="L136">        log.info(&quot;Upstream resource {} references {} which doesn't exist downstream; triggering immediate load&quot;,</span>
+<span class="nc" id="L137">            upstreamResource.simpleResourceId(), upstreamResourceId.upstream.upstreamResourceId)</span>
+
+<span class="nc" id="L139">        return UpstreamChangeNotification(</span>
+<span class="nc" id="L140">            &quot;${upstream.serverUrl}${upstreamResourceId.upstream.upstreamResourceId}&quot;,</span>
+<span class="nc" id="L141">            mapOf(</span>
+<span class="nc" id="L142">                ATTRIBUTE_ACTION to PUBSUB_ACTION_CREATE_RESOURCE,</span>
+<span class="nc" id="L143">                ATTRIBUTE_RESOURCE_TYPE to resourceId.resourceType</span>
+            )
+        )
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

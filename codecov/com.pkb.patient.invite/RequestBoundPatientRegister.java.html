@@ -1,0 +1,406 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestBoundPatientRegister.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.patient.invite</a> &gt; <span class="el_source">RequestBoundPatientRegister.java</span></div><h1>RequestBoundPatientRegister.java</h1><pre class="source lang-java linenums">package com.pkb.patient.invite;
+
+import com.google.common.collect.Maps;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.base.Error;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.consent.PatientConsentUpdateTemplate;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.institute.entity.Team;
+import com.pkb.patient.InvitationNationalIdValidator;
+import com.pkb.patient.OrgLevelIdValidator;
+import com.pkb.patient.TeamLevelIdValidator;
+import com.pkb.patient.invite.RequestBoundExistingPatientRegister.Parameters;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.util.PersonAmbiguityHandler;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.lang.invoke.MethodHandles;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Function;
+
+import static com.pkb.common.base.ErrorBuilder.error;
+import static com.pkb.common.base.ErrorBuilder.errorOf;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failedOnNationalId;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failedOnOptedOutCheck;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failedOnOrgLevelId;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failedOnOrgLevelIdType;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failedOnTeamLevelId;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failedOnTeamLevelIdType;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failedOnUserTypeMismatch;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failureForUnknownReason;
+import static com.pkb.patient.invite.PatientRegister.SuccessType.ADDED_TO_TEAM_DEFERRED;
+import static com.pkb.patient.invite.RequestBoundPatientRegister.MatchingOption.EMAIL;
+import static com.pkb.patient.invite.RequestBoundPatientRegister.MatchingOption.NATIONAL_ID;
+import static com.pkb.patient.invite.RequestBoundPatientRegister.MatchingOption.ORG_LEVEL_ID;
+import static com.pkb.patient.invite.RequestBoundPatientRegister.MatchingOption.TEAM_LEVEL_ID;
+import static com.pkb.util.EmailUtil.Quantity.BULK;
+import static java.util.Collections.singletonList;
+import static java.util.Objects.nonNull;
+import static java.util.Optional.ofNullable;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.EMPTY;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class RequestBoundPatientRegister implements PatientRegister {
+<span class="fc" id="L57">    private static final Logger LOGGER = getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final String PATIENT_BULK_INVITE_USER_OPTED_OUT_CODE = &quot;patient.bulk.invite.user.opted.out&quot;;
+    private static final String PATIENT_BULK_INVITE_USER_OPTED_OUT = &quot;email %s has disabled sharing&quot;;
+    private static final String NATIONAL_ID_BELONGS_TO_DIFFERENT_USER_CODE = &quot;patient.bulk.invite.email.and.national.id.belongs.to.different.users&quot;;
+    private static final String NATIONAL_ID_BELONGS_TO_DIFFERENT_USER = &quot;email '%s' and %s %s belong to different PKB patients&quot;;
+    private static final String NATIONAL_ID_ILLEGAL_UPDATE_CODE = &quot;patient.bulk.invite.email.and.national.id.illegal.update&quot;;
+    private static final String NATIONAL_ID_ILLEGAL_UPDATE = &quot;Patient record exists with this email address and a different National Identifier or Organisation ID&quot;;
+    private static final String ORG_LEVEL_ID_BELONGS_TO_DIFFERENT_USER_CODE = &quot;patient.bulk.invite.org.level.id.belongs.to.different.user&quot;;
+    private static final String ORG_LEVEL_ID_BELONGS_TO_DIFFERENT_USER = &quot;Org level id %s belongs to a different PKB patient from earlier ids&quot;;
+    private static final String TEAM_LEVEL_ID_BELONGS_TO_DIFFERENT_USER_CODE = &quot;patient.bulk.invite.team.level.id.belongs.to.different.user&quot;;
+    private static final String TEAM_LEVEL_ID_BELONGS_TO_DIFFERENT_USER = &quot;Team level id %s belongs to a different PKB patient from earlier ids&quot;;
+    private static final String NOT_A_PATIENT_CODE = &quot;patient.bulk.invite.user.type.is.not.patient&quot;;
+    private static final String NOT_A_PATIENT = &quot;This account already belongs to a user who is not a patient&quot;;
+    private static final String UNEXPECTED_ERROR_CODE = &quot;patient.bulk.invite.unexpected.error&quot;;
+    private static final String UNEXPECTED_ERROR = &quot;Unexpected error happened&quot;;
+    private static final String INVITE_CARER_TO_NON_TEAM_MEMBER_CODE = &quot;patient.bulk.invite.cannot.invite.carer.to.non.team.member&quot;;
+    private static final String INVITE_CARER_TO_NON_TEAM_MEMBER = &quot;Cannot add carer until Patient accepts invitation&quot;;
+
+    private final UserManager userManager;
+    private final RequestBoundExistingPatientRegister existingPatientRegister;
+    private final RequestBoundNewPatientRegister newPatientRegister;
+    private final RequestBoundCarerRegister carerRegister;
+    private final InvitationNationalIdValidator invitationNationalIdValidator;
+
+    private LoggedInEHRRequestContext requestContext;
+    private PKBPerson inviter;
+    private Team invitingTeam;
+    private NationalIdType nationalIdType;
+
+    private OrgLevelIdValidator orgLevelIdValidator;
+    private TeamLevelIdValidator teamLevelIdValidator;
+
+    public RequestBoundPatientRegister(
+            UserManager userManager,
+            RequestBoundExistingPatientRegister existingPatientRegister,
+            RequestBoundNewPatientRegister newPatientRegister,
+<span class="fc" id="L94">            RequestBoundCarerRegister carerRegister, InvitationNationalIdValidator invitationNationalIdValidator) {</span>
+<span class="fc" id="L95">        this.userManager = userManager;</span>
+<span class="fc" id="L96">        this.existingPatientRegister = existingPatientRegister;</span>
+<span class="fc" id="L97">        this.newPatientRegister = newPatientRegister;</span>
+<span class="fc" id="L98">        this.carerRegister = carerRegister;</span>
+<span class="fc" id="L99">        this.invitationNationalIdValidator = invitationNationalIdValidator;</span>
+<span class="fc" id="L100">    }</span>
+
+    /**
+     * &lt;pre&gt;
+     * Registering a patient. Invitation might contains following Personal identifiers: national id, org level id or team level id, plus email.
+     * At least one identifier must be always present in invitation request.
+     * Outcomes cane be:
+     * 1. Neither Personal identifier (nor email) matches any existing user know to PKB -&gt; handling new user (status is pending on if email is present or not).
+     * 2. Any Personal identifier (or email) matches with user(s) known to PKB:
+     * 2. a) all matches yield the same PKB user -&gt; handling existing user
+     * 2. b) identifiers (and email) is matching two or more different users -&gt; failure
+     * 3. When Org level id is present and Org has 0 or more than one org level id type -&gt; failure.
+     * 4. When Team level id is present and Team has 0 or more than one team level it type -&gt; failure.
+     * &lt;/pre&gt;
+     */
+    @Override
+    public Either&lt;FailedInvitation, SuccessfulInvitation&gt; registerAndActivate(@NotNull InvitationDto invitation,
+                                                                              PatientConsentUpdateTemplate patientConsent) {
+        //TODO: Switch this to use common matcher. UserManager#findSinglePatient
+<span class="fc" id="L119">        InviteeDto invitee = invitation.getInvitee();</span>
+        try {
+            Either&lt;FailedInvitation, SuccessfulInvitation&gt; patientInvitationOutcome;
+
+<span class="fc" id="L123">            Context context = new Context();</span>
+<span class="fc" id="L124">            Optional&lt;FailedInvitation&gt; validatedMaybeUserByOrgLevelId = findByOrgLevelId(invitation, context);</span>
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">            if (validatedMaybeUserByOrgLevelId.isPresent()) {</span>
+<span class="nc" id="L126">                return Either.left(validatedMaybeUserByOrgLevelId.get());</span>
+            }
+
+<span class="fc" id="L129">            Optional&lt;FailedInvitation&gt; validatedMaybeUserByTeamLevelId = findByTeamLevelId(invitation, context);</span>
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">            if (validatedMaybeUserByTeamLevelId.isPresent()) {</span>
+<span class="nc" id="L131">                return Either.left(validatedMaybeUserByTeamLevelId.get());</span>
+            }
+
+<span class="fc" id="L134">            findByEmail(invitee).ifPresent(userByEmail -&gt; context.matchingUsers.put(EMAIL, userByEmail));</span>
+<span class="fc" id="L135">            PersonAmbiguityHandler.getMaybePersonOrNone(findByNationalId(invitee.getInviteeIds()),&quot;nationalId&quot;)</span>
+<span class="fc" id="L136">                    .peek(user -&gt; context.matchingUsers.put(NATIONAL_ID, user));</span>
+
+<span class="fc bfc" id="L138" title="All 2 branches covered.">            if (context.matchingUsers.isEmpty()) {</span>
+<span class="fc" id="L139">                patientInvitationOutcome = newPatientRegister.registerPatientWithTeam(invitation, invitingTeam, patientConsent);</span>
+            } else {
+<span class="fc" id="L141">                patientInvitationOutcome = validateUsersMatchedByIdsAreConsistent(invitation, context.matchingUsers)</span>
+<span class="fc" id="L142">                        .flatMap(validateUserIsPatient())</span>
+<span class="fc" id="L143">                        .flatMap(validateUserIsNotOptedOut())</span>
+<span class="fc" id="L144">                        .flatMap(invitePatientToTeam(invitation, context, patientConsent));</span>
+            }
+
+<span class="fc" id="L147">            return patientInvitationOutcome.map(inviteCarers(invitation));</span>
+<span class="nc" id="L148">        } catch (Exception cause) {</span>
+<span class="nc" id="L149">            InviteeIdsDto inviteeIds = invitee.getInviteeIds();</span>
+<span class="nc" id="L150">            LOGGER.error(&quot;Failed to process Patient Invitation e-mail: '{}', National Id: '{}', Org Level Id: '{}', Team Level id: '{}'&quot;,</span>
+<span class="nc" id="L151">                    invitee.findEmail(),</span>
+<span class="nc" id="L152">                    inviteeIds.findNationalId(),</span>
+<span class="nc" id="L153">                    inviteeIds.findOrgLevelId(),</span>
+<span class="nc" id="L154">                    inviteeIds.findTeamLevelId(),</span>
+                    cause);
+<span class="nc" id="L156">            return Either.left(failureForUnknownReason(singletonList(errorOf(UNEXPECTED_ERROR_CODE, UNEXPECTED_ERROR))));</span>
+        }
+    }
+
+    @Override
+    public List&lt;Either&lt;FailedInvitation, SuccessfulInvitation&gt;&gt; registerAndActivateInBulk(@NotNull Collection&lt;InvitationDto&gt; invitations,
+                                                                                          PatientConsentUpdateTemplate patientConsent) {
+<span class="fc" id="L163">        return invitations.stream().map(invitation -&gt; registerAndActivate(invitation, patientConsent)).collect(toList());</span>
+    }
+
+    @NotNull
+    RequestBoundPatientRegister withInvitingTeam(@NotNull Team invitingTeam) {
+<span class="fc" id="L168">        this.invitingTeam = invitingTeam;</span>
+<span class="fc" id="L169">        this.orgLevelIdValidator = new OrgLevelIdValidator(invitingTeam.getOrg());</span>
+<span class="fc" id="L170">        this.teamLevelIdValidator = new TeamLevelIdValidator(invitingTeam);</span>
+<span class="fc" id="L171">        return this;</span>
+    }
+
+    @NotNull
+    RequestBoundPatientRegister withRequestContext(@NotNull LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L176">        this.requestContext = requestContext;</span>
+<span class="fc" id="L177">        return this;</span>
+    }
+
+    @NotNull
+    RequestBoundPatientRegister withInviter(@NotNull PKBPerson inviter) {
+<span class="fc" id="L182">        this.inviter = inviter;</span>
+<span class="fc" id="L183">        return this;</span>
+    }
+
+    @NotNull
+    RequestBoundPatientRegister withNationalIdType(@NotNull NationalIdType nationalIdType) {
+<span class="fc" id="L188">        this.nationalIdType = nationalIdType;</span>
+<span class="fc" id="L189">        return this;</span>
+    }
+
+    private Optional&lt;FailedInvitation&gt; findByOrgLevelId(InvitationDto patientInvitation, Context context) {
+<span class="fc" id="L193">        return orgLevelIdValidator.validate(patientInvitation, requestContext)</span>
+<span class="fc" id="L194">                .map(</span>
+                        maybeOrgLevelId -&gt; {
+<span class="fc" id="L196">                            maybeOrgLevelId.ifPresent(orgLevelId -&gt; {</span>
+<span class="fc" id="L197">                                context.orgLevelId = orgLevelId;</span>
+<span class="fc" id="L198">                                PersonAmbiguityHandler.getMaybePersonOrNone(findByOrgLevelId(orgLevelId),&quot;orgLevelId&quot;)</span>
+<span class="pc" id="L199">                                        .peek(user -&gt; context.matchingUsers.put(ORG_LEVEL_ID, user));</span>
+<span class="fc" id="L200">                            });</span>
+<span class="fc" id="L201">                            return Optional.&lt;FailedInvitation&gt;empty();</span>
+                        })
+<span class="pc" id="L203">                .mapLeft(errors -&gt; Optional.of(failedOnOrgLevelIdType(errors)))</span>
+<span class="fc" id="L204">                .fold(Function.identity(), Function.identity());</span>
+
+    }
+
+    private Optional&lt;FailedInvitation&gt; findByTeamLevelId(InvitationDto patientInvitation, Context context) {
+<span class="fc" id="L209">        return teamLevelIdValidator.validate(patientInvitation, requestContext)</span>
+<span class="fc" id="L210">                .map(</span>
+                        maybeTeamLevelId -&gt; {
+<span class="fc" id="L212">                            maybeTeamLevelId.ifPresent(teamLevelId -&gt; {</span>
+<span class="fc" id="L213">                                context.teamLevelIds = teamLevelId;</span>
+<span class="fc" id="L214">                                PersonAmbiguityHandler.getMaybePersonOrNone(findByTeamLevelId(teamLevelId),&quot;teamLevelId&quot;)</span>
+<span class="pc" id="L215">                                        .peek(user -&gt; context.matchingUsers.put(TEAM_LEVEL_ID, user));</span>
+<span class="fc" id="L216">                            });</span>
+<span class="fc" id="L217">                            return Optional.&lt;FailedInvitation&gt;empty();</span>
+                        })
+<span class="pc" id="L219">                .mapLeft(errors -&gt; Optional.of(failedOnTeamLevelIdType(errors))).fold(Function.identity(), Function.identity());</span>
+    }
+
+    private Function&lt;SuccessfulInvitation, SuccessfulInvitation&gt; inviteCarers(InvitationDto invitation) {
+<span class="fc" id="L223">        return successfulInvitation -&gt; {</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">            if (cannotAccessPatientsAccountJustYet(successfulInvitation)) {</span>
+<span class="pc" id="L225">                invitation.findInvitedCarerOne().ifPresent(carerDto -&gt; successfulInvitation.withCarerOneInvitationErrors(singletonList(errorOf(</span>
+                        INVITE_CARER_TO_NON_TEAM_MEMBER_CODE, INVITE_CARER_TO_NON_TEAM_MEMBER))));
+<span class="pc" id="L227">                invitation.findInvitedCarerTwo().ifPresent(carerDto -&gt; successfulInvitation.withCaresTwoInvitationErrors(singletonList(errorOf(</span>
+                        INVITE_CARER_TO_NON_TEAM_MEMBER_CODE, INVITE_CARER_TO_NON_TEAM_MEMBER))));
+            } else {
+<span class="fc" id="L230">                invitation.findInvitedCarerOne()</span>
+<span class="fc" id="L231">                        .map(carer -&gt; carerRegister.registerCarer(carer, successfulInvitation.getUser(), requestContext, inviter, invitingTeam))</span>
+<span class="fc" id="L232">                        .ifPresent(successfulInvitation::withCarerOneInvitationErrors);</span>
+
+<span class="fc" id="L234">                invitation.findInvitedCarerTwo()</span>
+<span class="fc" id="L235">                        .map(carer -&gt; carerRegister.registerCarer(carer, successfulInvitation.getUser(), requestContext, inviter, invitingTeam))</span>
+<span class="fc" id="L236">                        .ifPresent(successfulInvitation::withCaresTwoInvitationErrors);</span>
+            }
+
+<span class="fc" id="L239">            return successfulInvitation;</span>
+        };
+    }
+
+    /**
+     * &lt;pre&gt;
+     * When a Patient is member in a different Organizations team and (s)he is only invited yet,
+     * Inviting team cannot add/modify/access any Patients data until Patient accept Team Coordinators invitation.
+     * This means Team Coordinator cannot add Carer at this point.
+     * &lt;/pre&gt;
+     */
+    private boolean cannotAccessPatientsAccountJustYet(SuccessfulInvitation successfulInvitation) {
+<span class="fc bfc" id="L251" title="All 2 branches covered.">        return ADDED_TO_TEAM_DEFERRED == successfulInvitation.getSuccessType();</span>
+    }
+
+    private Optional&lt;PKBPerson&gt; findByEmail(InviteeDto invitee) {
+<span class="fc" id="L255">        return invitee.findEmail()</span>
+<span class="fc" id="L256">                .flatMap(this::findByEmail);</span>
+    }
+
+    private Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByNationalId(InviteeIdsDto inviteeIds) {
+<span class="fc" id="L260">        Optional&lt;ValidNationalId&gt; nationalId = inviteeIds.findNationalId();</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">        if (nationalId.isPresent()) {</span>
+<span class="fc" id="L262">            return findByNationalId(nationalId.get());</span>
+        }
+
+<span class="fc" id="L265">        return Either.left(Option.none());</span>
+    }
+
+    private Either&lt;FailedInvitation, PKBPerson&gt; validateUsersMatchedByIdsAreConsistent(InvitationDto patientInvitation, Map&lt;MatchingOption, PKBPerson&gt; matchingUsers) {
+<span class="fc" id="L269">        PKBPerson matchingUser = matchingUsers.get(EMAIL);</span>
+
+<span class="fc" id="L271">        InviteeDto invitee = patientInvitation.getInvitee();</span>
+<span class="fc" id="L272">        InviteeIdsDto inviteeIds = invitee.getInviteeIds();</span>
+
+<span class="fc" id="L274">        PKBPerson userByNationalId = matchingUsers.get(NATIONAL_ID);</span>
+<span class="fc bfc" id="L275" title="All 2 branches covered.">        if (matchingUser == null) {</span>
+<span class="fc" id="L276">            matchingUser = userByNationalId;</span>
+        } else {
+<span class="fc bfc" id="L278" title="All 2 branches covered.">            if (userByNationalId != null) {</span>
+                // Found a user with the specified national id - make sure it belongs to the same user as the email
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">                if (!matchingUser.getId().equals(userByNationalId.getId())) {</span>
+<span class="nc" id="L281">                    return Either.left(failedOnNationalId(nationalIdBelongToDifferentUser(invitee, inviteeIds)));</span>
+                }
+            } else {
+                // No user found with the specifed national id - but make sure the user found via email doesn't already
+                // have a national id: PHR-7147
+<span class="fc" id="L286">                ValidNationalId newId = inviteeIds.findNationalId().orElse(null);</span>
+<span class="fc" id="L287">                Email emailAddress = invitee.findEmail().orElse(null);</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">                if (nonNull(newId)) {</span>
+<span class="fc" id="L289">                    boolean tryingToUpdateNationalId = invitationNationalIdValidator.isTryingToUpdateNationalId(</span>
+                            matchingUser,
+                            newId);
+<span class="fc bfc" id="L292" title="All 2 branches covered.">                    if (tryingToUpdateNationalId) {</span>
+<span class="fc" id="L293">                        return Either.left(failedOnNationalId(illegalNationalIdModification()));</span>
+                    }
+                }
+            }
+        }
+
+<span class="fc" id="L299">        PKBPerson userByOrgLevelId = matchingUsers.get(ORG_LEVEL_ID);</span>
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">        if (matchingUser == null) {</span>
+<span class="nc" id="L301">            matchingUser = userByOrgLevelId;</span>
+        } else {
+<span class="pc bpc" id="L303" title="3 of 4 branches missed.">            if (userByOrgLevelId != null &amp;&amp; !matchingUser.getId().equals(userByOrgLevelId.getId())) {</span>
+<span class="nc" id="L304">                return Either.left(failedOnOrgLevelId(orgLevelIdBelongsToDifferentUser(inviteeIds)));</span>
+            }
+        }
+
+<span class="fc" id="L308">        PKBPerson userByTeamLevelId = matchingUsers.get(TEAM_LEVEL_ID);</span>
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">        if (matchingUser == null) {</span>
+<span class="nc" id="L310">            matchingUser = userByTeamLevelId;</span>
+        } else {
+<span class="pc bpc" id="L312" title="3 of 4 branches missed.">            if (userByTeamLevelId != null &amp;&amp; !matchingUser.getId().equals(userByTeamLevelId.getId())) {</span>
+<span class="nc" id="L313">                return Either.left(failedOnTeamLevelId(teamLevelIdBelongToDifferentUser(inviteeIds)));</span>
+
+            }
+        }
+
+<span class="fc" id="L318">        return Either.right(matchingUser);</span>
+    }
+
+    private Function&lt;PKBPerson, Either&lt;FailedInvitation, PKBPerson&gt;&gt; validateUserIsPatient() {
+<span class="pc bpc" id="L322" title="1 of 2 branches missed.">        return existingUser -&gt; existingUser.isPatient() ? Either.right(existingUser)</span>
+<span class="nc" id="L323">                : Either.left(failedOnUserTypeMismatch(singletonList(errorOf(NOT_A_PATIENT_CODE, NOT_A_PATIENT))));</span>
+    }
+
+    private Function&lt;PKBPerson, Either&lt;FailedInvitation, PKBPerson&gt;&gt; validateUserIsNotOptedOut() {
+<span class="fc" id="L327">        return existingUser -&gt; {</span>
+<span class="pc bpc" id="L328" title="1 of 4 branches missed.">            boolean isOptedOut = existingUser.getOptoutDetails() != null &amp;&amp; !existingUser.getOptoutDetails().isSharingEnabled();</span>
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">            return isOptedOut</span>
+<span class="nc" id="L330">                    ? Either.left(</span>
+<span class="nc" id="L331">                    failedOnOptedOutCheck(singletonList(errorOf(PATIENT_BULK_INVITE_USER_OPTED_OUT_CODE, PATIENT_BULK_INVITE_USER_OPTED_OUT, existingUser.getEmail()))))</span>
+<span class="fc" id="L332">                    : Either.right(existingUser);</span>
+        };
+    }
+
+    private Function&lt;PKBPerson, Either&lt;FailedInvitation, SuccessfulInvitation&gt;&gt; invitePatientToTeam(@NotNull InvitationDto invitation,
+                                                                                                    Context context,
+                                                                                                    @NotNull PatientConsentUpdateTemplate patientConsent) {
+<span class="fc" id="L339">        return existingUser -&gt; existingPatientRegister.addPatientToTeam(requestContext, invitation, new Parameters(existingUser, inviter, invitingTeam, patientConsent)</span>
+<span class="fc" id="L340">                .withOrgLevelId(context.orgLevelId)</span>
+<span class="fc" id="L341">                .withTeamLevelId(context.teamLevelIds), BULK);</span>
+    }
+
+    private List&lt;Error&gt; orgLevelIdBelongsToDifferentUser(InviteeIdsDto inviteeIds) {
+<span class="nc" id="L345">        return singletonList(</span>
+<span class="nc" id="L346">                errorOf(ORG_LEVEL_ID_BELONGS_TO_DIFFERENT_USER_CODE, ORG_LEVEL_ID_BELONGS_TO_DIFFERENT_USER, inviteeIds.findOrgLevelId().orElse(EMPTY)));</span>
+    }
+
+    private List&lt;Error&gt; nationalIdBelongToDifferentUser(InviteeDto invitee, InviteeIdsDto inviteeIds) {
+<span class="nc" id="L350">        return singletonList(error(NATIONAL_ID_BELONGS_TO_DIFFERENT_USER_CODE, NATIONAL_ID_BELONGS_TO_DIFFERENT_USER)</span>
+<span class="nc" id="L351">                .withArguments(invitee.findEmail().map(Email::address).orElse(null), inviteeIds.findNationalId().map(ValidNationalId::type).orElse(nationalIdType).getName(),</span>
+<span class="nc" id="L352">                        inviteeIds.findNationalId().map(ValidNationalId::value).orElse(EMPTY))</span>
+<span class="nc" id="L353">                .build());</span>
+    }
+
+    private List&lt;Error&gt; illegalNationalIdModification() {
+<span class="fc" id="L357">        return singletonList(error(NATIONAL_ID_ILLEGAL_UPDATE_CODE, NATIONAL_ID_ILLEGAL_UPDATE).build());</span>
+    }
+
+    private List&lt;Error&gt; teamLevelIdBelongToDifferentUser(InviteeIdsDto inviteeIds) {
+<span class="nc" id="L361">        return singletonList(errorOf(TEAM_LEVEL_ID_BELONGS_TO_DIFFERENT_USER_CODE, TEAM_LEVEL_ID_BELONGS_TO_DIFFERENT_USER, inviteeIds.findTeamLevelId().orElse(EMPTY)));</span>
+    }
+
+    private Optional&lt;PKBPerson&gt; findByEmail(Email email) {
+<span class="fc" id="L365">        return ofNullable(userManager.getSinglePersonByEmail(</span>
+                email,
+                PersonContact.Lazy.NATIONAL_AND_LOCAL_IDS,
+                PersonContact.Lazy.PERSON_W_CONTACTS,
+                PersonContact.Lazy.PROPERTIES));
+    }
+
+    private Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByNationalId(ValidNationalId nationalId) {
+<span class="fc" id="L373">        return userManager.getPKBPersonByNationalId(</span>
+                nationalId,
+                PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS,
+                PKBPerson.Lazy.CONTACTS,
+                PKBPerson.Lazy.PROPERTIES);
+    }
+
+    private Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByOrgLevelId(OrgLevelId orgLevelId) {
+<span class="fc" id="L381">        return userManager.getPKBPersonByOrgLevelId(</span>
+                orgLevelId,
+                PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS,
+                PKBPerson.Lazy.CONTACTS,
+                PKBPerson.Lazy.PROPERTIES);
+    }
+
+    private Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findByTeamLevelId(TeamLevelId teamLevelId) {
+<span class="fc" id="L389">        return userManager.getPKBPersonByTeamLevelId(</span>
+                teamLevelId,
+                PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS,
+                PKBPerson.Lazy.CONTACTS,
+                PKBPerson.Lazy.PROPERTIES);
+    }
+
+<span class="fc" id="L396">    private static final class Context {</span>
+<span class="fc" id="L397">        private final Map&lt;MatchingOption, PKBPerson&gt; matchingUsers = Maps.newEnumMap(MatchingOption.class);</span>
+        private OrgLevelId orgLevelId;
+        private TeamLevelId teamLevelIds;
+    }
+
+<span class="fc" id="L402">    enum MatchingOption {</span>
+<span class="fc" id="L403">        EMAIL, NATIONAL_ID, ORG_LEVEL_ID, TEAM_LEVEL_ID</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DeleteOperationRepositoryImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.deletion.repository</a> &gt; <span class="el_source">DeleteOperationRepositoryImpl.java</span></div><h1>DeleteOperationRepositoryImpl.java</h1><pre class="source lang-java linenums">package com.pkb.deletion.repository;
+
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.deletion.model.ActorId;
+import com.pkb.deletion.model.DeleteOperation;
+import com.pkb.deletion.model.DeleteRequestStatus;
+import com.pkb.deletion.model.DeletionServiceProperties;
+import com.pkb.deletion.model.ImmutableActorId;
+import com.pkb.deletion.model.errors.DatabaseError;
+import com.pkb.deletion.model.errors.DeletionServiceError;
+import io.vavr.control.Either;
+import io.vavr.control.Try;
+import org.jooq.SortOrder;
+import org.slf4j.Logger;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
+
+import javax.sql.DataSource;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.util.Collections.emptyMap;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * This is a slightly unusual repository. It is implemented with vanilla JDBC because
+ * it deals with entirely generic SQL constructed from the database model classes. Using Hibernate/JPA/JOOQ
+ * imposed a variety of awkward constraints and/or performance penalties that simply weren't worth paying
+ * relative to the complexity of the SQL being built. It's possible that we might have to revisit this
+ * in the future - most likely reconsidering JOOQ as an option.
+ */
+@Component
+public class DeleteOperationRepositoryImpl implements DeleteOperationRepository {
+
+<span class="fc" id="L47">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+    private final NamedParameterJdbcTemplate jdbcTemplate;
+
+    private static final String DELETE_OPERATION_ID_INSERT_TEMPLATE = &quot;INSERT INTO %1$s.delete_operation_id VALUES (:operationId, :idToDelete);&quot;;
+
+    private static final String ROOT_DELETE_OPERATION_SELECT_TEMPLATE = &quot;SELECT * FROM %1$s.delete_operation WHERE request_id = :requestId and parent_operation_id IS NULL&quot;;
+    private static final String DELETE_OPERATION_SELECT_BY_PARENT_TEMPLATE = &quot;SELECT * FROM %1$s.delete_operation WHERE parent_operation_id = :parentOperationId&quot;;
+    private static final String DELETE_OPERATION_INSERT_TEMPLATE = &quot;INSERT INTO %1$s.delete_operation VALUES (:id, :requestId, :parentOperationId, :createdDate, :tableName, :requestingUserId, :requestingUserIdType, :ordinal, :owned);&quot;;
+    private static final String DELETE_REQUEST_INSERT_TEMPLATE = &quot;INSERT INTO %1$s.delete_request VALUES(:requestId, :status)&quot;;
+    private static final String DELETE_REQUEST_STATUS_SELECT_TEMPLATE = &quot;SELECT status FROM %1$s.delete_request WHERE id = :requestId&quot;;
+    private static final String DELETE_REQUEST_STATUS_LOCK_SELECT_TEMPLATE = DELETE_REQUEST_STATUS_SELECT_TEMPLATE + &quot; FOR UPDATE&quot;;
+    private static final String DELETE_REQUEST_STATUS_UPDATE_TEMPLATE = &quot;UPDATE %1$s.delete_request SET status = :status WHERE id = :requestId;&quot;;
+
+
+    private final DateTimeService dateTimeService;
+
+    private final String deleteOperationIdInsert;
+    private final String deleteOperationSelect;
+    private final String deleteOperationInsert;
+    private final String deleteOperationByParentSelect;
+    private final String deleteRequestInsert;
+    private final String deleteRequestStatusLockSelect;
+    private final String deleteRequestStatusSelect;
+    private final String deleteRequestStatusUpdate;
+    private final DeletionServiceProperties properties;
+
+<span class="fc" id="L74">    public DeleteOperationRepositoryImpl(DataSource dataSource, DateTimeService dateTimeService, DeletionServiceProperties properties) {</span>
+<span class="fc" id="L75">        jdbcTemplate = new NamedParameterJdbcTemplate(dataSource);</span>
+<span class="fc" id="L76">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L77">        deleteOperationIdInsert = String.format(DELETE_OPERATION_ID_INSERT_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L78">        deleteOperationSelect = String.format(ROOT_DELETE_OPERATION_SELECT_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L79">        deleteOperationInsert = String.format(DELETE_OPERATION_INSERT_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L80">        deleteOperationByParentSelect = String.format(DELETE_OPERATION_SELECT_BY_PARENT_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L81">        deleteRequestInsert = String.format(DELETE_REQUEST_INSERT_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L82">        deleteRequestStatusLockSelect = String.format(DELETE_REQUEST_STATUS_LOCK_SELECT_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L83">        deleteRequestStatusSelect = String.format(DELETE_REQUEST_STATUS_SELECT_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L84">        deleteRequestStatusUpdate = String.format(DELETE_REQUEST_STATUS_UPDATE_TEMPLATE, properties.getBackupSchema());</span>
+<span class="fc" id="L85">        this.properties = properties;</span>
+<span class="fc" id="L86">    }</span>
+
+
+    @Override
+    public Stream&lt;DeleteOperation&gt; findByParentOperationId(UUID parentOperationId, SortOrder sortOrder) {
+<span class="fc" id="L91">        return jdbcTemplate.queryForStream(deleteOperationByParentSelect, Map.of(&quot;parentOperationId&quot;, parentOperationId), this::mapRow);</span>
+    }
+
+    @Override
+    public Either&lt;DeletionServiceError, DeleteOperation&gt; findByRequestId(UUID requestId) {
+<span class="fc" id="L96">        return runDbCommand(() -&gt; jdbcTemplate.queryForObject(deleteOperationSelect, Map.of(&quot;requestId&quot;, requestId), this::mapRow));</span>
+
+    }
+
+    @Override
+    @Transactional
+    public Either&lt;DeletionServiceError, DeleteOperation&gt; persist(DeleteOperation deleteOperation) {
+
+<span class="fc" id="L104">        deleteOperation.setCreatedDate(dateTimeService.now());</span>
+<span class="fc" id="L105">        var paramSource = new MapSqlParameterSource(Map.of(</span>
+<span class="fc" id="L106">                &quot;id&quot;, deleteOperation.getId(),</span>
+<span class="fc" id="L107">                &quot;requestId&quot;, deleteOperation.getRequestId(),</span>
+<span class="fc" id="L108">                &quot;tableName&quot;, deleteOperation.getTableName(),</span>
+<span class="fc" id="L109">                &quot;createdDate&quot;, Timestamp.from(deleteOperation.getCreatedDate()),</span>
+<span class="fc" id="L110">                &quot;requestingUserId&quot;, deleteOperation.getRequestingUser().getId(),</span>
+<span class="fc" id="L111">                &quot;requestingUserIdType&quot;, deleteOperation.getRequestingUser().getType().toString(),</span>
+<span class="fc" id="L112">                &quot;ordinal&quot;, deleteOperation.getOrdinal(),</span>
+<span class="fc" id="L113">                &quot;owned&quot;, deleteOperation.isOwned()</span>
+        ));
+        
+<span class="fc" id="L116">        paramSource.addValue(&quot;parentOperationId&quot;, deleteOperation.getParentOperationId());</span>
+
+<span class="fc" id="L118">        return runDbCommand(() -&gt; {</span>
+<span class="fc" id="L119">        jdbcTemplate.update(deleteOperationInsert, paramSource);</span>
+<span class="fc" id="L120">        return deleteOperation;</span>
+        });
+    }
+
+    private DeletionServiceError makeError(Throwable exception) {
+<span class="nc" id="L125">        LOGGER.error(&quot;Database error:&quot;, exception);</span>
+<span class="nc" id="L126">        return DatabaseError.of(exception.getMessage());</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    @Override
+    @Transactional
+    public Either&lt;DeletionServiceError, DeleteOperation&gt; persist(DeleteOperation deleteOperation, List&lt;String&gt; idStrings) {
+<span class="fc" id="L133">        Map&lt;String, Object&gt;[] values = idStrings.stream().map(idString -&gt; Map.of(&quot;operationId&quot;, deleteOperation.getId(), &quot;idToDelete&quot;, idString)).toArray(Map[]::new);</span>
+<span class="fc" id="L134">        return persist(deleteOperation)</span>
+<span class="fc" id="L135">                .flatMap(persisted -&gt;</span>
+<span class="fc" id="L136">                        runDbCommand(() -&gt; {</span>
+<span class="fc" id="L137">                            jdbcTemplate.batchUpdate(deleteOperationIdInsert, values);</span>
+<span class="fc" id="L138">                            return persisted;</span>
+                        })
+                );
+    }
+
+
+    @Override
+    public &lt;T&gt; List&lt;T&gt; selectList(String sql, Map&lt;String, Object&gt; parameters, Class&lt;T&gt; resultClass) {
+<span class="fc" id="L146">        return jdbcTemplate.queryForList(sql, parameters, resultClass);</span>
+    }
+
+
+    @Override
+    @Transactional
+    public Either&lt;DeletionServiceError, Integer&gt; runUpdateDeleteQuery(String sql, Map&lt;String, Object&gt; parameters) {
+<span class="fc" id="L153">        return runDbCommand(() -&gt; jdbcTemplate.update(sql, parameters));</span>
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY) // This method makes no sense unless there's an existing transaction,
+                                                        // because it only applies for the scope of the current transaction
+    public Either&lt;DeletionServiceError, Integer&gt; setConstraintsDeferred() {
+<span class="fc" id="L160">        return runDbCommand(() -&gt; jdbcTemplate.update(&quot;SET CONSTRAINTS ALL DEFERRED;&quot;, emptyMap()));</span>
+    }
+
+    @Override
+    public String getDeletionServiceSchema() {
+<span class="fc" id="L165">        return properties.getBackupSchema();</span>
+    }
+
+    @Override
+    @Transactional
+    public void insertNewDeletionRequest(UUID deleteRequestid) {
+<span class="fc" id="L171">        jdbcTemplate.update(deleteRequestInsert, Map.of(&quot;requestId&quot;, deleteRequestid, &quot;status&quot;, DeleteRequestStatus.CREATING.toString()));</span>
+<span class="fc" id="L172">    }</span>
+
+    @Override
+    @Transactional(propagation = Propagation.MANDATORY)
+    public DeleteRequestStatus queryAndLockDeleteRequestStatus(UUID requestId) {
+<span class="fc" id="L177">       return Optional.ofNullable(jdbcTemplate.queryForObject(deleteRequestStatusLockSelect, Map.of(&quot;requestId&quot;, requestId), String.class)).map(DeleteRequestStatus::valueOf).orElseThrow();</span>
+    }
+
+    @Override
+    @Transactional
+    public int updateDeleteRequestStatus(UUID deleteOperationId, DeleteRequestStatus updatedStatus) {
+<span class="fc" id="L183">        return jdbcTemplate.update(deleteRequestStatusUpdate, Map.of(&quot;requestId&quot;, deleteOperationId, &quot;status&quot;, updatedStatus.toString()));</span>
+    }
+
+    @Override
+    public DeleteRequestStatus getRequestStatus(UUID requestId) {
+<span class="fc" id="L188">        return Optional.ofNullable(jdbcTemplate.queryForObject(deleteRequestStatusSelect, Map.of(&quot;requestId&quot;, requestId), String.class)).map(DeleteRequestStatus::valueOf).orElseThrow();</span>
+    }
+
+    private &lt;R&gt; Either&lt;DeletionServiceError, R&gt; runDbCommand(Supplier&lt;R&gt; commandRunner) {
+        //Convert database exceptions to Either for consistent error handling. Also important
+        //to avoid throwing out to the pub-sub consumer level, which will trigger redundant attempts to re-process the
+        //same messasge.
+<span class="fc" id="L195">        return Try.of(commandRunner::get)</span>
+<span class="fc" id="L196">                .toEither()</span>
+<span class="pc" id="L197">                .peekLeft((ignored) -&gt; TransactionAspectSupport.currentTransactionStatus().setRollbackOnly())</span>
+<span class="fc" id="L198">                .mapLeft(this::makeError);</span>
+
+    }
+
+    private DeleteOperation mapRow(ResultSet rs, int index) throws SQLException {
+<span class="fc" id="L203">        return new DeleteOperation(</span>
+<span class="fc" id="L204">                rs.getObject(&quot;id&quot;, UUID.class),</span>
+<span class="fc" id="L205">                rs.getObject(&quot;request_id&quot;, UUID.class),</span>
+<span class="fc" id="L206">                rs.getObject(&quot;parent_operation_id&quot;, UUID.class),</span>
+<span class="fc" id="L207">                rs.getObject(&quot;created_date&quot;, Timestamp.class).toInstant(),</span>
+<span class="fc" id="L208">                rs.getString(&quot;table_name&quot;),</span>
+<span class="fc" id="L209">                ImmutableActorId.builder().id(rs.getObject(&quot;requesting_user_id&quot;, UUID.class)).type(ActorId.Type.valueOf(rs.getString(&quot;requesting_user_id_type&quot;))).build(),</span>
+<span class="fc" id="L210">                rs.getInt(&quot;ordinal&quot;),</span>
+<span class="fc" id="L211">                rs.getBoolean(&quot;owned&quot;)</span>
+        );
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

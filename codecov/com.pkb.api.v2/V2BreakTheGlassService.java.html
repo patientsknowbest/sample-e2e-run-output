@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>V2BreakTheGlassService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.v2</a> &gt; <span class="el_source">V2BreakTheGlassService.java</span></div><h1>V2BreakTheGlassService.java</h1><pre class="source lang-java linenums">package com.pkb.api.v2;
+
+import com.pkb.api.aspect.annotation.RequiresScope;
+import com.pkb.api.aspect.annotation.Timed;
+import com.pkb.api.util.PKBCommonApiParams;
+import com.pkb.api.util.v2.RestUtil;
+import com.pkb.api.v1.model.ApiReadResponse;
+import com.pkb.api.v2.model.ApiBtgToken;
+import com.pkb.apiservice.BTGTokenService;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.consent.entity.BreakTheGlassLog;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.Constants;
+import io.swagger.annotations.Api;
+import io.swagger.annotations.ApiOperation;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import javax.ws.rs.Consumes;
+import javax.ws.rs.GET;
+import javax.ws.rs.POST;
+import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
+import javax.ws.rs.Produces;
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+
+import static com.pkb.apiservice.BTGTokenService.BTG_TTL;
+import static com.pkb.entities.enums.api.ApiClientScope.TEAMCOORD;
+
+/**
+ * A BTG Token is formulated as B64_Encode(&quot;code-part-of-token&quot; + &quot;::&quot; + &quot;patientId&quot; + &quot;::&quot; + expirySeconds)
+ *
+ * @author vorekoya on 04/07/2016.
+ */
+@Component
+@Path(&quot;/v2-beta/btg&quot;)
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
+@Api(tags = { &quot;Break The Glass&quot; }, value = &quot;Manage access to the break the glass service&quot;)
+<span class="fc" id="L51">public class V2BreakTheGlassService {</span>
+
+<span class="fc" id="L53">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private RestUtil util;
+    private PKBEmailMessageManager emailMessageManager;
+    private PatientConsentManager patientConsentManager;
+    private TeamUserManager teamUserManager;
+    private BTGTokenService tokenService;
+    private UserManager userManager;
+    private DateTimeService dateTimeService;
+
+    @Autowired
+    public void setDependencies(RestUtil util, TeamUserManager teamUserManager,
+            BTGTokenService tokenService, UserManager userManager, @NotNull DateTimeService dateTimeService, PatientConsentManager patientConsentManager, PKBEmailMessageManager emailMessageManager) {
+<span class="fc" id="L66">        this.util = util;</span>
+<span class="fc" id="L67">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L68">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L69">        this.tokenService = tokenService;</span>
+<span class="fc" id="L70">        this.userManager = userManager;</span>
+<span class="fc" id="L71">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L72">        this.emailMessageManager = emailMessageManager;</span>
+<span class="fc" id="L73">    }</span>
+
+    @POST
+    @Path(&quot;/{patientId}&quot;)
+    @Timed(hideParams = &quot;patientId&quot;)
+    @RequiresScope(scopes = { TEAMCOORD })
+    @ApiOperation(value = &quot;Scope: TEAMCOORD&quot;, notes = &quot;Fetch a btg token for the current user to be used against a specific patient. Returns a breaktheglass token that will expire after a set time(usually 30 mins). If a client wishes to invoke the BreakTheGlass option, she must include an additional request header named: breaktheglass with the value returned by this call. e.g. breaktheglass: eyJhbGciOiJIUzI1NiJ9.eyJqdGk. This operation is currently not possible via Swagger. Please use Postman or simlar tools to test this.&quot;, response = ApiBtgToken.class, code = 201)
+    public Response getBtgToken(
+            @PathParam(&quot;patientId&quot;) long patientId) {
+
+<span class="fc" id="L83">        PKBCommonApiParams params = util.getCommonParams(patientId, true);</span>
+
+<span class="fc" id="L85">        EHRRequestContext requestContext = params.getRequestContext();</span>
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">        if (patientConsentManager.hasAccessToUser(requestContext, patientId)) {</span>
+            //create a token
+<span class="fc" id="L88">            Long expiry = dateTimeService.nowLocalDateTime().plusMinutes(BTG_TTL).atZone(Constants.APPLICATION_TZ).toInstant().toEpochMilli();</span>
+<span class="fc" id="L89">            String token = tokenService.create(patientId);</span>
+            //write a BTG event
+<span class="fc" id="L91">            PKBPerson actor = params.getPerson();</span>
+<span class="fc" id="L92">            Team team = teamUserManager.getPrimaryTeam(requestContext, actor.getId(), true);</span>
+
+            try {
+<span class="fc" id="L95">                teamUserManager.beginTransaction();</span>
+<span class="fc" id="L96">                teamUserManager.logBreakTheGlassEvent(patientId, team.getId(), actor.getId());</span>
+<span class="fc" id="L97">                teamUserManager.commitTransaction();</span>
+
+<span class="fc" id="L99">                PKBPerson patient = userManager.getPKBPerson(patientId);</span>
+
+<span class="fc" id="L101">                emailMessageManager.sendBreakTheGlassNotificationToPatient(actor, patient, team);</span>
+
+<span class="fc" id="L103">                return Response.ok(new ApiBtgToken(token, expiry)).status(Response.Status.CREATED).build();</span>
+            } finally {
+<span class="fc" id="L105">                teamUserManager.rollbackIfNotCommitted();</span>
+            }
+        } else {
+<span class="nc" id="L108">            String message = &quot;You have no access to this user&quot;;</span>
+<span class="nc" id="L109">            LOGGER.error(message);</span>
+<span class="nc" id="L110">            throw new WebApplicationException(message, Response.Status.UNAUTHORIZED);</span>
+        }
+
+    }
+
+    @GET
+    @Path(&quot;/log/{patientId}&quot;)
+    @Timed(hideParams = &quot;patientId&quot;)
+    @RequiresScope(scopes = { TEAMCOORD })
+    @ApiOperation(value = &quot;Scope: TEAMCOORD&quot;, notes = &quot;Fetch a log for btg events made against a patient by the current user. Returns a btg log&quot;, response = BreakTheGlassLog.class, responseContainer = &quot;com.pkb.api.v1.model.ApiReadResponse&quot;)
+    public Response getBtgLog(@PathParam(&quot;patientId&quot;) long patientId) {
+<span class="fc" id="L121">        PKBCommonApiParams params = util.getCommonParams(patientId, true);</span>
+
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">        if (patientConsentManager.hasAccessToUser(params.getRequestContext(), patientId)) {</span>
+<span class="fc" id="L124">            return Response.ok(new ApiReadResponse&lt;&gt;(teamUserManager</span>
+<span class="fc" id="L125">                    .findBreakTheGlassEvent(patientId, params.getRequestContext().getAccessingUserId())))</span>
+<span class="fc" id="L126">                    .status(Response.Status.OK)</span>
+<span class="fc" id="L127">                    .build();</span>
+        } else {
+<span class="nc" id="L129">            String message = &quot;You have no access to this user&quot;;</span>
+<span class="nc" id="L130">            LOGGER.error(message);</span>
+<span class="nc" id="L131">            throw new WebApplicationException(message, Response.Status.UNAUTHORIZED);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

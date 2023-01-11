@@ -1,0 +1,371 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PatientQuestionnaireAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.message</a> &gt; <span class="el_source">PatientQuestionnaireAction.java</span></div><h1>PatientQuestionnaireAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.message;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.institute.entity.InstituteUserEntity.ContactOptions;
+import com.pkb.institute.entity.Team;
+import com.pkb.questionnaireservice.modelv2.Question;
+import com.pkb.questionnaireservice.modelv2.Questionnaire;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireRequest;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireTeam;
+import com.pkb.service.questionnaire.CheckboxAnswerMap;
+import com.pkb.service.questionnaire.MissingMandatoryAnswerException;
+import com.pkb.service.questionnaire.NoRecipientQuestionnaireException;
+import com.pkb.service.questionnaire.QuestionnaireException;
+import com.pkb.service.questionnaire.QuestionnaireManager;
+import com.pkb.service.questionnaire.QuestionnaireResultAnswerSupplier;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.Constants;
+import io.vavr.control.Either;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+<span class="fc" id="L37">public class PatientQuestionnaireAction extends MessageBaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L41">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String DASHBOARD = &quot;dashboard&quot;;
+
+    private static final String AUTO_SAVE_RESET = &quot;reset&quot;;
+
+    private String questionnaireName;
+
+    /**
+     * Identifies a questionnaire - a list of questions and associated possible answers
+     */
+    private UUID questionnaireId;
+
+    /**
+     * Identifies a questionnaire request sent to a particular patient
+     */
+    private UUID questionnaireRequestId;
+
+    private Questionnaire questionnaire;
+
+    private List&lt;QuestionnaireTeam&gt; questionnaires;
+
+    private Map&lt;UUID, String&gt; textResponses;
+
+    private Map&lt;UUID, UUID&gt; radioResponses;
+
+    private Map&lt;UUID, CheckboxAnswerMap&gt; checkboxResponses;
+
+<span class="fc" id="L69">    private List&lt;String&gt; recipientIds = new ArrayList&lt;&gt;();</span>
+
+    private boolean knownRecipient;
+
+    private boolean massQuestionnaire;
+
+    private UUID conversationId;
+
+    private UserAccessManager userAccessManager;
+
+    private QuestionnaireManager questionnaireManager;
+    private TeamManager teamManager;
+
+    private ParticipantSelectorParams participantSelectorParams;
+
+<span class="fc" id="L84">    private List&lt;Question&gt; mandatoryQuestionsWithoutAnswer = new ArrayList&lt;&gt;();</span>
+
+    private InputStream autoSaveResult;
+
+    /**
+     * click on 'start consultation' from a clinician message sending a questionnaire
+     * it is the answer to the questionnaireRequest, redirects to the fillQuestionnaire.jsp
+     */
+    public String fillQuestionnaire() {
+<span class="fc" id="L93">        PKBPerson loggedInUser = userManager.getPKBPerson(loggedInUserUtil.getLoggedInUserId());</span>
+<span class="fc" id="L94">        PKBPerson contextUser = contextUserUtil.getContextUser();</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">        PKBPerson patient = contextUser != null ? contextUser : loggedInUser;</span>
+<span class="fc" id="L96">        contextUserUtil.setContextUserInSession(patient.getId());</span>
+        // We know the recipient can only be the professional that sent the questionnaire request and the recipientId box should not get displayed
+<span class="fc" id="L98">        knownRecipient = true;</span>
+
+<span class="fc" id="L100">        return questionnaireManager.getQuestionnaireTeamByRequestIdToBeFilledOut(questionnaireRequestId, patient)</span>
+<span class="fc" id="L101">                .fold(error -&gt; {</span>
+<span class="fc" id="L102">                    handleQuestionnaireException(error);</span>
+<span class="fc" id="L103">                    return ERROR;</span>
+                }, questionnaireTeam -&gt; {
+<span class="fc" id="L105">                    this.questionnaire = questionnaireTeam.getQuestionnaire();</span>
+<span class="fc" id="L106">                    this.questionnaireId = this.questionnaire.getId();</span>
+<span class="fc" id="L107">                    this.questionnaireName = this.questionnaire.getName();</span>
+<span class="fc" id="L108">                    return Action.SUCCESS;</span>
+                });
+    }
+
+    /**
+     * A patient clicks on 'start consultation' from the dashboard
+     */
+    @SuppressWarnings(&quot;unused&quot;)
+    public String startPatientSelfQuestionnaire() {
+<span class="fc" id="L117">        PKBPerson loggedInUser = loggedInUserUtil.getLoggedInUser(PKBPerson.Lazy.PROPERTIES);</span>
+<span class="fc" id="L118">        PKBPerson patient = Optional.ofNullable(contextUserUtil.getContextUser()).orElse(loggedInUser);</span>
+<span class="fc" id="L119">        Team primaryTeam = loggedInUserUtil.getLoggedInUserPrimaryTeam(getEHRRequestContext());</span>
+
+<span class="fc" id="L121">        return questionnaireManager.selfRequestQuestionnaire(patient, questionnaireId, loggedInUser.getPublicId())</span>
+<span class="fc" id="L122">                .fold(error -&gt; {</span>
+<span class="fc" id="L123">                    handleQuestionnaireException(error);</span>
+<span class="fc" id="L124">                    return ERROR;</span>
+                }, request -&gt; {
+<span class="fc" id="L126">                    this.questionnaireRequestId = request.getId();</span>
+<span class="fc" id="L127">                    this.questionnaire = request.getQuestionnaire();</span>
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">                    if (primaryTeam != null){</span>
+<span class="fc" id="L129">                        participantSelectorParams = setupParticipantSelectorParams(loggedInUser, patient, primaryTeam);</span>
+<span class="fc" id="L130">                        findDefaultRecipient(patient)</span>
+<span class="fc" id="L131">                                .ifPresent(it -&gt; recipientIds.add(it));</span>
+                    }
+
+<span class="fc" id="L134">                    return Action.SUCCESS;</span>
+                });
+    }
+
+    private ParticipantSelectorParams setupParticipantSelectorParams(PKBPerson loggedInUser, PKBPerson patient, Team primaryTeam) {
+<span class="fc" id="L139">        ZoneId zoneId = loggedInUserUtil.getLoggedInUserZoneId();</span>
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">        zoneId = zoneId == null ? Constants.APPLICATION_TZ : zoneId;</span>
+<span class="fc" id="L141">        return participantSelectorService.setupParticipantSelectorParams(false, primaryTeam.getId(),</span>
+<span class="fc" id="L142">                loggedInUser, patient, isLoggedInUserProfessional(), ContactOptions.Consultations_Only, loggedInUserUtil.getLoggedInUserPrimaryTeam(),</span>
+<span class="fc" id="L143">                getLoggedInEHRRequestContext(), null,</span>
+<span class="fc" id="L144">                DateTimeFormatter.ofPattern(&quot;dd MMM yy&quot;).withLocale(getLocale()).withZone(zoneId));</span>
+    }
+
+    private Optional&lt;String&gt; findDefaultRecipient(PKBPerson patient) {
+<span class="fc" id="L148">        return participantSelectorService.getQuestionnaireRecipientId(getEHRRequestContext(), patient);</span>
+    }
+
+    /**
+     * After a patient fills in a questionnaire, this validates the current questionnaireResponse and sends it to the questionnaireService
+     */
+    @SuppressWarnings(&quot;unused&quot;) // Called from JSP
+    public String submitQuestionnaire() {
+<span class="fc" id="L156">        refillPrivacyFlags();</span>
+
+<span class="fc" id="L158">        PKBPerson loggedInUser = loggedInUserUtil.getLoggedInUser(PKBPerson.Lazy.PROPERTIES);</span>
+<span class="fc" id="L159">        PKBPerson contextUser = contextUserUtil.getContextUser();</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">        PKBPerson patient = contextUser == null ? loggedInUser : contextUser;</span>
+<span class="fc" id="L161">        Team primaryTeam = loggedInUserUtil.getLoggedInUserPrimaryTeam(getEHRRequestContext());</span>
+
+<span class="pc bpc" id="L163" title="1 of 4 branches missed.">        if (!knownRecipient &amp;&amp; primaryTeam != null) {</span>
+<span class="fc" id="L164">            participantSelectorParams = setupParticipantSelectorParams(loggedInUser, patient, primaryTeam);</span>
+<span class="fc" id="L165">            findDefaultRecipient(patient)</span>
+<span class="fc" id="L166">                    .ifPresent(it -&gt; recipientIds.add(it));</span>
+        }
+
+<span class="fc bfc" id="L169" title="All 2 branches covered.">        if (questionnaireRequestId == null) {</span>
+<span class="fc" id="L170">            handleQuestionnaireException(questionnaireManager.createQuestionnaireNotFoundException());</span>
+<span class="fc" id="L171">            return DASHBOARD;</span>
+        }
+
+<span class="fc" id="L174">        return questionnaireManager.getQuestionnaireRequest(questionnaireRequestId)</span>
+<span class="fc" id="L175">                .peek(questionnaireRequest -&gt; questionnaire = questionnaireRequest.getQuestionnaire())</span>
+<span class="fc" id="L176">                .peekLeft(err -&gt; LOGGER.warn(&quot;Possible bug or someone hacking the application! Can't find questionnaire request {}, error message: {}&quot;, questionnaireRequestId,</span>
+<span class="fc" id="L177">                        err.getMessage()))</span>
+<span class="fc" id="L178">                .flatMap(questionnaireRequest -&gt; checkRecipientsIsNotEmpty(loggedInUser, patient, questionnaireRequest))</span>
+<span class="fc" id="L179">                .flatMap(questionnaireRequest -&gt; questionnaireManager.submitQuestionnaireResponseAndCreateMessage(questionnaireRequest, patient,</span>
+                        new QuestionnaireResultAnswerSupplier(checkboxResponses, radioResponses, textResponses, questionnaire),
+<span class="fc" id="L181">                        getLoggedInEHRRequestContext(), loggedInUser, recipientIds))</span>
+<span class="fc" id="L182">                .peek(message -&gt; {</span>
+<span class="fc" id="L183">                    fillPrivacyFlagIfSetIn(message);</span>
+<span class="fc" id="L184">                    encounterManager.saveMessage(getLoggedInEHRRequestContext(), loggedInUserUtil.getLoggedInUserId(),</span>
+                            message, null, contextUserId, false);
+<span class="fc" id="L186">                    tbmSelectedTeam.forEach(teamId -&gt; TBM_SELECTED_TEAMS.labels(teamId).inc());</span>
+<span class="fc" id="L187">                    conversationId = message.getEncounterUniqueId();</span>
+<span class="fc" id="L188">                })</span>
+<span class="fc" id="L189">                .fold(error -&gt; {</span>
+<span class="fc" id="L190">                    handleQuestionnaireException(error);</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">                    if (error instanceof MissingMandatoryAnswerException) {</span>
+<span class="fc" id="L192">                        mandatoryQuestionsWithoutAnswer.clear();</span>
+<span class="fc" id="L193">                        mandatoryQuestionsWithoutAnswer.addAll(((MissingMandatoryAnswerException) error).getMandatoryQuestionsWithoutAnswer());</span>
+<span class="fc" id="L194">                        return Action.INPUT;</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">                    } else if (error instanceof NoRecipientQuestionnaireException) {</span>
+<span class="fc" id="L196">                        return Action.INPUT;</span>
+                    }
+<span class="fc" id="L198">                    return ERROR; // Ideally, we would go back to input, but we have lost the original questionnaire at this point. So go back to dashboard.</span>
+                }, message -&gt; {
+<span class="fc" id="L200">                    addActionMessage(getText(&quot;patientQuestionnaireAction.txt.questionnaire_sent&quot;));</span>
+                    // we only get massQuestionnaire = true when clicking directly from the link in the email
+<span class="fc bfc" id="L202" title="All 2 branches covered.">                    return massQuestionnaire ? DASHBOARD : Action.SUCCESS;</span>
+                });
+    }
+
+    public String cancel(){
+<span class="fc" id="L207">        return DASHBOARD;</span>
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireRequest&gt; checkRecipientsIsNotEmpty(PKBPerson loggedInUser, PKBPerson patient, QuestionnaireRequest questionnaireRequest) {
+<span class="fc bfc" id="L211" title="All 2 branches covered.">        if ((patient.getPublicId().equals(questionnaireRequest.getRequestorPersonId())</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">                || loggedInUser.getPublicId().equals(questionnaireRequest.getRequestorPersonId()))</span>
+<span class="pc bpc" id="L213" title="1 of 4 branches missed.">                &amp;&amp; (isEmpty(recipientIds) || isEmptyStrutsInput(recipientIds))) {</span>
+<span class="fc" id="L214">            return Either.left(questionnaireManager.createNoRecipientException());</span>
+        }
+<span class="fc" id="L216">        return Either.right(questionnaireRequest);</span>
+    }
+
+    // No actual autosave - see ComposeMessageAction for an example of that.
+    // This is only used to keep the HTTP session alive when the patient takes a long time to fill the questionnaire
+    public String dummyAutosave() {
+<span class="fc" id="L222">        autoSaveResult = new ByteArrayInputStream(AUTO_SAVE_RESET.getBytes(UTF_8));</span>
+<span class="fc" id="L223">        return Action.SUCCESS;</span>
+    }
+
+    public String getQuestionnaireName() {
+<span class="nc" id="L227">        return questionnaireName;</span>
+    }
+
+    public void setQuestionnaireName(String questionnaireName) {
+<span class="nc" id="L231">        this.questionnaireName = questionnaireName;</span>
+<span class="nc" id="L232">    }</span>
+
+    public Questionnaire getQuestionnaire() {
+<span class="fc" id="L235">        return questionnaire;</span>
+    }
+
+    public Map&lt;UUID, String&gt; getTextResponses() {
+<span class="fc" id="L239">        return textResponses;</span>
+    }
+
+    public void setTextResponses(Map&lt;UUID, String&gt; textResponses) {
+<span class="fc" id="L243">        this.textResponses = textResponses;</span>
+<span class="fc" id="L244">    }</span>
+
+    public Map&lt;UUID, UUID&gt; getRadioResponses() {
+<span class="fc" id="L247">        return radioResponses;</span>
+    }
+
+    public void setRadioResponses(Map&lt;UUID, UUID&gt; radioResponses) {
+<span class="fc" id="L251">        this.radioResponses = radioResponses;</span>
+<span class="fc" id="L252">    }</span>
+
+    public Map&lt;UUID, CheckboxAnswerMap&gt; getCheckboxResponses() {
+<span class="fc" id="L255">        return checkboxResponses;</span>
+    }
+
+    public void setCheckboxResponses(Map&lt;UUID, CheckboxAnswerMap&gt; checkBoxResponses) {
+<span class="fc" id="L259">        this.checkboxResponses = checkBoxResponses;</span>
+<span class="fc" id="L260">    }</span>
+
+    public void setQuestionnaire(Questionnaire questionnaire) {
+<span class="nc" id="L263">        this.questionnaire = questionnaire;</span>
+<span class="nc" id="L264">    }</span>
+
+    public TeamManager getTeamManager() {
+<span class="nc" id="L267">        return teamManager;</span>
+    }
+
+    public void setTeamManager(TeamManager teamManager) {
+<span class="fc" id="L271">        this.teamManager = teamManager;</span>
+<span class="fc" id="L272">    }</span>
+
+    public QuestionnaireManager getQuestionnaireManager() {
+<span class="nc" id="L275">        return questionnaireManager;</span>
+    }
+
+    public void setQuestionnaireManager(QuestionnaireManager questionnaireManager) {
+<span class="fc" id="L279">        this.questionnaireManager = questionnaireManager;</span>
+<span class="fc" id="L280">    }</span>
+
+    public UUID getQuestionnaireId() {
+<span class="fc" id="L283">        return questionnaireId;</span>
+    }
+
+    public void setQuestionnaireId(UUID questionnaireId) {
+<span class="fc" id="L287">        this.questionnaireId = questionnaireId;</span>
+<span class="fc" id="L288">    }</span>
+
+    public UUID getQuestionnaireRequestId() {
+<span class="fc" id="L291">        return questionnaireRequestId;</span>
+    }
+
+    public void setQuestionnaireRequestId(UUID questionnaireRequestId) {
+<span class="fc" id="L295">        this.questionnaireRequestId = questionnaireRequestId;</span>
+<span class="fc" id="L296">    }</span>
+
+    public boolean isMassQuestionnaire() {
+<span class="fc" id="L299">        return massQuestionnaire;</span>
+    }
+
+    public void setMassQuestionnaire(boolean massQuestionnaire) {
+<span class="fc" id="L303">        this.massQuestionnaire = massQuestionnaire;</span>
+<span class="fc" id="L304">    }</span>
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L307">        return userAccessManager;</span>
+    }
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L311">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L312">    }</span>
+
+    public List&lt;QuestionnaireTeam&gt; getQuestionnaires() {
+<span class="nc" id="L315">        return questionnaires;</span>
+    }
+
+    public void setQuestionnaires(List&lt;QuestionnaireTeam&gt; questionnaires) {
+<span class="nc" id="L319">        this.questionnaires = questionnaires;</span>
+<span class="nc" id="L320">    }</span>
+
+    public UUID getConversationId() {
+<span class="fc" id="L323">        return conversationId;</span>
+    }
+
+    public void setConversationId(UUID conversationId) {
+<span class="nc" id="L327">        this.conversationId = conversationId;</span>
+<span class="nc" id="L328">    }</span>
+
+    public List&lt;String&gt; getRecipientIds() {
+<span class="fc" id="L331">        return recipientIds;</span>
+    }
+
+    public void setRecipientIds(List&lt;String&gt; recipientIds) {
+<span class="fc" id="L335">        this.recipientIds = recipientIds;</span>
+<span class="fc" id="L336">    }</span>
+
+    public boolean isKnownRecipient() {
+<span class="fc" id="L339">        return knownRecipient;</span>
+    }
+
+    public void setKnownRecipient(boolean knownRecipient) {
+<span class="fc" id="L343">        this.knownRecipient = knownRecipient;</span>
+<span class="fc" id="L344">    }</span>
+
+    public ParticipantSelectorParams getParticipantSelectorParams() {
+<span class="fc" id="L347">        return participantSelectorParams;</span>
+    }
+
+    public void setParticipantSelectorParams(ParticipantSelectorParams participantSelectorParams) {
+<span class="nc" id="L351">        this.participantSelectorParams = participantSelectorParams;</span>
+<span class="nc" id="L352">    }</span>
+
+    public InputStream getAutoSaveResult() {
+<span class="fc" id="L355">        return autoSaveResult;</span>
+    }
+
+    public void setAutoSaveResult(InputStream autoSaveResult) {
+<span class="nc" id="L359">        this.autoSaveResult = autoSaveResult;</span>
+<span class="nc" id="L360">    }</span>
+
+    public int getQuestionnaireAutosaveTimeoutInMilliseconds() {
+        // This will cause a session keep-alive every 5 minutes on prod
+<span class="fc" id="L364">        return config.getMaxInactiveIntervalSeconds() * 1000 / 6;</span>
+    }
+
+    public List&lt;Question&gt; getMandatoryQuestionsWithoutAnswer() {
+<span class="fc" id="L368">        return mandatoryQuestionsWithoutAnswer;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

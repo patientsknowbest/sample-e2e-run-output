@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DocumentMessageMapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.datamodel.entity.mapper</a> &gt; <span class="el_source">DocumentMessageMapper.java</span></div><h1>DocumentMessageMapper.java</h1><pre class="source lang-java linenums">package com.pkb.datamodel.entity.mapper;
+
+import com.pkb.datamodel.AccountKeys;
+import com.pkb.datamodel.AppMenuDataWithSourceObjects;
+import com.pkb.datamodel.DocumentMessage;
+import com.pkb.datamodel.ImmutableDocumentMessage;
+import com.pkb.datamodel.ReferenceDatumCache;
+import com.pkb.datamodel.crypto.CryptoService;
+import com.pkb.datamodel.entity.ClinicalDataDeserializer;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.entities.app.AppMenuData;
+import io.prometheus.client.Histogram;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.mapstruct.Mapper;
+
+import javax.inject.Inject;
+import java.util.Objects;
+import java.util.UUID;
+
+import static java.util.Comparator.comparing;
+
+@Mapper
+<span class="fc" id="L26">public abstract class DocumentMessageMapper implements TimedMapper {</span>
+    @Inject
+    private PrivacyFlagsMapper privacyFlagsMapper;
+
+    @Inject
+    private SourceDetailsMapper sourceDetailsMapper;
+
+    @Inject
+    private CryptoService cryptoService;
+
+    @Inject
+    private ClinicalDataDeserializer dataDeserializer;
+
+    @Inject
+    private InstantMapper instantMapper;
+
+    @NotNull
+    public List&lt;DocumentMessage&gt; menuDataToDocumentMessage(@NotNull List&lt;AppMenuDataWithSourceObjects&gt; menuData,
+                                                           @NotNull Map&lt;Long, AccountKeys&gt; accountKeysByAccountId,
+                                                           @NotNull ReferenceDatumCache specialtyCache,
+                                                           @NotNull List&lt;Patient&gt; patients,
+                                                           @NotNull List&lt;AppMenuData&gt; allMenuDataWithTheSameEncounterId) {
+<span class="fc" id="L48">        Map&lt;UUID, io.vavr.collection.List&lt;AppMenuData&gt;&gt; allMenuDataWithEncounterIdAsKey = allMenuDataWithTheSameEncounterId</span>
+<span class="fc" id="L49">                .groupBy(AppMenuData::getUuid01);</span>
+<span class="fc" id="L50">        return menuData</span>
+<span class="fc" id="L51">                .map(menuDataWrapper -&gt; menuDataToDocumentMessage(</span>
+                        menuDataWrapper,
+<span class="fc" id="L53">                        tryDecrypt(menuDataWrapper.getAppMenuData(), accountKeysByAccountId),</span>
+                        patients
+<span class="fc" id="L55">                                .filter(p -&gt; menuDataWrapper.getAppMenuData().getString03().equals(p.getId().toString()))</span>
+<span class="fc" id="L56">                                .peek(),</span>
+<span class="fc" id="L57">                        findMostRecentlyCreatedData(allMenuDataWithEncounterIdAsKey.get(menuDataWrapper.getAppMenuData().getUuid01()).get())</span>
+<span class="pc" id="L58">                                .getOrElseThrow(() -&gt; new IllegalStateException(&quot;No data&quot;))</span>
+<span class="fc" id="L59">                                .getId(),</span>
+                        specialtyCache));
+    }
+
+    private Option&lt;AppMenuData&gt; findMostRecentlyCreatedData(List&lt;AppMenuData&gt; menuData) {
+<span class="fc" id="L64">        return menuData.maxBy(comparing(data -&gt; data.getBaseFields().getPersistedDate()));</span>
+    }
+
+    private Option&lt;byte[]&gt; tryDecrypt(AppMenuData menuData, Map&lt;Long, AccountKeys&gt; accountKeysByAccountId) {
+<span class="fc" id="L68">        return accountKeysByAccountId.get(menuData.getAccountId())</span>
+<span class="fc" id="L69">                .map(keys -&gt; cryptoService.decrypt(keys, menuData));</span>
+    }
+
+    private DocumentMessage menuDataToDocumentMessage(AppMenuDataWithSourceObjects menuDataWrapper, Option&lt;byte[]&gt; plaintext, @NotNull Patient patient,
+            @NotNull Long latestId,
+            @NotNull ReferenceDatumCache specialtyCache) {
+
+<span class="fc" id="L76">        AppMenuData menuData = menuDataWrapper.getAppMenuData();</span>
+
+<span class="fc" id="L78">        try (Histogram.Timer ignored = MAP_TIMER.labels(&quot;document_message&quot;, &quot;message&quot;).startTimer()) {</span>
+<span class="fc" id="L79">            return plaintext.map(pt -&gt; initBuilderWithDecryptedData(menuData, pt, specialtyCache))</span>
+<span class="fc" id="L80">                    .getOrElse(ImmutableDocumentMessage::builder)</span>
+<span class="fc" id="L81">                    .id(menuData.getId())</span>
+<span class="fc" id="L82">                    .uniqueId(menuData.getBaseFields().getUniqueId())</span>
+<span class="fc" id="L83">                    .privacyFlags(privacyFlagsMapper.entityToDataModel(menuData.getBaseFields()))</span>
+<span class="fc" id="L84">                    .source(sourceDetailsMapper.entityToDataModel(menuData.getSourceDetails(), menuDataWrapper.getSourcePerson().getOrNull()))</span>
+<span class="fc" id="L85">                    .type(string14toDocumentType(menuData))</span>
+<span class="fc" id="L86">                    .patient(patient)</span>
+<span class="fc" id="L87">                    .encounter(menuData.getUuid01())</span>
+<span class="fc" id="L88">                    .externalMessageId(menuData.getString10())</span>
+<span class="fc" id="L89">                    .accountId(menuData.getAccountId())</span>
+<span class="fc" id="L90">                    .created(instantMapper.mapToZonedDateTime(menuData.getDate01()))</span>
+<span class="fc" id="L91">                    .persisted(instantMapper.mapToZonedDateTimeOption(menuData.getBaseFields().getPersistedDate()))</span>
+<span class="fc" id="L92">                    .current(Objects.equals(menuData.getId(), latestId))</span>
+<span class="fc" id="L93">                    .status(com.pkb.datamodel.Message.StatusType.valueOf(menuData.getString04()))</span>
+<span class="fc" id="L94">                    .build();</span>
+        }
+    }
+
+    private DocumentMessage.DocumentType string14toDocumentType(AppMenuData menuData) {
+<span class="fc" id="L99">        return DocumentMessage.DocumentType.valueOf(menuData.getString14());</span>
+    }
+
+
+    private ImmutableDocumentMessage.Builder initBuilderWithDecryptedData(AppMenuData menuData, byte[] plaintext,
+            ReferenceDatumCache specialtyCache) {
+<span class="fc" id="L105">        return dataDeserializer.deserialize(plaintext, fields -&gt;</span>
+<span class="fc" id="L106">                ImmutableDocumentMessage.builder()</span>
+<span class="fc" id="L107">                        .specialty(specialtyCache.lookup(Option.of(menuData.getSourceDetails().getOrg()),</span>
+<span class="fc" id="L108">                                Option.of((String) fields.getOrDefault(&quot;hospitalServiceCode&quot;, null)))));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QryA19Processor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.hl7.processor</a> &gt; <span class="el_source">QryA19Processor.java</span></div><h1>QryA19Processor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.hl7.processor;
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.reports.A19PatientStatusService;
+import com.pkb.reports.A19Record;
+import com.pkb.reports.RegistrationStatus;
+import com.pkb.repository.legacy.CustomizedLegacyInstituteUserRepository;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.dataupload.hl7.HL7XmlDoc;
+import com.pkb.service.dataupload.hl7.response.A19Response;
+import com.pkb.service.dataupload.hl7.response.StaA19Response;
+import com.pkb.service.dataupload.hl7.response.StandardA19Response;
+import com.pkb.service.dataupload.hl7.segment.HL7QueryDetail;
+import com.pkb.service.dataupload.hl7.segment.HL7QueryFilter;
+import com.pkb.service.dataupload.hl7.value.HL7Date;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.Tuple2;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
+
+import java.lang.invoke.MethodHandles;
+import java.time.ZonedDateTime;
+import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.util.Constants.POSTGRES_DATE_NEGATIVE_INFINITY_ZONED_UTC;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public class QryA19Processor {
+
+<span class="fc" id="L42">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private final TeamUserManager teamUserManager;
+    private final A19PatientStatusService a19PatientStatusService;
+    private final PhrConfig config;
+    private final UUIDProvider uuidProvider;
+
+<span class="fc" id="L49">    public QryA19Processor(TeamUserManager teamUserManager, A19PatientStatusService a19PatientStatusService, PhrConfig config, UUIDProvider uuidProvider) {</span>
+<span class="fc" id="L50">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L51">        this.config = config;</span>
+<span class="fc" id="L52">        this.a19PatientStatusService = a19PatientStatusService;</span>
+<span class="fc" id="L53">        this.uuidProvider = uuidProvider;</span>
+<span class="fc" id="L54">    }</span>
+
+    public String process(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, String nowInHL7Format) {
+
+        // optional
+<span class="fc" id="L59">        Optional&lt;HL7QueryFilter&gt; filter = parseQueryFilter(hl7);</span>
+
+        // This is required
+<span class="fc" id="L62">        HL7QueryDetail detail = parseQueryDetail(hl7)</span>
+<span class="pc" id="L63">                .orElseThrow(() -&gt; new ApiCallMalformedException(&quot;Required QRD segment is missing&quot;));</span>
+
+<span class="fc" id="L65">        return process(detail, filter, hl7, hl7ConnContext, nowInHL7Format);</span>
+    }
+
+    private String process(HL7QueryDetail detail, Optional&lt;HL7QueryFilter&gt; filter, HL7XmlDoc hl7, HL7ConnContext hl7ConnContext,
+                           String nowInHL7Format) {
+
+<span class="fc bfc" id="L71" title="All 2 branches covered.">        switch (detail.getQueryFilterType().getString()) {</span>
+            case HL7QueryDetail.REGISTRATION_STATUS:
+<span class="fc" id="L73">                return processSta(filter, hl7ConnContext, detail, hl7, nowInHL7Format);</span>
+            default:
+<span class="fc" id="L75">                return processNonSta(detail, filter.orElse(null), hl7ConnContext, hl7, nowInHL7Format);</span>
+        }
+    }
+
+    private String processNonSta(HL7QueryDetail detail, HL7QueryFilter filter, HL7ConnContext hl7ConnContext,
+                                 HL7XmlDoc hl7, String nowInHL7Format) {
+
+<span class="fc" id="L82">        ZonedDateTime startDate = null, endDate = null;</span>
+
+<span class="fc bfc" id="L84" title="All 2 branches covered.">        if (filter != null) {</span>
+<span class="fc" id="L85">            startDate = getStartTimestampElseNegativeInfinity(filter.getStartTimestamp());</span>
+<span class="fc" id="L86">            endDate = filter.getEndTimestamp().getZonedDateTime();</span>
+        }
+
+        // include all patients if the query filter type is &quot;APN&quot;; otherwise include only patients w/ IDs
+<span class="fc bfc" id="L90" title="All 2 branches covered.">        boolean patientsWithIdsOnly = (!HL7QueryDetail.DEMOGRAPHICS_BY_NAME.equals(detail.getQueryFilterType().getString()));</span>
+<span class="fc" id="L91">        String patientId = detail.getPatientId().getString();</span>
+<span class="fc" id="L92">        boolean localIdFlag = HL7QueryDetail.ID_TYPE_LOCAL.equals(detail.getPatientIdType().getString());</span>
+<span class="fc" id="L93">        List&lt;PKBPerson&gt; personList = getPersonList(hl7ConnContext, startDate, endDate,</span>
+                patientId, localIdFlag, patientsWithIdsOnly);
+<span class="fc" id="L95">        return buildMessage(personList, detail, filter, hl7, nowInHL7Format, hl7ConnContext);</span>
+    }
+
+    private String processSta(Optional&lt;HL7QueryFilter&gt; filter, HL7ConnContext hl7ConnContext,
+                              HL7QueryDetail detail, HL7XmlDoc hl7, String nowInHL7Format) {
+<span class="fc" id="L100">        ZonedDateTime startDate = filter.map(f -&gt; getStartTimestampElseNegativeInfinity(f.getStartTimestamp())).orElse(null);</span>
+
+<span class="fc" id="L102">        UUID lastSeenPublicId = filter.map(f -&gt; f.getLastSeenId().getString()).filter(StringUtils::isNotBlank).map(UUID::fromString).orElse(null);</span>
+<span class="fc" id="L103">        String registrationStatusString = detail.getRegisteredStatus().getString();</span>
+<span class="fc" id="L104">        RegistrationStatus registrationStatus = null;</span>
+<span class="fc bfc" id="L105" title="All 2 branches covered.">        if (isNotBlank(registrationStatusString)) {</span>
+<span class="fc" id="L106">            registrationStatus = RegistrationStatus.getRegistrationStatus(registrationStatusString)</span>
+<span class="fc" id="L107">                    .orElseThrow(() -&gt; new ApiCallMalformedException(&quot;QRD-11.1 must be one of these values: &quot; + Arrays.toString(RegistrationStatus.values())));</span>
+        }
+<span class="fc" id="L109">        Tuple2&lt;Boolean, List&lt;A19Record&gt;&gt; personsWithRegStatus = getPersonsWithRegStatus(hl7ConnContext, startDate,</span>
+<span class="fc" id="L110">                detail.getPageSize().getString(), detail.getPageSizeDetail().getString(),</span>
+                registrationStatus, lastSeenPublicId);
+<span class="fc" id="L112">        return buildMessageSTA(personsWithRegStatus, detail, filter, hl7, nowInHL7Format, hl7ConnContext);</span>
+    }
+
+    private Tuple2&lt;Boolean, List&lt;A19Record&gt;&gt; getPersonsWithRegStatus(
+            HL7ConnContext hl7ConnContext, @Nullable ZonedDateTime queryStartDate,
+            String pageSize, String pageSizeDetail, @Nullable RegistrationStatus registeredStatus, @Nullable UUID lastSeenPublicId) {
+
+<span class="fc bfc" id="L119" title="All 4 branches covered.">        if (!isEmpty(pageSize) &amp;&amp; !&quot;RD&quot;.equals(pageSizeDetail)) {</span>
+<span class="fc" id="L120">            throw new ApiCallMalformedException(&quot;QRD-7.2 must be 'RD'&quot;);</span>
+        }
+
+<span class="fc bfc" id="L123" title="All 2 branches covered.">        if (hl7ConnContext.hasSourceTeam()) {</span>
+<span class="fc" id="L124">            throw new ApiCallMalformedException(&quot;Team-level STA queries not supported&quot;);</span>
+        } else {
+<span class="fc" id="L126">            return a19PatientStatusService.getOrgPatientsWithRegStatusForDataUpload(</span>
+<span class="fc" id="L127">                    hl7ConnContext.getSourceOrg().getId(), queryStartDate,</span>
+<span class="fc" id="L128">                    getPageSize(pageSize), registeredStatus,</span>
+                    lastSeenPublicId);
+        }
+    }
+
+    private int getPageSize(String requestedPageSize) {
+        try {
+
+<span class="fc" id="L136">            int systemPageSize = config.getHl7QryA19PageSize();</span>
+
+<span class="fc bfc" id="L138" title="All 2 branches covered.">            if (isEmpty(requestedPageSize)) {</span>
+<span class="fc" id="L139">                return systemPageSize;</span>
+            }
+
+<span class="fc" id="L142">            int requestVal = Integer.parseInt(requestedPageSize);</span>
+
+<span class="fc bfc" id="L144" title="All 2 branches covered.">            if (requestVal &lt;= 0) {</span>
+<span class="fc" id="L145">                throw new ApiCallMalformedException(&quot;QRD-7.1 must be a positive integer&quot;);</span>
+            }
+<span class="fc" id="L147">            return Math.min(requestVal, systemPageSize);</span>
+<span class="fc" id="L148">        } catch (NumberFormatException nfe) {</span>
+<span class="fc" id="L149">            throw new ApiCallMalformedException(&quot;QRD-7.1 must be a positive integer&quot;, nfe);</span>
+        }
+    }
+
+    private List&lt;PKBPerson&gt; getPersonList(HL7ConnContext hl7ConnContext, @Nullable ZonedDateTime startDate,
+                                          @Nullable ZonedDateTime endDate, String patientId,
+                                          boolean localIdFlag, boolean patientsWithIdsOnly) {
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        if (hl7ConnContext.hasSourceTeam()) {</span>
+<span class="fc" id="L157">            return teamUserManager.getTeamPatientsForDataUpload(</span>
+<span class="fc" id="L158">                    hl7ConnContext.getSourceTeam().orElse(null),</span>
+                    startDate, endDate, patientId, localIdFlag, patientsWithIdsOnly,
+<span class="fc" id="L160">                    EnumSet.noneOf(CustomizedLegacyInstituteUserRepository.DataUploadOption.class));</span>
+        } else {
+<span class="fc" id="L162">            return teamUserManager.getOrgPatientsForDataUpload(hl7ConnContext.getEHRRequestContext(),</span>
+<span class="fc" id="L163">                    hl7ConnContext.getSourceOrg(),</span>
+                    startDate, endDate, patientId, localIdFlag, patientsWithIdsOnly);
+        }
+    }
+
+    private String buildMessage(List&lt;PKBPerson&gt; personList, HL7QueryDetail detail, HL7QueryFilter filter, HL7XmlDoc hl7,
+                                String timestamp, HL7ConnContext hl7ConnContext) {
+
+<span class="fc" id="L171">        A19Response response = new StandardA19Response(hl7, timestamp, detail, filter, hl7ConnContext, personList);</span>
+
+<span class="fc" id="L173">        doLogging(response, personList.size());</span>
+
+<span class="fc" id="L175">        return response.getFullResponse();</span>
+    }
+
+    private String buildMessageSTA(Tuple2&lt;Boolean, List&lt;A19Record&gt;&gt; personsWithRegStatus,
+                                   HL7QueryDetail detail, Optional&lt;HL7QueryFilter&gt; filter, HL7XmlDoc hl7,
+                                   String timestamp, HL7ConnContext hl7ConnContext) {
+
+<span class="fc" id="L182">        A19Response response = new StaA19Response(hl7, timestamp, detail, filter, hl7ConnContext, personsWithRegStatus, uuidProvider);</span>
+
+<span class="fc" id="L184">        doLogging(response, personsWithRegStatus._2.size());</span>
+
+<span class="fc" id="L186">        return response.getFullResponse();</span>
+    }
+
+    private void doLogging(A19Response response, int size) {
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">        if (config.isDisplayOfSensitiveErrorInformationEnabled()) {</span>
+<span class="fc" id="L191">            LOGGER.info(&quot;SENDING RESPONSE: {}&quot;, response);</span>
+        } else {
+<span class="nc" id="L193">            String responseBeforePatientData = response.getNonSensitiveResponse(); // for prod logging</span>
+<span class="nc" id="L194">            LOGGER.info(&quot;SENDING RESPONSE: {} [{} patients listed]&quot;, responseBeforePatientData, size);</span>
+        }
+<span class="fc" id="L196">    }</span>
+
+    private Optional&lt;HL7QueryDetail&gt; parseQueryDetail(HL7XmlDoc hl7) {
+
+<span class="fc" id="L200">        NodeList nodeList = hl7.getRoot().getElementsByTagName(&quot;QRD&quot;);</span>
+
+<span class="pc bpc" id="L202" title="2 of 4 branches missed.">        if ((nodeList != null) &amp;&amp; (nodeList.getLength() &gt; 0)) {</span>
+<span class="fc" id="L203">            HL7QueryDetail dto = new HL7QueryDetail(hl7.getMessageProperties());</span>
+<span class="fc" id="L204">            dto.parseQrd((Element) nodeList.item(0));</span>
+<span class="fc" id="L205">            return Optional.of(dto);</span>
+        }
+<span class="nc" id="L207">        return Optional.empty();</span>
+    }
+
+    private Optional&lt;HL7QueryFilter&gt; parseQueryFilter(HL7XmlDoc hl7) {
+
+<span class="fc" id="L212">        NodeList nodeList = hl7.getRoot().getElementsByTagName(&quot;QRF&quot;);</span>
+
+<span class="pc bpc" id="L214" title="1 of 4 branches missed.">        if ((nodeList != null) &amp;&amp; (nodeList.getLength() &gt; 0)) {</span>
+<span class="fc" id="L215">            HL7QueryFilter dto = new HL7QueryFilter(hl7.getMessageProperties());</span>
+<span class="fc" id="L216">            dto.parseQrf((Element) nodeList.item(0));</span>
+<span class="fc" id="L217">            return Optional.of(dto);</span>
+        }
+<span class="fc" id="L219">        return Optional.empty();</span>
+    }
+
+    private ZonedDateTime getStartTimestampElseNegativeInfinity(HL7Date startTimestamp) {
+<span class="fc bfc" id="L223" title="All 2 branches covered.">        if (startTimestamp.getZonedDateTime() == null) {</span>
+<span class="fc" id="L224">            return POSTGRES_DATE_NEGATIVE_INFINITY_ZONED_UTC;</span>
+        }
+<span class="fc" id="L226">        return startTimestamp.getZonedDateTime();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

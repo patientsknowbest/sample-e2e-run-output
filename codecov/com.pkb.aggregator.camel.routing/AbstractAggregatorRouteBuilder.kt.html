@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractAggregatorRouteBuilder.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel.routing</a> &gt; <span class="el_source">AbstractAggregatorRouteBuilder.kt</span></div><h1>AbstractAggregatorRouteBuilder.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel.routing
+
+import ca.uhn.fhir.rest.server.exceptions.UnprocessableEntityException
+import com.pkb.aggregator.camel.UPSTREAM_SOURCE_ID_PROPERTY
+import com.pkb.aggregator.camel.routing.resource.MissingReferenceProcessor
+import com.pkb.aggregator.service.exception.DownstreamResourceExistsException
+import com.pkb.aggregator.service.exception.DownstreamVersionConflictException
+import com.pkb.aggregator.service.exception.UpstreamReferenceException
+import com.pkb.common.testcontrol.camel.route.AbstractNamespaceAwareRouteBuilder
+import com.pkb.common.testcontrol.services.PubSubNamespaceService
+import org.apache.camel.LoggingLevel
+
+<span class="fc" id="L13">abstract class AbstractAggregatorRouteBuilder(</span>
+<span class="fc" id="L14">    private val pubSubNamespaceService: PubSubNamespaceService,</span>
+<span class="fc" id="L15">) : AbstractNamespaceAwareRouteBuilder() {</span>
+
+<span class="fc" id="L17">    override fun camelNamespaceService() = pubSubNamespaceService</span>
+<span class="nc" id="L18">    override fun throwExceptionForNamespaceMismatch() = true</span>
+
+    protected fun registerDeadLetter() {
+<span class="fc" id="L21">        errorHandler(deadLetterChannel(DeadLetterRouteBuilder.DEAD_LETTER)</span>
+<span class="fc" id="L22">            .allowRedeliveryWhileStopping(false))</span>
+<span class="fc" id="L23">    }</span>
+
+    protected fun registerAllErrorHandlers(missingReferenceProcessor: MissingReferenceProcessor) {
+<span class="fc" id="L26">        registerDeadLetter()</span>
+<span class="fc" id="L27">        registerMissingReferenceRetryHandler(missingReferenceProcessor)</span>
+<span class="fc" id="L28">        registerDownstreamDuplicateHandler()</span>
+<span class="fc" id="L29">        registerVersionConflictRetryHandler()</span>
+<span class="fc" id="L30">    }</span>
+
+    protected fun registerDownstreamDuplicateHandler() {
+        /*
+        This generally shouldn't happen, but is possible in niche situations e.g. a retry is scheduled to load a missing
+        resource but some other thread processes the create message at the same time. We'll log a warning, but it's safe
+        to continue processing
+        */
+<span class="fc" id="L38">        onException(DownstreamResourceExistsException::class.java)</span>
+<span class="fc" id="L39">            .continued(true)</span>
+<span class="fc" id="L40">            .log(LoggingLevel.WARN, &quot;\${exchangeProperty.$UPSTREAM_SOURCE_ID_PROPERTY} already exists downstream; skipping&quot;)</span>
+<span class="fc" id="L41">    }</span>
+
+    private fun registerMissingReferenceRetryHandler(missingReferenceProcessor: MissingReferenceProcessor) {
+
+<span class="fc" id="L45">        onException(UpstreamReferenceException::class.java, UnprocessableEntityException::class.java)</span>
+<span class="fc" id="L46">            .maximumRedeliveries(missingReferenceProcessor.maxRedeliveries)</span>
+<span class="fc" id="L47">            .redeliveryDelay(missingReferenceProcessor.redeliveryDelayMS)</span>
+<span class="fc" id="L48">            .useExponentialBackOff()</span>
+<span class="fc" id="L49">            .backOffMultiplier(missingReferenceProcessor.backoffMultiplier)</span>
+<span class="fc" id="L50">            .onExceptionOccurred(missingReferenceProcessor)</span>
+<span class="fc" id="L51">            .handled(true)</span>
+<span class="fc" id="L52">            .log(LoggingLevel.ERROR, &quot;Retries exhausted for resource \${exchangeProperty.$UPSTREAM_SOURCE_ID_PROPERTY}&quot;)</span>
+<span class="fc" id="L53">    }</span>
+
+    private fun registerVersionConflictRetryHandler() {
+
+        // When a version conflict happens, we want to have pubsub redeliver the message and process it again from
+        // scratch (since the message only failed due to unfortunate timing, it should eventually succeed if we retry
+        // enough). However, we can't fail the camel exchange otherwise it will end up in the dead letter handler and
+        // the parent pubsub route will never know it failed. So, we continue processing and rely on
+        // PubSubBindingRouteBuilder to detect the exception and nack the message
+<span class="fc" id="L62">        onException(DownstreamVersionConflictException::class.java)</span>
+<span class="fc" id="L63">            .continued(true)</span>
+<span class="fc" id="L64">            .log(LoggingLevel.DEBUG, &quot;Continuing after conflict detected for \${exchangeProperty.$UPSTREAM_SOURCE_ID_PROPERTY}&quot;)</span>
+<span class="fc" id="L65">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

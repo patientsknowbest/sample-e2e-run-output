@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MessageDeletionsTemplate.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.phoenix.api.service.task.template.messagedeletion</a> &gt; <span class="el_source">MessageDeletionsTemplate.java</span></div><h1>MessageDeletionsTemplate.java</h1><pre class="source lang-java linenums">package com.pkb.phoenix.api.service.task.template.messagedeletion;
+
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.pkb.phoenix.api.service.Meta;
+import com.pkb.phoenix.api.service.freshdesk.FreshDeskService;
+import com.pkb.phoenix.api.service.freshdesk.ImmutableApiKey;
+import com.pkb.phoenix.api.service.task.TaskService;
+import com.pkb.phoenix.api.service.task.template.AbstractPostProcessingTaskTemplate;
+import com.pkb.phoenix.api.service.task.template.AbstractPubSubTaskTemplate;
+import com.pkb.phoenix.api.service.task.template.TaskTemplateCode;
+import com.pkb.phoenix.api.service.task.template.messagedeletion.MessageDeletionsResult.BatchResult;
+import com.pkb.phoenix.api.service.task.template.messagedeletion.MessageDeletionsResult.ExtendedMessageDeletionsResult;
+import com.pkb.phoenix.api.service.tasktype.ValidationUtil;
+import com.pkb.phoenix.shared.structures.request.MessageDeletionTaskRequest;
+import com.pkb.phoenix.shared.structures.response.MessageDeletionTaskResponse;
+import org.apache.camel.ProducerTemplate;
+import org.apache.velocity.VelocityContext;
+import org.apache.velocity.app.VelocityEngine;
+import org.jetbrains.annotations.NotNull;
+import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import reactor.core.publisher.Mono;
+import reactor.util.context.ContextView;
+
+import java.io.IOException;
+import java.io.StringWriter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+
+import static com.pkb.phoenix.api.service.task.template.TaskTemplateCode.MSGD_CIE;
+import static com.pkb.phoenix.api.service.task.template.TaskTemplateCode.MSGD_GEN;
+import static com.pkb.phoenix.api.service.tasktype.ValidationUtil.validateFreshDeskId;
+import static java.lang.String.format;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toUnmodifiableList;
+import static reactor.core.publisher.Mono.just;
+import static reactor.core.publisher.Mono.zip;
+
+
+public abstract class MessageDeletionsTemplate extends AbstractPostProcessingTaskTemplate&lt;MessageDeletionsParameters, MessageDeletionsResult, MessageDeletionsResult.ExtendedMessageDeletionsResult&gt; {
+    public static final String OUTBOUND_REQUEST_MSG_DELETION = &quot;direct:outboundRequestMessageDeletion&quot;;
+    private final String serviceAccountKey;
+
+    public static class CieMessageDeletionsTemplate extends MessageDeletionsTemplate {
+        public CieMessageDeletionsTemplate(ReactiveRedisTemplate&lt;String, String&gt; redis, ProducerTemplate producer, ObjectReader json, FreshDeskService freshDeskService, VelocityEngine templateEngine, String serviceAccountKey) {
+<span class="fc" id="L49">            super(MSGD_CIE, redis, producer, json, freshDeskService, templateEngine, serviceAccountKey);</span>
+<span class="fc" id="L50">        }</span>
+    }
+
+    public static class GenericMessageDeletionsTemplate extends MessageDeletionsTemplate {
+        public GenericMessageDeletionsTemplate(ReactiveRedisTemplate&lt;String, String&gt; redis, ProducerTemplate producer, ObjectReader json, FreshDeskService freshDeskService, VelocityEngine templateEngine, String serviceAccountKey) {
+<span class="fc" id="L55">            super(MSGD_GEN, redis, producer, json, freshDeskService, templateEngine, serviceAccountKey);</span>
+<span class="fc" id="L56">        }</span>
+    }
+
+    //We need to provide an AbstractPubSubTaskTemplate which knows how to validate and dispatch the task to redis and will be passed in as a delegate to this template:
+    private static class BaseMessageDeletionTemplate extends AbstractPubSubTaskTemplate&lt;MessageDeletionsParameters, MessageDeletionTaskRequest, MessageDeletionTaskResponse, MessageDeletionsResult&gt; {
+<span class="fc" id="L61">        private static final RawParameterParser RAW_PARAMETER_PARSER = new RawParameterParser();</span>
+
+        BaseMessageDeletionTemplate(TaskTemplateCode code,
+                                    ReactiveRedisTemplate&lt;String, String&gt; redis,
+                                    ProducerTemplate producer,
+                                    ObjectReader json) {
+<span class="fc" id="L67">            super(code, MessageDeletionsParameters.class, new MessageDeletionsTranslator(code, RAW_PARAMETER_PARSER), redis, producer, OUTBOUND_REQUEST_MSG_DELETION, json);</span>
+<span class="fc" id="L68">        }</span>
+
+        @Override
+        public List&lt;String&gt; validate(MessageDeletionsParameters parameters) {
+<span class="fc" id="L72">            var batches = RAW_PARAMETER_PARSER.apply(parameters.rawData());</span>
+
+<span class="fc" id="L74">            return io.vavr.collection.List.ofAll(batches)</span>
+<span class="fc" id="L75">                    .zipWithIndex(this::validateMessageDeletionTaskParameters)</span>
+<span class="fc" id="L76">                    .flatMap(identity())</span>
+<span class="fc" id="L77">                    .collect(toUnmodifiableList());</span>
+        }
+
+        @NotNull
+        private List&lt;String&gt; validateMessageDeletionTaskParameters(RawParameterParser.Batch batch, Integer lineNumber) {
+<span class="fc" id="L82">            var errors = new ArrayList&lt;String&gt;();</span>
+
+<span class="fc" id="L84">            validateFreshDeskId(batch.fdId)</span>
+<span class="fc" id="L85">                    .map(message -&gt; format(&quot;%s (in line=[%s])&quot;, message, lineNumber + 1))</span>
+<span class="fc" id="L86">                    .ifPresent(errors::add);</span>
+
+<span class="pc bpc" id="L88" title="1 of 2 branches missed.">            if (batch.messageIds.length &gt; 0) {</span>
+<span class="fc" id="L89">                errors.addAll(Arrays.stream(batch.messageIds)</span>
+<span class="fc" id="L90">                        .map(ValidationUtil::validateMessageId)</span>
+<span class="fc" id="L91">                        .filter(Optional::isPresent)</span>
+<span class="fc" id="L92">                        .map(Optional::get)</span>
+<span class="fc" id="L93">                        .collect(toList()));</span>
+            } else {
+<span class="nc" id="L95">                errors.add(format(&quot;Error at line [%s] = At least a freshdesk ticket and a message ID is mandatory&quot;, lineNumber + 1));</span>
+            }
+
+<span class="fc" id="L98">            return errors;</span>
+        }
+    }
+
+    private final FreshDeskService freshDeskService;
+    private final VelocityEngine templateEngine;
+
+    public MessageDeletionsTemplate(TaskTemplateCode code, ReactiveRedisTemplate&lt;String, String&gt; redis, ProducerTemplate producer, ObjectReader json, FreshDeskService freshDeskService, VelocityEngine templateEngine, String serviceAccountKey) {
+<span class="fc" id="L106">        super(new BaseMessageDeletionTemplate(code, redis, producer, json), json);</span>
+<span class="fc" id="L107">        this.freshDeskService = freshDeskService;</span>
+<span class="fc" id="L108">        this.templateEngine = templateEngine;</span>
+<span class="fc" id="L109">        this.serviceAccountKey = serviceAccountKey;</span>
+<span class="fc" id="L110">    }</span>
+
+
+    @Override
+    protected Mono&lt;ExtendedMessageDeletionsResult&gt; postProcess(MessageDeletionsResult result, ContextView context) {
+<span class="fc" id="L115">        var meta = context.&lt;Meta&gt;get(TaskService.META);</span>
+<span class="fc" id="L116">        var resultsByFdId = result.results().stream().collect(groupingBy(BatchResult::fdId));</span>
+
+        // We add notes to all tickets
+<span class="fc" id="L119">        var notesAdded = meta.session().user().fdApiKey()</span>
+<span class="fc" id="L120">                .map(ImmutableApiKey::of)</span>
+<span class="fc" id="L121">                .map(apiKey -&gt; {</span>
+<span class="fc" id="L122">                    var notesBeingAdded = resultsByFdId.entrySet().stream()</span>
+<span class="fc" id="L123">                            .map(entry -&gt; freshDeskService.addNote(entry.getKey(), renderMessage(entry.getValue()), apiKey))</span>
+<span class="fc" id="L124">                            .collect(toList());</span>
+
+<span class="fc" id="L126">                    return zip(notesBeingAdded, Arrays::asList)</span>
+<span class="fc" id="L127">                            .map($ -&gt; &quot;Notes added&quot;);</span>
+<span class="fc" id="L128">                }).orElseGet(Mono::empty);</span>
+
+
+        // We close all tickets
+<span class="fc" id="L132">        var closedTickets = meta.session().user().fdApiKey()</span>
+<span class="fc" id="L133">                .map(ImmutableApiKey::of)</span>
+<span class="fc" id="L134">                .map(apiKey -&gt; {</span>
+<span class="fc" id="L135">                    var ticketsBeingClosed = resultsByFdId.keySet().stream()</span>
+<span class="fc" id="L136">                            .map(ticketId -&gt; freshDeskService.closeTicket(ticketId, apiKey))</span>
+<span class="fc" id="L137">                            .collect(toList());</span>
+
+<span class="fc" id="L139">                    return zip(ticketsBeingClosed, Arrays::asList)</span>
+<span class="fc" id="L140">                            .map($ -&gt; &quot;Closed&quot;);</span>
+<span class="fc" id="L141">                }).orElseGet(Mono::empty);</span>
+
+        // when all notes are added and all tickets are closed, then we yield a response.
+<span class="fc" id="L144">        return notesAdded.then(closedTickets)</span>
+<span class="fc" id="L145">                .map($1 -&gt; &quot;Done&quot;)</span>
+<span class="fc" id="L146">                .defaultIfEmpty(&quot;Skipped&quot;)</span>
+<span class="pc" id="L147">                .onErrorResume($ -&gt; just(&quot;Failed&quot;))</span>
+<span class="fc" id="L148">                .map(fdStatus -&gt; ImmutableExtendedMessageDeletionsResult.builder()</span>
+<span class="fc" id="L149">                        .fdStatus(fdStatus)</span>
+<span class="fc" id="L150">                        .addAllResults(result.results())</span>
+<span class="fc" id="L151">                        .build());</span>
+    }
+
+    private String renderMessage(List&lt;BatchResult&gt; results) {
+<span class="fc" id="L155">        try (var writer = new StringWriter()) {</span>
+
+<span class="fc bfc" id="L157" title="All 2 branches covered.">            var singleMessageDeletion = results.size() == 1;</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">            var templateFile = singleMessageDeletion ? &quot;messageDeletedTemplate&quot; : &quot;messageDeletedBulkTemplate&quot;;</span>
+<span class="fc" id="L159">            var template = templateEngine.getTemplate(format(&quot;%s.vm&quot;, templateFile));</span>
+
+<span class="fc" id="L161">            var context = new VelocityContext();</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">            if (singleMessageDeletion) {</span>
+<span class="fc" id="L163">                var result = results.get(0);</span>
+<span class="fc" id="L164">                context.put(&quot;uniqueId&quot;, result.uniqueId());</span>
+<span class="fc" id="L165">                context.put(&quot;readByPatient&quot;, result.patientRead());</span>
+<span class="fc" id="L166">                context.put(&quot;readByCarer&quot;, result.carersRead());</span>
+<span class="fc" id="L167">                context.put(&quot;readByPro&quot;, result.prosRead());</span>
+<span class="fc" id="L168">            } else {</span>
+<span class="fc" id="L169">                context.put(&quot;results&quot;, results);</span>
+            }
+
+<span class="fc" id="L172">            template.merge(context, writer);</span>
+<span class="fc" id="L173">            writer.flush();</span>
+
+<span class="fc" id="L175">            return writer.toString();</span>
+<span class="nc" id="L176">        } catch (IOException e) {</span>
+<span class="nc" id="L177">            throw new IllegalStateException(e);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

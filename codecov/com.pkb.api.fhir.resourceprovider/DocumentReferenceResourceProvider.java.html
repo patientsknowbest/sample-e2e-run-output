@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DocumentReferenceResourceProvider.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir.resourceprovider</a> &gt; <span class="el_source">DocumentReferenceResourceProvider.java</span></div><h1>DocumentReferenceResourceProvider.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir.resourceprovider;
+
+import ca.uhn.fhir.model.api.Include;
+import ca.uhn.fhir.model.api.annotation.Description;
+import ca.uhn.fhir.rest.annotation.IncludeParam;
+import ca.uhn.fhir.rest.annotation.Operation;
+import ca.uhn.fhir.rest.annotation.OptionalParam;
+import ca.uhn.fhir.rest.annotation.ResourceParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.param.DateParam;
+import ca.uhn.fhir.rest.param.DateRangeParam;
+import ca.uhn.fhir.rest.param.ParamPrefixEnum;
+import ca.uhn.fhir.rest.param.ReferenceParam;
+import ca.uhn.fhir.rest.param.TokenParam;
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import com.pkb.api.fhir.BundleMapper;
+import com.pkb.api.fhir.converter.DateParamToDateRestrictionConverter;
+import com.pkb.api.fhir.converter.DateRangeParamToDateRangeRestrictionConverter;
+import com.pkb.api.fhir.converter.ReferenceParamToUUIDConverter;
+import com.pkb.api.fhir.converter.ReverseIncludeConverter;
+import com.pkb.api.fhir.converter.TokenParamToDocumentStatusConverter;
+import com.pkb.api.fhir.documentreference.DocumentReferenceDocumentStatus;
+import com.pkb.api.fhir.documentreference.DocumentReferenceResourceService;
+import com.pkb.api.fhir.documentreference.DocumentReferenceSearchCriteria;
+import com.pkb.api.fhir.documentreference.ImmutableDocumentReferenceSearchCriteria;
+import com.pkb.api.fhir.documentreference.ReadReceiptDTO;
+import com.pkb.api.fhir.service.AuthenticationService;
+import com.pkb.api.fhir.util.IncludeResource;
+import com.pkb.api.fhir.util.Issues;
+import com.pkb.api.fhir.util.NamedParam;
+import com.pkb.api.fhir.util.NamedParameterFactory;
+import com.pkb.domain.criteria.Constraint;
+import com.pkb.domain.criteria.FhirCriteriaResult;
+import com.pkb.domain.criteria.Restriction;
+import com.pkb.domain.criteria.TemporalRangeRestriction;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.collection.Seq;
+import io.vavr.collection.Set;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import io.vavr.control.Validation;
+import org.hl7.fhir.dstu3.model.BooleanType;
+import org.hl7.fhir.dstu3.model.Bundle;
+import org.hl7.fhir.dstu3.model.DocumentReference;
+import org.hl7.fhir.dstu3.model.OperationOutcome.IssueSeverity;
+import org.hl7.fhir.dstu3.model.OperationOutcome.OperationOutcomeIssueComponent;
+import org.hl7.fhir.dstu3.model.Parameters;
+import org.hl7.fhir.dstu3.model.ResourceType;
+import org.hl7.fhir.dstu3.model.StringType;
+import org.hl7.fhir.dstu3.model.Type;
+import org.jetbrains.annotations.NotNull;
+
+import java.time.LocalDate;
+import java.util.UUID;
+
+import static com.pkb.api.fhir.util.Fhirs.invalidRequestException;
+import static com.pkb.domain.criteria.CriteriaResult.emptyCriteriaResult;
+import static com.pkb.entities.enums.messaging.MessageStatus.READ;
+import static io.vavr.API.List;
+import static io.vavr.API.Map;
+import static io.vavr.API.Set;
+import static io.vavr.API.Some;
+import static io.vavr.API.Stream;
+import static io.vavr.control.Either.left;
+import static java.util.function.Function.identity;
+import static org.hl7.fhir.dstu3.model.DocumentReference.SP_CREATED;
+import static org.hl7.fhir.dstu3.model.DocumentReference.SP_INDEXED;
+import static org.hl7.fhir.dstu3.model.Observation.SP_PATIENT;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueSeverity.ERROR;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueSeverity.FATAL;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueSeverity.INFORMATION;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueType.REQUIRED;
+import static org.hl7.fhir.dstu3.model.OperationOutcome.IssueType.TOOCOSTLY;
+import static org.hl7.fhir.dstu3.model.ResourceType.Patient;
+
+public class DocumentReferenceResourceProvider extends AbstractResourceProvider {
+
+    public static final String READ_RECEIPT_QUERY_OPERATION_NAME = &quot;read-receipt-query&quot;;
+
+    private static final String SP_PATIENT_DESCRIPTION = &quot;Conditional. Multi-value support: none. Modifier support: [&lt;type&gt;].&quot;;
+    private static final String SP_INDEXED_DESCRIPTION = &quot;Conditional. Multi-value support: none. Modifier support: none. Prefix support: [eq].&quot;;
+    private static final String SP_CREATED_DESCRIPTION = &quot;Conditional. Multi-value support: AND. Modifier support: none. Prefix support: [eq, gt, lt, ge, le].&quot;;
+    private static final String SP_DOCUMENT_STATUS_DESCRIPTION = &quot;Optional. Multi-value support: none. Modifier support: none. Definition: http://fhir.patientsknowbest.com/searchparameter/document-status&quot;;
+    private static final String SP_SOURCE_ORGANISATION_DESCRIPTION = &quot;Optional. Multi-value support: none. Modifier support: [&lt;type&gt;]. Definition: http://fhir.patientsknowbest.com/searchparameter/source-organisation&quot;;
+<span class="fc" id="L87">    private static final Map&lt;ParamPrefixEnum, Constraint&gt; PARAM_PREFIX_TO_OPERATOR = Map(ParamPrefixEnum.EQUAL, Constraint.EQUAL);</span>
+
+    private static final String DOCUMENT_STATUS = &quot;document-status&quot;;
+    private static final String SOURCE_ORGANISATION = &quot;source-organisation&quot;;
+<span class="fc" id="L91">    private static final Set&lt;IssueSeverity&gt; SEVERITIES = Set(ERROR, FATAL);</span>
+    private static final String READ_RECEIPT_COMPONENT_NAME = &quot;read_receipt&quot;;
+    private static final String DOCUMENT_IDENTIFIER_PART_NAME = &quot;documentIdentifier&quot;;
+    private static final String READ_PART_NAME = &quot;read&quot;;
+
+    private final AuthenticationService authenticationService;
+    private final DocumentReferenceResourceService resourceService;
+    private final ReferenceParamToUUIDConverter referenceParamToUUIDConverter;
+    private final DateParamToDateRestrictionConverter dateParamToDateRestrictionConverter;
+    private final TokenParamToDocumentStatusConverter documentStatusConverter;
+    private final ReverseIncludeConverter reverseIncludeConverter;
+    private final DateRangeParamToDateRangeRestrictionConverter dateRangeParamToDateRangeRestrictionConverter;
+
+    private final BundleMapper bundleMapper;
+    private final NamedParameterFactory parameterFactory;
+
+    public DocumentReferenceResourceProvider(
+            AuthenticationService authenticationService, 
+            DocumentReferenceResourceService resourceService,
+            ReferenceParamToUUIDConverter referenceParamToUUIDConverter,
+            DateParamToDateRestrictionConverter dateParamToDateRestrictionConverter,
+            TokenParamToDocumentStatusConverter documentStatusConverter,
+            BundleMapper bundleMapper,
+            NamedParameterFactory parameterFactory,
+            ReverseIncludeConverter reverseIncludeConverter,
+            DateRangeParamToDateRangeRestrictionConverter dateRangeParamToDateRangeRestrictionConverter) {
+<span class="fc" id="L117">        super(DocumentReference.class);</span>
+<span class="fc" id="L118">        this.authenticationService = authenticationService;</span>
+<span class="fc" id="L119">        this.resourceService = resourceService;</span>
+<span class="fc" id="L120">        this.referenceParamToUUIDConverter = referenceParamToUUIDConverter;</span>
+<span class="fc" id="L121">        this.dateParamToDateRestrictionConverter = dateParamToDateRestrictionConverter;</span>
+<span class="fc" id="L122">        this.documentStatusConverter = documentStatusConverter;</span>
+<span class="fc" id="L123">        this.reverseIncludeConverter = reverseIncludeConverter;</span>
+<span class="fc" id="L124">        this.bundleMapper = bundleMapper;</span>
+<span class="fc" id="L125">        this.parameterFactory = parameterFactory;</span>
+<span class="fc" id="L126">        this.dateRangeParamToDateRangeRestrictionConverter = dateRangeParamToDateRangeRestrictionConverter;</span>
+<span class="fc" id="L127">    }</span>
+
+    @Search
+    public Bundle findDocumentReference(
+            @OptionalParam(name = SP_PATIENT) @Description(value = SP_PATIENT_DESCRIPTION) ReferenceParam patient,
+            @OptionalParam(name = SP_INDEXED) @Description(value = SP_INDEXED_DESCRIPTION) DateParam indexedDateParam,
+            @OptionalParam(name = SP_CREATED) @Description(value = SP_CREATED_DESCRIPTION) DateRangeParam createdDateParam,
+
+            @OptionalParam(name = DOCUMENT_STATUS) @Description(value = SP_DOCUMENT_STATUS_DESCRIPTION) TokenParam documentStatusTokenParam,
+            @OptionalParam(name = SOURCE_ORGANISATION) @Description(value = SP_SOURCE_ORGANISATION_DESCRIPTION) ReferenceParam organisationReferenceParam,
+            @IncludeParam(reverse = true, allow = { ReverseIncludeConverter.PROVENANCE_TARGET_STR }) java.util.Collection&lt;Include&gt; reverseIncludes,
+            RequestDetails request) {
+<span class="fc" id="L139">        var authenticatedIdentity = authenticationService.authenticateOrThrow(request);</span>
+<span class="fc bfc" id="L140" title="All 6 branches covered.">        if (request.getParameters().get(SP_INDEXED) == null &amp;&amp; request.getParameters().get(SP_CREATED) == null &amp;&amp; request.getParameters().get(SP_PATIENT) == null) {</span>
+<span class="fc" id="L141">            String diagnostics = &quot;Please provide at least one of the following search parameters: [created,indexed,patient]&quot;;</span>
+<span class="nc" id="L142">            return bundleMapper.toEmptyBundleOrThrowException(invalidRequestException(Issues.errorFrom(diagnostics, TOOCOSTLY)), request, null);</span>
+        }
+
+<span class="fc bfc" id="L145" title="All 4 branches covered.">        if (createdDateParam != null &amp;&amp; patient == null) {</span>
+<span class="fc" id="L146">            String diagnostics = &quot;The [patient] parameter must be provided when providing the [created] parameter.&quot;;</span>
+<span class="nc" id="L147">            return bundleMapper.toEmptyBundleOrThrowException(invalidRequestException(Issues.errorFrom(diagnostics, TOOCOSTLY)), request, null);</span>
+        }
+
+<span class="fc" id="L150">        NamedParam&lt;ReferenceParam&gt; patientParam = parameterFactory.createNamedParam(patient, SP_PATIENT, request);</span>
+<span class="fc" id="L151">        NamedParam&lt;DateParam&gt; indexedParam = parameterFactory.createNamedParam(indexedDateParam, SP_INDEXED, request);</span>
+<span class="fc" id="L152">        NamedParam&lt;DateRangeParam&gt; createdParam = parameterFactory.createNamedParam(createdDateParam, SP_CREATED, request);</span>
+<span class="fc" id="L153">        NamedParam&lt;TokenParam&gt; documentStatusParam = parameterFactory.createNamedParam(documentStatusTokenParam, DOCUMENT_STATUS, request);</span>
+<span class="fc" id="L154">        NamedParam&lt;ReferenceParam&gt; sourceOrganisationParam = parameterFactory.createNamedParam(organisationReferenceParam, SOURCE_ORGANISATION, request);</span>
+
+<span class="fc" id="L156">        Validation&lt;Issues, Option&lt;UUID&gt;&gt; issuesOrPatientId = referenceParamToUUIDConverter.convert(patientParam, Patient);</span>
+<span class="fc" id="L157">        Validation&lt;Issues, Option&lt;Restriction&lt;Constraint, LocalDate&gt;&gt;&gt; issuesOrIndexed = dateParamToDateRestrictionConverter.convert(indexedParam, PARAM_PREFIX_TO_OPERATOR);</span>
+<span class="fc" id="L158">        Validation&lt;Issues, TemporalRangeRestriction&lt;LocalDate&gt;&gt; issuesOrCreated = dateRangeParamToDateRangeRestrictionConverter</span>
+<span class="fc" id="L159">                .convert(createdParam);</span>
+<span class="fc" id="L160">        Validation&lt;Issues, Option&lt;DocumentReferenceDocumentStatus&gt;&gt; issuesOrDocumentStatus = documentStatusConverter.convert(documentStatusParam);</span>
+<span class="fc" id="L161">        Validation&lt;Issues, Option&lt;UUID&gt;&gt; issuesOrOrganisationId = referenceParamToUUIDConverter.convert(sourceOrganisationParam, ResourceType.Organization);</span>
+<span class="fc" id="L162">        Validation&lt;Issues, List&lt;IncludeResource&gt;&gt; issuesOrReverseIncludes = reverseIncludeConverter.convert(List.ofAll(reverseIncludes));</span>
+
+<span class="fc" id="L164">        Seq&lt;String&gt; presentAndValidParameterNames = Stream(</span>
+<span class="fc" id="L165">                maybeNameOfValidParameter(issuesOrIndexed, indexedParam),</span>
+<span class="fc" id="L166">                Option.when(issuesOrCreated.isValid(), SP_CREATED),</span>
+<span class="fc" id="L167">                maybeNameOfValidParameter(issuesOrPatientId, patientParam),</span>
+<span class="fc" id="L168">                maybeNameOfValidParameter(issuesOrDocumentStatus, documentStatusParam),</span>
+<span class="fc" id="L169">                maybeNameOfValidParameter(issuesOrOrganisationId, sourceOrganisationParam),</span>
+<span class="pc bpc" id="L170" title="1 of 4 branches missed.">                Option.when(issuesOrReverseIncludes.isValid() &amp;&amp; !reverseIncludes.isEmpty(), ReverseIncludeConverter.PARAM_NAME))</span>
+<span class="fc" id="L171">                        .filter(Option::isDefined)</span>
+<span class="fc" id="L172">                        .map(Option::get)</span>
+<span class="fc" id="L173">                        .toList();</span>
+
+<span class="fc bfc" id="L175" title="All 2 branches covered.">        if (issuesOrDocumentStatus.isInvalid()) {</span>
+<span class="pc bpc" id="L176" title="2 of 4 branches missed.">            if (issuesOrDocumentStatus.getError().get().find(issue -&gt; issue.getSeverity() == INFORMATION).isDefined()) {</span>
+<span class="fc" id="L177">                return bundleMapper.toBundle(emptyCriteriaResult(), request, Some(presentAndValidParameterNames));</span>
+            }
+        }
+
+<span class="fc" id="L181">        Either&lt;BaseServerResponseException, FhirCriteriaResult&lt;DocumentReference&gt;&gt; searchResult = Validation</span>
+<span class="fc" id="L182">                .combine(issuesOrPatientId, issuesOrIndexed, issuesOrCreated, issuesOrDocumentStatus, issuesOrOrganisationId,</span>
+                        issuesOrReverseIncludes)
+<span class="fc" id="L184">                .ap((maybePatientId, indexed, created, documentStatus, organisationId, revIncludes) -&gt; {</span>
+<span class="fc" id="L185">                    DocumentReferenceSearchCriteria criteria = ImmutableDocumentReferenceSearchCriteria.builder()</span>
+<span class="fc" id="L186">                            .authenticatedIdentity(authenticatedIdentity)</span>
+<span class="fc" id="L187">                            .patientId(maybePatientId)</span>
+<span class="fc" id="L188">                            .indexed(indexed)</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">                            .created(created.isNonEmpty() ? Option.of(created) : Option.none())</span>
+<span class="fc" id="L190">                            .documentStatus(documentStatus)</span>
+<span class="fc" id="L191">                            .sourceOrganisationId(organisationId)</span>
+<span class="fc" id="L192">                            .build();</span>
+<span class="fc" id="L193">                    return resourceService.search(criteria, revIncludes);</span>
+                })
+<span class="fc" id="L195">                .mapError(Issues::flatten)</span>
+<span class="fc" id="L196">                .fold(issues -&gt; left(invalidRequestException(issues)), identity());</span>
+
+<span class="fc" id="L198">        return searchResult.fold(</span>
+<span class="fc" id="L199">                bundleMapper.toEmptyBundle(request, Some(presentAndValidParameterNames)),</span>
+<span class="fc" id="L200">                result -&gt; bundleMapper.toBundleWithIncludes(result, request, Some(presentAndValidParameterNames)));</span>
+    }
+
+    @Operation(type = Parameters.class, name = READ_RECEIPT_QUERY_OPERATION_NAME, idempotent = true)
+    public Parameters findReadReceipts(@ResourceParam Parameters parameters, RequestDetails request) {
+<span class="fc" id="L205">        var authenticatedIdentity = authenticationService.authenticateOrThrow(request);</span>
+<span class="fc" id="L206">        isEmptyParameters(parameters);</span>
+<span class="fc" id="L207">        List&lt;String&gt; identifiers = List.ofAll(parameters.getParameter())</span>
+<span class="fc" id="L208">                .map(this::mapDocumentIdentifierToString);</span>
+<span class="fc" id="L209">        return resourceService.searchDocumentStatus(authenticatedIdentity, identifiers)</span>
+<span class="fc" id="L210">                .map(this::mapReadReceiptListToParams).getOrElseThrow(identity());</span>
+    }
+
+    private String mapDocumentIdentifierToString(Parameters.ParametersParameterComponent identifier) {
+<span class="fc bfc" id="L214" title="All 2 branches covered.">        if(DOCUMENT_IDENTIFIER_PART_NAME.equals(identifier.getName())) {</span>
+<span class="fc" id="L215">            Type value = identifier.getValue();</span>
+<span class="pc bpc" id="L216" title="2 of 4 branches missed.">            if ((value instanceof StringType) &amp;&amp; ((StringType) value).hasValue()){</span>
+<span class="fc" id="L217">                return ((StringType) value).getValueAsString();</span>
+            } else{
+<span class="nc" id="L219">                String diagnostics = &quot;The [value] field of DocumentIdentifier is missing or not [valueString]&quot;;</span>
+<span class="nc" id="L220">                throw invalidRequestException(Issues.errorFrom(diagnostics, REQUIRED));</span>
+            }
+        } else{
+<span class="fc" id="L223">            String diagnostics = &quot;The [parameter] part needs to have [name] &quot; + DOCUMENT_IDENTIFIER_PART_NAME;</span>
+<span class="fc" id="L224">            throw invalidRequestException(Issues.errorFrom(diagnostics, REQUIRED));</span>
+        }
+    }
+
+    private void isEmptyParameters(@ResourceParam Parameters parameters) {
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">        if (parameters.getParameter().isEmpty()) {</span>
+<span class="nc" id="L230">            String diagnostics = &quot;The [parameter] parameter can not be empty&quot;;</span>
+<span class="nc" id="L231">            throw invalidRequestException(Issues.errorFrom(diagnostics, REQUIRED));</span>
+        }
+<span class="fc" id="L233">    }</span>
+
+    private Parameters mapReadReceiptListToParams(List&lt;ReadReceiptDTO&gt; readReceiptDTOS) {
+<span class="fc" id="L236">        Parameters parametersRet = new Parameters();</span>
+<span class="fc" id="L237">        readReceiptDTOS</span>
+<span class="fc" id="L238">                .map(this::mapReadReceiptToParamComponent)</span>
+<span class="fc" id="L239">                .forEach(parametersRet::addParameter);</span>
+<span class="fc" id="L240">        return parametersRet;</span>
+    }
+
+    private Parameters.ParametersParameterComponent mapReadReceiptToParamComponent(ReadReceiptDTO readReceiptDTO) {
+<span class="fc" id="L244">        Parameters.ParametersParameterComponent identifierPart = new Parameters.ParametersParameterComponent();</span>
+<span class="fc" id="L245">        identifierPart.setName(DOCUMENT_IDENTIFIER_PART_NAME);</span>
+<span class="fc" id="L246">        identifierPart.setValue(new StringType(readReceiptDTO.externalDocumentId()));</span>
+
+<span class="fc" id="L248">        Parameters.ParametersParameterComponent readReceipt = new Parameters.ParametersParameterComponent();</span>
+<span class="fc" id="L249">        readReceipt.setName(READ_PART_NAME);</span>
+<span class="fc bfc" id="L250" title="All 4 branches covered.">        readReceipt.setValue(new BooleanType(readReceiptDTO.status().equals(READ.name()) &amp;&amp; !readReceiptDTO.unreadableDocument()));</span>
+
+<span class="fc" id="L252">        return createComponent(List(identifierPart, readReceipt));</span>
+    }
+
+    @NotNull
+    private Parameters.ParametersParameterComponent createComponent(List&lt;Parameters.ParametersParameterComponent&gt; part) {
+<span class="fc" id="L257">        Parameters.ParametersParameterComponent component = new Parameters.ParametersParameterComponent();</span>
+<span class="fc" id="L258">        component.setName(READ_RECEIPT_COMPONENT_NAME);</span>
+<span class="fc" id="L259">        component.setPart(part.toJavaList());</span>
+<span class="fc" id="L260">        return component;</span>
+    }
+
+    private Option&lt;String&gt; maybeNameOfValidParameter(Validation&lt;Issues, ? extends Option&lt;?&gt;&gt; paramValidation, NamedParam&lt;?&gt; namedParameter) {
+<span class="fc" id="L264">        return Option.when(isParameterValid(paramValidation), namedParameter.getName());</span>
+    }
+
+    private boolean isParameterValid(Validation&lt;Issues, ? extends Option&lt;?&gt;&gt; paramValidation) {
+<span class="fc" id="L268">        return paramValidation.fold(</span>
+<span class="fc" id="L269">                error -&gt; error.get()</span>
+<span class="fc" id="L270">                        .map(OperationOutcomeIssueComponent::getSeverity)</span>
+<span class="fc" id="L271">                        .find(SEVERITIES::contains)</span>
+<span class="fc" id="L272">                        .isEmpty(),</span>
+                Option::isDefined);
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

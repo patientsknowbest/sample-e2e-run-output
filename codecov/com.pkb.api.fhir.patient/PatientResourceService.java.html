@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PatientResourceService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir.patient</a> &gt; <span class="el_source">PatientResourceService.java</span></div><h1>PatientResourceService.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir.patient;
+
+import ca.uhn.fhir.rest.param.TokenParam;
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import ca.uhn.fhir.rest.server.exceptions.ForbiddenOperationException;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.rest.server.exceptions.InvalidRequestException;
+import com.pkb.api.fhir.AbstractResourceService;
+import com.pkb.api.fhir.FhirCodeSystemToNationalIdTypeMapper;
+import com.pkb.api.fhir.config.HybridMailProperties;
+import com.pkb.api.fhir.exception.ServerResponseExceptionMapper;
+import com.pkb.api.fhir.parameters.ParametersMapper;
+import com.pkb.api.fhir.parameters.ParametersToPatientIdentifiersDTOMapper;
+import com.pkb.api.fhir.person.PatientMapper;
+import com.pkb.api.fhir.util.Issues;
+import com.pkb.authentication.AuthenticatedIdentity;
+import com.pkb.authz.AuthorizationDataService;
+import com.pkb.authz.TargetMeta;
+import com.pkb.authz.action.Action;
+import com.pkb.authz.data.AuthorizationData;
+import com.pkb.authz.data.AuthorizationInputs;
+import com.pkb.datamodel.PatientIdentifierDTO;
+import com.pkb.datamodel.projections.PatientDateOfLastDataPoint;
+import com.pkb.datamodel.projections.PatientStatus;
+import com.pkb.domain.PatientDemographicsService;
+import com.pkb.domain.PatientService;
+import com.pkb.domain.criteria.FhirCriteriaResult;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.ValidNationalId;
+import io.prometheus.client.Counter;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.List;
+import io.vavr.collection.Set;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import io.vavr.control.Try;
+import io.vavr.control.Validation;
+import org.hl7.fhir.dstu3.model.Parameters;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.UUID;
+
+import static com.pkb.api.fhir.util.Fhirs.invalidRequestException;
+import static com.pkb.authz.ImmutableTargetMeta.targetMeta;
+import static com.pkb.authz.action.Action.READ;
+import static com.pkb.authz.action.Action.SEARCH;
+import static com.pkb.authz.context.Path.FHIR;
+import static com.pkb.authz.data.ImmutableAuthorizationInputs.inputs;
+import static io.vavr.API.None;
+import static io.vavr.API.Set;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+import static java.lang.String.format;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+public class PatientResourceService extends AbstractResourceService&lt;Patient&gt; {
+
+<span class="fc" id="L59">    private static final Counter REQUEST_COUNTER = Counter.build()</span>
+<span class="fc" id="L60">            .name(&quot;pkb_fhir_date_of_last_data_point_operation_usage&quot;)</span>
+<span class="fc" id="L61">            .labelNames(&quot;requests&quot;, &quot;user&quot;)</span>
+<span class="fc" id="L62">            .help(&quot;Number of requests to query for the last update to patient record(s) by patient or system user&quot;)</span>
+<span class="fc" id="L63">            .register();</span>
+
+<span class="fc" id="L65">    private static final Set&lt;MenuDataType&gt; EXCLUDE_TYPES = HashSet.of(MenuDataType.coreDevicesSyncRecord, MenuDataType.consentreason);</span>
+    private final AuthorizationDataService authorizationDataService;
+    private final FhirCodeSystemToNationalIdTypeMapper fhirCodeSystemToNationalIdTypeMapper;
+    private final ParametersToPatientIdentifiersDTOMapper parametersToPatientIdentifiersDTOMapper;
+    private final PatientDemographicsService patientDemographicsService;
+    private final PatientMapper patientMapper;
+    private final PatientService patientService;
+    private final HybridMailProperties hybridMailProperties;
+
+    public PatientResourceService(
+            @NotNull AuthorizationDataService authorizationDataService,
+            @NotNull PatientDemographicsService patientDemographicsService,
+            @NotNull PatientMapper patientMapper,
+            @NotNull PatientService patientService,
+            @NotNull FhirCodeSystemToNationalIdTypeMapper fhirCodeSystemToNationalIdTypeMapper,
+            @NotNull ParametersToPatientIdentifiersDTOMapper parametersToPatientIdentifiersDTOMapper,
+            @NotNull ServerResponseExceptionMapper exceptionMapper,
+            HybridMailProperties hybridMailProperties) {
+<span class="fc" id="L83">        super(exceptionMapper);</span>
+<span class="fc" id="L84">        this.authorizationDataService = authorizationDataService;</span>
+<span class="fc" id="L85">        this.patientMapper = patientMapper;</span>
+<span class="fc" id="L86">        this.fhirCodeSystemToNationalIdTypeMapper = fhirCodeSystemToNationalIdTypeMapper;</span>
+<span class="fc" id="L87">        this.parametersToPatientIdentifiersDTOMapper = parametersToPatientIdentifiersDTOMapper;</span>
+<span class="fc" id="L88">        this.patientDemographicsService = patientDemographicsService;</span>
+<span class="fc" id="L89">        this.patientService = patientService;</span>
+<span class="fc" id="L90">        this.hybridMailProperties = hybridMailProperties;</span>
+<span class="fc" id="L91">    }</span>
+
+    public @NotNull
+    Either&lt;BaseServerResponseException, Patient&gt; findPatientDemographics(
+            AuthenticatedIdentity authenticatedIdentity,
+            UUID patientId) {
+<span class="fc" id="L97">        AuthorizationData authorizationData = getAuthorizationData(authenticatedIdentity, READ,</span>
+<span class="fc" id="L98">                targetMeta(com.pkb.datamodel.user.Patient.class, Set(patientId), None(), true));</span>
+
+<span class="fc" id="L100">        return patientDemographicsService.findPatientDemographics(authorizationData, patientId)</span>
+<span class="fc" id="L101">                .map(patientMapper::toPatient)</span>
+<span class="fc" id="L102">                .mapLeft(exception -&gt; exceptionToFhir(exception, Patient.class));</span>
+    }
+
+    public @NotNull
+    Either&lt;BaseServerResponseException, Parameters&gt; findPatientStatuses(AuthenticatedIdentity authenticatedIdentity,
+                                                                        Parameters parameters) {
+<span class="fc" id="L108">        AuthorizationData authorizationData = getAuthorizationData(authenticatedIdentity, SEARCH,</span>
+<span class="fc" id="L109">                targetMeta(PatientStatus.class, Set(), None(), false));</span>
+
+<span class="fc" id="L111">        Validation&lt;Issues, List&lt;ValidNationalId&gt;&gt; issuesOrPatientIdentifiers = parametersToPatientIdentifiersDTOMapper.toPatientNationalIdentifiers(parameters,</span>
+<span class="fc" id="L112">                hybridMailProperties.getGeneralRequestLimit());</span>
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        if (issuesOrPatientIdentifiers.isInvalid()) {</span>
+<span class="fc" id="L114">            return left(invalidRequestException(issuesOrPatientIdentifiers.getError()));</span>
+        }
+<span class="fc" id="L116">        return patientService.findPatientStatuses(authorizationData, issuesOrPatientIdentifiers.get())</span>
+<span class="fc" id="L117">                .bimap(InternalErrorException::new, ParametersMapper::patientStatusToParameters);</span>
+    }
+
+    public @NotNull
+    Either&lt;BaseServerResponseException, Parameters&gt; findLastDataPointDate(
+            AuthenticatedIdentity authenticatedIdentity,
+            Parameters parameters) {
+<span class="fc" id="L124">        AuthorizationData authorizationData = getAuthorizationData(authenticatedIdentity, SEARCH,</span>
+<span class="fc" id="L125">                targetMeta(PatientDateOfLastDataPoint.class, Set(), None(), false));</span>
+
+<span class="fc bfc" id="L127" title="All 2 branches covered.">        if (parameters == null) {</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">            if (authorizationData.inputs().authenticatedPatient().isDefined()) {</span>
+<span class="fc" id="L129">                Either&lt;BaseServerResponseException, Parameters&gt; singleLastDataPointDate = findSingleLastDataPointDate(authorizationData);</span>
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">                REQUEST_COUNTER.labels(singleLastDataPointDate.isRight() ? &quot;success&quot; : &quot;error&quot;, &quot;patient&quot;).inc();</span>
+<span class="fc" id="L131">                return singleLastDataPointDate;</span>
+            } else {
+<span class="fc" id="L133">                REQUEST_COUNTER.labels(&quot;error&quot;, &quot;patient&quot;).inc();</span>
+<span class="fc" id="L134">                return left(new ForbiddenOperationException(&quot;Authenticated Patient is required for a request without parameters!&quot;));</span>
+            }
+        } else {
+<span class="fc bfc" id="L137" title="All 2 branches covered.">            if (authorizationData.inputs().authenticatedSystemUser().isDefined()) {</span>
+<span class="fc" id="L138">                Either&lt;BaseServerResponseException, Parameters&gt; multipleLastDataPointDate = findMultipleLastDataPointDate(parameters, authorizationData);</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">                REQUEST_COUNTER.labels(multipleLastDataPointDate.isRight() ? &quot;success&quot; : &quot;error&quot;, &quot;system&quot;).inc();</span>
+<span class="fc" id="L140">                return multipleLastDataPointDate;</span>
+            } else {
+<span class="fc" id="L142">                REQUEST_COUNTER.labels(&quot;error&quot;, &quot;system&quot;).inc();</span>
+<span class="fc" id="L143">                return left(new ForbiddenOperationException(&quot;Authenticated System user is required for a request with parameters!&quot;));</span>
+            }
+        }
+    }
+
+    public @NotNull
+    Either&lt;BaseServerResponseException, FhirCriteriaResult&lt;Patient&gt;&gt; searchForPatientByCodedIdentifier(
+            AuthenticatedIdentity authenticatedIdentity,
+            TokenParam tokenParam) {
+
+<span class="pc bpc" id="L153" title="2 of 4 branches missed.">        if (tokenParam.getModifier() != null || tokenParam.getMissing() != null) {</span>
+<span class="nc" id="L154">            return left(new InvalidRequestException(</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">                    format(&quot;Modifier [%s] is not supported for parameter [identifier].&quot;, tokenParam.getModifier() != null ? tokenParam.getModifier() : &quot;MISSING&quot;)));</span>
+        }
+
+<span class="fc bfc" id="L158" title="All 2 branches covered.">        if (isBlank(tokenParam.getSystem())) {</span>
+<span class="fc" id="L159">            return left(new InvalidRequestException(&quot;Please provide a [system] component for the [identifier] parameter.&quot;));</span>
+        }
+
+<span class="fc bfc" id="L162" title="All 2 branches covered.">        if (isBlank(tokenParam.getValue())) {</span>
+<span class="fc" id="L163">            return left(new InvalidRequestException(&quot;Please provide a [code] component for the [identifier] parameter.&quot;));</span>
+        }
+
+        // TODO LATER - add new type that can hold NationalIdType,TeamLevelIdType,OrgLevelIdType, etc
+<span class="fc" id="L167">        Option&lt;ValidNationalId&gt; maybeValidNationalId = fhirCodeSystemToNationalIdTypeMapper.toNationalIdType(tokenParam.getSystem())</span>
+<span class="fc" id="L168">                .flatMap(n -&gt; Option.ofOptional(n.getValidNationalIdAndType(tokenParam.getValue())));</span>
+
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        if (!maybeValidNationalId.isDefined()) {</span>
+<span class="fc" id="L171">            return right(FhirCriteriaResult.empty());</span>
+        }
+
+<span class="fc" id="L174">        AuthorizationData authorizationData = getAuthorizationData(authenticatedIdentity, SEARCH,</span>
+<span class="fc" id="L175">                targetMeta(com.pkb.datamodel.user.Patient.class, Set(), None(), true));</span>
+
+<span class="fc" id="L177">        return Try.of(() -&gt; patientDemographicsService.findPatientDemographicsByNationalId(authorizationData, maybeValidNationalId.get())</span>
+<span class="fc" id="L178">                .map(patientMapper::toPatientList)</span>
+<span class="pc" id="L179">                .mapLeft(exception -&gt; exceptionToFhir(exception, Patient.class)))</span>
+<span class="fc" id="L180">                .getOrElseGet(recoverWhenPaginatedResourcesSearched(FhirCriteriaResult::empty));</span>
+    }
+
+    private &lt;T&gt; AuthorizationData getAuthorizationData(AuthenticatedIdentity authenticatedIdentity, Action action, TargetMeta&lt;T&gt; targetMeta) {
+<span class="fc" id="L184">        AuthorizationInputs authorizationInputs = inputs()</span>
+<span class="fc" id="L185">                .authenticatedIdentity(authenticatedIdentity)</span>
+<span class="fc" id="L186">                .action(action)</span>
+<span class="fc" id="L187">                .addTargets(targetMeta)</span>
+<span class="fc" id="L188">                .path(FHIR)</span>
+<span class="fc" id="L189">                .build();</span>
+<span class="fc" id="L190">        return authorizationDataService.fetch(authorizationInputs);</span>
+    }
+
+    @NotNull
+    private Either&lt;BaseServerResponseException, Parameters&gt; findMultipleLastDataPointDate(Parameters parameters, AuthorizationData authorizationData) {
+<span class="fc" id="L195">        Validation&lt;Issues, List&lt;PatientIdentifierDTO&gt;&gt; issuesOrPatientIdentifierDTOS = parametersToPatientIdentifiersDTOMapper.toPatientIdentifiers(parameters,</span>
+<span class="fc" id="L196">                hybridMailProperties.getGeneralRequestLimit());</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">        if (issuesOrPatientIdentifierDTOS.isInvalid()) {</span>
+<span class="fc" id="L198">            return left(invalidRequestException(issuesOrPatientIdentifierDTOS.getError()));</span>
+        }
+<span class="fc" id="L200">        return patientService.findMultipleLastDataPointDate(authorizationData, issuesOrPatientIdentifierDTOS.get(), EXCLUDE_TYPES)</span>
+<span class="fc" id="L201">                .bimap(InternalErrorException::new, ParametersMapper::dateOfLastDataPointToParameters);</span>
+    }
+
+    private Either&lt;BaseServerResponseException, Parameters&gt; findSingleLastDataPointDate(AuthorizationData authorizationData) {
+<span class="fc" id="L205">        return patientService.findSingleLastDataPointDate(authorizationData, EXCLUDE_TYPES)</span>
+<span class="fc" id="L206">                .bimap(InternalErrorException::new, ParametersMapper::dateOfLastDataPointToParameters);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

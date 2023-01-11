@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AuthzMapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhirwall.service.auth</a> &gt; <span class="el_source">AuthzMapper.java</span></div><h1>AuthzMapper.java</h1><pre class="source lang-java linenums">package com.pkb.fhirwall.service.auth;
+
+import com.pkb.fhirwall.domain.ConsentRepository;
+import com.pkb.fhirwall.domain.PatientRepository;
+import com.pkb.fhirwall.service.auth.oso.AppointmentAuth;
+import com.pkb.fhirwall.service.auth.oso.AuthBase;
+import com.pkb.fhirwall.service.auth.oso.PatientAuth;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.instance.model.api.IIdType;
+import org.hl7.fhir.r4.model.Appointment;
+import org.hl7.fhir.r4.model.Appointment.AppointmentParticipantComponent;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Bundle.BundleEntryComponent;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Consent;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Reference;
+
+import java.util.Collection;
+import java.util.List;
+
+import static com.pkb.entities.enums.FhirConsentSource.OPTOUT;
+import static com.pkb.entities.enums.FhirConsentSource.PATIENTCONSENT;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.Predicates.instanceOf;
+import static java.lang.String.format;
+import static java.util.Collections.emptyList;
+import static java.util.Optional.empty;
+import static java.util.stream.Collectors.toList;
+
+/**
+ * Maps FHIR resources to types suitable for consumption by authorization policies
+ */
+public class AuthzMapper {
+
+<span class="fc" id="L38">    private static final String PATIENT = new Patient().fhirType();</span>
+
+    private final PatientRepository patientRepository;
+    private final ConsentRepository consentRepository;
+
+<span class="fc" id="L43">    public AuthzMapper(PatientRepository patientRepository, ConsentRepository consentRepository) {</span>
+<span class="fc" id="L44">        this.patientRepository = patientRepository;</span>
+<span class="fc" id="L45">        this.consentRepository = consentRepository;</span>
+<span class="fc" id="L46">    }</span>
+
+    public AuthBase mapWithConsent(Patient patient) {
+<span class="fc" id="L49">        var consentsBundle = consentRepository.getConsentsByPatient(patient.getId());</span>
+<span class="fc" id="L50">        var consentResources = getConsentsByCode(consentsBundle,PATIENTCONSENT.name());</span>
+<span class="fc" id="L51">        var optOutResources = getConsentsByCode(consentsBundle, OPTOUT.name());</span>
+<span class="pc bpc" id="L52" title="1 of 2 branches missed.">        if (optOutResources.size() &gt; 1) {</span>
+<span class="nc" id="L53">            throw new RuntimeException(&quot;Multiple opt-out consents found for patient &quot; + patient.getId());</span>
+        }
+
+<span class="fc" id="L56">        return PatientAuth.of(patient, consentResources, optOutResources.stream().findFirst());</span>
+    }
+
+    public AuthBase toAuth(IBaseResource resource) {
+<span class="nc" id="L60">        return Match(resource).of(</span>
+<span class="nc" id="L61">                Case($(instanceOf(Patient.class)), patient -&gt; PatientAuth.of(patient, emptyList(), empty())),</span>
+<span class="nc" id="L62">                Case($(instanceOf(Appointment.class)), this::mapAppointment),</span>
+<span class="nc" id="L63">                Case($(), o -&gt; {</span>
+<span class="nc" id="L64">                    throw new RuntimeException(&quot;Unknown resource type: &quot; + resource.fhirType());</span>
+                }));
+    }
+
+    private AppointmentAuth mapAppointment(Appointment appointment) {
+<span class="nc" id="L69">        var patientIds = appointment.getParticipant().stream()</span>
+<span class="nc" id="L70">                .map(AppointmentParticipantComponent::getActor)</span>
+<span class="nc" id="L71">                .map(Reference::getReferenceElement)</span>
+<span class="nc" id="L72">                .filter(referenceElement -&gt; referenceElement.getResourceType().equals(PATIENT))</span>
+<span class="nc" id="L73">                .map(IIdType::getIdPart)</span>
+<span class="nc" id="L74">                .collect(toList());</span>
+<span class="nc bnc" id="L75" title="All 2 branches missed.">        if (patientIds.size() &gt; 1) {</span>
+<span class="nc" id="L76">            throw new RuntimeException(&quot;Multiple patients are referenced from Appointment &quot; + appointment.getId());</span>
+        }
+<span class="nc bnc" id="L78" title="All 2 branches missed.">        if (patientIds.isEmpty()) {</span>
+<span class="nc" id="L79">            return AppointmentAuth.withoutPatient(appointment);</span>
+        }
+
+<span class="nc" id="L82">        return patientRepository.getPatientByFhirId(patientIds.get(0))</span>
+<span class="nc" id="L83">                .map(patient -&gt; AppointmentAuth.of(appointment, patient))</span>
+<span class="nc" id="L84">                .orElseThrow(() -&gt; new RuntimeException(</span>
+<span class="nc" id="L85">                        format(&quot;Patient %s not found for Appointment %s&quot;, patientIds.get(0), appointment.getId())));</span>
+    }
+
+    private List&lt;Consent&gt; getConsentsByCode(Bundle bundle, String code) {
+<span class="fc" id="L89">        return bundle.getEntry().stream()</span>
+<span class="fc" id="L90">                .map(BundleEntryComponent::getResource)</span>
+<span class="pc" id="L91">                .filter(resource -&gt; resource instanceof Consent)</span>
+<span class="pc" id="L92">                .map(resource -&gt; (Consent) resource)</span>
+<span class="pc" id="L93">                .filter(consent -&gt; filterByCode(consent, code))</span>
+<span class="fc" id="L94">                .collect(toList());</span>
+    }
+
+    private boolean filterByCode(Consent consent, String code) {
+<span class="nc" id="L98">        return consent.getCategory().stream()</span>
+<span class="nc" id="L99">                .map(CodeableConcept::getCoding)</span>
+<span class="nc" id="L100">                .flatMap(Collection::stream)</span>
+<span class="nc" id="L101">                .anyMatch(coding -&gt; code.equals(coding.getCode()));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

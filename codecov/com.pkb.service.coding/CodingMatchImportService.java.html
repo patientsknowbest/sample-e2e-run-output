@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CodingMatchImportService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.coding</a> &gt; <span class="el_source">CodingMatchImportService.java</span></div><h1>CodingMatchImportService.java</h1><pre class="source lang-java linenums">package com.pkb.service.coding;
+
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import com.fasterxml.jackson.datatype.jdk8.Jdk8Module;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Iterables;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.entities.pub.CodingMatchImportTransformTempTable;
+import com.pkb.repository.CodingMatchImportNewRecordsTempTableRepository;
+import com.pkb.repository.CodingMatchImportRepository;
+import com.pkb.repository.CodingMatchImportTransformTempTableRepository;
+import com.pkb.service.code.CodingTranslationService;
+import org.apache.commons.lang3.StringUtils;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.transaction.Transactional;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+
+import static com.pkb.service.dataupload.emis.esv2.CodeSystems.LOINC;
+import static com.pkb.service.dataupload.emis.esv2.CodeSystems.SNOMED_CT;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+
+@SuppressWarnings(&quot;unchecked&quot;)
+public class CodingMatchImportService {
+
+<span class="fc" id="L42">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    @PersistenceContext
+    EntityManager em;
+
+    private CodingMatchImportTransformTempTableRepository cmiTransformRepository;
+    private CodingMatchImportRepository codingMatchImportRepository;
+    private CodingMatchImportNewRecordsTempTableRepository cmiNewRecordsTempTableRepository;
+    private CodingTranslationService codingTranslationService;
+    private DateTimeService dateTimeService;
+    private int hibernateJdbcBatchSize;
+
+    public CodingMatchImportService(CodingMatchImportRepository codingMatchImportRepository,
+                                    CodingMatchImportTransformTempTableRepository cmiTransformRepository,
+                                    CodingMatchImportNewRecordsTempTableRepository cmiNewRecordsTempTableRepository,
+                                    CodingTranslationService codingTranslationService,
+                                    DateTimeService dateTimeService,
+<span class="fc" id="L59">                                    int hibernateJdbcBatchSize) {</span>
+<span class="fc" id="L60">        this.codingMatchImportRepository = codingMatchImportRepository;</span>
+<span class="fc" id="L61">        this.cmiTransformRepository = cmiTransformRepository;</span>
+<span class="fc" id="L62">        this.cmiNewRecordsTempTableRepository = cmiNewRecordsTempTableRepository;</span>
+<span class="fc" id="L63">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L64">        this.codingTranslationService = codingTranslationService;</span>
+<span class="fc" id="L65">        this.hibernateJdbcBatchSize = hibernateJdbcBatchSize;</span>
+<span class="fc" id="L66">    }</span>
+
+    @Transactional
+    public CodingMatchImportResult saveNewMappingsCsv(File csvFile, LoggedInEHRRequestContext requestContext) throws Exception {
+<span class="fc" id="L70">        CodingMatchValidationResult importValidationResult = validateNewMappingsCsv(csvFile, requestContext);</span>
+<span class="fc bfc" id="L71" title="All 2 branches covered.">        if (!importValidationResult.getSuccessful()) {</span>
+<span class="fc" id="L72">            return ImmutableCodingMatchImportResult.of(false, &quot;Unable to save because validation failed: &quot; + importValidationResult.getMessage());</span>
+        }
+
+<span class="fc" id="L75">        createMissingTranslations(requestContext);</span>
+
+<span class="fc" id="L77">        int insertCount = codingMatchImportRepository.releaseNewCodingMatchRowsFromTempTable();</span>
+<span class="fc" id="L78">        return ImmutableCodingMatchImportResult.of(true, &quot;Inserted &quot; + insertCount + &quot; new codingmatch records&quot;);</span>
+    }
+
+    @Transactional
+    public CodingMatchValidationResult validateNewMappingsCsv(File csvFile, LoggedInEHRRequestContext requestContext) throws Exception {
+<span class="fc" id="L83">        ImmutableCodingMatchValidationResult.Builder builder = ImmutableCodingMatchValidationResult.builder();</span>
+
+<span class="fc" id="L85">        String loadError = loadCsvIntoTempTable(csvFile);</span>
+<span class="fc bfc" id="L86" title="All 2 branches covered.">        if (loadError != null) {</span>
+<span class="fc" id="L87">            return builder.successful(false).message(loadError).build();</span>
+        }
+
+<span class="fc" id="L90">        String badDuplicatesError = validateNoBadDuplicates();</span>
+<span class="fc bfc" id="L91" title="All 2 branches covered.">        if (badDuplicatesError != null) {</span>
+<span class="fc" id="L92">            return builder.successful(false).message(badDuplicatesError).build();</span>
+        }
+
+<span class="fc" id="L95">        String loincTranslationError = validateLoincTranslations();</span>
+<span class="fc bfc" id="L96" title="All 2 branches covered.">        if (loincTranslationError != null) {</span>
+<span class="fc" id="L97">            return builder.successful(false).message(loincTranslationError).build();</span>
+        }
+
+        //prepare new codingmatch rows
+<span class="fc" id="L101">        cmiNewRecordsTempTableRepository.createTempCodingMatchTable();</span>
+<span class="fc" id="L102">        int newSnomedMatches = prepareNewSnomedMatches(requestContext);</span>
+
+<span class="fc" id="L104">        String existingMatchError = validateNoExistingMatchesAndSetValidated(newSnomedMatches);</span>
+<span class="fc bfc" id="L105" title="All 2 branches covered.">        if (existingMatchError != null) {</span>
+<span class="fc" id="L106">            return builder.successful(false).message(existingMatchError).build();</span>
+        }
+
+<span class="fc" id="L109">        return builder.successful(true).message(&quot;Validated succesfully, there are &quot; + newSnomedMatches + &quot; new snomed matches&quot;).build();</span>
+    }
+
+    private void createMissingTranslations(LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L113">        Map&lt;String, String&gt; sourceCodeToTargetCode = cmiTransformRepository.selectDesiredTranslations()</span>
+<span class="fc" id="L114">                .stream().collect(toMap(CodingMatchImportTransformTempTableRepository.DesiredSnomedToLoincTranslations::getSourceCode,</span>
+                        CodingMatchImportTransformTempTableRepository.DesiredSnomedToLoincTranslations::getTargetCode));
+
+        //create any missing loinc translations
+<span class="fc" id="L118">        codingTranslationService.ensureTranslationsExist(sourceCodeToTargetCode, SNOMED_CT, LOINC, requestContext);</span>
+<span class="fc" id="L119">    }</span>
+
+    @Nullable
+    private String validateLoincTranslations() {
+<span class="fc" id="L123">        String loincTranslationError = validateTestDatatypesHaveLoincTranslation();</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">        if (loincTranslationError != null) {</span>
+<span class="fc" id="L125">            return loincTranslationError;</span>
+        }
+<span class="fc" id="L127">        loincTranslationError = validateTestDatatypesLinkToValidLoincs();</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">        if (loincTranslationError != null) {</span>
+<span class="fc" id="L129">            return loincTranslationError;</span>
+        }
+<span class="fc" id="L131">        return validateNoExistingDifferentTestDatatypeTranslations();</span>
+    }
+
+    private int prepareNewSnomedMatches(LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L135">        return cmiNewRecordsTempTableRepository.prepareNewSnomedMappings(dateTimeService.now(), requestContext.getAccessingUserId());</span>
+    }
+
+    @Nullable
+    private String validateNoExistingMatchesAndSetValidated(int expectedNewMatches) {
+<span class="fc" id="L140">        int newInserts = cmiNewRecordsTempTableRepository.updateRowsSetValidatedWhereNotExistingCodingMatchRecord();</span>
+
+<span class="fc bfc" id="L142" title="All 2 branches covered.">        if (newInserts != expectedNewMatches) {</span>
+<span class="fc" id="L143">            List&lt;String&gt; existingMatchesWithDifferences = cmiNewRecordsTempTableRepository.getDetailsOfExistingMatchesWithDifferences();</span>
+<span class="pc bpc" id="L144" title="1 of 2 branches missed.">            if (!existingMatchesWithDifferences.isEmpty()) {</span>
+<span class="fc" id="L145">                return &quot;Found existing codingmatch records that differ from those provided, found: &quot; + StringUtils.join(existingMatchesWithDifferences, ',');</span>
+            }
+        }
+<span class="fc" id="L148">        return null;</span>
+    }
+
+    private String validateNoBadDuplicates() {
+<span class="fc" id="L152">        List&lt;String&gt; resultList = cmiTransformRepository.selectBadDuplicateDetails();</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">        if (!resultList.isEmpty()) {</span>
+<span class="fc" id="L154">            return &quot;Duplicates found with different privacy/datatype/translation metadata, found duplicates with snomed:read ids: &quot; + StringUtils.join(resultList, ',');</span>
+        }
+<span class="fc" id="L156">        return null;</span>
+    }
+
+    private String validateTestDatatypesHaveLoincTranslation() {
+<span class="fc" id="L160">        List&lt;String&gt; resultList = cmiTransformRepository.selectTestsWithoutTranslations();</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">        if (!resultList.isEmpty()) {</span>
+<span class="fc" id="L162">            return &quot;Found test datatype records without loinc transations, snomeds: &quot; + StringUtils.join(resultList, ',');</span>
+        }
+<span class="fc" id="L164">        return null;</span>
+    }
+
+    private String validateTestDatatypesLinkToValidLoincs() {
+<span class="fc" id="L168">        List&lt;String&gt; resultList = cmiTransformRepository.selectTestsWithoutMatchingLoinc();</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">        if (!resultList.isEmpty()) {</span>
+<span class="fc" id="L170">            return &quot;Found test datatype records without matching loinc record, snomed:translation: &quot; + StringUtils.join(resultList, ',');</span>
+        }
+<span class="fc" id="L172">        return null;</span>
+    }
+
+    private String validateNoExistingDifferentTestDatatypeTranslations() {
+<span class="fc" id="L176">        List&lt;String&gt; resultList = cmiTransformRepository.selectTestsWithDifferentExistingTranslation();</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">        if (!resultList.isEmpty()) {</span>
+<span class="fc" id="L178">            return &quot;Found test datatype records with different existing translations, snomed:proposed-translation:existing-translation: &quot; + StringUtils.join(resultList, ',');</span>
+        }
+<span class="fc" id="L180">        return null;</span>
+    }
+
+    private String loadCsvIntoTempTable(File csv) throws IOException {
+<span class="fc" id="L184">        cmiTransformRepository.createTempTableForTransform();</span>
+
+<span class="fc" id="L186">        try (BufferedReader bufferedReader = new BufferedReader(new FileReader(csv))) {</span>
+<span class="fc" id="L187">            MappingIterator&lt;UnmatchedCodingDetails&gt; rowMapper = buildRowMappingReader(bufferedReader);</span>
+<span class="fc" id="L188">            return loadCsvRecordsToTable(rowMapper);</span>
+        }
+    }
+
+    private MappingIterator&lt;UnmatchedCodingDetails&gt; buildRowMappingReader(BufferedReader bufferedReader) throws IOException {
+<span class="fc" id="L193">        CsvMapper csvMapper = new CsvMapper();</span>
+<span class="fc" id="L194">        csvMapper.registerModule(new Jdk8Module());</span>
+<span class="fc" id="L195">        CsvSchema columns = csvMapper.typedSchemaFor(UnmatchedCodingDetails.class).withHeader();</span>
+<span class="fc" id="L196">        ObjectReader rowReader = csvMapper.readerFor(UnmatchedCodingDetails.class).with(columns);</span>
+
+<span class="fc" id="L198">        return rowReader.readValues(bufferedReader);</span>
+    }
+
+    private String loadCsvRecordsToTable(MappingIterator&lt;UnmatchedCodingDetails&gt; rowMapper) {
+
+        //split into lazily mapped batches
+<span class="fc" id="L204">        Iterable&lt;List&lt;UnmatchedCodingDetails&gt;&gt; batchMapper = Iterables.partition(() -&gt; rowMapper, hibernateJdbcBatchSize);</span>
+        try {
+<span class="fc bfc" id="L206" title="All 2 branches covered.">            for (List&lt;UnmatchedCodingDetails&gt; batch : batchMapper) {</span>
+<span class="fc" id="L207">                List&lt;CodingMatchImportTransformTempTable&gt; batchToSave = batch.stream()</span>
+<span class="fc" id="L208">                        .map(this::convertRowToTempTableEntity)</span>
+<span class="fc" id="L209">                        .collect(toList());</span>
+<span class="fc" id="L210">                cmiTransformRepository.saveAllAndFlush(batchToSave);</span>
+                //clear to ensure we don't cache the batches in memory
+<span class="fc" id="L212">                em.clear();</span>
+<span class="fc" id="L213">            }</span>
+<span class="fc" id="L214">        } catch (Exception e) {</span>
+<span class="fc" id="L215">            LOGGER.error(&quot;Exception saving mapped rows to temp table&quot;, e);</span>
+<span class="fc" id="L216">            return &quot;Failed to map rows, is the CSV in the correct format? Error was: &quot; + e.getMessage();</span>
+<span class="fc" id="L217">        }</span>
+<span class="fc" id="L218">        return null;</span>
+    }
+
+    @NotNull
+    private CodingMatchImportTransformTempTable convertRowToTempTableEntity(UnmatchedCodingDetails ucd) {
+<span class="fc" id="L223">        CodingMatchImportTransformTempTable newCodeToMap = new CodingMatchImportTransformTempTable();</span>
+<span class="fc" id="L224">        newCodeToMap.setSnomedCtConceptId(Long.parseLong(ucd.getCodeId()));</span>
+<span class="fc" id="L225">        newCodeToMap.setDatatypeMapping(ucd.getDatatypeMapping());</span>
+<span class="fc" id="L226">        newCodeToMap.setPrivacyMapping(ucd.getPrivacyMapping());</span>
+<span class="fc" id="L227">        newCodeToMap.setExclude(ucd.getExclude());</span>
+<span class="fc" id="L228">        newCodeToMap.setExclude(ucd.getExclude());</span>
+<span class="fc" id="L229">        newCodeToMap.setLoincTestTranslation(ucd.getLoincTestTranslation());</span>
+<span class="fc" id="L230">        return newCodeToMap;</span>
+    }
+
+    @Value.Immutable
+    public interface CodingMatchValidationResult {
+        @Value.Parameter
+        boolean getSuccessful();
+        @Value.Parameter
+        String getMessage();
+    }
+
+    @Value.Immutable
+    public interface CodingMatchImportResult {
+        @Value.Parameter
+        boolean getSuccessful();
+        @Value.Parameter
+        String getMessage();
+    }
+
+    @VisibleForTesting
+    void setHibernateJdbcBatchSize(int hibernateJdbcBatchSize) {
+<span class="nc" id="L251">        this.hibernateJdbcBatchSize = hibernateJdbcBatchSize;</span>
+<span class="nc" id="L252">    }</span>
+    @VisibleForTesting
+    void setEntityManager(EntityManager em) {
+<span class="nc" id="L255">        this.em = em;</span>
+<span class="nc" id="L256">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

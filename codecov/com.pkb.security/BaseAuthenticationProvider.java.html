@@ -1,0 +1,194 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BaseAuthenticationProvider.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.security</a> &gt; <span class="el_source">BaseAuthenticationProvider.java</span></div><h1>BaseAuthenticationProvider.java</h1><pre class="source lang-java linenums">package com.pkb.security;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.datamodel.Email;
+import com.pkb.entities.enums.LoginAttemptLogResult;
+import com.pkb.kms.shared.representation.KmsError;
+import com.pkb.security.LoginAttemptAuditor.Factory;
+import com.pkb.servlets.filter.PkbAuthenticationToken;
+import io.vavr.Tuple3;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.security.authentication.AuthenticationProvider;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.core.CredentialsContainer;
+import org.springframework.security.core.GrantedAuthority;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+
+import java.lang.invoke.MethodHandles;
+import java.util.Collection;
+import java.util.Optional;
+
+import static com.pkb.entities.enums.LoginAttemptLogResult.FAIL_BAD_USERNAME;
+
+public abstract class BaseAuthenticationProvider&lt;T extends BaseAuthenticationDetails&gt; implements AuthenticationProvider {
+
+    private final Class&lt;T&gt; supportedDetailsClass;
+    private final Factory loginAttemptAuditorFactory;
+<span class="fc" id="L34">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+
+<span class="fc" id="L37">    BaseAuthenticationProvider(Class&lt;T&gt; supportedDetailsClass, Factory loginAttemptAuditorFactory) {</span>
+<span class="fc" id="L38">        this.supportedDetailsClass = supportedDetailsClass;</span>
+<span class="fc" id="L39">        this.loginAttemptAuditorFactory = loginAttemptAuditorFactory;</span>
+<span class="fc" id="L40">    }</span>
+
+    @Override public final Authentication authenticate(Authentication authentication) throws AuthenticationException {
+<span class="fc" id="L43">        return Optional.ofNullable(authentication.getDetails()).map(details -&gt; {</span>
+<span class="fc bfc" id="L44" title="All 2 branches covered.">            if (supportedDetailsClass.isAssignableFrom(details.getClass())) {</span>
+                //noinspection unchecked
+<span class="fc" id="L46">                TypedAuthentication&lt;T&gt; typedAuth = new TypedAuthentication&lt;&gt;((UsernamePasswordAuthenticationToken) authentication);</span>
+<span class="fc" id="L47">                LoginAttemptAuditor loginAttemptAuditor = loginAttemptAuditorFactory.createAuditor(typedAuth.getDetails().getRemoteAddress());</span>
+
+<span class="fc" id="L49">                String principal = typedAuth.getName();</span>
+<span class="fc" id="L50">                String credentials = (String) authentication.getCredentials();</span>
+<span class="pc bpc" id="L51" title="2 of 4 branches missed.">                if (principal.isEmpty() || credentials.isEmpty()) {</span>
+<span class="nc" id="L52">                    throw new BadCredentialsException(&quot;Empty Credentials; failing authentication.&quot;);</span>
+                }
+
+<span class="fc" id="L55">                LoginResultHandler&lt;T&gt; handler = new LoginResultHandler&lt;&gt;(loginAttemptAuditor, typedAuth);</span>
+<span class="fc" id="L56">                return doAuthenticate(typedAuth)</span>
+<span class="fc" id="L57">                        .map(result -&gt; result.apply(handler::handleSuccess))</span>
+<span class="fc" id="L58">                        .getOrElseThrow(handler::handleFailure);</span>
+            }
+<span class="fc" id="L60">            return null;</span>
+<span class="fc" id="L61">        }).orElse(null);</span>
+    }
+
+
+
+    @NotNull
+    protected abstract Either&lt;AuditableLoginException, Tuple3&lt;PersonAuthInfo, Runnable, Runnable&gt;&gt; doAuthenticate(TypedAuthentication&lt;T&gt; authentication);
+
+    @Override public final boolean supports(Class&lt;?&gt; authentication) {
+<span class="fc" id="L70">        return UsernamePasswordAuthenticationToken.class.isAssignableFrom(authentication);</span>
+    }
+
+    private static final class LoginResultHandler&lt;T extends BaseAuthenticationDetails&gt; {
+        private LoginAttemptAuditor auditor;
+        private TypedAuthentication&lt;T&gt; typedAuth;
+
+<span class="fc" id="L77">        private LoginResultHandler(LoginAttemptAuditor auditor, TypedAuthentication&lt;T&gt; typedAuth) {</span>
+<span class="fc" id="L78">            this.auditor = auditor;</span>
+<span class="fc" id="L79">            this.typedAuth = typedAuth;</span>
+<span class="fc" id="L80">        }</span>
+
+        PkbAuthenticationToken handleSuccess(PersonAuthInfo personAuthInfo, Runnable successHandler, Runnable failureHandler) {
+            try {
+<span class="fc" id="L84">                auditor.checkForTooManyRecentLoginAttempts(personAuthInfo.getId());</span>
+            }
+<span class="fc" id="L86">            catch(Exception e) {</span>
+<span class="fc" id="L87">                failureHandler.run();</span>
+<span class="fc" id="L88">                throw e;</span>
+<span class="fc" id="L89">            }</span>
+<span class="fc" id="L90">            auditor.logAttempt(typedAuth.getDetails().getLoginAttemptSuccessResult(), personAuthInfo.getId());</span>
+<span class="fc" id="L91">            successHandler.run();</span>
+<span class="fc" id="L92">            return new PkbAuthenticationToken(personAuthInfo, null, typedAuth.getDetails(), UserTypeToGrantedAuthorityMapper</span>
+<span class="fc" id="L93">                    .getAuthorityList(personAuthInfo.getUserType()));</span>
+        }
+
+        AuthenticationException handleFailure(AuditableLoginException exception) {
+<span class="fc" id="L97">            return exception.audit(auditor);</span>
+        }
+    }
+
+    protected interface AuditableLoginException {
+        AuthenticationException audit(LoginAttemptAuditor auditor);
+    }
+
+    protected static class AuditableUsernameNotFoundException extends UsernameNotFoundException implements AuditableLoginException {
+
+        private final String username;
+
+        AuditableUsernameNotFoundException(String username) {
+<span class="nc" id="L110">            super(&quot;Authentication failed due to unknown username &quot; + username);</span>
+<span class="nc" id="L111">            this.username = username;</span>
+<span class="nc" id="L112">        }</span>
+
+        @Override public AuthenticationException audit(LoginAttemptAuditor auditor) {
+<span class="nc" id="L115">            auditor.logAttempt(FAIL_BAD_USERNAME, null, username);</span>
+<span class="nc" id="L116">            return this;</span>
+        }
+    }
+
+    protected static class AuditableBadCredentialsException extends BadCredentialsException implements AuditableLoginException {
+
+        private long userId;
+        private LoginAttemptLogResult result;
+
+        AuditableBadCredentialsException(long userId, LoginAttemptLogResult result, Throwable cause) {
+<span class="nc" id="L126">            super(&quot;Authentication failed due to invalid credentials for user &quot; + userId, cause);</span>
+<span class="nc" id="L127">            this.userId = userId;</span>
+<span class="nc" id="L128">            this.result = result;</span>
+<span class="nc" id="L129">        }</span>
+
+        AuditableBadCredentialsException(long userId, LoginAttemptLogResult result, KmsError cause) {
+<span class="fc" id="L132">            super(&quot;Authentication failed due to invalid credentials for user &quot; + userId + &quot; with Kms Error &quot; + cause.toString());</span>
+<span class="fc" id="L133">            this.userId = userId;</span>
+<span class="fc" id="L134">            this.result = result;</span>
+<span class="fc" id="L135">        }</span>
+
+        @Override public AuthenticationException audit(LoginAttemptAuditor auditor) {
+<span class="fc" id="L138">            LOGGER.debug(getDebugMessage());</span>
+<span class="fc" id="L139">            auditor.logAttempt(result, userId);</span>
+<span class="fc" id="L140">            return this;</span>
+        }
+
+        private String getDebugMessage() {
+<span class="fc" id="L144">            return Optional.ofNullable(getCause()).map(Throwable::getMessage).orElse(getMessage());</span>
+        }
+    }
+
+    public static final class TypedAuthentication&lt;T extends BaseAuthenticationDetails&gt; implements Authentication, CredentialsContainer {
+
+        private UsernamePasswordAuthenticationToken inner;
+
+        @VisibleForTesting
+<span class="fc" id="L153">        public TypedAuthentication(UsernamePasswordAuthenticationToken inner) {</span>
+<span class="fc" id="L154">            this.inner = inner;</span>
+<span class="fc" id="L155">        }</span>
+
+        @Override public Collection&lt;? extends GrantedAuthority&gt; getAuthorities() {
+<span class="nc" id="L158">            return inner.getAuthorities();</span>
+        }
+
+        @Override public String getCredentials() {
+<span class="fc" id="L162">            return (String) inner.getCredentials();</span>
+        }
+
+        @Override public T getDetails() {
+            //noinspection unchecked
+<span class="fc" id="L167">            return (T) inner.getDetails();</span>
+        }
+
+        @Override public Object getPrincipal() {
+<span class="fc" id="L171">            return inner.getPrincipal();</span>
+        }
+
+        @Override public boolean isAuthenticated() {
+<span class="nc" id="L175">            return inner.isAuthenticated();</span>
+        }
+
+        @Override public void setAuthenticated(boolean isAuthenticated) throws IllegalArgumentException {
+<span class="nc" id="L179">            inner.setAuthenticated(isAuthenticated);</span>
+<span class="nc" id="L180">        }</span>
+
+        @Override public String getName() {
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">            if(this.getPrincipal() instanceof Email) {</span>
+<span class="nc" id="L184">                return ((Email)this.getPrincipal()).asAuthPrincipal();</span>
+            }
+<span class="fc" id="L186">            return inner.getName();</span>
+        }
+
+        @Override public void eraseCredentials() {
+<span class="nc" id="L190">            inner.eraseCredentials();</span>
+<span class="nc" id="L191">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

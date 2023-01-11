@@ -1,0 +1,439 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DownloadFileAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.file</a> &gt; <span class="el_source">DownloadFileAction.java</span></div><h1>DownloadFileAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action.file;
+
+import com.pkb.action.BaseAction;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.document.entity.ChunkedDocDTO;
+import com.pkb.document.entity.DocumentMetadata;
+import com.pkb.file.entity.FileDTO;
+import com.pkb.filesanitizer.FileSanitizer;
+import com.pkb.service.file.ChunkFetchInputStream;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.service.file.FileManager;
+import com.pkb.util.Constants;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.struts2.interceptor.ServletResponseAware;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.servlet.http.HttpServletResponse;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.lang.invoke.MethodHandles;
+import java.time.format.DateTimeFormatter;
+import java.util.Base64;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.regex.Pattern;
+
+/**
+ * @author robwhelan
+ * @author pravina Added code to merge the huge file chunks before it is streamed for download
+ */
+<span class="fc" id="L45">public class DownloadFileAction extends BaseAction implements ServletResponseAware {</span>
+
+    private static final long serialVersionUID = -4168629627225767493L;
+    public static final int SANITY_CHECK_LIMIT_BYTES = 30 * 1024 * 1024;
+
+    private static final int DEFAULT_BUFFER_SIZE = 8192;
+<span class="fc" id="L51">    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern(&quot;_yyyy-MM-dd&quot;).withLocale(Locale.UK).withZone(Constants.APPLICATION_TZ);</span>
+
+<span class="fc" id="L53">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L54">    private static final Pattern RANGE_PATTERN = Pattern.compile(&quot;^bytes=\\d*-\\d*(,\\d*-\\d*)*$&quot;);</span>
+
+    // source file id (only for supporting the test results source files)
+    private Long sourceFileId;
+
+    private UUID parentDocId;
+
+    private String fileName;
+
+    private String downloadFileName;
+
+    private String formattedDate;
+
+    private String contentDisposition;
+
+    private String contentType;
+
+<span class="fc" id="L71">    private Long contentLength = 0L;</span>
+
+    private FileDTO fileDTO;
+
+    private InputStream inputStream;
+
+    private ChunkedDocManager chunkedDocManager;
+
+    private FileManager fileManager;
+
+    private FileSanitizer fileSanitizer;
+
+<span class="fc" id="L83">    private String tab = &quot;files&quot;;</span>
+
+    private HttpServletResponse response;
+
+    private boolean enforceMp4;
+
+    @Override
+    public String execute() {
+        ChunkedDocDTO chunkedDocDTO;
+<span class="fc" id="L92">        LoggedInEHRRequestContext context = getLoggedInEHRRequestContext();</span>
+        try {
+<span class="fc bfc" id="L94" title="All 2 branches covered.">            if (parentDocId == null) {</span>
+<span class="fc" id="L95">                fileManager.getFile(context, sourceFileId, false/*don't fetch contents*/)</span>
+<span class="fc" id="L96">                        .ifPresent(dto -&gt; {</span>
+<span class="fc" id="L97">                    fileName = dto.getFileName();</span>
+<span class="fc" id="L98">                    parentDocId = dto.getDocumentMetadataId();</span>
+<span class="fc" id="L99">                });</span>
+            }
+
+<span class="pc bpc" id="L102" title="1 of 4 branches missed.">            if (parentDocId == null &amp;&amp; fileName == null) {</span>
+<span class="fc" id="L103">                LOGGER.error(&quot;Failed to retrieve file for requestContext {} and sourceFileId {}&quot;, context, sourceFileId);</span>
+<span class="fc" id="L104">                addActionError(getText(&quot;downloadFileAction.err.already_deleted&quot;));</span>
+<span class="fc" id="L105">                return INPUT;</span>
+            }
+
+<span class="fc" id="L108">            formattedDate = dateTimeService.nowLocalDateTime().format(DATE_FORMATTER);</span>
+<span class="fc" id="L109">            chunkedDocDTO = chunkedDocManager.getChunk(context, parentDocId);</span>
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">            if (chunkedDocDTO == null) {</span>
+<span class="nc" id="L111">                addActionError(getText(&quot;downloadFileAction.err.already_deleted&quot;));</span>
+<span class="nc" id="L112">                return INPUT;</span>
+            }
+
+<span class="fc" id="L115">            downloadFileName = buildFileName();</span>
+<span class="fc" id="L116">            ChunkFetchInputStream chunkFetchInputStream = new ChunkFetchInputStream(context, parentDocId, chunkedDocManager);</span>
+<span class="fc" id="L117">            readFullContentLength(chunkFetchInputStream, chunkedDocDTO);</span>
+<span class="fc" id="L118">            byte[] contentBytes = new byte[Math.toIntExact(contentLength)];</span>
+
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">            if (contentLength &lt; (long) SANITY_CHECK_LIMIT_BYTES) {</span>
+<span class="fc" id="L121">                chunkFetchInputStream.read(contentBytes);</span>
+
+<span class="fc" id="L123">                chunkedDocDTO.setMediaType(fileSanitizer.fixMediaType(contentBytes, chunkedDocDTO.getMediaType()));</span>
+
+<span class="fc" id="L125">                inputStream = new ByteArrayInputStream(contentBytes);</span>
+            } else {
+<span class="nc" id="L127">                inputStream = chunkFetchInputStream;</span>
+            }
+
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">            if (enforceMp4) {</span>
+<span class="nc" id="L131">                contentType = &quot;video/mp4&quot;;</span>
+            } else {
+<span class="fc" id="L133">                contentType = chunkedDocDTO.getMediaType();</span>
+            }
+
+<span class="fc" id="L136">            String rangeHeader = request.getHeader(&quot;Range&quot;);</span>
+<span class="fc" id="L137">            LOGGER.info(&quot;The range is {}&quot;, rangeHeader);</span>
+
+<span class="fc bfc" id="L139" title="All 2 branches covered.">            if (StringUtils.isBlank(contentDisposition)) {</span>
+<span class="fc" id="L140">                contentDisposition = &quot;attachment&quot;;</span>
+<span class="fc bfc" id="L141" title="All 2 branches covered.">            } else if (contentDisposition.equals(&quot;base64&quot;)) {</span>
+<span class="fc" id="L142">                contentType = &quot;text/plain&quot;;</span>
+<span class="fc" id="L143">                byte[] base64Content = Base64.getEncoder().encode(contentBytes);</span>
+<span class="fc" id="L144">                inputStream = new ByteArrayInputStream(base64Content);</span>
+<span class="fc" id="L145">                contentLength = (long) base64Content.length;</span>
+            }
+
+<span class="fc bfc" id="L148" title="All 2 branches covered.">            if (rangeHeader == null) {</span>
+<span class="fc" id="L149">                return SUCCESS;</span>
+            }
+
+<span class="fc" id="L152">            Optional&lt;Range&gt; maybeRange = parseRange(rangeHeader);</span>
+
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">            if (maybeRange.isPresent()) {</span>
+<span class="fc" id="L155">                Range range = maybeRange.get();</span>
+<span class="fc" id="L156">                response.reset();</span>
+<span class="fc" id="L157">                response.setBufferSize(DEFAULT_BUFFER_SIZE);</span>
+<span class="fc" id="L158">                response.setHeader(&quot;Content-Type&quot;, contentType);</span>
+<span class="fc" id="L159">                response.setHeader(&quot;Accept-Ranges&quot;, &quot;bytes&quot;);</span>
+
+<span class="fc" id="L161">                try (OutputStream output = response.getOutputStream()) {</span>
+<span class="fc" id="L162">                    LOGGER.info(&quot;Return 1 part of file : from ({}) to ({})&quot;, range.start, range.end);</span>
+<span class="fc" id="L163">                    response.setContentType(contentType);</span>
+<span class="fc" id="L164">                    response.setHeader(&quot;Content-Range&quot;, &quot;bytes &quot; + range.start + &quot;-&quot; + range.end + &quot;/&quot; + range.total);</span>
+<span class="fc" id="L165">                    response.setHeader(&quot;Content-Length&quot;, String.valueOf(range.length));</span>
+<span class="fc" id="L166">                    response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT); // 206.</span>
+
+                    // Copy single part range.
+<span class="fc" id="L169">                    Range.copy(inputStream, output, contentLength, range.start, range.length);</span>
+                }
+
+<span class="fc" id="L172">                return SUCCESS;</span>
+            }
+
+<span class="nc" id="L175">            return ERROR;</span>
+
+<span class="fc" id="L177">        } catch (Exception exception) {</span>
+<span class="fc" id="L178">            throw new RuntimeException(&quot;failed getting document with id &quot; + Optional.ofNullable(parentDocId).map(UUID::toString).orElse(&quot;null&quot;), exception);</span>
+        }
+    }
+
+    public Optional&lt;Range&gt; parseRange(String rangeHeader) throws IOException {
+
+<span class="pc bpc" id="L184" title="1 of 2 branches missed.">        if (!RANGE_PATTERN.matcher(rangeHeader).matches()) {</span>
+<span class="nc" id="L185">            setNotSatisfiableResponseHeaders();</span>
+<span class="nc" id="L186">            return Optional.empty();</span>
+        }
+
+<span class="fc" id="L189">        String part = rangeHeader.substring(6).split(&quot;,&quot;)[0];</span>
+<span class="fc" id="L190">        long start = Range.sublong(part, 0, part.indexOf(&quot;-&quot;));</span>
+<span class="fc" id="L191">        long end = Range.sublong(part, part.indexOf(&quot;-&quot;) + 1, part.length());</span>
+
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">        if (start == -1) {</span>
+<span class="nc" id="L194">            start = contentLength - end;</span>
+<span class="nc" id="L195">            end = contentLength - 1;</span>
+<span class="pc bpc" id="L196" title="3 of 4 branches missed.">        } else if (end == -1 || end &gt; contentLength - 1) {</span>
+<span class="fc" id="L197">            end = contentLength - 1;</span>
+        }
+
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">        if (start &gt; end) {</span>
+<span class="nc" id="L201">            setNotSatisfiableResponseHeaders();</span>
+<span class="nc" id="L202">            return Optional.empty();</span>
+        }
+
+<span class="fc" id="L205">        return Optional.of(new Range(start, end, contentLength));</span>
+
+    }
+
+    private void setNotSatisfiableResponseHeaders() throws IOException {
+<span class="nc" id="L210">        response.setHeader(&quot;Content-Range&quot;, &quot;bytes */&quot; + contentLength);</span>
+<span class="nc" id="L211">        response.sendError(HttpServletResponse.SC_REQUESTED_RANGE_NOT_SATISFIABLE);</span>
+<span class="nc" id="L212">    }</span>
+
+    private void readFullContentLength(ChunkFetchInputStream chunkFetchInputStream, ChunkedDocDTO chunkedDocDTO) {
+<span class="fc" id="L215">        List&lt;UUID&gt; chunkIds = chunkFetchInputStream.getNextChunkQueue();</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">        if (chunkIds.isEmpty()) {</span>
+<span class="fc" id="L217">            contentLength = (long) chunkedDocDTO.getContent().length;</span>
+        } else {
+<span class="fc" id="L219">            int chunkListSize = chunkIds.size();</span>
+<span class="fc" id="L220">            contentLength = (long) (chunkListSize * chunkedDocDTO.getContent().length</span>
+<span class="fc" id="L221">                    + chunkedDocManager.getChunk(getLoggedInEHRRequestContext(), chunkIds.get(chunkIds.size() - 1)).getContent().length);</span>
+        }
+<span class="fc" id="L223">    }</span>
+
+    private static class Range {
+
+        long start;
+        long end;
+        long length;
+        long total;
+
+        /**
+         * Construct a byte range.
+         *
+         * @param start Start of the byte range.
+         * @param end   End of the byte range.
+         * @param total Total length of the byte source.
+         */
+<span class="fc" id="L239">        public Range(long start, long end, long total) {</span>
+<span class="fc" id="L240">            this.start = start;</span>
+<span class="fc" id="L241">            this.end = end;</span>
+<span class="fc" id="L242">            this.length = end - start + 1;</span>
+<span class="fc" id="L243">            this.total = total;</span>
+<span class="fc" id="L244">        }</span>
+
+        public static long sublong(String value, int beginIndex, int endIndex) {
+<span class="fc" id="L247">            String substring = value.substring(beginIndex, endIndex);</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">            return (!substring.isEmpty()) ? Long.parseLong(substring) : -1;</span>
+        }
+
+        private static void copy(InputStream input, OutputStream output, long inputSize, long start, long length) throws IOException {
+<span class="fc" id="L252">            byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];</span>
+            int read;
+
+<span class="fc bfc" id="L255" title="All 2 branches covered.">            if (inputSize == length) {</span>
+                // Write full range.
+<span class="fc bfc" id="L257" title="All 2 branches covered.">                while ((read = input.read(buffer)) &gt; 0) {</span>
+<span class="fc" id="L258">                    output.write(buffer, 0, read);</span>
+<span class="fc" id="L259">                    output.flush();</span>
+                }
+            } else {
+<span class="fc" id="L262">                input.skip(start);</span>
+<span class="fc" id="L263">                long toRead = length;</span>
+
+<span class="pc bpc" id="L265" title="1 of 2 branches missed.">                while ((read = input.read(buffer)) &gt; 0) {</span>
+<span class="fc bfc" id="L266" title="All 2 branches covered.">                    if ((toRead -= read) &gt; 0) {</span>
+<span class="fc" id="L267">                        output.write(buffer, 0, read);</span>
+<span class="fc" id="L268">                        output.flush();</span>
+                    } else {
+<span class="fc" id="L270">                        output.write(buffer, 0, (int) toRead + read);</span>
+<span class="fc" id="L271">                        output.flush();</span>
+<span class="fc" id="L272">                        break;</span>
+                    }
+                }
+            }
+<span class="fc" id="L276">        }</span>
+
+    }
+
+    public String streamVideo() {
+<span class="nc" id="L281">        populateFileDTO();</span>
+<span class="nc" id="L282">        return SUCCESS;</span>
+    }
+
+    public String viewImage() {
+<span class="fc" id="L286">        populateFileDTO();</span>
+<span class="fc" id="L287">        return SUCCESS;</span>
+    }
+
+    public String viewPdf() {
+<span class="fc" id="L291">        populateFileDTO();</span>
+<span class="fc" id="L292">        return SUCCESS;</span>
+    }
+
+    private void populateFileDTO() {
+<span class="fc bfc" id="L296" title="All 2 branches covered.">        if (parentDocId == null) {</span>
+<span class="fc" id="L297">            fileDTO = fileManager.getFile(getLoggedInEHRRequestContext(), sourceFileId, true/*fetchContent*/)</span>
+<span class="fc" id="L298">                    .orElseThrow(() -&gt; new RuntimeException(String.format(&quot;error getting file %s&quot;, sourceFileId)));</span>
+<span class="fc" id="L299">                            fileDTO.setMediaType(fileSanitizer.fixMediaType(fileDTO.getContent(), fileDTO.getMediaType()));</span>
+        } else {
+            // Pravina : Revisit this part of code as it uses FileDTO. We may not be able to fill in all fields through ChunkedDocDTO
+            // FileDTO is not linked to any data point but ChunkedDocDTO is and so doesn't really have same information as FileDTO
+<span class="fc" id="L303">            DocumentMetadata metadata = chunkedDocManager.getMetadata(parentDocId).orElseThrow();</span>
+<span class="fc" id="L304">            fileDTO = new FileDTO(new SourceDetails());</span>
+<span class="fc" id="L305">            fileDTO.setFileName(fileName);</span>
+<span class="fc" id="L306">            fileDTO.setMediaType(metadata.getMediaType());</span>
+<span class="fc" id="L307">            fileDTO.setDocumentMetadataId(metadata.getId());</span>
+        }
+<span class="fc" id="L309">    }</span>
+
+    /**
+     * append the date associated with the file if we can
+     */
+    public String buildFileName() {
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">        if (formattedDate == null) {</span>
+<span class="nc" id="L316">            return fileName;</span>
+        }
+
+<span class="pc bpc" id="L319" title="1 of 2 branches missed.">        String base = StringUtils.isBlank(fileName) ? &quot;UNNAMED&quot; : fileName;</span>
+<span class="fc" id="L320">        int extensionX = base.lastIndexOf('.');</span>
+        String part1, part2;
+<span class="pc bpc" id="L322" title="1 of 2 branches missed.">        if (extensionX &lt; 0) {</span>
+<span class="nc" id="L323">            part1 = base;</span>
+<span class="nc" id="L324">            part2 = &quot;&quot;;</span>
+        } else {
+<span class="fc" id="L326">            part1 = base.substring(0, extensionX);</span>
+<span class="fc" id="L327">            part2 = base.substring(extensionX);</span>
+        }
+
+<span class="fc" id="L330">        return part1 + formattedDate + part2;</span>
+    }
+
+    public void setParentDocId(UUID parentDocId) {
+<span class="fc" id="L334">        this.parentDocId = parentDocId;</span>
+<span class="fc" id="L335">    }</span>
+
+    public String getFileName() {
+<span class="nc" id="L338">        return fileName;</span>
+    }
+
+    public String getContentType() {
+<span class="fc" id="L342">        return contentType;</span>
+    }
+
+    public InputStream getInputStream() {
+<span class="fc" id="L346">        return inputStream;</span>
+    }
+
+    public Long getContentLength() {
+<span class="fc" id="L350">        return contentLength;</span>
+    }
+
+    public void setChunkedDocManager(ChunkedDocManager chunkedDocManager) {
+<span class="fc" id="L354">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L355">    }</span>
+
+    public String getDownloadFileName() {
+<span class="fc" id="L358">        return downloadFileName;</span>
+    }
+
+    public void setDownloadFileName(String downloadFileName) {
+<span class="nc" id="L362">        this.downloadFileName = downloadFileName;</span>
+<span class="nc" id="L363">    }</span>
+
+    public void setFileName(String fileName) {
+<span class="fc" id="L366">        this.fileName = fileName;</span>
+<span class="fc" id="L367">    }</span>
+
+    public void setInputStream(InputStream inputStream) {
+<span class="nc" id="L370">        this.inputStream = inputStream;</span>
+<span class="nc" id="L371">    }</span>
+
+    public String getFormattedDate() {
+<span class="nc" id="L374">        return formattedDate;</span>
+    }
+
+    public void setFormattedDate(String formattedDate) {
+<span class="fc" id="L378">        this.formattedDate = formattedDate;</span>
+<span class="fc" id="L379">    }</span>
+
+    public Long getSourceFileId() {
+<span class="nc" id="L382">        return sourceFileId;</span>
+    }
+
+    public void setSourceFileId(Long sourceFileId) {
+<span class="fc" id="L386">        this.sourceFileId = sourceFileId;</span>
+<span class="fc" id="L387">    }</span>
+
+    public void setFileManager(FileManager fileManager) {
+<span class="fc" id="L390">        this.fileManager = fileManager;</span>
+<span class="fc" id="L391">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L394">        return tab;</span>
+    }
+
+    public void setTab(String tab) {
+<span class="fc" id="L398">        this.tab = tab;</span>
+<span class="fc" id="L399">    }</span>
+
+    public FileDTO getFileDTO() {
+<span class="fc" id="L402">        return fileDTO;</span>
+    }
+
+    public void setFileDTO(FileDTO fileDTO) {
+<span class="nc" id="L406">        this.fileDTO = fileDTO;</span>
+<span class="nc" id="L407">    }</span>
+
+    public String getContentDisposition() {
+<span class="fc" id="L410">        return contentDisposition;</span>
+    }
+
+    public void setContentDisposition(String contentDisposition) {
+<span class="fc" id="L414">        this.contentDisposition = contentDisposition;</span>
+<span class="fc" id="L415">    }</span>
+
+    @Override
+    public HttpServletResponse getResponse() {
+<span class="nc" id="L419">        return response;</span>
+    }
+
+    @Override
+    public void setServletResponse(HttpServletResponse response) {
+<span class="fc" id="L424">        this.response = response;</span>
+<span class="fc" id="L425">    }</span>
+
+    public FileSanitizer getFileSanitizer() {
+<span class="nc" id="L428">        return fileSanitizer;</span>
+    }
+
+    public void setFileSanitizer(FileSanitizer fileSanitizer) {
+<span class="fc" id="L432">        this.fileSanitizer = fileSanitizer;</span>
+<span class="fc" id="L433">    }</span>
+
+    public void setEnforceMp4(boolean enforceMp4) {
+<span class="nc" id="L436">        this.enforceMp4 = enforceMp4;</span>
+<span class="nc" id="L437">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

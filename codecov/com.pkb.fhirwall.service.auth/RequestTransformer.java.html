@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestTransformer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhirwall.service.auth</a> &gt; <span class="el_source">RequestTransformer.java</span></div><h1>RequestTransformer.java</h1><pre class="source lang-java linenums">package com.pkb.fhirwall.service.auth;
+
+import com.google.common.base.Charsets;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import org.springframework.http.server.ServletServerHttpRequest;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.util.UriComponentsBuilder;
+
+import javax.servlet.http.HttpServletRequest;
+import java.util.Arrays;
+import java.util.Optional;
+
+import static com.pkb.fhirwall.service.util.ResourceIdUtil.removeContext;
+import static java.net.URLEncoder.encode;
+import static java.util.regex.Pattern.compile;
+
+/**
+ * Appends additional filters from authorization rules to query parameters
+ */
+public class RequestTransformer {
+
+    private final AccessLogger accessLogger;
+
+<span class="fc" id="L26">    public RequestTransformer(AccessLogger accessLogger) {</span>
+<span class="fc" id="L27">        this.accessLogger = accessLogger;</span>
+<span class="fc" id="L28">    }</span>
+
+    public RequestDetails transform(HttpServletRequest request, AuthzResult authzResult) {
+<span class="fc" id="L31">        var filterParameters = createMapFromFilters(authzResult);</span>
+<span class="fc" id="L32">        var newParameters = applyQueryTransformations(request, filterParameters);</span>
+
+<span class="fc" id="L34">        var newUrl = UriComponentsBuilder.fromPath(removeContext(request.getRequestURI()))</span>
+<span class="fc" id="L35">                .queryParams(newParameters)</span>
+<span class="fc" id="L36">                .build()</span>
+<span class="fc" id="L37">                .toUriString();</span>
+
+<span class="fc" id="L39">        accessLogger.logTransformedUrl(newUrl);</span>
+
+<span class="fc" id="L41">        return ImmutableRequestDetails.builder()</span>
+<span class="fc" id="L42">                .url(newUrl)</span>
+<span class="fc" id="L43">                .build();</span>
+
+    }
+
+    private MultiValueMap&lt;String, String&gt; createMapFromFilters(AuthzResult authzResult) {
+<span class="fc" id="L48">        var builder = UriComponentsBuilder.newInstance();</span>
+<span class="fc" id="L49">        authzResult.filters().forEach(builder::query);</span>
+<span class="fc" id="L50">        return builder.build().getQueryParams();</span>
+    }
+
+    private MultiValueMap&lt;String, String&gt; applyQueryTransformations(
+            HttpServletRequest request,
+            MultiValueMap&lt;String, String&gt; newParameters) {
+
+<span class="fc" id="L57">        var originalRequest = UriComponentsBuilder.fromHttpRequest(new ServletServerHttpRequest(request)).build();</span>
+<span class="fc" id="L58">        var originalParams = originalRequest.getQueryParams();</span>
+<span class="fc" id="L59">        var copy = new LinkedMultiValueMap&lt;&gt;(originalParams);</span>
+<span class="fc" id="L60">        copy.remove(&quot;_format&quot;);</span>
+
+        // If we have the patient resource id in the new parameters, we don't need the chained identifier search
+        // any more so we'll remove it (check using encoded and unencoded string, just to be sure)
+<span class="pc bpc" id="L64" title="1 of 2 branches missed.">        if (newParameters.containsKey(&quot;patient&quot;)) {</span>
+<span class="fc" id="L65">            copy.remove(&quot;actor:Patient.identifier&quot;);</span>
+<span class="fc" id="L66">            copy.remove(encode(&quot;actor:Patient.identifier&quot;, Charsets.UTF_8));</span>
+        }
+
+<span class="fc" id="L69">        var sortParam = generateSortParamIfNecessary(request, originalParams);</span>
+
+
+<span class="fc" id="L72">        var result = new LinkedMultiValueMap&lt;String, String&gt;();</span>
+<span class="fc" id="L73">        result.putAll(newParameters);</span>
+<span class="fc" id="L74">        result.putAll(copy);</span>
+<span class="fc" id="L75">        sortParam.ifPresent(param -&gt; result.add(param._1, param._2));</span>
+<span class="fc" id="L76">        return result;</span>
+    }
+
+    /*
+     * Aidbox adds LIMIT to its queries to the underlying postgres instance, which can become very slow if you don't also
+     * sort by something other than ID, because postgres just scans the table if the limit number is small.
+     */
+    private static Optional&lt;Tuple2&lt;String, String&gt;&gt; generateSortParamIfNecessary(HttpServletRequest request, MultiValueMap&lt;String, String&gt; originalParams) {
+<span class="fc" id="L84">        var pattern = compile(&quot;\\/fhir\\/(\\w+)&quot;);</span>
+<span class="fc" id="L85">        var matcher = pattern.matcher(request.getRequestURI());</span>
+<span class="pc bpc" id="L86" title="2 of 4 branches missed.">        if (matcher.find() &amp;&amp; !originalParams.containsKey(&quot;_sort&quot;)) {</span>
+<span class="fc" id="L87">            var resource = matcher.group(1); //the 0th group is the entire string</span>
+<span class="fc" id="L88">            return Arrays.stream(SupportedResources.values())</span>
+<span class="fc" id="L89">                    .filter(supportedResource -&gt; supportedResource.toString().equalsIgnoreCase(resource))</span>
+<span class="fc" id="L90">                    .findFirst().map(supportedResource -&gt; Tuple.of(&quot;_sort&quot;, supportedResource.getDefaultSortField()));</span>
+        } else {
+<span class="nc" id="L92">            return Optional.empty();</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

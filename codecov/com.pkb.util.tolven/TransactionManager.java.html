@@ -1,0 +1,289 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.util.tolven</a> &gt; <span class="el_source">TransactionManager.java</span></div><h1>TransactionManager.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//------------------------------------------------------------------------------
+package com.pkb.util.tolven;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.exception.PKBException;
+import com.pkb.service.uuid.UUIDProvider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.naming.InitialContext;
+import javax.transaction.HeuristicMixedException;
+import javax.transaction.HeuristicRollbackException;
+import javax.transaction.NotSupportedException;
+import javax.transaction.RollbackException;
+import javax.transaction.Status;
+import javax.transaction.SystemException;
+import javax.transaction.UserTransaction;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.concurrent.Callable;
+
+public class TransactionManager implements ITransactionManager {
+
+<span class="fc" id="L33">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    public static final int DEFAULT_TRANSACTION_TIMEOUT = 0;
+    //this field is modified in arq tests to disable explicit tx management
+<span class="fc" id="L37">    protected static String USER_TRANSACTION_JNDI = &quot;java:jboss/UserTransaction&quot;;</span>
+
+    protected final PhrConfig config;
+    protected final TolvenBeanFactory beanFactory;
+    protected DateTimeService dateTimeService;
+    protected final UUIDProvider uuidProvider;
+
+<span class="fc" id="L44">    public TransactionManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider) {</span>
+<span class="fc" id="L45">        this.config = config;</span>
+<span class="fc" id="L46">        this.beanFactory = beanFactory;</span>
+<span class="fc" id="L47">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L48">        this.uuidProvider = uuidProvider;</span>
+<span class="fc" id="L49">    }</span>
+
+    //Integration tests fiddle with it....
+    @VisibleForTesting
+    public void setDateTimeService(DateTimeService dateTimeService) {
+<span class="nc" id="L54">        this.dateTimeService = dateTimeService;</span>
+<span class="nc" id="L55">    }</span>
+
+    public TolvenBeanFactory getBeanFactory() {
+<span class="fc" id="L58">        return beanFactory;</span>
+    }
+
+    protected PhrConfig getConfig() {
+<span class="fc" id="L62">        return config;</span>
+    }
+
+<span class="fc" id="L65">    private class DefaultTransactionOpened implements TransactionOpened {</span>
+
+        @Override
+        public void close() {
+<span class="nc" id="L69">            rollbackIfNotCommitted();</span>
+<span class="nc" id="L70">        }</span>
+    }
+
+    /**
+     * @deprecated use {@link TransactionManager#transactional(Runnable, Runnable...)}
+     * or {@link TransactionManager#transactional(Callable, Runnable...)} instead.
+     */
+    @Deprecated
+    @Override
+    public TransactionScope beginTransaction() {
+<span class="fc" id="L80">        return beginTransaction(DEFAULT_TRANSACTION_TIMEOUT);</span>
+    }
+
+    @Override
+    public ITransactionManager.TransactionScope beginTransaction(int timeoutSeconds) {
+        try {
+<span class="fc" id="L86">            UserTransaction userTransaction = lookupUserTransaction();</span>
+<span class="fc bfc" id="L87" title="All 2 branches covered.">            if (Status.STATUS_ACTIVE == userTransaction.getStatus()) {</span>
+<span class="fc" id="L88">                traceThread(&quot;Trying to call begin on userTransaction that is already active&quot;);</span>
+<span class="fc" id="L89">                return new NoTransactionOpened(); // somewhere a kitten dies</span>
+            }
+<span class="pc bpc" id="L91" title="1 of 2 branches missed.">            if (timeoutSeconds &gt; 0) {</span>
+<span class="nc" id="L92">                LOGGER.info(&quot;Updating transaction timeout to {}s&quot;, timeoutSeconds);</span>
+<span class="nc" id="L93">                userTransaction.setTransactionTimeout(timeoutSeconds);</span>
+            }
+<span class="fc" id="L95">            userTransaction.begin();</span>
+<span class="fc" id="L96">            LOGGER.debug(&quot;Began transaction&quot;);</span>
+<span class="fc" id="L97">            return new DefaultTransactionOpened();</span>
+<span class="nc" id="L98">        } catch (NotSupportedException | SystemException e) {</span>
+<span class="nc" id="L99">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    /**
+     * @deprecated use {@link TransactionManager#transactional(Runnable, Runnable...)}
+     * or {@link TransactionManager#transactional(Callable, Runnable...)} instead.
+     */
+    @Deprecated
+    @Override
+    public void commitTransaction() {
+        try {
+<span class="fc" id="L111">            UserTransaction userTransaction = lookupUserTransaction();</span>
+<span class="fc" id="L112">            traceThread(String.format(&quot;Trying to call commit on userTransaction[status=%s]&quot;, userTransaction.getStatus()));</span>
+<span class="fc" id="L113">            userTransaction.commit();</span>
+<span class="fc" id="L114">            LOGGER.debug(&quot;Committed transaction&quot;);</span>
+<span class="nc" id="L115">        } catch (SystemException | HeuristicMixedException | HeuristicRollbackException | RollbackException e) {</span>
+            // temporary awful hack 20161121 mvarga (not that it is worse than how it used to be :/)
+<span class="nc" id="L117">            LOGGER.error(&quot;Could not roll back transaction&quot;, e);</span>
+            // throw new RuntimeException(e);
+<span class="fc" id="L119">        }</span>
+<span class="fc" id="L120">    }</span>
+
+    /**
+     * Call from finally block -- if commitTransaction() didn't get called,
+     * that means something broke and we should rollback.
+     * Catches and logs any exception to avoid needing any external error handling.
+     *
+     * @deprecated use {@link TransactionManager#transactional(Runnable, Runnable...)}
+     * or {@link TransactionManager#transactional(Callable, Runnable...)} instead.
+     */
+    @Deprecated
+    @Override
+    public void rollbackIfNotCommitted() {
+        try {
+<span class="fc" id="L134">            UserTransaction userTransaction = lookupUserTransaction();</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">            if (userTransaction != null) {</span>
+<span class="fc" id="L136">                int status = userTransaction.getStatus();</span>
+<span class="pc bpc" id="L137" title="1 of 6 branches missed.">                if (Status.STATUS_ACTIVE == status ||</span>
+                        Status.STATUS_MARKED_ROLLBACK == status ||
+                        Status.STATUS_ROLLEDBACK == status) {
+<span class="fc" id="L140">                    userTransaction.rollback();</span>
+<span class="fc" id="L141">                    traceThread(&quot;rolled-back transaction[status=&quot; + status + &quot;]&quot;);</span>
+                }
+            }
+<span class="nc" id="L144">        } catch (Exception e) {</span>
+<span class="nc" id="L145">            LOGGER.error(&quot;error checking transaction status, or rolling back&quot;, e);</span>
+<span class="fc" id="L146">        }</span>
+<span class="fc" id="L147">    }</span>
+
+    @Override
+    public void ensureValidTransactionStatus() {
+        //throws NotSupportedException, SystemException, NamingException {
+        try {
+<span class="nc" id="L153">            UserTransaction userTransaction = lookupUserTransaction();</span>
+
+<span class="nc" id="L155">            LOGGER.info(&quot;TEST TRANSACTION: status: {}&quot;, userTransaction.getStatus());</span>
+<span class="nc bnc" id="L156" title="All 2 branches missed.">            if (userTransaction.getStatus() == Status.STATUS_MARKED_ROLLBACK) {</span>
+<span class="nc" id="L157">                userTransaction.rollback();</span>
+<span class="nc" id="L158">                LOGGER.info(&quot;TEST TRANSACTION: forced rollback; new status: {}&quot;, userTransaction.getStatus());</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">            } else if (userTransaction.getStatus() == Status.STATUS_ROLLEDBACK) {</span>
+<span class="nc" id="L160">                LOGGER.info(&quot;TRANSACTION: is rolled-back; attempting commit&quot;);</span>
+                try {
+<span class="nc" id="L162">                    userTransaction.commit();</span>
+<span class="nc" id="L163">                    LOGGER.info(&quot;...committed rolled-back transaction: {}&quot;, userTransaction.getStatus());</span>
+<span class="nc" id="L164">                } catch (Exception e) {</span>
+<span class="nc" id="L165">                    LOGGER.info(&quot;TRANSACTION: commit of rolled-back trans FAILED: {}&quot;, userTransaction.getStatus(), e);</span>
+<span class="nc" id="L166">                }</span>
+            }
+<span class="nc" id="L168">        } catch (Exception e) { // wrap, to simplify interface</span>
+<span class="nc" id="L169">            throw new PKBException(e);</span>
+<span class="nc" id="L170">        }</span>
+<span class="nc" id="L171">    }</span>
+
+    public UserTransaction lookupUserTransaction() {
+        try {
+<span class="fc" id="L175">            InitialContext ctx = new InitialContext();</span>
+            try {
+<span class="fc" id="L177">                return ((UserTransaction) (ctx).lookup(USER_TRANSACTION_JNDI));</span>
+            } finally {
+<span class="fc" id="L179">                ctx.close();</span>
+            }
+<span class="nc" id="L181">        } catch (Exception e) { // wrap, to simplify interface</span>
+<span class="nc" id="L182">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    private void traceThread(String msg) {
+<span class="fc" id="L187">        Thread current = Thread.currentThread();</span>
+<span class="fc" id="L188">        StackTraceElement[] traceArr = current.getStackTrace();</span>
+<span class="fc" id="L189">        LOGGER.debug(&quot;TX ({}): {} - from: {}&quot;, current.getName(), msg, traceArr[3].toString());</span>
+<span class="fc" id="L190">    }</span>
+
+    /**
+     * Finds and rolls back any 'dangling' unfinished transactions (either because a a commit/rollback command is missing
+     * or they timed out and were aborted by transaction reaper ) .
+     *
+     * @param transactionSite
+     */
+    @Override
+    public void cleanupTransaction(String transactionSite) {
+
+<span class="fc" id="L201">        UserTransaction userTransaction = null;</span>
+
+        try {
+
+<span class="fc" id="L205">            userTransaction = lookupUserTransaction();</span>
+
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">            if (userTransaction != null &amp;&amp;</span>
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">                    (userTransaction.getStatus() == Status.STATUS_ROLLEDBACK ||</span>
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">                            userTransaction.getStatus() == Status.STATUS_ACTIVE)</span>
+                    &amp;&amp;
+<span class="nc bnc" id="L211" title="All 2 branches missed.">                    userTransaction.getClass().getCanonicalName().equals(&quot;org.jboss.tm.usertx.client.ClientUserTransaction&quot;)) {</span>
+
+<span class="nc" id="L213">                Object context = userTransaction.getClass().getDeclaredMethod(&quot;getTransactionPropagationContext&quot;).invoke(userTransaction);</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">                if (context != null) {</span>
+<span class="nc" id="L215">                    LOGGER.warn(&quot;Rolling back potentially unfinished transaction for {}&quot;, transactionSite);</span>
+<span class="nc" id="L216">                    userTransaction.rollback();</span>
+                }
+            }
+<span class="nc" id="L219">        } catch (IllegalStateException ise) {</span>
+<span class="nc" id="L220">            forceClearOfTransactionContext(userTransaction, ise);</span>
+<span class="nc" id="L221">        } catch (Exception e) {</span>
+            //ignore
+<span class="nc" id="L223">            LOGGER.error(&quot;Error during cleanup&quot;, e);</span>
+<span class="pc" id="L224">        }</span>
+<span class="fc" id="L225">    }</span>
+
+    private void forceClearOfTransactionContext(UserTransaction userTransaction, IllegalStateException ise) {
+
+        try {
+<span class="nc" id="L230">            Object threadInfo = invokePrivate(userTransaction, &quot;getThreadInfo&quot;);</span>
+<span class="nc" id="L231">            invokePrivate(threadInfo, &quot;pop&quot;);</span>
+<span class="nc" id="L232">        } catch (InvocationTargetException | NoSuchMethodException | IllegalAccessException e) {</span>
+<span class="nc" id="L233">            LOGGER.error(&quot;Error during cleanup&quot;, e);</span>
+<span class="nc" id="L234">        }</span>
+<span class="nc" id="L235">    }</span>
+
+    private Object invokePrivate(Object o, String methodName)
+            throws NoSuchMethodException, InvocationTargetException, IllegalAccessException {
+<span class="nc" id="L239">        Method m = o.getClass().getDeclaredMethod(methodName);</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">        if (!m.isAccessible()) {</span>
+<span class="nc" id="L241">            m.setAccessible(true);</span>
+        }
+<span class="nc" id="L243">        return m.invoke(o);</span>
+    }
+
+    @Override
+    public void transactional(Runnable runnable, int timeout, Runnable... errorHandlers) {
+<span class="fc" id="L248">        transactional(() -&gt; {</span>
+<span class="fc" id="L249">            runnable.run();</span>
+            //noinspection ReturnOfNull
+<span class="fc" id="L251">            return null;</span>
+        }, timeout, errorHandlers);
+<span class="fc" id="L253">    }</span>
+
+    @Override
+    public &lt;V&gt; V transactional(Callable&lt;V&gt; callable, Runnable... errorHandlers) {
+<span class="fc" id="L257">        return transactional(callable, DEFAULT_TRANSACTION_TIMEOUT, errorHandlers);</span>
+    }
+
+    @Override
+    public void transactional(Runnable runnable, Runnable... errorHandlers) {
+<span class="fc" id="L262">        transactional(runnable, DEFAULT_TRANSACTION_TIMEOUT, errorHandlers);</span>
+<span class="fc" id="L263">    }</span>
+
+    @Override
+    public &lt;V&gt; V transactional(Callable&lt;V&gt; callable, int timeout, Runnable... errorHandlers) {
+<span class="fc" id="L267">        boolean newTransactionStarted = false;</span>
+        try {
+<span class="fc" id="L269">            TransactionScope transactionScope = beginTransaction(timeout);</span>
+<span class="fc" id="L270">            newTransactionStarted = transactionScope instanceof TransactionOpened;</span>
+<span class="fc" id="L271">            V v = callable.call();</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">            if(newTransactionStarted){</span>
+<span class="fc" id="L273">                commitTransaction();</span>
+            }
+<span class="fc" id="L275">            return v;</span>
+<span class="fc" id="L276">        } catch (RuntimeException exception) {</span>
+<span class="fc" id="L277">            Arrays.stream(errorHandlers).forEach(Runnable::run);</span>
+<span class="fc" id="L278">            throw exception;</span>
+<span class="nc" id="L279">        } catch (Exception exception) {</span>
+<span class="nc" id="L280">            Arrays.stream(errorHandlers).forEach(Runnable::run);</span>
+<span class="nc" id="L281">            throw new RuntimeException(exception);</span>
+        } finally {
+<span class="fc bfc" id="L283" title="All 2 branches covered.">            if(newTransactionStarted){</span>
+<span class="fc" id="L284">                rollbackIfNotCommitted();</span>
+            }
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

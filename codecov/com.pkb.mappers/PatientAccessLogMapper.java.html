@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PatientAccessLogMapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.mappers</a> &gt; <span class="el_source">PatientAccessLogMapper.java</span></div><h1>PatientAccessLogMapper.java</h1><pre class="source lang-java linenums">package com.pkb.mappers;
+
+import com.pkb.app.entity.PatientAuditLog;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.consent.entity.PatientConsentReason;
+import com.pkb.dto.PatientAccessLogDTO;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.PrivacyFlag;
+import org.mapstruct.AfterMapping;
+import org.mapstruct.Mapper;
+import org.mapstruct.Mapping;
+import org.mapstruct.MappingTarget;
+
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+@Mapper(uses = PatientConsentReasonMapper.class)
+<span class="fc" id="L27">public abstract class PatientAccessLogMapper {</span>
+
+    public static final String MENU_DATA_TYPE_FULL_NAME = &quot;com.pkb.entities.enums.MenuDataType.&quot;;
+
+    @Mapping(source = &quot;auditLog.id.accessTime&quot;, target = &quot;accessTime&quot;)
+    @Mapping(source = &quot;auditLog.accessingPersonName&quot;, target = &quot;accessedBy&quot;)
+    @Mapping(source = &quot;reason&quot;, target = &quot;consentChangeReason&quot;)
+    @Mapping(source = &quot;newFlags&quot;, target = &quot;newFlags&quot;)
+    @Mapping(target = &quot;accessType&quot;, ignore = true) // calculated after mapping
+    @Mapping(target = &quot;accessedVia&quot;, ignore = true) // calculated after mapping
+    @Mapping(target = &quot;consentChangeEvent&quot;, ignore = true) // calculated after mapping
+    public abstract PatientAccessLogDTO accessLogToDTO(
+            PatientAuditLog auditLog,
+            PatientConsentReason reason,
+            MappingTextProvider textProvider,
+            Set&lt;PrivacyFlag&gt; newFlags);
+
+    public List&lt;PatientAccessLogDTO&gt; accessLogsToDTOs(
+            List&lt;PatientAuditLog&gt; auditLogs,
+            List&lt;PatientConsentReason&gt; consentChangeReasons,
+            Map&lt;Long, Set&lt;PrivacyFlag&gt;&gt; newFlags,
+            boolean hideOwnAccess,
+            MappingTextProvider textProvider) {
+
+<span class="fc" id="L51">        Map&lt;PatientAuditLog.AuditLogKey, PatientConsentReason&gt; consentChangeReasonMap = auditLogs.stream()</span>
+<span class="fc bfc" id="L52" title="All 2 branches covered.">                .filter(logEntry -&gt; PatientAuditLog.LogType.CONSENT_CHANGE == logEntry.getId().getLogType())</span>
+<span class="fc" id="L53">                .collect(toMap(PatientAuditLog::getId, log -&gt; findCorrespondingReason(log, consentChangeReasons)));</span>
+
+<span class="fc" id="L55">        return auditLogs.stream()</span>
+<span class="fc" id="L56">                .filter(log -&gt; includeInAuditLog(hideOwnAccess, log, consentChangeReasonMap.get(log.getId())))</span>
+<span class="fc" id="L57">                .map(log -&gt; accessLogToDTO(log, consentChangeReasonMap.get(log.getId()), textProvider,</span>
+<span class="fc" id="L58">                        Optional.ofNullable(log.getPrivacyFlagsId()).flatMap(id -&gt; Optional.ofNullable(newFlags.get(id)))</span>
+<span class="fc" id="L59">                                .orElseGet(Collections::emptySet)))</span>
+<span class="fc" id="L60">                .collect(toList());</span>
+    }
+
+    @AfterMapping
+    protected void calculateAdditionalProperties(
+            PatientAuditLog auditLog,
+            PatientConsentReason reason,
+            MappingTextProvider textProvider,
+            @MappingTarget PatientAccessLogDTO result) {
+
+        // This must be set first, since methods below may check this property
+<span class="fc bfc" id="L71" title="All 2 branches covered.">        result.setConsentChangeEvent(PatientAuditLog.LogType.CONSENT_CHANGE == auditLog.getId().getLogType());</span>
+
+<span class="fc" id="L73">        overrideAccessedByIfRequired(auditLog, reason, textProvider, result);</span>
+
+<span class="fc" id="L75">        mapAccessType(auditLog, textProvider, result);</span>
+<span class="fc" id="L76">        mapAccessRoute(auditLog, textProvider, result);</span>
+<span class="fc" id="L77">    }</span>
+
+    /**
+     * accessedBy field defaults to accessingPersonName field from the audit log
+     * entity. However, if the audit log is a consent change or is a change made
+     * by a team pro, we set more information here
+     */
+    private void overrideAccessedByIfRequired(
+            PatientAuditLog auditLog,
+            PatientConsentReason reason,
+            MappingTextProvider textProvider,
+            PatientAccessLogDTO result) {
+
+<span class="fc bfc" id="L90" title="All 2 branches covered.">        if (result.isConsentChangeEvent()) {</span>
+<span class="fc" id="L91">            result.setAccessedBy(reason.getSource().getDisplayText());</span>
+<span class="fc bfc" id="L92" title="All 2 branches covered.">        } else if (auditLog.getAccessingEntityType() == AccessingEntityType.CARER) {</span>
+<span class="fc" id="L93">            String[] args = new String[]{auditLog.getAccessingPersonName()};</span>
+<span class="fc" id="L94">            result.setAccessedBy(textProvider.getText(&quot;accesslog.carer_access_by&quot;, args));</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">        } else if (isNotBlank(auditLog.getTeamName())) {</span>
+<span class="fc" id="L96">            String[] args = new String[]{auditLog.getAccessingPersonName(), auditLog.getTeamName()};</span>
+<span class="fc" id="L97">            result.setAccessedBy(textProvider.getText(&quot;accesslog.team_access_by&quot;, args));</span>
+        }
+<span class="fc" id="L99">    }</span>
+
+    private void mapAccessType(
+            PatientAuditLog auditLog,
+            MappingTextProvider textProvider,
+            PatientAccessLogDTO result) {
+
+<span class="fc bfc" id="L106" title="All 2 branches covered.">        if (isNotEmpty(result.getNewFlags())) {</span>
+<span class="fc" id="L107">            String[] args = new String[]{resolveDataType(auditLog.getDataType().name(), textProvider)};</span>
+<span class="fc" id="L108">            result.setAccessType(textProvider.getText(&quot;accesslog.privacy_change&quot;, args));</span>
+<span class="fc" id="L109">            return;</span>
+        }
+
+<span class="fc bfc" id="L112" title="All 3 branches covered.">        switch (auditLog.getId().getLogType()) {</span>
+            case CONSENT_CHANGE:
+<span class="fc bfc" id="L114" title="All 2 branches covered.">                if (AccessingEntityType.TEAM == auditLog.getAccessingEntityType()) {</span>
+<span class="fc" id="L115">                    String[] args = new String[]{auditLog.getTeamName()};</span>
+<span class="fc" id="L116">                    result.setAccessType(textProvider.getText(&quot;accesslog.consent_changed_for_team&quot;, args));</span>
+<span class="fc" id="L117">                } else {</span>
+<span class="fc" id="L118">                    String[] args = new String[]{auditLog.getAccessingPersonName()};</span>
+<span class="fc" id="L119">                    result.setAccessType(textProvider.getText(&quot;accesslog.consent_changed_for_person&quot;, args));</span>
+                }
+<span class="fc" id="L121">                break;</span>
+            case ACCESS:
+<span class="fc" id="L123">                String[] args = new String[]{resolveDataType(auditLog.getDataType().name(), textProvider)};</span>
+<span class="fc" id="L124">                result.setAccessType(textProvider.getText(&quot;accesslog.data_access&quot;, args));</span>
+<span class="fc" id="L125">                break;</span>
+            default:
+<span class="fc" id="L127">                result.setAccessType(textProvider.getText(&quot;accesslog.log_type.&quot; + auditLog.getId().getLogType().name()));</span>
+                break;
+        }
+
+<span class="fc" id="L131">    }</span>
+
+    private String resolveDataType(String name, MappingTextProvider textProvider) {
+<span class="fc" id="L134">        String resolved = textProvider.getText(MENU_DATA_TYPE_FULL_NAME + name);</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">        return resolved.contains(MENU_DATA_TYPE_FULL_NAME) ? name : resolved;</span>
+    }
+
+    private void mapAccessRoute(
+            PatientAuditLog auditLog,
+            MappingTextProvider textProvider,
+            PatientAccessLogDTO result) {
+
+<span class="fc" id="L143">        String route = auditLog.getRoute().name();</span>
+<span class="fc" id="L144">        StringBuilder sb = new StringBuilder(&quot;accesslog.via.&quot;).append(route);</span>
+
+<span class="fc bfc" id="L146" title="All 2 branches covered.">        if (auditLog.isBreakTheGlassActive()) {</span>
+<span class="fc" id="L147">            sb.append(&quot;.btg&quot;);</span>
+        }
+
+<span class="fc" id="L150">        result.setAccessedVia(textProvider.getText(sb.toString()));</span>
+<span class="fc" id="L151">    }</span>
+
+    private PatientConsentReason findCorrespondingReason(PatientAuditLog auditLog, List&lt;PatientConsentReason&gt; reasons) {
+<span class="fc" id="L154">        return reasons.stream()</span>
+<span class="fc" id="L155">                .filter(r -&gt; Objects.equals(auditLog.getUniqueId(), r.getBaseFields().getUniqueId()))</span>
+<span class="fc" id="L156">                .filter(r -&gt; auditLog.getId().getAccessTime().equals(r.getBaseFields().getPersistedDate()))</span>
+<span class="fc" id="L157">                .findFirst()</span>
+<span class="fc" id="L158">                .orElseGet(() -&gt; new PatientConsentReason(new SourceDetails()));</span>
+    }
+
+    private boolean includeInAuditLog(boolean hideOwnAccess, PatientAuditLog log, PatientConsentReason reason) {
+<span class="fc bfc" id="L162" title="All 2 branches covered.">        return !hideOwnAccess ||</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">                PatientAuditLog.LogType.CONSENT_CHANGE != log.getId().getLogType() ||</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">                !log.getPatientPersonId().equals(reason.getSource().getPersonId());</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

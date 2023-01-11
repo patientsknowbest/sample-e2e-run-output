@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CoreDevicesClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.integration.coredevices</a> &gt; <span class="el_source">CoreDevicesClient.java</span></div><h1>CoreDevicesClient.java</h1><pre class="source lang-java linenums">package com.pkb.integration.coredevices;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.Sets;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.CoreDevicesCredentials;
+import com.pkb.datamodel.ImmutableCoreDevicesCredentials;
+import com.pkb.domain.CoreDevicesCredentialsService;
+import com.pkb.service.uuid.UUIDProvider;
+import io.prometheus.client.Summary;
+import org.jetbrains.annotations.Nullable;
+import org.picketbox.util.StringUtil;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
+
+import javax.json.Json;
+import javax.json.JsonArray;
+import javax.json.JsonObject;
+import javax.json.JsonString;
+import javax.json.JsonStructure;
+import javax.json.JsonValue;
+import javax.ws.rs.HttpMethod;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.StringReader;
+import java.net.HttpURLConnection;
+import java.net.InetSocketAddress;
+import java.net.Proxy;
+import java.net.SocketTimeoutException;
+import java.net.URL;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import static java.time.LocalDateTime.parse;
+
+@Component
+public class CoreDevicesClient{
+
+<span class="fc" id="L55">    private static Summary httpRequestStatistics = Summary.build()</span>
+<span class="fc" id="L56">            .name(&quot;pkb_phr_coredevices_httprequest&quot;)</span>
+<span class="fc" id="L57">            .labelNames(&quot;method&quot;)</span>
+<span class="fc" id="L58">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L59">            .quantile(0.95, 0.01)</span>
+<span class="fc" id="L60">            .help(&quot;Core devices HTTP request seconds&quot;)</span>
+<span class="fc" id="L61">            .register();</span>
+
+<span class="fc" id="L63">    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern(&quot;yyyy-MM-dd'T'HH:mm:ssz&quot;);</span>
+<span class="fc" id="L64">    private static final Set&lt;String&gt; IGNORED_FIELDS = Collections</span>
+<span class="fc" id="L65">            .unmodifiableSet(Sets.newHashSet(&quot;timestamp&quot;, &quot;utc_offset&quot;, &quot;source&quot;, &quot;last_updated&quot;, &quot;source_name&quot;));</span>
+<span class="fc" id="L66">    public static final ZoneId DEVICE_RECORD_TIMEZONE = ZoneId.of(&quot;UTC&quot;);</span>
+
+    private final Logger LOGGER; // Mockito can't mock a static
+<span class="fc" id="L69">    private static final Logger DEFAULT_LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    @Autowired
+    private PhrConfig config;
+
+    @Autowired
+    private DateTimeService dateTimeService;
+
+    @Autowired
+    private UUIDProvider uuidProvider;
+
+    @Autowired
+    private CoreDevicesCredentialsService coreDevicesCredentialsService;
+
+<span class="fc" id="L83">    public CoreDevicesClient() {</span>
+<span class="fc" id="L84">        LOGGER = DEFAULT_LOGGER;</span>
+<span class="fc" id="L85">    }</span>
+
+    @VisibleForTesting
+<span class="nc" id="L88">    public CoreDevicesClient(Logger logger, PhrConfig config, DateTimeService dateTimeService, UUIDProvider uuidProvider) {</span>
+<span class="nc" id="L89">        LOGGER = logger;</span>
+<span class="nc" id="L90">        this.config = config;</span>
+<span class="nc" id="L91">        this.dateTimeService = dateTimeService;</span>
+<span class="nc" id="L92">        this.uuidProvider = uuidProvider;</span>
+<span class="nc" id="L93">    }</span>
+
+    public CoreDevicesCredentials registerPatient(long patientId, String installationId) throws IOException {
+        // Make an opaque user id and send it to CD
+        // They will return a userId of their own + an access token
+        // to be used in all actions on behalf of the patient
+<span class="fc" id="L99">        String opaqueUserId = uuidProvider.randomUUID() + &quot;_&quot; + installationId;</span>
+<span class="fc" id="L100">        String endpoint = config.getValidicURL() + config.getCoreDevicesOrganizationId() + &quot;/users.json&quot;;</span>
+        JsonObject request = Json
+<span class="fc" id="L102">                .createObjectBuilder()</span>
+<span class="fc" id="L103">                .add(&quot;user&quot;, Json.createObjectBuilder()</span>
+<span class="fc" id="L104">                        .add(&quot;uid&quot;, opaqueUserId))</span>
+<span class="fc" id="L105">                .add(&quot;access_token&quot;, config.getCoreDevicesAccessToken())</span>
+<span class="fc" id="L106">                .build();</span>
+<span class="fc" id="L107">        Function&lt;JsonObject, CoreDevicesCredentials&gt; extractCredentials = response -&gt; {</span>
+<span class="fc" id="L108">            JsonObject user = response.getJsonObject(&quot;user&quot;);</span>
+<span class="fc" id="L109">            return ImmutableCoreDevicesCredentials.builder()</span>
+<span class="fc" id="L110">                    .patientId(Long.toString(patientId))</span>
+<span class="fc" id="L111">                    .opaqueId(opaqueUserId)</span>
+<span class="fc" id="L112">                    .coreDevicesUserId(user.getString(&quot;_id&quot;))</span>
+<span class="fc" id="L113">                    .accessToken(user.getString(&quot;access_token&quot;))</span>
+<span class="fc" id="L114">                    .dateCreated(dateTimeService.now())</span>
+<span class="fc" id="L115">                    .build();</span>
+        };
+<span class="fc" id="L117">        return httpRequest(</span>
+                HttpMethod.POST,
+                endpoint,
+                request,
+                extractCredentials,
+<span class="nc" id="L122">                () -&gt; new RuntimeException(</span>
+                        &quot;Unexpected response to provision request for opaqueUserId-&quot; + opaqueUserId + &quot;: missing 'user' field&quot;));
+    }
+
+    public void deregisterPatient(CoreDevicesCredentials credentials) {
+<span class="nc" id="L127">        throw new UnsupportedOperationException(&quot;Not implemented yet&quot;);</span>
+    }
+
+    public List&lt;CoreDevice&gt; fetchAllDevices(CoreDevicesCredentials credentials) throws IOException {
+<span class="fc" id="L131">        return fetchDevices(credentials, false);</span>
+    }
+
+    public List&lt;CoreDevice&gt; fetchConnectedDevices(CoreDevicesCredentials credentials) throws Exception {
+<span class="fc" id="L135">        return fetchDevices(credentials, true);</span>
+    }
+
+    private List&lt;CoreDevice&gt; fetchDevices(CoreDevicesCredentials credentials, boolean connectedOnly) throws IOException {
+<span class="fc" id="L139">        String endpoint = config.getValidicURL() + config.getCoreDevicesOrganizationId() + &quot;/apps.json?&quot; +</span>
+<span class="fc" id="L140">                &quot;authentication_token=&quot; + credentials.getAccessToken().getOrElse(&quot;&quot;) + &quot;&amp;&quot; +</span>
+<span class="fc" id="L141">                &quot;access_token=&quot; + config.getCoreDevicesAccessToken();</span>
+<span class="fc" id="L142">        Function&lt;JsonValue, Optional&lt;CoreDevice&gt;&gt; extractCoreDeviceInfo = jsonValue -&gt; {</span>
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">            if (jsonValue instanceof JsonObject) {</span>
+<span class="fc" id="L144">                JsonObject app = (JsonObject) jsonValue;</span>
+<span class="fc bfc" id="L145" title="All 4 branches covered.">                if (connectedOnly &amp;&amp; StringUtil.isNullOrEmpty(app.getString(&quot;refresh_url&quot;))) {</span>
+<span class="fc" id="L146">                    return Optional.empty();</span>
+                } else {
+<span class="fc bfc" id="L148" title="All 2 branches covered.">                    if(config.getAvailableValidicDevices().contains(app.getString(&quot;name&quot;))){</span>
+<span class="fc" id="L149">                        CoreDevice coreDevice = new CoreDevice();</span>
+<span class="fc" id="L150">                        coreDevice.setName(app.getString(&quot;name&quot;));</span>
+<span class="fc" id="L151">                        coreDevice.setConnectURL(</span>
+<span class="fc" id="L152">                                app.getString(&quot;sync_url&quot;)</span>
+                                        + &quot;&amp;redirect_uri=&quot;
+<span class="fc" id="L154">                                        + config.getBaseURL()</span>
+                                        + &quot;/devices/coreDeviceConnectedCallback.action?&quot;
+<span class="fc" id="L156">                                        + &quot;device=&quot; + coreDevice.getName());</span>
+<span class="fc" id="L157">                        coreDevice.setSyncURL(app.getString(&quot;refresh_url&quot;));</span>
+<span class="fc" id="L158">                        coreDevice.setDisconnectURL(app.getString(&quot;unsync_url&quot;));</span>
+<span class="fc" id="L159">                        return Optional.of(coreDevice);</span>
+                    }else{
+<span class="fc" id="L161">                        return Optional.empty();</span>
+                    }
+
+                }
+            } else {
+<span class="nc" id="L166">                return Optional.empty();</span>
+            }
+        };
+<span class="fc" id="L169">        Function&lt;JsonObject, List&lt;CoreDevice&gt;&gt; extractCoreDeviceList = response -&gt; {</span>
+<span class="fc" id="L170">            Optional&lt;JsonArray&gt; apps = Optional.ofNullable(response.getJsonArray(&quot;apps&quot;));</span>
+<span class="fc" id="L171">            return apps</span>
+<span class="pc" id="L172">                    .orElseThrow(() -&gt; new RuntimeException(&quot;MeasurementCategory apps cannot be found in json!&quot;))</span>
+<span class="fc" id="L173">                    .stream()</span>
+<span class="fc" id="L174">                    .map(extractCoreDeviceInfo)</span>
+<span class="fc" id="L175">                    .filter(Optional::isPresent)</span>
+<span class="fc" id="L176">                    .map(Optional::get)</span>
+<span class="fc" id="L177">                    .collect(Collectors.toList());</span>
+        };
+<span class="fc" id="L179">        return httpRequest(</span>
+                HttpMethod.GET,
+                endpoint,
+                null,
+                extractCoreDeviceList,
+<span class="nc" id="L184">                () -&gt; new RuntimeException(&quot;Error while getting app list for patient-&quot; + credentials.getPatientId()));</span>
+    }
+
+    &lt;T&gt; T httpRequest(String method,
+            String endpoint,
+            @Nullable JsonObject request,
+            Function&lt;JsonObject, T&gt; responseHandler,
+            Supplier&lt;RuntimeException&gt; errorHandler) throws IOException {
+<span class="fc" id="L192">        Summary.Timer timer = httpRequestStatistics.labels(method).startTimer();</span>
+<span class="fc" id="L193">        HttpURLConnection connection = null;</span>
+        try {
+<span class="fc" id="L195">            connection = makeConnection(endpoint);</span>
+<span class="fc" id="L196">            connection.setRequestMethod(method);</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">            if (request != null) {</span>
+<span class="fc" id="L198">                try (OutputStream os = connection.getOutputStream()) {</span>
+<span class="fc" id="L199">                    os.write(request.toString().getBytes());</span>
+                }
+            }
+<span class="fc" id="L202">            JsonStructure responseBody = getJsonStructure(connection);</span>
+<span class="fc" id="L203">            int responseCode = connection.getResponseCode();</span>
+
+<span class="pc bpc" id="L205" title="1 of 4 branches missed.">            if (responseCode &gt;= 200 &amp;&amp; responseCode &lt; 300) {</span>
+<span class="fc" id="L206">                JsonObject response = responseBody.asJsonObject();</span>
+<span class="fc" id="L207">                return responseHandler.apply(response);</span>
+            } else {
+                // Logging the failed request, see PHR-2739 (by @erosb)
+<span class="fc" id="L210">                LOGGER.warn(&quot;request {} {} errored&quot;, method, sanitizeEndpointForLogging(endpoint));</span>
+<span class="fc" id="L211">                String statusMessage = connection.getResponseMessage();</span>
+<span class="fc" id="L212">                Map&lt;String, List&lt;String&gt;&gt; headers = connection.getHeaderFields();</span>
+<span class="fc" id="L213">                LOGGER.warn(&quot;Response: {} {}&quot;, responseCode, statusMessage);</span>
+<span class="fc" id="L214">                LOGGER.warn(&quot;Headers:&quot;);</span>
+<span class="fc bfc" id="L215" title="All 2 branches covered.">                for (Map.Entry&lt;String, List&lt;String&gt;&gt; header : headers.entrySet()) {</span>
+<span class="fc" id="L216">                    String headerName = header.getKey();</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">                    for (String headerValue : header.getValue()) {</span>
+<span class="fc" id="L218">                        LOGGER.warn(&quot;{}: {}&quot;, headerName, headerValue);</span>
+<span class="fc" id="L219">                    }</span>
+<span class="fc" id="L220">                }</span>
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">                if (responseBody instanceof JsonObject) {</span>
+<span class="fc" id="L222">                    int responseSize = ((JsonObject) responseBody).size();</span>
+<span class="fc" id="L223">                    LOGGER.warn(&quot;response body is a JSON object with {} keys&quot;, responseSize);</span>
+<span class="pc bnc" id="L224" title="All 2 branches missed.">                } else if (responseBody instanceof JsonArray) {</span>
+<span class="nc" id="L225">                    int responseSize = ((JsonArray) responseBody).size();</span>
+<span class="nc" id="L226">                    LOGGER.warn(&quot;response body is a JSON array with {} keys&quot;, responseSize);</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">                } else if (JsonValue.NULL.equals(responseBody)) {</span>
+<span class="nc" id="L228">                    LOGGER.warn(&quot;response body is null&quot;);</span>
+                }
+<span class="fc" id="L230">                throw errorHandler.get();</span>
+            }
+<span class="nc" id="L232">        } catch (SocketTimeoutException e) {</span>
+<span class="nc" id="L233">            throw new RuntimeException(String.format(&quot;%s %s timed out&quot;, method, sanitizeEndpointForLogging(endpoint)), e);</span>
+        } finally {
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">            if (connection != null) {</span>
+<span class="fc" id="L236">                connection.disconnect();</span>
+            }
+<span class="fc" id="L238">            timer.observeDuration();</span>
+        }
+    }
+
+    private JsonStructure getJsonStructure(HttpURLConnection connection) throws IOException {
+<span class="fc bfc" id="L243" title="All 2 branches covered.">        if (connection.getResponseCode() &lt; 400) {</span>
+<span class="fc" id="L244">            return Json.createReader(connection.getInputStream()).read();</span>
+        } else {
+<span class="fc" id="L246">            return Json.createReader(connection.getErrorStream()).read();</span>
+        }
+    }
+
+    private String sanitizeEndpointForLogging(String endpoint) {
+<span class="fc" id="L251">        return endpoint.replace(config.getCoreDevicesAccessToken(), &quot;ACCESS-TOKEN&quot;);</span>
+    }
+
+    public CoreDeviceDataBatch fetchData(CoreDevicesCredentials credentials, String category, String device,
+            Date from, @Nullable Date until) throws Exception {
+<span class="fc bfc" id="L256" title="All 2 branches covered.">        String startDate = from == null ? &quot;2000-01-01T00:00:00+00:00&quot;</span>
+<span class="fc" id="L257">                : from.toInstant().atZone(DEVICE_RECORD_TIMEZONE).format(DATE_FORMATTER);</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">        String endDate = (until == null ? Date.from(dateTimeService.now()) : until).toInstant().atZone(DEVICE_RECORD_TIMEZONE).format(DATE_FORMATTER);</span>
+
+<span class="fc" id="L260">        String endpoint = config.getValidicURL() + config.getCoreDevicesOrganizationId() + &quot;/users/&quot; + credentials.getCoreDevicesUserId()</span>
+                + &quot;/&quot; + category + &quot;/latest.json?&quot;
+                +
+                &quot;start_date=&quot; + startDate + &quot;&amp;&quot; +
+                &quot;end_date=&quot; + endDate + &quot;&amp;&quot; +
+                &quot;source=&quot; + device + &quot;&amp;&quot; +
+<span class="fc" id="L266">                &quot;access_token=&quot; + config.getCoreDevicesAccessToken();</span>
+
+<span class="fc" id="L268">        logFetchDataEndpoint(credentials.getCoreDevicesUserId(), endpoint);</span>
+
+<span class="fc" id="L270">        return httpRequest(</span>
+                HttpMethod.GET,
+                endpoint,
+                null,
+                response -&gt; {
+<span class="fc" id="L275">                    logDataBatch(response, credentials);</span>
+<span class="fc" id="L276">                    return parseBatch(response, credentials, category, until);</span>
+                },
+<span class="nc" id="L278">                () -&gt; new RuntimeException(&quot;Could not parse batch&quot;));</span>
+    }
+
+    public CoreDeviceDataBatch parseBatch(JsonObject json, CoreDevicesCredentials credentials, String category,
+            Date until) {
+
+<span class="fc" id="L284">        CoreDeviceDataBatch batch = new CoreDeviceDataBatch();</span>
+<span class="fc" id="L285">        batch.setPatientId(Long.parseLong(credentials.getPatientId()));</span>
+<span class="fc" id="L286">        batch.setBatchTimestamp(until);</span>
+<span class="fc" id="L287">        batch.setRecords(</span>
+<span class="fc" id="L288">                Optional.ofNullable(json</span>
+<span class="fc" id="L289">                        .getJsonArray(category))</span>
+<span class="pc" id="L290">                        .orElseThrow(() -&gt; new RuntimeException(&quot;MeasurementCategory &quot; + category + &quot; cannot be found in json!&quot;))</span>
+<span class="fc" id="L291">                        .stream()</span>
+<span class="fc" id="L292">                        .map(JsonObject.class::cast)</span>
+<span class="fc" id="L293">                        .map(this::parseRecord)</span>
+<span class="fc" id="L294">                        .collect(Collectors.toList()));</span>
+<span class="fc" id="L295">        batch.setOriginalJson(json.toString());</span>
+<span class="fc" id="L296">        batch.setCensoredJson(&quot;&quot;);</span>
+<span class="fc" id="L297">        return batch;</span>
+    }
+
+    public static Instant getRecordTimestamp(String timestamp) {
+<span class="fc" id="L301">        return parse(timestamp, DATE_FORMATTER).atZone(DEVICE_RECORD_TIMEZONE).toInstant();</span>
+    }
+
+    private CoreDeviceDataRecord parseRecord(JsonObject jsonRecord) {
+<span class="fc" id="L305">        CoreDeviceDataRecord record = new CoreDeviceDataRecord();</span>
+<span class="fc" id="L306">        record.setCoreDevicesRecordId(jsonRecord.getString(&quot;_id&quot;));</span>
+<span class="fc" id="L307">        record.setRecordTimestamp(getRecordTimestamp(jsonRecord.getString(&quot;timestamp&quot;)));</span>
+<span class="fc" id="L308">        record.setUtcOffset(jsonRecord.getString(&quot;utc_offset&quot;));</span>
+<span class="fc" id="L309">        record.setSource(jsonRecord.getString(&quot;source&quot;));</span>
+<span class="fc" id="L310">        record.setOriginalJson(jsonRecord.toString());</span>
+<span class="fc" id="L311">        record.setFields(jsonRecord</span>
+<span class="fc" id="L312">                .entrySet()</span>
+<span class="fc" id="L313">                .stream()</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">                .filter(node -&gt; !IGNORED_FIELDS.contains(node.getKey()))</span>
+<span class="fc" id="L315">                .collect(Collectors.toMap(</span>
+                        Map.Entry::getKey,
+<span class="fc bfc" id="L317" title="All 2 branches covered.">                        e -&gt; (e.getValue() instanceof JsonString) ? ((JsonString) e.getValue()).getString() : e.getValue().toString())));</span>
+<span class="fc" id="L318">        return record;</span>
+    }
+
+    public CoreDeviceDataRecord parseRecord(String json) throws Exception {
+<span class="fc" id="L322">        return parseRecord(Json.createReader(new StringReader(json)).readObject());</span>
+    }
+
+    HttpURLConnection makeConnection(String endPoint) throws IOException {
+<span class="fc" id="L326">        URL url = new URL(endPoint);</span>
+        HttpURLConnection uc;
+<span class="pc bpc" id="L328" title="1 of 2 branches missed.">        if (config.isProxyConfigured()) {</span>
+<span class="nc" id="L329">            Proxy proxy = new Proxy(Proxy.Type.HTTP, new InetSocketAddress(config.getProxyHost(), config.getProxyPort()));</span>
+<span class="nc" id="L330">            uc = (HttpURLConnection) url.openConnection(proxy);</span>
+<span class="nc" id="L331">        } else {</span>
+<span class="fc" id="L332">            uc = (HttpURLConnection) url.openConnection();</span>
+        }
+<span class="fc" id="L334">        uc.setRequestProperty(&quot;Content-Type&quot;, &quot;application/json&quot;);</span>
+<span class="fc" id="L335">        uc.setConnectTimeout(config.getValidicConnectionTimeoutMillis());</span>
+<span class="fc" id="L336">        uc.setReadTimeout(config.getValidicReadTimeoutMillis());</span>
+<span class="fc" id="L337">        uc.setDoOutput(true);</span>
+<span class="fc" id="L338">        return uc;</span>
+    }
+
+    public void setConfig(PhrConfig config) {
+<span class="fc" id="L342">        this.config = config;</span>
+<span class="fc" id="L343">    }</span>
+
+    //
+    // PHR-9688 - TEMPORARILY (3/3/22) log message bodies for a specified test patient
+    // It is safe to log the entire body since all auth happens through the headers
+    //
+
+    public void logPushNotification(Notification notification) {
+<span class="pc bpc" id="L351" title="3 of 4 branches missed.">        if (config.isValidicLoggingEnabledForDeviceTester() &amp;&amp; config.getDeviceTesterValidicId().equals(notification.getCoreDevicesUserId())) {</span>
+<span class="nc" id="L352">            LOGGER.info(&quot;PHR-9688: push notication: {}&quot;, notification.getOriginalJson());</span>
+        }
+<span class="fc" id="L354">    }</span>
+
+    private void logFetchDataEndpoint(String validicId, String endpoint) {
+<span class="pc bpc" id="L357" title="3 of 4 branches missed.">        if (config.isValidicLoggingEnabledForDeviceTester() &amp;&amp; config.getDeviceTesterValidicId().equals(validicId)) {</span>
+<span class="nc" id="L358">            LOGGER.info(&quot;PHR-9688: GETting data from {}&quot;, endpoint);</span>
+        }
+<span class="fc" id="L360">    }</span>
+
+    private void logDataBatch(JsonObject json, CoreDevicesCredentials credentials) {
+<span class="pc bpc" id="L363" title="3 of 4 branches missed.">        if (config.isValidicLoggingEnabledForDeviceTester() &amp;&amp; config.getDeviceTesterValidicId().equals(credentials.getCoreDevicesUserId())) {</span>
+<span class="nc" id="L364">            LOGGER.info(&quot;PHR-9688: Pulled data {}&quot;, json.toString());</span>
+        }
+<span class="fc" id="L366">    }</span>
+
+    public List&lt;String&gt; getProvisionedCoreDeviceUserId() throws IOException {
+<span class="fc" id="L369">        String endpoint = config.getValidicURL() + config.getCoreDevicesOrganizationId() + &quot;/users.json?&quot; +</span>
+<span class="fc" id="L370">                &quot;access_token=&quot; + config.getCoreDevicesAccessToken() + &quot;&amp;&quot; + &quot;status=provisioned&quot;;</span>
+
+<span class="fc" id="L372">        Function&lt;JsonObject, List&lt;String&gt;&gt; extractProvisionedUsers = response -&gt; {</span>
+<span class="fc" id="L373">            List&lt;String&gt; provisionedCoreDeviceUserIds = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L374">            Optional&lt;JsonArray&gt; users = Optional.ofNullable(response.getJsonArray(&quot;users&quot;));</span>
+<span class="fc" id="L375">            users.ifPresent(provUsers -&gt; {</span>
+<span class="fc" id="L376">                provUsers.forEach(user -&gt; {</span>
+<span class="fc" id="L377">                    provisionedCoreDeviceUserIds.add(user.asJsonObject().getString(&quot;_id&quot;));</span>
+<span class="fc" id="L378">                });</span>
+<span class="fc" id="L379">            });</span>
+
+<span class="fc" id="L381">            return provisionedCoreDeviceUserIds;</span>
+        };
+
+<span class="fc" id="L384">        return httpRequest(</span>
+                HttpMethod.GET,
+                endpoint,
+                null,
+                extractProvisionedUsers,
+<span class="nc" id="L389">                () -&gt; new RuntimeException(&quot;Unexpected response for getting provisioned Validic users.&quot;));</span>
+
+    }
+
+
+
+    @Transactional
+    public void removeProvisionedUserFromValidicAndPHR(String provisionedCoreDeviceUserId) throws RuntimeException {
+<span class="fc" id="L397">        Optional&lt;String&gt; deletedCoreDeviceUser = coreDevicesCredentialsService.deleteCoreDevicesCredentialsIfOlderThan(provisionedCoreDeviceUserId,</span>
+<span class="fc" id="L398">                dateTimeService.now().minus(config.getValidicProvisionedUsersMaturityMins(), ChronoUnit.MINUTES));</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">        if (deletedCoreDeviceUser.isPresent()) {</span>
+<span class="fc" id="L400">            LOGGER.info(&quot;Deletion of Local Validic user {} : Ok&quot;, deletedCoreDeviceUser);</span>
+<span class="fc" id="L401">            String endpoint = config.getValidicURL() + config.getCoreDevicesOrganizationId() + &quot;/users/&quot; + deletedCoreDeviceUser.get();</span>
+            JsonObject request = Json
+<span class="fc" id="L403">                    .createObjectBuilder()</span>
+<span class="fc" id="L404">                    .add(&quot;access_token&quot;, config.getCoreDevicesAccessToken())</span>
+<span class="fc" id="L405">                    .build();</span>
+
+<span class="fc" id="L407">            Function&lt;JsonObject, String&gt; extractMessage = response -&gt; {</span>
+<span class="fc" id="L408">                LOGGER.info(&quot;Deletion of Validic user {} : {}&quot;, provisionedCoreDeviceUserId, response.getString(&quot;message&quot;));</span>
+<span class="fc" id="L409">                return response.getString(&quot;message&quot;);</span>
+            };
+
+
+            try {
+<span class="fc" id="L414">                httpRequest(</span>
+                        HttpMethod.DELETE,
+                        endpoint,
+                        request,
+                        extractMessage,
+<span class="fc" id="L419">                        () -&gt; new RuntimeException(</span>
+                                &quot;Unexpected response for deleting Validic user: &quot; + provisionedCoreDeviceUserId + &quot;.&quot;));
+<span class="nc" id="L421">            } catch (IOException e) {</span>
+<span class="nc" id="L422">                throw new RuntimeException(e);</span>
+<span class="fc" id="L423">            }</span>
+
+
+        }
+<span class="fc" id="L427">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,203 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SSOService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.kms.service</a> &gt; <span class="el_source">SSOService.kt</span></div><h1>SSOService.kt</h1><pre class="source lang-java linenums">package com.pkb.kms.service
+
+import com.pkb.common.datetime.DateTimeService
+import com.pkb.crypto.SSOCryptoHelper
+import com.pkb.crypto.SSOCryptoHelper.SSOCryptoWrapper
+import com.pkb.crypto.SymmetricKey
+import com.pkb.crypto.UserPrivateKey
+import com.pkb.crypto.dto.AccountKeysDTO
+import com.pkb.crypto.dto.AccountSymmetricKeyDTO
+import com.pkb.crypto.dto.UserPrivateKeyDTO
+import com.pkb.datamodel.entity.mapper.EncryptedWrapperEntityMapper
+import com.pkb.entities.embeddables.EncryptedWrapper
+import com.pkb.entities.enums.SSOType
+import com.pkb.entities.pub.PublicSSOAuthRecord
+import com.pkb.entities.pub.PublicSSOCredential
+import com.pkb.kms.service.cache.AccountCacheService
+import com.pkb.kms.service.cache.UserCacheService
+import com.pkb.kms.service.cache.UserPrivateKeyCacheService
+import com.pkb.kms.service.repository.SSOAuthRecordRepository
+import com.pkb.kms.service.repository.SSOCredentialRepository
+import com.pkb.kms.shared.representation.AccountIds
+import com.pkb.kms.shared.representation.KmsError
+import com.pkb.kms.shared.representation.KmsError.Companion.ssoDecryptionFailed
+import com.pkb.kms.shared.representation.PersonPublicId
+import io.vavr.Tuple
+import io.vavr.control.Either
+import io.vavr.control.Option
+import io.vavr.kotlin.Try
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
+import java.lang.invoke.MethodHandles
+import java.security.SecureRandom
+import java.util.Base64
+
+/**
+ * Provides the core implementation of the EMIS and SystmOne-specific SSO flows. These
+ * integrations have their own, completely custom implementation of SSO as mandated by
+ * EMIS/TPP respectively.
+ *
+ * The whole workflow  is pretty nuts - especially the EMIS version. Rather than
+ * attempting to explain the whole lot in javadoc, I direct interested parties (with
+ * fair warning for the likely damage to your sanity and willingness to continue being
+ * a software developer) to the documentation for
+ * &lt;a href=&quot;https://pkbdev.atlassian.net/wiki/spaces/TECHNOLOGY/pages/1253113992/SystmOne+SSO+Project&quot;&gt;SystmOne&lt;/a&gt;
+ * and &lt;a href=&quot;https://pkbdev.atlassian.net/wiki/spaces/TECHNOLOGY/pages/2825184/EMIS+SSO+Workflows&quot;&gt;EMIS&lt;/a&gt;
+ */
+<span class="fc" id="L49">@Service</span>
+<span class="fc" id="L50">class SSOService(</span>
+<span class="fc" id="L51">    private val userPrivateKeyCache: UserPrivateKeyCacheService,</span>
+<span class="fc" id="L52">    private val ssoCryptoHelper: SSOCryptoHelper,</span>
+<span class="fc" id="L53">    private val ssoAuthRecordRepository: SSOAuthRecordRepository,</span>
+<span class="fc" id="L54">    private val dateTimeService: DateTimeService,</span>
+<span class="fc" id="L55">    private val accountSymmetricKeyService: AccountSymmetricKeyService,</span>
+<span class="fc" id="L56">    private val userCacheService: UserCacheService,</span>
+<span class="fc" id="L57">    private val accountCacheService: AccountCacheService,</span>
+<span class="fc" id="L58">    private val ssoCredentialRepository: SSOCredentialRepository,</span>
+<span class="fc" id="L59">    private val accountKeyService: AccountKeyService,</span>
+<span class="fc" id="L60">    private val random: SecureRandom</span>
+) {
+<span class="fc" id="L62">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    fun ssoLogin(personPublicId: PersonPublicId, keyString: String, ssoType: SSOType): Either&lt;KmsError, UserPrivateKeyDTO&gt; =
+<span class="fc" id="L65">        userPrivateKeyCache.findUserPrivateKeyWithSSOKey(personPublicId, keyString, ssoType)</span>
+<span class="fc" id="L66">            .map(UserPrivateKeyDTO::userPrivateKeyDTO)</span>
+
+
+    @Transactional
+    fun createSSOCredential(personPublicId: PersonPublicId, ssoPassword: String, ssoType: SSOType): Either&lt;KmsError, Void&gt; =
+<span class="fc" id="L71">        userCacheService.findPerson(personPublicId)</span>
+<span class="fc" id="L72">            .flatMap { person -&gt; accountCacheService.findDefaultAccountForPerson(personPublicId).map { account -&gt; Tuple.of(person, account) } }</span>
+<span class="fc" id="L73">            .flatMap { personAndAccount -&gt;</span>
+<span class="fc" id="L74">                deleteAllOldSSOAuthInfo(personPublicId, ssoType)</span>
+<span class="fc" id="L75">                accountSymmetricKeyService.getAnyAccountSymmetricKey(personAndAccount._2.publicId)</span>
+<span class="fc" id="L76">                    .map { key -&gt;</span>
+<span class="fc" id="L77">                        PublicSSOCredential().apply {</span>
+<span class="fc" id="L78">                            this.personPublicId = personPublicId</span>
+<span class="fc" id="L79">                            createdOn = dateTimeService.now()</span>
+<span class="fc" id="L80">                            ssoPasswordEncryptedData = encryptSSOPassword(ssoPassword, key)</span>
+<span class="fc" id="L81">                            this.ssoType = ssoType</span>
+<span class="fc" id="L82">                        }</span>
+<span class="fc" id="L83">                            .let(ssoCredentialRepository::save)</span>
+                    }
+<span class="fc" id="L85">                    .map { null }</span>
+<span class="fc" id="L86">            }</span>
+
+    @Transactional
+    fun createSSOAuthRecord(personPublicId: PersonPublicId, ssoPassword: String, ssoType: SSOType): Either&lt;KmsError, Void&gt; =
+<span class="fc" id="L90">        userCacheService.findPerson(personPublicId)</span>
+<span class="fc" id="L91">            .flatMap { person -&gt;</span>
+<span class="fc" id="L92">                deleteAllOldSSOAuthInfo(personPublicId, ssoType)</span>
+<span class="fc" id="L93">                userPrivateKeyCache.getCachedUserPrivateKey(person.publicId)</span>
+<span class="fc" id="L94">                    .flatMap {</span>
+<span class="fc" id="L95">                        Try { createAndSaveSsoAuthRecord(it, personPublicId, ssoPassword, ssoType) }</span>
+<span class="fc" id="L96">                            .toEither()</span>
+<span class="pc bnc" id="L97" title="All 2 branches missed.">                            .mapLeft { KmsError(&quot;sso.credential.save.error&quot;, it.message ?: &quot;Error saving SSO credential&quot;, KmsError.Type.UNEXPECTED) }</span>
+                    }
+<span class="fc" id="L99">                    .map { null }</span>
+<span class="fc" id="L100">            }</span>
+
+    private fun deleteAllOldSSOAuthInfo(personPublicId: PersonPublicId, ssoType: SSOType) {
+<span class="fc" id="L103">        ssoCredentialRepository.deleteOldSSOCredential(personPublicId, ssoType)</span>
+<span class="fc" id="L104">        ssoAuthRecordRepository.deleteOldSSOAuthRecord(personPublicId, ssoType)</span>
+<span class="fc" id="L105">    }</span>
+
+
+    private fun encryptSSOPassword(ssoPassword: String, key: AccountSymmetricKeyDTO): EncryptedWrapper =
+<span class="fc" id="L109">        EncryptedWrapperEntityMapper.generateEncryptedWrapper(random, Tuple.of(key.keyId, SymmetricKey.symmetricKey(key)), ssoPassword)</span>
+
+
+    private fun createAndSaveSsoAuthRecord(userPrivateKey: UserPrivateKey, personPublicId: PersonPublicId, key: String, ssoType: SSOType) {
+<span class="pc bpc" id="L113" title="1 of 3 branches missed.">        val authRecord: PublicSSOAuthRecord = when (ssoType) {</span>
+<span class="fc" id="L114">            SSOType.EMIS -&gt; createSsoAuthRecordEmis(userPrivateKey, personPublicId, key)</span>
+<span class="fc" id="L115">            SSOType.SYSTMONE -&gt; createSSOAuthRecordSystmOne(personPublicId, key, userPrivateKey)</span>
+<span class="nc" id="L116">            SSOType.UNKNOWN -&gt; throw RuntimeException(&quot;Unknown sso type&quot;)</span>
+        }
+
+<span class="fc" id="L119">        ssoAuthRecordRepository.save(authRecord)</span>
+<span class="fc" id="L120">    }</span>
+
+    private fun createSsoAuthRecordEmis(userPrivateKey: UserPrivateKey, personPublicId: PersonPublicId, emisKey: String): PublicSSOAuthRecord {
+<span class="fc" id="L123">        val pkbKey = ByteArray(emisKey.toByteArray().size)</span>
+<span class="fc" id="L124">        random.nextBytes(pkbKey)</span>
+
+<span class="fc" id="L126">        return createSSOAuthRecord(ssoCryptoHelper.getCryptoWrapper(emisKey, pkbKey), personPublicId, userPrivateKey, SSOType.EMIS)</span>
+<span class="fc" id="L127">            .apply {</span>
+<span class="fc" id="L128">                pkbKeyBase64 = Base64.getEncoder().encodeToString(pkbKey)</span>
+<span class="fc" id="L129">            }</span>
+
+
+    }
+
+    private fun createSSOAuthRecordSystmOne(personPublicId: PersonPublicId, ssoPassword: String, userPrivateKey: UserPrivateKey): PublicSSOAuthRecord {
+<span class="fc" id="L135">        return createSSOAuthRecord(ssoCryptoHelper.getCryptoWrapper(ssoPassword), personPublicId, userPrivateKey, SSOType.SYSTMONE)</span>
+    }
+
+    private fun createSSOAuthRecord(wrapper: SSOCryptoWrapper, personPublicId: PersonPublicId, userPrivateKey: UserPrivateKey, ssoType: SSOType) =
+<span class="fc" id="L139">        PublicSSOAuthRecord()</span>
+<span class="fc" id="L140">            .apply {</span>
+<span class="fc" id="L141">                createdOn = dateTimeService.now()</span>
+<span class="fc" id="L142">                this.personPublicId = personPublicId</span>
+<span class="fc" id="L143">                saltBase64 = Base64.getEncoder().encodeToString(wrapper.salt)</span>
+<span class="fc" id="L144">                encryptedPrivateKeyBase64 = Base64.getEncoder().encodeToString(wrapper.encryptPrivateKey(userPrivateKey).encryptedKeyBytes)</span>
+<span class="fc" id="L145">                iterationCount = wrapper.iterationCount</span>
+<span class="fc" id="L146">                this.ssoType = ssoType</span>
+<span class="fc" id="L147">            }</span>
+
+    fun ssoAuthRecordExistsFor(personPublicId: PersonPublicId, ssoType: SSOType): Boolean =
+<span class="fc" id="L150">        ssoAuthRecordRepository.getByPersonPublicIdAndSsoType(personPublicId, ssoType).isPresent</span>
+
+    fun credentialStatus(personPublicId: PersonPublicId): Set&lt;SSOType&gt; =
+<span class="fc" id="L153">        (ssoAuthRecordRepository.getByPersonPublicId(personPublicId).map(PublicSSOAuthRecord::getSsoType) +</span>
+<span class="fc" id="L154">                ssoCredentialRepository.getByPersonPublicId(personPublicId).map(PublicSSOCredential::getSsoType))</span>
+<span class="fc" id="L155">        .toSet()</span>
+
+    fun emisKeyValid(personPublicId: PersonPublicId, passwordHash: String): Boolean {
+<span class="fc" id="L158">        return getEmisCredentialPassword(personPublicId)</span>
+<span class="fc" id="L159">            .map { s -&gt; ssoCryptoHelper.validateEMISSSOPassword(s, passwordHash) }.getOrElse(false)</span>
+    }
+
+
+    private fun getEmisCredentialPassword(
+        personPublicId: PersonPublicId
+    ): Either&lt;KmsError, String&gt; {
+<span class="fc" id="L166">        return Option.ofOptional(ssoCredentialRepository.getByPersonPublicIdAndSsoType(personPublicId,  SSOType.EMIS)).toEither(KmsError.ssoCredentialNotFound(personPublicId))</span>
+<span class="fc" id="L167">            .flatMap { ssoCredential -&gt; accountCacheService.findDefaultAccountForPerson(personPublicId).map{ Tuple.of(ssoCredential, it)} }</span>
+<span class="fc" id="L168">            .flatMap { credsAndAccountIds -&gt; accountKeyService.getAccountKeys(credsAndAccountIds._2.publicId).map(credsAndAccountIds::append) }</span>
+<span class="fc" id="L169">            .flatMap { credsAccountIdsAndKeys -&gt; credsAccountIdsAndKeys.apply(this::getSymmetricKey).map{ Tuple.of(credsAccountIdsAndKeys._1, it)} }</span>
+<span class="fc" id="L170">            .flatMap { it.apply(this::decryptSSOPassword) }</span>
+    }
+
+    private fun getSymmetricKey(ssoCredential: PublicSSOCredential,  accountIds: AccountIds, accountKeys: AccountKeysDTO): Either&lt;KmsError, SymmetricKey&gt; =
+<span class="fc" id="L174">        Option.ofOptional(accountKeys.getSymmetricKey(ssoCredential.ssoPasswordEncryptedData.symmetricEncryptionKeyId).map(SymmetricKey::symmetricKey))</span>
+<span class="fc" id="L175">            .toEither(KmsError.symmetricKeyNotFound(accountIds.publicId))</span>
+
+    private fun decryptSSOPassword(entity: PublicSSOCredential, symmetricKey: SymmetricKey): Either&lt;KmsError, String&gt; {
+
+<span class="fc" id="L179">        val ssoPasswordEncryptedData = entity.ssoPasswordEncryptedData</span>
+
+        //We're NOT migrating legacy credentials which do not have a nonce, e.g. those encrypted with DESede.
+        // If we ever did, this method could simply change to pass in a null nonce and everything would work fine.
+<span class="fc" id="L183">        return Try {</span>
+<span class="fc" id="L184">            symmetricKey.decrypt(</span>
+<span class="fc" id="L185">                ssoPasswordEncryptedData.encryptedData,</span>
+<span class="fc" id="L186">                Base64.getDecoder().decode(ssoPasswordEncryptedData.nonceBase64),</span>
+<span class="fc" id="L187">                ssoPasswordEncryptedData.cipherAlgorithm</span>
+            )
+<span class="fc" id="L189">                .let{ String(it) }</span>
+<span class="pc" id="L190">        }.toEither{KmsError.ssoDecryptionFailed(entity.personPublicId)}</span>
+    }
+
+
+<span class="fc" id="L194">    private fun KmsError.Companion.ssoCredentialNotFound(personPublicId: PersonPublicId) = KmsError(</span>
+<span class="fc" id="L195">        &quot;sso.credential.not.found&quot;,</span>
+<span class="fc" id="L196">        &quot;SSO credential for personPublicId $personPublicId not found&quot;,</span>
+<span class="fc" id="L197">        KmsError.Type.NOT_FOUND)</span>
+
+
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

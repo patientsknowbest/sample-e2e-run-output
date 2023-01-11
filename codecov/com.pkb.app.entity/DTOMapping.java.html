@@ -1,0 +1,539 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DTOMapping.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.app.entity</a> &gt; <span class="el_source">DTOMapping.java</span></div><h1>DTOMapping.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: PKBMenuQueryControl.java Jul 17, 2009 9:20:13 PM pravinam$
+//
+//------------------------------------------------------------------------------
+package com.pkb.app.entity;
+
+import com.pkb.annotation.EHRField;
+import com.pkb.annotation.EHRField.QueryField;
+import com.pkb.annotation.EHRField.ValueDTOType;
+import com.pkb.annotation.EHRMigration;
+import com.pkb.annotation.EHRMigratorBase;
+import com.pkb.annotation.EncryptedFieldMigration;
+import com.pkb.annotation.Migrate;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.Nullable;
+
+import java.io.Externalizable;
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectOutput;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Each DTO's fields are mapped to fields in the EHRData entity, AND database columns (for native queries).
+ * We build these lookup maps once per DTO, and then cache them in EHRBean.
+ * &lt;p&gt;
+ * Handling details:
+ * We capture the DTO's empty constructor method, and flag if this is a nested DTO or not. Can't be both.
+ * &lt;p&gt;
+ * Also data migration required -- at field level (deprecate?) or via Migrator interface impl
+ * &lt;p&gt;
+ * For all fields:
+ * fieldToTypeMap: e.g., &quot;diagnosis&quot; -&gt; java.lang.String. No dot notation for fields in nested DTOs.
+ * &lt;p&gt;
+ * For stored-encrypted fields:
+ * set of encrypted field names -- NO dot notation for fields of nested DTOs
+ * encFieldGettersMap
+ * encFieldSettersMap
+ * (if value is EHR-annotated) fieldToNestedDtoMappingMap -- fetch the DTOMapping of the nested DTO here
+ * &lt;p&gt;
+ * For queryable fields:
+ * set of queryable field names -- using dot notation for queryable fields from nested DTOs
+ * fieldToQueryFieldMap -- from the annotation
+ * fieldToDbColumnMap -- used EHRData to map queryField to DB column
+ * queryFieldGettersMap
+ * queryFieldSettersMap
+ *
+ * @author robwhelan
+ */
+public final class DTOMapping&lt;D&gt; implements Externalizable {
+    private static final long serialVersionUID = 1L;
+
+    // STATIC CACHE: load as mappings are requested
+<span class="fc" id="L72">    private static Map&lt;String, DTOMapping&gt; mappingCache = new ConcurrentHashMap&lt;&gt;();</span>
+
+    // data &amp; maps for this DTO
+<span class="fc" id="L75">    private Class&lt;D&gt; dtoClass = null;</span>
+<span class="fc" id="L76">    private boolean nested = false; // is this a DTO nested in top-level DTOs?  &quot;Sometimes&quot; is not supported.</span>
+
+    // Constructor isn't serializable, all the rest of these fields are derived from the  
+    // dtoClass and nested members.
+<span class="fc" id="L80">    private Constructor&lt;D&gt; dtoConstructor = null;</span>
+<span class="fc" id="L81">    private Map&lt;String, QueryField&gt; fieldToQueryFieldMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L82">    private Map&lt;String, String&gt; fieldToDbColumnMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L83">    private Map&lt;String, Type&gt; fieldToTypeMap = new HashMap&lt;&gt;(); // Type interface -- not Class -- so we can get parametrized collections</span>
+<span class="fc" id="L84">    private Map&lt;String, DTOMapping&gt; fieldToFlattenedDtoMappingMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L85">    private Map&lt;String, DTOMapping&gt; fieldToNestedDtoMappingMap = new HashMap&lt;&gt;();</span>
+
+    // reflection, pre-loaded!  Accessors for the DTO.
+<span class="fc" id="L88">    private Map&lt;String, Method&gt; encFieldGettersMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L89">    private Map&lt;String, Method&gt; encFieldSettersMap = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L91">    private Map&lt;String, Method&gt; queryFieldGettersMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L92">    private Map&lt;String, Method&gt; queryFieldSettersMap = new HashMap&lt;&gt;();</span>
+
+
+<span class="fc" id="L95">    private EHRMigratorBase ehrMigrator = null;</span>
+<span class="fc" id="L96">    private Migrate[] ehrDataFieldMigrations = null;</span>
+
+    /**
+     * Get cached DTOMapping (init new and add to cache if needed).
+     * For external use; assumes this isn't a nested DTO.
+     *
+     * @param dtoClass
+     * @return the (now) cached mapping
+     */
+    public static &lt;C&gt; DTOMapping&lt;C&gt; get(Class&lt;C&gt; dtoClass) {
+<span class="fc" id="L106">        return get(dtoClass, false/*nested*/);</span>
+    }
+
+    public static &lt;C&gt; int getMigrationVersionFor(C dto) {
+<span class="fc" id="L110">        return get(dto.getClass()).getMigrationVersion();</span>
+    }
+
+    public int getMigrationVersion() {
+<span class="fc" id="L114">        return Optional.ofNullable(getEhrMigrator()).map(EHRMigratorBase::getMigrationVersion).orElse(0);</span>
+    }
+
+    /**
+     * handle nested DTOs here as well -- this is only ever called internally.
+     */
+    private static &lt;C&gt; DTOMapping&lt;C&gt; get(Class&lt;C&gt; dtoClass, boolean nested) {
+<span class="fc" id="L121">        DTOMapping&lt;C&gt; mapping = mappingCache.get(dtoClass.getName());</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">        if (mapping == null) {</span>
+<span class="fc bfc" id="L123" title="All 2 branches covered.">            mapping = dtoClass.equals(EHRData.class) ?</span>
+<span class="fc" id="L124">                    new DTOMapping&lt;&gt;() : // No DTO Class to map to, working with EHRData only</span>
+<span class="fc" id="L125">                    new DTOMapping&lt;&gt;(dtoClass, nested);</span>
+<span class="fc" id="L126">            mappingCache.put(dtoClass.getName(), mapping);</span>
+        } else {
+            // sanity check: can't change nested flag
+<span class="pc bpc" id="L129" title="1 of 2 branches missed.">            if (mapping.isNested() != nested) {</span>
+<span class="nc" id="L130">                throw new IllegalArgumentException(&quot;DTOs must be either nested, or not; &quot; + dtoClass +</span>
+<span class="nc" id="L131">                        &quot; is already cached with nested = &quot; + mapping.isNested() + &quot;!&quot;);</span>
+            }
+        }
+<span class="fc" id="L134">        return mapping;</span>
+    }
+
+
+    /**
+     * @param dtoClass
+     */
+<span class="fc" id="L141">    private DTOMapping(Class&lt;D&gt; dtoClass, boolean nested) {</span>
+<span class="fc" id="L142">        this.dtoClass = dtoClass;</span>
+<span class="fc" id="L143">        this.nested = nested;</span>
+<span class="fc" id="L144">        init();</span>
+<span class="fc" id="L145">    }</span>
+
+<span class="fc" id="L147">    public DTOMapping() {}</span>
+    
+    private void init() {
+        try {   
+<span class="fc" id="L151">            dtoConstructor = dtoClass.getDeclaredConstructor();</span>
+<span class="fc" id="L152">            dtoConstructor.setAccessible(true);</span>
+<span class="fc" id="L153">            EHRMigration migrationAnno = dtoClass.getAnnotation(EHRMigration.class);</span>
+<span class="fc bfc" id="L154" title="All 2 branches covered.">            if (migrationAnno != null) {</span>
+<span class="fc" id="L155">                ehrMigrator = migrationAnno.migratorClass().getConstructor().newInstance();</span>
+            }
+
+            // TODO: phase out the field-based migrations -- too fiddly!
+<span class="fc" id="L159">            EncryptedFieldMigration migration = dtoClass.getAnnotation(EncryptedFieldMigration.class);</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">            if (migration != null) {</span>
+<span class="fc" id="L161">                ehrDataFieldMigrations = migration.value();</span>
+                // quick validation
+<span class="fc bfc" id="L163" title="All 2 branches covered.">                for (Migrate migrate : ehrDataFieldMigrations) {</span>
+<span class="fc" id="L164">                    int fromFields = 0, toFields = 0;</span>
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">                    if (StringUtils.isNotEmpty(migrate.fromEncrypted())) {</span>
+<span class="fc" id="L166">                        fromFields++;</span>
+                    }
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">                    if (migrate.fromQueryField() != QueryField.ENCRYPTED) {</span>
+<span class="nc" id="L169">                        fromFields++;</span>
+                    }
+<span class="fc bfc" id="L171" title="All 2 branches covered.">                    if (StringUtils.isNotEmpty(migrate.toEncrypted())) {</span>
+<span class="fc" id="L172">                        toFields++;</span>
+                    }
+<span class="fc bfc" id="L174" title="All 2 branches covered.">                    if (migrate.toQueryField() != QueryField.ENCRYPTED) {</span>
+<span class="fc" id="L175">                        toFields++;</span>
+                    }
+
+<span class="pc bpc" id="L178" title="2 of 4 branches missed.">                    if ((fromFields != 1) || (toFields != 1)) {</span>
+<span class="nc" id="L179">                        throw new IllegalArgumentException(</span>
+                                &quot;@EncryptedFieldMigration: each entry must have one 'from' field and one 'to' field&quot;);
+                    }
+                }
+            }
+
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">            if (!isTypeEhrAnnotated(dtoClass)) {</span>
+<span class="nc" id="L186">                throw new IllegalArgumentException(&quot;no annotated fields found; cannot auto-populate EHRData from &quot; + dtoClass);</span>
+            }
+
+<span class="fc" id="L189">            Map&lt;QueryField, String&gt; queryFieldDupeCheck = new EnumMap&lt;&gt;(QueryField.class);</span>
+<span class="fc" id="L190">            Map&lt;String, String&gt; encrFieldDupeCheck = new HashMap&lt;&gt;();</span>
+
+            // now use that to fill in the other lists -- lookups for mappings and getter/setter methods
+<span class="fc bfc" id="L193" title="All 2 branches covered.">            for (Field field : getAnnotatedFieldsInClassAndSupers(dtoClass)) {</span>
+<span class="fc" id="L194">                EHRField ehrFieldAnno = field.getAnnotation(EHRField.class);</span>
+<span class="fc" id="L195">                String fieldName = field.getName();</span>
+<span class="fc" id="L196">                QueryField edQueryField = ehrFieldAnno.queryField();</span>
+
+<span class="fc" id="L198">                String overrideFieldName = StringUtils.trimToNull(ehrFieldAnno.overrideEncryptedName());</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">                if (overrideFieldName != null) {</span>
+                    // the name to use in EHRData.encryptedFields needn't match the DTO field name
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">                    if (edQueryField != QueryField.ENCRYPTED) {</span>
+<span class="nc" id="L202">                        throw new IllegalArgumentException(&quot;@EHRField(overrideEncryptedName) is only for encrypted fields; not &quot;</span>
+<span class="nc" id="L203">                                + fieldName + &quot;, queryField &quot; + ehrFieldAnno.queryField());</span>
+                    }
+                    // use the overriding name everywhere EXCEPT when finding the getters/setters
+<span class="fc" id="L206">                    fieldName = overrideFieldName;</span>
+                }
+<span class="fc" id="L208">                fieldToTypeMap.put(fieldName, field.getGenericType());</span>
+
+
+                // accessor methods; must have getter; must have setter except for flattened DTO values (may be never-null -- e.g., SourceDetails)
+                // don't use the (possibly-overridden) fieldName here
+<span class="fc" id="L213">                Method getter = findGetterMethodOrFail(dtoClass, field.getName());</span>
+<span class="fc" id="L214">                Method setter = findSetterMethodOrFailUnlessNestedDTO(dtoClass, field.getName(), ehrFieldAnno.valueDtoType());</span>
+
+<span class="fc bfc" id="L216" title="All 2 branches covered.">                if (edQueryField == QueryField.ENCRYPTED) { // encrypted (and nested DTOs)</span>
+                    // error if this encrypted field has already been used (in the main DTO, or a flattened field DTO)
+<span class="fc" id="L218">                    String foundDupe = encrFieldDupeCheck.put(fieldName, fieldName);</span>
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">                    if (foundDupe != null) {</span>
+<span class="nc" id="L220">                        throw new IllegalStateException(</span>
+                                &quot;Encrypted field &quot; + fieldName + &quot; already in use by another field! &quot; + foundDupe);
+                    }
+
+                    // just map the QueryField.ENCRYPTED as-is
+<span class="fc" id="L225">                    fieldToQueryFieldMap.put(fieldName, edQueryField);</span>
+
+<span class="fc" id="L227">                    encFieldGettersMap.put(fieldName, getter);</span>
+<span class="fc" id="L228">                    encFieldSettersMap.put(fieldName, setter); // may be null</span>
+
+                    // check for nested DTOs: does the field value type have its own annotations?
+<span class="fc" id="L231">                    boolean isNestedDto = false;</span>
+<span class="fc" id="L232">                    Class&lt;?&gt; typeInCollection = null;</span>
+<span class="fc bfc" id="L233" title="All 2 branches covered.">                    if (field.getGenericType() instanceof Class) {</span>
+                        // field isn't parameterized (list); check if it's a simple nested DTO
+<span class="fc" id="L235">                        isNestedDto = isTypeEhrAnnotated((Class) field.getGenericType());</span>
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">                    } else if (field.getGenericType() instanceof ParameterizedType) {</span>
+                        // a parameterized collection -- nested DTOs in the collection?
+<span class="fc" id="L238">                        typeInCollection = (Class) ((ParameterizedType) field.getGenericType()).getActualTypeArguments()[0];</span>
+<span class="fc" id="L239">                        isNestedDto = isTypeEhrAnnotated(typeInCollection);</span>
+                    } else {
+<span class="nc" id="L241">                        throw new IllegalArgumentException(</span>
+<span class="nc" id="L242">                                &quot;dtoField.getGenericType() is neither Class nor has generic parameters: &quot; + field.getGenericType());</span>
+                    }
+
+<span class="fc bfc" id="L245" title="All 2 branches covered.">                    if (isNestedDto) {</span>
+<span class="fc" id="L246">                        ValueDTOType valueDtoType = ehrFieldAnno.valueDtoType();</span>
+<span class="fc bfc" id="L247" title="All 2 branches covered.">                        if (typeInCollection != null) {</span>
+                            // can't be flattened
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">                            if (valueDtoType == ValueDTOType.FLATTENED) {</span>
+<span class="nc" id="L250">                                throw new IllegalArgumentException(</span>
+                                        &quot;DTOs in Lists cannot be flattened; @EHRField(valueDtoType) must be NESTED&quot;);
+                            }
+<span class="fc" id="L253">                            DTOMapping nestedDtoMapping = DTOMapping.get(typeInCollection, true/*nested*/);</span>
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">                            if (!nestedDtoMapping.getQueryFieldNameSet().isEmpty()) {</span>
+<span class="nc" id="L255">                                throw new IllegalArgumentException(&quot;Only encrypted fields allowed in Lists of DTOs; found &quot;</span>
+<span class="nc" id="L256">                                        + nestedDtoMapping.getQueryFieldNameSet() + &quot; in &quot; + nestedDtoMapping.dtoConstructor);</span>
+                            }
+<span class="fc" id="L258">                            fieldToNestedDtoMappingMap.put(fieldName, nestedDtoMapping);</span>
+<span class="fc" id="L259">                        } else {</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">                            if (valueDtoType == ValueDTOType.NESTED) {</span>
+                                // simple nested DTO -- only encrypted fields
+<span class="fc" id="L262">                                DTOMapping nestedDtoMapping = DTOMapping.get(field.getType(), true/*nested*/);</span>
+<span class="fc" id="L263">                                fieldToNestedDtoMappingMap.put(fieldName, nestedDtoMapping);</span>
+
+                                // validation: no query fields!
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">                                if (!nestedDtoMapping.getQueryFieldNameSet().isEmpty()) {</span>
+<span class="nc" id="L267">                                    throw new IllegalArgumentException(&quot;Only encrypted fields allowed in Lists of DTOs; found &quot;</span>
+<span class="nc" id="L268">                                            + nestedDtoMapping.getQueryFieldNameSet() + &quot; in &quot; + nestedDtoMapping.dtoConstructor);</span>
+                                }
+<span class="fc" id="L270">                            } else {</span>
+                                // flattened -- when converting, fields will be treated as DTO-level
+                                // may have query fields AND encrypted fields (e.g., SourceDetails)
+<span class="fc" id="L273">                                DTOMapping flattenedDtoMapping = DTOMapping.get(field.getType(), true/*nested*/);</span>
+<span class="fc" id="L274">                                fieldToFlattenedDtoMappingMap.put(fieldName, flattenedDtoMapping);</span>
+
+                                // special validation: avoid name clashes
+<span class="fc" id="L277">                                Map&lt;String, QueryField&gt; flatFieldToQueryMap = flattenedDtoMapping.fieldToQueryFieldMap;</span>
+<span class="fc bfc" id="L278" title="All 2 branches covered.">                                for (Map.Entry&lt;String, QueryField&gt; stringQueryFieldEntry : flatFieldToQueryMap.entrySet()) {</span>
+<span class="fc" id="L279">                                    String dtoDotFlatFieldName = fieldName + &quot;.&quot; + stringQueryFieldEntry.getKey();</span>
+<span class="fc" id="L280">                                    QueryField flatQueryField = stringQueryFieldEntry.getValue();</span>
+
+<span class="fc bfc" id="L282" title="All 2 branches covered.">                                    if (flatQueryField == QueryField.ENCRYPTED) {</span>
+                                        // field name already used?
+                                        // error if this encrypted field has already been used (in the main DTO, or a flattened field DTO)
+<span class="fc" id="L285">                                        String foundFlatDupe = encrFieldDupeCheck.put(stringQueryFieldEntry.getKey(),</span>
+                                                dtoDotFlatFieldName);
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">                                        if (foundFlatDupe != null) {</span>
+<span class="nc" id="L288">                                            throw new IllegalArgumentException(&quot;Encrypted field (flattened from &quot; + dtoDotFlatFieldName</span>
+                                                    + &quot;) already in use by another field! &quot; + foundFlatDupe);
+                                        }
+<span class="fc" id="L291">                                    } else { // query field</span>
+                                        // error if this queryField has already been mapped to something else
+<span class="fc" id="L293">                                        String foundFlatDupe = queryFieldDupeCheck.put(flatQueryField, dtoDotFlatFieldName);</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">                                        if (foundFlatDupe != null) {</span>
+<span class="nc" id="L295">                                            throw new IllegalArgumentException(&quot;Query field &quot; + flatQueryField.name()</span>
+                                                    + &quot; mapped for multiple fields! &quot; + foundFlatDupe + &quot; and &quot; + dtoDotFlatFieldName);
+                                        }
+                                    }
+<span class="fc" id="L299">                                }</span>
+                            } // end flattened nested DTO
+                        } // end simple nested DTO
+                    } // end nested DTO
+<span class="fc" id="L303">                } // end annotated as encrypted</span>
+                else {
+                    // error if this queryField has already been mapped to something else
+<span class="fc" id="L306">                    String foundDupe = queryFieldDupeCheck.put(edQueryField, fieldName);</span>
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">                    if (foundDupe != null) {</span>
+<span class="nc" id="L308">                        throw new IllegalStateException(&quot;Query field &quot; + edQueryField.name() + &quot; mapped for multiple fields! &quot;</span>
+                                + foundDupe + &quot; and &quot; + fieldName);
+                    }
+
+<span class="fc" id="L312">                    fieldToQueryFieldMap.put(fieldName, edQueryField);</span>
+
+<span class="fc" id="L314">                    String dbColumn = EHRData.fieldToDbColumnMap.get(edQueryField.name());</span>
+<span class="fc" id="L315">                    fieldToDbColumnMap.put(fieldName, dbColumn);</span>
+
+<span class="fc" id="L317">                    queryFieldGettersMap.put(fieldName, getter);</span>
+<span class="fc" id="L318">                    queryFieldSettersMap.put(fieldName, setter);</span>
+                }
+<span class="fc" id="L320">            } // end loop annotated DTO fields</span>
+<span class="nc" id="L321">        } catch (Exception e) {</span>
+<span class="nc" id="L322">            throw new IllegalArgumentException(&quot;Failed processing dtoClass annnotations &quot; + dtoClass, e);</span>
+<span class="fc" id="L323">        }</span>
+<span class="fc" id="L324">    }</span>
+
+    /**
+     * Search fields in the given type and superclasses
+     */
+    private boolean isTypeEhrAnnotated(Class&lt;?&gt; type) {
+<span class="fc" id="L330">        Class checkType = type;</span>
+<span class="fc bfc" id="L331" title="All 6 branches covered.">        while (checkType != Object.class &amp;&amp; !checkType.isPrimitive() &amp;&amp; !checkType.isEnum()) {</span>
+<span class="fc" id="L332">            if (Arrays.stream(checkType.getDeclaredFields())</span>
+<span class="fc bfc" id="L333" title="All 4 branches covered.">                    .anyMatch(f -&gt; f.getAnnotation(EHRField.class) != null)) {</span>
+<span class="fc" id="L334">                return true;</span>
+            }
+
+            // keep looping until the superclass is Object
+<span class="fc" id="L338">            checkType = checkType.getSuperclass();</span>
+        }
+<span class="fc" id="L340">        return false; // no field annotations found</span>
+    }
+
+    /**
+     * @EHRField-annotated fields in the given type and superclasses
+     */
+    private List&lt;Field&gt; getAnnotatedFieldsInClassAndSupers(Class&lt;?&gt; type) {
+<span class="fc" id="L347">        List&lt;Field&gt; foundFields = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L349">        Class checkType = type;</span>
+<span class="fc bfc" id="L350" title="All 2 branches covered.">        while (checkType != Object.class) {</span>
+<span class="fc" id="L351">            Arrays.stream(checkType.getDeclaredFields())</span>
+<span class="fc bfc" id="L352" title="All 2 branches covered.">                    .filter(f -&gt; f.getAnnotation(EHRField.class) != null)</span>
+<span class="fc" id="L353">                    .forEach(f -&gt; foundFields.add(f));</span>
+
+<span class="fc" id="L355">            checkType = checkType.getSuperclass();</span>
+        }
+<span class="fc" id="L357">        return foundFields;</span>
+    }
+
+    private Method findGetterMethodOrFail(Class&lt;D&gt; dtoClass, String fieldName) {
+        // avoid dtoClass.getMethod() -- must have param types, and throws an exception if there's no match.
+<span class="fc" id="L362">        String getterName1 = &quot;get&quot; + StringUtils.capitalize(fieldName);</span>
+<span class="fc" id="L363">        String getterName2 = &quot;is&quot; + StringUtils.capitalize(fieldName);</span>
+<span class="fc" id="L364">        Method getter = null;</span>
+
+        loopMethods:
+<span class="pc bpc" id="L367" title="1 of 2 branches missed.">        for (Method m : dtoClass.getMethods()) {</span>
+<span class="fc bfc" id="L368" title="All 4 branches covered.">            if (m.getName().equals(getterName1) || m.getName().equals(getterName2)) {</span>
+<span class="fc" id="L369">                getter = m;</span>
+<span class="fc" id="L370">                break loopMethods;</span>
+            }
+        }
+        // fail if we didn't find it
+<span class="pc bpc" id="L374" title="1 of 2 branches missed.">        if (getter == null) {</span>
+<span class="nc" id="L375">            throw new IllegalArgumentException(</span>
+                    &quot;DTO &quot; + dtoClass + &quot;, field &quot; + fieldName + &quot; has no public method &quot; + getterName1 + &quot; or &quot; + getterName2);
+        }
+
+<span class="fc" id="L379">        return getter;</span>
+    }
+
+    private Method findSetterMethodOrFailUnlessNestedDTO(Class&lt;D&gt; dtoClass, String fieldName, ValueDTOType valueDtoType) {
+        // avoid dtoClass.getMethod() -- must have param types, and throws an exception if there's no match.
+<span class="fc" id="L384">        String setterName = &quot;set&quot; + StringUtils.capitalize(fieldName);</span>
+<span class="fc" id="L385">        Method setter = null;</span>
+
+        loopMethods:
+<span class="fc bfc" id="L388" title="All 2 branches covered.">        for (Method m : dtoClass.getMethods()) {</span>
+<span class="fc bfc" id="L389" title="All 2 branches covered.">            if (m.getName().equals(setterName)) {</span>
+<span class="fc" id="L390">                setter = m;</span>
+<span class="fc" id="L391">                break loopMethods;</span>
+            }
+        }
+        // fail if we didn't find it, and this isn't a nested DTO (see SourceDetails or DTOBaseFields)
+<span class="fc bfc" id="L395" title="All 2 branches covered.">        if (setter == null) {</span>
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">            if (valueDtoType != ValueDTOType.FLATTENED) {</span>
+<span class="nc" id="L397">                throw new IllegalArgumentException(</span>
+                        &quot;DTO &quot; + dtoClass + &quot;, field &quot; + fieldName + &quot; has no public setter &quot; + setterName + &quot; but isn't a flattened DTO&quot;);
+            }
+        }
+
+<span class="fc" id="L402">        return setter;</span>
+    }
+
+    public D newDTO() {
+        try {
+<span class="fc" id="L407">            var constructor = dtoConstructor;</span>
+<span class="fc" id="L408">            return constructor.newInstance();</span>
+<span class="nc" id="L409">        } catch (Exception e) {</span>
+<span class="nc" id="L410">            throw new RuntimeException(&quot;failed instantiating new DTO: &quot; + dtoClass, e);</span>
+        }
+    }
+
+    public boolean containsEncryptedField(Collection&lt;String&gt; fields) {
+<span class="fc bfc" id="L415" title="All 2 branches covered.">        for (String field : fields) {</span>
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">            if (encFieldGettersMap.containsKey(field)) {</span>
+<span class="nc" id="L417">                return true;</span>
+            }
+<span class="fc" id="L419">        }</span>
+        // none found!
+<span class="fc" id="L421">        return false;</span>
+    }
+
+    public boolean isFieldEncrypted(String dtoFieldName) {
+<span class="fc" id="L425">        QueryField qf = fieldToQueryFieldMap.get(dtoFieldName);</span>
+<span class="pc bpc" id="L426" title="2 of 4 branches missed.">        return (qf != null) &amp;&amp; qf == QueryField.ENCRYPTED;</span>
+    }
+
+    public String getDbColumn(String dtoFieldName) {
+<span class="fc" id="L430">        return Optional.ofNullable(fieldToDbColumnMap.get(dtoFieldName))</span>
+<span class="fc" id="L431">                .or(() -&gt; Optional.ofNullable(EHRData.fieldToDbColumnMap.get(dtoFieldName)))</span>
+<span class="pc" id="L432">                .or(() -&gt; EHRData.dbColumnSet.stream().filter(it -&gt; it.equals(dtoFieldName)).findFirst())</span>
+<span class="pc" id="L433">                .orElseThrow(() -&gt; new IllegalArgumentException(&quot;Field name isn't DTO field, EHRData field, or known DB column: &quot; + dtoFieldName));</span>
+    }
+
+    @Nullable
+    public Class getType(String dtoFieldName) {
+<span class="nc" id="L438">        Type type = fieldToTypeMap.get(dtoFieldName);</span>
+<span class="nc bnc" id="L439" title="All 2 branches missed.">        if (type == null) {</span>
+<span class="nc" id="L440">            return null;</span>
+        }
+
+<span class="nc bnc" id="L443" title="All 2 branches missed.">        if (type instanceof ParameterizedType) {</span>
+<span class="nc" id="L444">            return ((ParameterizedType) type).getClass();</span>
+        } else {
+<span class="nc" id="L446">            return (Class) type;</span>
+        }
+    }
+
+
+    public DTOMapping&lt;?&gt; getNestedDtoMapping(String dtoFieldName) {
+<span class="fc" id="L452">        return fieldToNestedDtoMappingMap.get(dtoFieldName);</span>
+    }
+
+    public DTOMapping&lt;?&gt; getFlattenedDtoMapping(String dtoFieldName) {
+<span class="fc" id="L456">        return fieldToFlattenedDtoMappingMap.get(dtoFieldName);</span>
+    }
+
+    public String getEHRDataField(String dtoFieldName) {
+<span class="fc" id="L460">        QueryField qf = fieldToQueryFieldMap.get(dtoFieldName);</span>
+        // is it an annotated field from the DTO?
+<span class="pc bpc" id="L462" title="1 of 4 branches missed.">        if ((qf != null) &amp;&amp; (qf != QueryField.ENCRYPTED)) {</span>
+<span class="fc" id="L463">            return qf.name();</span>
+<span class="pc bpc" id="L464" title="1 of 2 branches missed.">        } else if (EHRData.fieldSet.contains(dtoFieldName)) {</span>
+<span class="fc" id="L465">            return dtoFieldName; // it's simply a valid EHRData field</span>
+        }
+<span class="nc" id="L467">        throw new IllegalArgumentException(</span>
+                &quot;Field name doesn't map to queryable EHRData field, and is not a valid EHRData field name: &quot; + dtoFieldName);
+    }
+
+    public Set&lt;String&gt; getEncryptedFieldNameSet() {
+<span class="fc" id="L472">        return encFieldGettersMap.keySet();</span>
+    }
+
+    public Method getEncryptedFieldGetter(String dtoField) {
+<span class="fc" id="L476">        return encFieldGettersMap.get(dtoField);</span>
+    }
+
+    public Method getEncryptedFieldSetter(String dtoField) {
+<span class="fc" id="L480">        return encFieldSettersMap.get(dtoField);</span>
+    }
+
+    public Set&lt;String&gt; getQueryFieldNameSet() {
+<span class="fc" id="L484">        return queryFieldGettersMap.keySet();</span>
+    }
+
+    public Method getQueryFieldGetter(String dtoField) {
+<span class="fc" id="L488">        return queryFieldGettersMap.get(dtoField);</span>
+    }
+
+    public Method getQueryFieldSetter(String dtoField) {
+<span class="fc" id="L492">        return queryFieldSettersMap.get(dtoField);</span>
+    }
+
+    public Class&lt;D&gt; getDtoClass() {
+<span class="nc" id="L496">        return dtoClass;</span>
+    }
+
+    public Migrate[] getEhrDataFieldMigrations() {
+<span class="fc" id="L500">        return Objects.requireNonNullElseGet(ehrDataFieldMigrations, () -&gt; new Migrate[]{});</span>
+    }
+
+    public EHRMigratorBase getEhrMigrator() {
+<span class="fc" id="L504">        return ehrMigrator;</span>
+    }
+
+    public boolean isNested() {
+<span class="fc" id="L508">        return nested;</span>
+    }
+
+    @Override
+    public String toString() {
+<span class="nc" id="L513">        String s = &quot;DTOMapping: &quot; + dtoClass + &quot;; nested? &quot; + nested;</span>
+<span class="nc" id="L514">        s += &quot;; dbColFields &quot; + fieldToDbColumnMap + &quot;; enc fields: &quot; + encFieldGettersMap.keySet();</span>
+<span class="nc" id="L515">        s += &quot;; flattenedDTO fields &quot; + fieldToFlattenedDtoMappingMap.keySet() + &quot;; nestedDTO fields &quot;</span>
+<span class="nc" id="L516">                + fieldToNestedDtoMappingMap.keySet();</span>
+<span class="nc" id="L517">        return s;</span>
+    }
+
+    /**
+     * DTOMapping must be serializable, but Constructor isn't.
+     * All the other members are derived from dtoClass / nested 
+     * So we'll just serialize these and derive the rest as required.
+     */
+    @Override
+    public void writeExternal(ObjectOutput out) throws IOException {
+<span class="fc" id="L527">        out.writeObject(dtoClass);</span>
+<span class="fc" id="L528">        out.writeBoolean(nested);</span>
+<span class="fc" id="L529">    }</span>
+
+    @Override
+    public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
+        //noinspection unchecked
+<span class="fc" id="L534">        this.dtoClass = (Class&lt;D&gt;)in.readObject();</span>
+<span class="fc" id="L535">        this.nested = in.readBoolean();</span>
+<span class="fc" id="L536">        init();</span>
+<span class="fc" id="L537">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

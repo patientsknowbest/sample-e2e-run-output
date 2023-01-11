@@ -1,0 +1,773 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlanManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.phplan</a> &gt; <span class="el_source">PlanManager.java</span></div><h1>PlanManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.phplan;
+
+import com.google.common.collect.ArrayTable;
+import com.google.common.collect.ImmutableTable;
+import com.google.common.collect.Table;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PKBFilter;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.plantemplate.TemplateAttachment;
+import com.pkb.dataupload.entity.UploadedData.Destination;
+import com.pkb.document.entity.Attachment;
+import com.pkb.domain.ParticipantService;
+import com.pkb.exception.PKBPluginException;
+import com.pkb.model.RecordWithId;
+import com.pkb.phplan.PHPlanAfterLoadSteps;
+import com.pkb.phplan.entity.PHPlan;
+import com.pkb.phplan.entity.PHPlan.Lazy;
+import com.pkb.phplan.entity.PHPlanAttachment;
+import com.pkb.service.dataupload.processor.UploadedDataService;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import org.apache.commons.lang3.NotImplementedException;
+import org.bouncycastle.util.Arrays;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
+
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import java.io.IOException;
+import java.io.StringReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
+
+import static com.pkb.phplan.entity.PHPlan.Lazy.ACTIVE_VERSION_COUNT;
+import static com.pkb.phplan.entity.PHPlan.Lazy.CREATOR_DETAILS;
+import static com.pkb.phplan.entity.PHPlan.Lazy.LAST_EDITOR_DEATILS;
+import static com.pkb.service.dataupload.processor.ImmutableLoggedInUploadedDataProcessingContext.loggedInUploadedDataProcessingContext;
+import static freemarker.template.utility.Collections12.singletonList;
+import static java.lang.String.format;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptyMap;
+import static java.util.Collections.emptySet;
+import static java.util.Collections.singleton;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.lang3.ArrayUtils.contains;
+import static org.apache.commons.lang3.ObjectUtils.isNotEmpty;
+
+@SuppressWarnings(&quot;ClassWithTooManyMethods&quot;)
+public class PlanManager extends TransactionManager {
+
+<span class="fc" id="L83">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private static final int MIGRATION_VERSION = 1; // version 1 = migrate to not using trim doc
+
+    private final PlanTemplateManager planTemplateManager;
+    private final UserManager userManager;
+    private final PhPlanXhtmlValidator phPlanXhtmlValidator;
+    private final UploadedDataService uploadedDataService;
+    private final PhPlanSaver phPlanSaver;
+    private final ParticipantService participantService;
+    private final ChunkedDocManager chunkedDocManager;
+    private final PlanAttachmentManager planAttachmentManager;
+
+    public PlanManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, PlanTemplateManager planTemplateManager,
+                       UserManager userManager, PhPlanXhtmlValidator phPlanXhtmlValidator, UploadedDataService uploadedDataService, PhPlanSaver phPlanSaver,
+                       ParticipantService participantService, ChunkedDocManager chunkedDocManager, PlanAttachmentManager planAttachmentManager) {
+<span class="fc" id="L98">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L99">        this.planTemplateManager = planTemplateManager;</span>
+<span class="fc" id="L100">        this.userManager = userManager;</span>
+<span class="fc" id="L101">        this.phPlanXhtmlValidator = phPlanXhtmlValidator;</span>
+<span class="fc" id="L102">        this.uploadedDataService = uploadedDataService;</span>
+<span class="fc" id="L103">        this.phPlanSaver = phPlanSaver;</span>
+<span class="fc" id="L104">        this.participantService = participantService;</span>
+<span class="fc" id="L105">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L106">        this.planAttachmentManager = planAttachmentManager;</span>
+<span class="fc" id="L107">    }</span>
+
+    /**
+     * Save the personal health plan for the patient
+     *
+     * @param accountId default account id of the patient
+     * @param plan      {@link PHPlan} object
+     * @return id of the saved plan
+     */
+    public Long savePHPlan(EHRRequestContext requestContext, Long accountId, PHPlan plan) {
+<span class="fc" id="L117">        validatePlan(plan);</span>
+        try {
+<span class="fc" id="L119">            LOGGER.info(&quot;PlanManager.savePHPlan() currentUserId={} accountId={} phPlan.id={} phPlan.uniqueId={}&quot;,</span>
+<span class="fc" id="L120">                    requestContext.getMaybeAccessingUserId(), accountId, plan.getId(), plan.getBaseFields().getUniqueId());</span>
+<span class="fc" id="L121">            var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L122">            var ehrData = ehrBean.populateEHRData(new EHRData(), plan, accountId, PHPlan.MS_PATH_PHPLAN, requestContext);</span>
+<span class="fc" id="L123">            ehrData.setMigrationVersion(MIGRATION_VERSION);</span>
+<span class="fc" id="L124">            var id = ehrBean.saveEHRData(requestContext, ehrData);</span>
+<span class="fc" id="L125">            LOGGER.info(&quot;PlanManager.savePHPlan() returning planId={}&quot;, id);</span>
+<span class="fc" id="L126">            return id;</span>
+<span class="nc" id="L127">        } catch (Exception e) {</span>
+<span class="nc" id="L128">            throw new PKBPluginException(&quot;Exception while saving careplan&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Get the PH Plan by id for the user
+     *
+     * @return {@link PHPlan} object
+     */
+    public PHPlan getPHPlanForUserIdAccountIdPlanId(@NotNull LoggedInEHRRequestContext requestContext, Long userId, Long accountId, Long planId, PHPlan.Lazy... fields) {
+        try {
+<span class="fc" id="L139">            LOGGER.info(&quot;PlanManager.getPHPlan() currentUserId={} accountId={} planId={}&quot;, userId, accountId, planId);</span>
+<span class="fc" id="L140">            var ehrSearch = new EHRSearch&lt;&gt;(accountId, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc" id="L141">            ehrSearch.addFilter(new PKBFilter(&quot;id&quot;, PKBFilter.Operator.EQUAL, planId));</span>
+<span class="fc" id="L142">            ehrSearch.setUseParticipantFilter();</span>
+<span class="fc" id="L143">            var phPlansWithAccountId = loadPlan(ehrSearch, requestContext, fields);</span>
+<span class="fc" id="L144">            return phPlansWithAccountId.get(0).record();</span>
+<span class="nc" id="L145">        } catch (Exception e) {</span>
+<span class="nc" id="L146">            throw new PKBPluginException(&quot;Exception while reading PH Plan &quot; + planId + &quot; from trim&quot;, e);</span>
+        }
+    }
+
+    private List&lt;RecordWithId&lt;Long, PHPlan&gt;&gt; loadPlan(EHRSearch&lt;PHPlan&gt; search, @NotNull LoggedInEHRRequestContext context, Lazy... fields) {
+<span class="fc" id="L151">        var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L152">        var phPlansWithAccountId = ehrBean.queryDecryptAndPopulateDataByAccountId(search, context, PHPlanAfterLoadSteps.class);</span>
+
+<span class="fc" id="L154">        getPHPlansLazies(phPlansWithAccountId, context, fields);</span>
+<span class="fc" id="L155">        loadPlanContent(phPlansWithAccountId, context);</span>
+<span class="fc" id="L156">        return phPlansWithAccountId;</span>
+    }
+
+    private void loadPlanContent(Collection&lt;RecordWithId&lt;Long, PHPlan&gt;&gt; plans, @NotNull LoggedInEHRRequestContext requestContext) {
+<span class="fc bfc" id="L160" title="All 2 branches covered.">        if (isNotEmpty(plans)) {</span>
+<span class="fc" id="L161">            Set&lt;Long&gt; accountIds = new HashSet&lt;&gt;(plans.size());</span>
+<span class="fc" id="L162">            Set&lt;Long&gt; planIds = new HashSet&lt;&gt;(plans.size());</span>
+<span class="fc" id="L163">            plans.forEach(actual -&gt; {</span>
+<span class="fc" id="L164">                accountIds.add(actual.id());</span>
+<span class="fc" id="L165">                planIds.add(actual.record().getId());</span>
+<span class="fc" id="L166">            });</span>
+<span class="fc" id="L167">            Table&lt;Long, Long, List&lt;PHPlanAttachment&gt;&gt; actionPlanContent = planAttachmentManager.getActionPlanContent(planIds, requestContext, accountIds);</span>
+
+<span class="fc" id="L169">            plans.forEach(r -&gt; {</span>
+<span class="fc" id="L170">                var attachments = actionPlanContent.get(r.record().getId(), r.id());</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">                if (isNotEmpty(attachments)) {</span>
+<span class="fc" id="L172">                    attachments.stream()</span>
+<span class="fc" id="L173">                            .findFirst()</span>
+<span class="fc" id="L174">                            .ifPresent(phPlanAttachment -&gt; r.record().setAttachmentAsActionPlanContent(phPlanAttachment.getAttachment()));</span>
+                }
+<span class="fc" id="L176">            });</span>
+        }
+<span class="fc" id="L178">    }</span>
+
+    /**
+     * Get the given version of a PH Plan
+     */
+    public PHPlan getPHPlanForAccountIdAndVersionNumber(@NotNull LoggedInEHRRequestContext requestContext, Long accountId, UUID uniquePlanId, Long versionNumber, Lazy... fields) {
+        try {
+<span class="fc" id="L185">            EHRSearch&lt;PHPlan&gt; ehrSearch = new EHRSearch&lt;&gt;(accountId, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc" id="L186">            ehrSearch.addFilter(new PKBFilter(EHRData.UNIQUE_ID, PKBFilter.Operator.EQUAL, uniquePlanId));</span>
+<span class="fc" id="L187">            ehrSearch.addFilter(new PKBFilter(PHPlan.PHPLAN_VERSION, PKBFilter.Operator.EQUAL, &quot;&quot; + versionNumber));</span>
+<span class="fc" id="L188">            ehrSearch.setUseParticipantFilter();</span>
+<span class="fc" id="L189">            var phPlansWithAccountId = loadPlan(ehrSearch, requestContext, fields);</span>
+<span class="fc" id="L190">            return phPlansWithAccountId.get(0).record();</span>
+<span class="nc" id="L191">        } catch (Exception e) {</span>
+<span class="nc" id="L192">            throw new PKBPluginException(&quot;Exception while getting PH plan for version-&quot; + versionNumber, e);</span>
+        }
+    }
+
+    public List&lt;PHPlan&gt; getPHPlans(@NotNull LoggedInEHRRequestContext requestContext, Long currentUserId, Long accountId, int pageSize, int offset, Lazy... lazyFields) {
+<span class="fc" id="L197">        synchUploadedData(requestContext, userManager.getAccountOwner(accountId));</span>
+        try {
+<span class="fc" id="L199">            var phPlansWithAccountId = getPHPlansData(requestContext, accountId, pageSize, offset, lazyFields);</span>
+<span class="fc" id="L200">            var personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L201">            var userPerson = personBean.getPKBPerson(currentUserId);</span>
+
+
+<span class="fc bfc" id="L204" title="All 2 branches covered.">            Predicate&lt;RecordWithId&lt;Long, PHPlan&gt;&gt; isNonPatientDraft = r -&gt; r.record().getStatus() == PHPlan.PlanStatus.INDRAFT</span>
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">                    &amp;&amp; r.record().getLastEditorId() != null</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">                    &amp;&amp; !r.record().getLastEditor().isPatient();</span>
+
+<span class="fc" id="L208">            Set&lt;UUID&gt; nonPatientDraftUniqueIds = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L209">            Set&lt;Long&gt; nonPatientDraftAccountIds = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L210">            phPlansWithAccountId.stream()</span>
+<span class="fc" id="L211">                    .filter(isNonPatientDraft)</span>
+<span class="fc" id="L212">                    .forEach(r -&gt; {</span>
+<span class="fc" id="L213">                        nonPatientDraftUniqueIds.add(r.record().getBaseFields().getUniqueId());</span>
+<span class="fc" id="L214">                        nonPatientDraftAccountIds.add(r.id());</span>
+<span class="fc" id="L215">                    });</span>
+
+<span class="fc" id="L217">            Table&lt;UUID, Long, PHPlan&gt; latestFinalizedPLans = getLatestFinalizedPHPlan(nonPatientDraftUniqueIds, requestContext, nonPatientDraftAccountIds, lazyFields);</span>
+
+
+<span class="pc bpc" id="L220" title="1 of 4 branches missed.">            Predicate&lt;PHPlan&gt; activeOrDraftPlan = plan -&gt; plan.getStatus() == PHPlan.PlanStatus.ACTIVE || plan.getStatus() == PHPlan.PlanStatus.INDRAFT;</span>
+<span class="fc" id="L221">            List&lt;PHPlan&gt; result = new ArrayList&lt;&gt;(phPlansWithAccountId.size());</span>
+<span class="fc bfc" id="L222" title="All 2 branches covered.">            for (var actualPlanWithAccountId : phPlansWithAccountId) {</span>
+                // Hack - old records are wrong in xml01
+                // If a patient/carer is viewing, do not show clinician's drafts
+<span class="fc" id="L225">                var plan = actualPlanWithAccountId.record();</span>
+<span class="fc bfc" id="L226" title="All 2 branches covered.">                if (userPerson.isPatient()) {</span>
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">                    if (isNonPatientDraft.test(actualPlanWithAccountId)) {</span>
+<span class="nc" id="L228">                        PHPlan latestFinalizedPlan = latestFinalizedPLans.get(plan.getBaseFields().getUniqueId(), actualPlanWithAccountId.id());</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">                        if (latestFinalizedPlan != null) {</span>
+<span class="nc" id="L230">                            result.add(latestFinalizedPlan);</span>
+                        }
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">                    } else if (activeOrDraftPlan.test(plan)) {</span>
+<span class="fc" id="L233">                        result.add(plan);</span>
+                    }
+                } else {
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">                    if (activeOrDraftPlan.test(plan)) {</span>
+<span class="fc" id="L237">                        result.add(plan);</span>
+                    }
+                }
+<span class="fc" id="L240">            }</span>
+<span class="fc" id="L241">            return result;</span>
+<span class="nc" id="L242">        } catch (Exception e) {</span>
+<span class="nc" id="L243">            LOGGER.error(&quot;Error while getting plan list for user-{} account-{} context-{}&quot;, currentUserId, accountId, requestContext, e);</span>
+<span class="nc" id="L244">            throw new PKBPluginException(&quot;Exception while getting plan list for user-&quot; + currentUserId + &quot; account-&quot; + accountId + &quot; context-&quot; + requestContext, e);</span>
+        }
+    }
+
+    /**
+     * Get the plans this patient has for the given template ID.
+     * WARNING: templateId is encrypted, so this must get all latest plans by uniqueId and search through them!
+     */
+    public List&lt;PHPlan&gt; getPHPlansFromTemplate(@NotNull LoggedInEHRRequestContext requestContext, Long patientId, Long templateId, boolean activeOnly, Long patientAccountId, Lazy... fields) {
+        try {
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">            if (patientAccountId == null) {</span>
+<span class="nc" id="L255">                return emptyList();</span>
+            }
+
+<span class="fc" id="L258">            EHRSearch&lt;PHPlan&gt; ehrSearch = new EHRSearch&lt;&gt;(patientAccountId, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">            if (activeOnly) {</span>
+<span class="fc" id="L261">                ehrSearch.addFilter(new PKBFilter(PHPlan.PHPLAN_STATUS, PKBFilter.Operator.EQUAL, PHPlan.PlanStatus.ACTIVE.toString()));</span>
+            }
+
+<span class="fc" id="L264">            ehrSearch.setLatestPerTypeFilter(PHPlan.PHPLAN_LAST_EDITED_ON, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L265">            ehrSearch.setOrderBy(PHPlan.PHPLAN_LAST_EDITED_ON, EHRSearch.OrderByDirection.Desc);</span>
+<span class="fc" id="L266">            ehrSearch.setUseParticipantFilter();</span>
+
+<span class="fc" id="L268">            var phPlansWithAccountId = loadPlan(ehrSearch, requestContext, fields);</span>
+<span class="fc" id="L269">            boolean radboundLoggingEnabled = requestContext.getTeamId().map(id -&gt; id.equals(14263456L)).orElse(false);</span>
+<span class="fc" id="L270">            return phPlansWithAccountId.stream()</span>
+<span class="fc" id="L271">                    .peek(r -&gt; {</span>
+                        // Monitoring for radbound
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">                        if (radboundLoggingEnabled) {</span>
+<span class="nc" id="L274">                            LOGGER.info(&quot;SJG: Radbound {} -&gt; {}&quot;, r.record().getId(), r.record().getTemplateId());</span>
+                        }
+<span class="fc" id="L276">                    })</span>
+<span class="fc" id="L277">                    .filter(r -&gt; Objects.equals(templateId, r.record().getTemplateId()))</span>
+<span class="fc" id="L278">                    .map(RecordWithId::record)</span>
+<span class="fc" id="L279">                    .collect(toList());</span>
+<span class="nc" id="L280">        } catch (Exception e) {</span>
+<span class="nc" id="L281">            throw new PKBPluginException(&quot;Exception while getting PH plan list from template-&quot; + templateId + &quot; for patient-&quot; + patientId, e);</span>
+        }
+    }
+
+<span class="pc bnc" id="L285" title="All 2 branches missed.">    private BiFunction&lt;PHPlan, Map&lt;Long, PKBPerson&gt;, Boolean&gt; inDraftHasBeenEditedWasNotByPatient = (plan, map) -&gt; plan.getStatus() == PHPlan.PlanStatus.INDRAFT &amp;&amp;</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">            plan.getLastEditorId() != null &amp;&amp;</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">            !map.get(plan.getLastEditorId()).isPatient();</span>
+
+    private List&lt;RecordWithId&lt;Long, PHPlan&gt;&gt; getPHPlansData(@NotNull LoggedInEHRRequestContext requestContext, Long accountId, int pageSize, int offset, Lazy... lazyFields) {
+        // TODO - build PHPlanDTO list here
+<span class="fc" id="L291">        var ehrSearch = new EHRSearch&lt;&gt;(accountId, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc bfc" id="L292" title="All 2 branches covered.">        if (pageSize &gt; 0) {</span>
+<span class="fc" id="L293">            ehrSearch.setResultsMaxReturned(pageSize);</span>
+<span class="fc" id="L294">            ehrSearch.setResultsStartPosition(offset);</span>
+        } // else get all
+<span class="fc" id="L296">        ehrSearch.addFilter(new PKBFilter(PHPlan.PHPLAN_STATUS, PKBFilter.Operator.NOT_EQUAL, PHPlan.PlanStatus.DELETED.toString()));</span>
+<span class="fc" id="L297">        ehrSearch.setLatestPerTypeFilter(PHPlan.PHPLAN_LAST_EDITED_ON, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L298">        ehrSearch.setUseParticipantFilter();</span>
+        // In decreasing order of the According to last edited date
+<span class="fc" id="L300">        ehrSearch.setOrderBy(PHPlan.PHPLAN_LAST_EDITED_ON, EHRSearch.OrderByDirection.Desc);</span>
+
+<span class="fc" id="L302">        var everyLazyField = Stream.concat(Stream.of(LAST_EDITOR_DEATILS), java.util.Arrays.stream(lazyFields))</span>
+<span class="fc" id="L303">                .distinct()</span>
+<span class="fc" id="L304">                .toArray(Lazy[]::new);</span>
+
+<span class="fc" id="L306">        return loadPlan(ehrSearch, requestContext, everyLazyField);</span>
+    }
+
+    /**
+     * Fetch all versions of the given plan
+     */
+    public List&lt;PHPlan&gt; getPHPlanHistory(@NotNull LoggedInEHRRequestContext requestContext, Long accountId, UUID planUniqueId, Lazy... fields) {
+        try {
+            // TODO - build PHPlanDTO list in here
+<span class="fc" id="L315">            EHRSearch&lt;PHPlan&gt; ehrSearch = new EHRSearch&lt;&gt;(accountId, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc" id="L316">            ehrSearch.addFilter(new PKBFilter(EHRData.UNIQUE_ID,</span>
+                    PKBFilter.Operator.EQUAL, planUniqueId));
+<span class="fc" id="L318">            ehrSearch.addFilter(new PKBFilter(PHPlan.PHPLAN_STATUS,</span>
+<span class="fc" id="L319">                    PKBFilter.Operator.NOT_EQUAL, PHPlan.PlanStatus.DELETED.toString()));</span>
+<span class="fc" id="L320">            ehrSearch.setOrderBy(PHPlan.PHPLAN_LAST_EDITED_ON, EHRSearch.OrderByDirection.Desc);</span>
+<span class="fc" id="L321">            ehrSearch.setUseParticipantFilter();</span>
+
+            // TODO : Revisit this why we need to decrypt becuase no one is
+            // going to be able to look at entire history at a time
+<span class="fc" id="L325">            var phPlansWithAccountId = loadPlan(ehrSearch, requestContext, fields);</span>
+<span class="fc" id="L326">            return phPlansWithAccountId.stream()</span>
+<span class="pc bpc" id="L327" title="1 of 2 branches missed.">                    .filter(r -&gt; r.record().getStatus() == PHPlan.PlanStatus.ACTIVE)</span>
+<span class="fc" id="L328">                    .map(RecordWithId::record)</span>
+<span class="fc" id="L329">                    .collect(toList());</span>
+<span class="nc" id="L330">        } catch (Exception e) {</span>
+<span class="nc" id="L331">            throw new PKBPluginException(&quot;Exception while getting PH plan list&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Get the attachment contents as byte[] content and the media type
+     *
+     * @param attachmentId  Id of the attachment
+     * @param currentUserId logged in user id (must have access to attachment's
+     *                      account)
+     * @return {@link PHPlanAttachment} object
+     */
+    public @Nullable PHPlanAttachment getAttachmentContent(@NotNull LoggedInEHRRequestContext requestContext, Long attachmentId) {
+<span class="fc" id="L344">        return planAttachmentManager.getAttachmentContent(requestContext, attachmentId);</span>
+    }
+
+    public Table&lt;Long, Long, List&lt;PHPlanAttachment&gt;&gt; getAttachments(Collection&lt;Long&gt; planIds, @NotNull LoggedInEHRRequestContext context, Collection&lt;Long&gt; accountIds) {
+<span class="fc" id="L348">        return planAttachmentManager.getAttachments(planIds, context, accountIds);</span>
+    }
+
+    /**
+     * Get the list of attachments to the plan
+     *
+     * @return List of {@link PHPlanAttachment}
+     */
+    public List&lt;PHPlanAttachment&gt; getAttachments(Long planId, @NotNull LoggedInEHRRequestContext requestContext, Long accountId) {
+<span class="fc" id="L357">        return planAttachmentManager.getAttachments(planId, requestContext, accountId);</span>
+    }
+
+    private void validatePlan(PHPlan pHPlan) {
+<span class="fc" id="L361">        phPlanXhtmlValidator.validatePlan(pHPlan);</span>
+<span class="fc" id="L362">    }</span>
+
+    /**
+     * Check XML is valid (used for templates only)
+     *
+     * @deprecated
+     */
+    @Deprecated
+    public void validateXml(String xml) {
+        try {
+            // Check validity by building full parse tree
+
+<span class="fc" id="L374">            DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();</span>
+<span class="fc" id="L375">            DocumentBuilder db = dbf.newDocumentBuilder();</span>
+<span class="fc" id="L376">            InputSource input = new InputSource(new StringReader(xml));</span>
+<span class="fc" id="L377">            db.parse(input);</span>
+<span class="nc" id="L378">        } catch (SAXException | IOException | ParserConfigurationException e) {</span>
+<span class="nc" id="L379">            throw new RuntimeException(e);</span>
+<span class="fc" id="L380">        }</span>
+<span class="fc" id="L381">    }</span>
+
+    /**
+     * Ensure that an attachment image is in the cache directory ready to be
+     * fetched by &lt;img src='...'&gt;
+     */
+    public void ensureImageIsCached(@NotNull LoggedInEHRRequestContext requestContext, PHPlanAttachment attachment) {
+        try {
+<span class="fc" id="L389">            Path filePath = Path.of(getConfig().getImageUploadPHPlanTemplateImageBaseDirectory()).resolve(attachment.getName());</span>
+<span class="fc bfc" id="L390" title="All 2 branches covered.">            if (Files.notExists(filePath)) {</span>
+<span class="fc" id="L391">                Files.createDirectories(filePath.getParent());</span>
+<span class="fc" id="L392">                PHPlanAttachment fullAttachment = getAttachmentContent(requestContext, attachment.getAttachmentId());</span>
+<span class="fc" id="L393">                Files.write(filePath, fullAttachment.getContent());</span>
+            }
+<span class="nc" id="L395">        } catch (IOException e) {</span>
+<span class="nc" id="L396">            throw new RuntimeException(&quot;Error while caching PH Plan image '&quot; + attachment.getName() + &quot;' attachmentId-&quot; + attachment.getId() + &quot; for context-&quot; + requestContext, e);</span>
+<span class="fc" id="L397">        }</span>
+<span class="fc" id="L398">    }</span>
+
+    /**
+     * Delete the plan by unique Id
+     *
+     * @return whether the plan has been deleted
+     */
+    public boolean deletePHPlan(@NotNull LoggedInEHRRequestContext requestContext, Long userId, Long accountId, UUID uniquePlanId) {
+<span class="fc" id="L406">        return findPHPlanForAccountId(uniquePlanId, requestContext, accountId, false)</span>
+<span class="fc" id="L407">                .map(plan -&gt; deletePHPlan(plan, userId, requestContext, accountId, plan.getId())).orElse(false);</span>
+    }
+
+    /**
+     * Delete the PH Plan
+     */
+    boolean deletePHPlan(@NotNull LoggedInEHRRequestContext requestContext, Long userId, Long accountId, Long planId) {
+<span class="nc" id="L414">        PHPlan plan = getPHPlanForUserIdAccountIdPlanId(requestContext, userId, accountId, planId);</span>
+<span class="nc" id="L415">        return deletePHPlan(plan, userId, requestContext, accountId, planId);</span>
+    }
+
+    private boolean deletePHPlan(PHPlan plan, Long userId, EHRRequestContext requestContext, Long accountId, Long planId) {
+<span class="pc bpc" id="L419" title="1 of 2 branches missed.">        if (planIsDeletableBy(plan, userId)) {</span>
+            // no need to decrypt for deletion
+<span class="fc" id="L421">            var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L422">            var ehrData = ehrBean.findEHRData(planId, requestContext);</span>
+<span class="fc" id="L423">            var sourceDetails = new SourceDetails(requestContext);</span>
+<span class="fc" id="L424">            var search = new EHRSearch&lt;&gt;(accountId, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc" id="L425">            search.addFilter(new PKBFilter(EHRData.UNIQUE_ID, PKBFilter.Operator.EQUAL, ehrData.getUniqueId()));</span>
+<span class="fc" id="L426">            ehrBean.deleteEHRDataByUniqueId(requestContext, search, sourceDetails, dateTimeService.now());</span>
+<span class="fc" id="L427">            return true;</span>
+        }
+<span class="nc" id="L429">        return false;</span>
+    }
+
+<span class="fc" id="L432">    public BiPredicate&lt;PHPlan, Long&gt; isPlanDeletablePrecondition = (plan, userId) -&gt; Objects.equals(userId, plan.getCreatorId());</span>
+
+    public BiFunction&lt;PHPlan, Long, Boolean&gt; getPlanDeletableProvider(Map&lt;UUID, Boolean&gt; deletableByUniqueIdMap) {
+<span class="fc" id="L435">        return (p2, id) -&gt; deletableByUniqueIdMap.getOrDefault(p2.getBaseFields().getUniqueId(), false);</span>
+    }
+
+    public boolean planIsDeletableBy(@NotNull PHPlan plan, Long userId) {
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">        return isPlanDeletablePrecondition.test(plan, userId)</span>
+<span class="pc bpc" id="L440" title="1 of 2 branches missed.">                &amp;&amp; Objects.equals(participantService.getTotalParticipantCount(singleton(plan.getBaseFields().getUniqueId())).get(plan.getBaseFields().getUniqueId()), 1L);</span>
+    }
+
+    public Map&lt;UUID, Boolean&gt; planIsDeletableBy(Collection&lt;PHPlan&gt; plans, Long userId) {
+<span class="fc bfc" id="L444" title="All 2 branches covered.">        if (isEmpty(plans)) {</span>
+<span class="fc" id="L445">            return emptyMap();</span>
+        }
+
+<span class="fc" id="L448">        var planUniqueIds = plans.stream()</span>
+<span class="fc" id="L449">                .filter(p -&gt; isPlanDeletablePrecondition.test(p, userId))</span>
+<span class="fc" id="L450">                .map(p -&gt; p.getBaseFields().getUniqueId())</span>
+<span class="fc" id="L451">                .collect(toSet());</span>
+
+<span class="fc" id="L453">        var counts = participantService.getTotalParticipantCount(planUniqueIds);</span>
+<span class="fc" id="L454">        return planUniqueIds.stream().collect(toMap(identity(), v -&gt; Objects.equals(counts.get(v), 1L)));</span>
+    }
+
+    /**
+     * Get the PH Plan by unique user id
+     *
+     * @return {@link PHPlan} object
+     */
+    @Deprecated
+    public Optional&lt;PHPlan&gt; findPHPlanForAccountId(UUID uniquePlanId, @NotNull LoggedInEHRRequestContext requestContext, Long accountId, boolean includeDeleted, Lazy... fields) {
+<span class="fc" id="L464">        List&lt;RecordWithId&lt;Long, PHPlan&gt;&gt; planList = getPHPlanForAccountId(singleton(uniquePlanId), requestContext, singletonList(accountId), includeDeleted, fields);</span>
+<span class="fc bfc" id="L465" title="All 2 branches covered.">        if (isEmpty(planList)) {</span>
+<span class="fc" id="L466">            return Optional.empty();</span>
+        }
+<span class="fc" id="L468">        return Optional.of(planList.get(0).record());</span>
+    }
+
+    /**
+     * @param uniquePlanId
+     * @param requestContext
+     * @param accountId
+     * @param includeDeleted
+     * @return
+     * @deprecated The original method was deprecated, but I have no idea why, so flagged it, later we can figure it out...
+     */
+    @Deprecated
+    @NotNull
+    public PHPlan getPHPlanForAccountId(UUID uniquePlanId, @NotNull LoggedInEHRRequestContext requestContext, Long accountId, boolean includeDeleted) {
+<span class="fc" id="L482">        return findPHPlanForAccountId(uniquePlanId, requestContext, accountId, includeDeleted)</span>
+<span class="pc" id="L483">                .orElseThrow(() -&gt; new IllegalStateException(&quot;Couldn't find plan for uniqueid &quot; + uniquePlanId + &quot; accountId&quot; + accountId));</span>
+    }
+
+    /**
+     * @param uniquePlanId
+     * @param requestContext
+     * @param accountId
+     * @param includeDeleted
+     * @return
+     * @deprecated The original method was deprecated, but I have no idea why, so flagged it, later we can figure it out...
+     */
+    @Deprecated
+    @NotNull
+    public PHPlan getPHPlanForAccountId(UUID uniquePlanId, @NotNull LoggedInEHRRequestContext requestContext, Long accountId) {
+<span class="fc" id="L497">        return getPHPlanForAccountId(uniquePlanId, requestContext, accountId, false/*includeDeleted*/);</span>
+    }
+
+    /**
+     * Get the latest finalized version of a plan, or null if it is only in
+     * draft
+     */
+    public PHPlan getLatestFinalizedPHPlan(@NotNull LoggedInEHRRequestContext requestContext, Long accountId, UUID uniquePlanId, Lazy... lazyFields) {
+<span class="fc" id="L505">        return getLatestFinalizedPHPlan(singleton(uniquePlanId), requestContext, singleton(accountId), lazyFields).get(uniquePlanId, accountId);</span>
+    }
+
+    /**
+     * Get the latest finalized version of a plan, or null if it is only in draft
+     */
+    public Table&lt;UUID, Long, PHPlan&gt; getLatestFinalizedPHPlan(Collection&lt;UUID&gt; uniquePlanIds, @NotNull LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; accountIds, Lazy... lazyFields) {
+        try {
+<span class="pc bpc" id="L513" title="1 of 4 branches missed.">            if (isEmpty(uniquePlanIds) || isEmpty(accountIds)) {</span>
+<span class="fc" id="L514">                return ImmutableTable.of();</span>
+            }
+<span class="fc" id="L516">            EHRSearch&lt;PHPlan&gt; ehrSearch = new EHRSearch&lt;&gt;(accountIds, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc" id="L517">            ehrSearch.setLatestPerTypeFilter(&quot;date02&quot;, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L518">            ehrSearch.addFilter(new PKBFilter(EHRData.UNIQUE_ID, PKBFilter.Operator.IN, uniquePlanIds));</span>
+<span class="fc" id="L519">            ehrSearch.addFilter(new PKBFilter(PHPlan.PHPLAN_STATUS, PKBFilter.Operator.EQUAL, &quot;ACTIVE&quot;));</span>
+<span class="fc" id="L520">            ehrSearch.setUseParticipantFilter();</span>
+
+<span class="fc" id="L522">            var phPlansWithAccountId = loadPlan(ehrSearch, requestContext, lazyFields);</span>
+<span class="fc" id="L523">            Table&lt;UUID, Long, PHPlan&gt; result = ArrayTable.create(uniquePlanIds, accountIds);</span>
+<span class="fc" id="L524">            phPlansWithAccountId.forEach(r -&gt; {</span>
+<span class="fc" id="L525">                var plan = r.record();</span>
+<span class="fc" id="L526">                result.put(plan.getBaseFields().getUniqueId(), r.id(), plan);</span>
+<span class="fc" id="L527">            });</span>
+<span class="fc" id="L528">            return result;</span>
+<span class="nc" id="L529">        } catch (Exception e) {</span>
+<span class="nc" id="L530">            throw new PKBPluginException(&quot;Exception while getting latest finalized plan PH plan list for uniqueId-&quot; + uniquePlanIds, e);</span>
+        }
+    }
+
+    /**
+     * Check if the user has a plan with given uniquePlanId
+     *
+     * @return True if the user has a plan with the uniquePlanId False otherwise
+     */
+    @SuppressWarnings(&quot;BooleanMethodIsAlwaysInverted&quot;)
+    public boolean userHasPlan(EHRRequestContext requestContext, long userId, UUID uniquePlanId) {
+        try {
+            // Get default account of the user
+<span class="fc" id="L543">            var defaultAccountId = Optional.ofNullable(beanFactory.getPKBPersonBean().getDefaultAccountId(userId))</span>
+<span class="pc" id="L544">                    .orElseThrow(() -&gt; new IllegalStateException(format(&quot;Unable to check if there is plan %s as no default account id for userid %d&quot;, uniquePlanId, userId)));</span>
+<span class="fc" id="L545">            var ehrSearch = new EHRSearch&lt;&gt;(defaultAccountId, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc" id="L546">            ehrSearch.addFilter(new PKBFilter(EHRData.UNIQUE_ID, PKBFilter.Operator.EQUAL, uniquePlanId));</span>
+<span class="fc" id="L547">            ehrSearch.setUseParticipantFilter();</span>
+<span class="fc" id="L548">            var ehrList = beanFactory.getEhrRemote().queryEHRData(ehrSearch, requestContext);</span>
+<span class="fc bfc" id="L549" title="All 2 branches covered.">            return (ehrList.size() == 1);</span>
+<span class="nc" id="L550">        } catch (Exception e) {</span>
+<span class="nc" id="L551">            throw new PKBPluginException(&quot;Exception while checking if the user has PH plan&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Copy the attachments from one plan to another
+     *
+     * @param fromUserId user id which has fromPlanId
+     */
+    public void copyAttachments(@NotNull LoggedInEHRRequestContext requestContext, long fromUserId, Long fromPlanId, long toUserId, Long toPlanId) {
+<span class="fc" id="L561">        List&lt;PHPlanAttachment&gt; attachments = getAttachments(requestContext, fromUserId, fromPlanId);</span>
+<span class="fc" id="L562">        var toAccountId = Optional.ofNullable(beanFactory.getPKBPersonBean().getDefaultAccountId(toUserId));</span>
+<span class="fc" id="L563">        attachments.forEach(planAttachment -&gt; {</span>
+<span class="fc" id="L564">            var maybeAttachmentContent = Optional.ofNullable(getAttachmentContent(requestContext, planAttachment.getAttachment().getId()));</span>
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">            if (maybeAttachmentContent.isPresent()) {</span>
+<span class="fc" id="L566">                var planAttachmentToCopy = maybeAttachmentContent.get();</span>
+<span class="fc" id="L567">                planAttachmentToCopy.setId(null);</span>
+<span class="fc" id="L568">                toAccountId.ifPresent(planAttachmentToCopy::setAccountId);</span>
+<span class="fc" id="L569">                Attachment att = planAttachmentToCopy.getAttachment();</span>
+<span class="fc" id="L570">                att.setUserId(toUserId);</span>
+<span class="fc" id="L571">                toAccountId.ifPresent(att::setAccountId);</span>
+<span class="fc" id="L572">                att.setParentMessageId(toPlanId);</span>
+<span class="fc" id="L573">                att.setId(null);</span>
+<span class="fc" id="L574">                planAttachmentManager.addAttachment(requestContext, toPlanId, planAttachmentToCopy);</span>
+            }
+<span class="fc" id="L576">        });</span>
+<span class="fc" id="L577">    }</span>
+
+    /**
+     * Save plans and attachments for patient
+     *
+     * @return Id of the saved plan
+     */
+    public PhPlanSaveResult savePlan(SourceDetails sourceDetails, @NotNull LoggedInEHRRequestContext requestContext, long patientId, PKBPerson clinicianOrCarer,
+                                     PHPlan pHPlan,
+                                     Set&lt;Long&gt; wantedAttachmentIds, List&lt;Attachment&gt; nonTemplateAttachments) {
+<span class="fc" id="L587">        validatePlan(pHPlan);</span>
+<span class="pc bpc" id="L588" title="1 of 2 branches missed.">        long saverId = clinicianOrCarer == null ? patientId : clinicianOrCarer.getId();</span>
+
+        PhPlanSaveResult savedPlanResult;
+<span class="fc" id="L591">        List&lt;TemplateAttachment&gt; planTemplateAttachments = planTemplateManager.getTemplateAttachments(pHPlan.getTemplateId());</span>
+
+<span class="fc" id="L593">        savedPlanResult = saveUserPlan(sourceDetails, requestContext, saverId, patientId, pHPlan,</span>
+                planTemplateAttachments, wantedAttachmentIds, nonTemplateAttachments);
+
+<span class="pc bpc" id="L596" title="1 of 4 branches missed.">        if ((clinicianOrCarer != null) &amp;&amp; !clinicianOrCarer.isPatient()) {</span>
+<span class="fc" id="L597">            saveUserPlan(sourceDetails, requestContext.withConsentNotRequired(), saverId, saverId, pHPlan,</span>
+                    planTemplateAttachments, wantedAttachmentIds, nonTemplateAttachments);
+        }
+
+<span class="fc" id="L601">        return savedPlanResult;</span>
+    }
+
+    private PhPlanSaveResult saveUserPlan(SourceDetails sourceDetails, @NotNull LoggedInEHRRequestContext requestContext, long loggedInUserId, long userId, PHPlan pHPlan,
+                                          List&lt;TemplateAttachment&gt; planTemplateAttachments, Set&lt;Long&gt; wantedAttachmentIds,
+                                          List&lt;Attachment&gt; nonTemplateAttachments) {
+
+<span class="fc" id="L608">        return phPlanSaver.saveUserPlan(sourceDetails, requestContext, loggedInUserId, userId, pHPlan, planTemplateAttachments, wantedAttachmentIds, nonTemplateAttachments);</span>
+    }
+
+    /**
+     * @return List&lt;String&gt; field errors - note as currently implemented this will return only the first validation error. Presumably this is by design.
+     */
+    @NotNull
+    public List&lt;String&gt; validateXhtml(String xhtml, String fieldName, boolean extraTemplateChecks) {
+<span class="fc" id="L616">        return phPlanXhtmlValidator.validateXhtml(xhtml, fieldName, extraTemplateChecks);</span>
+    }
+
+    private void synchUploadedData(@NotNull LoggedInEHRRequestContext requestContext, PKBPerson patient) {
+<span class="fc" id="L620">        uploadedDataService.synchUploadedData(</span>
+<span class="fc" id="L621">                loggedInUploadedDataProcessingContext()</span>
+<span class="fc" id="L622">                        .requestContext(requestContext.withPiggyback(true))</span>
+<span class="fc" id="L623">                        .patientId(patient.getId())</span>
+<span class="fc" id="L624">                        .destination(Destination.PHPLAN)</span>
+<span class="fc" id="L625">                        .build());</span>
+<span class="fc" id="L626">    }</span>
+
+    public List&lt;RecordWithId&lt;Long, PHPlan&gt;&gt; getPHPlanForAccountId(Collection&lt;UUID&gt; uniquePlanIds, @NotNull LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; patientAccountIds, boolean includeDeleted, Lazy... fields) {
+<span class="pc bpc" id="L629" title="1 of 4 branches missed.">        if (isEmpty(uniquePlanIds) || isEmpty(patientAccountIds)) {</span>
+<span class="fc" id="L630">            return emptyList();</span>
+        }
+        try {
+<span class="fc" id="L633">            EHRSearch&lt;PHPlan&gt; ehrSearch = new EHRSearch&lt;&gt;(patientAccountIds, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc" id="L634">            ehrSearch.setLatestPerTypeFilter(&quot;date02&quot;, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L635">            ehrSearch.addFilter(new PKBFilter(EHRData.UNIQUE_ID, PKBFilter.Operator.IN, uniquePlanIds));</span>
+<span class="fc" id="L636">            ehrSearch.setIncludeDeleted(includeDeleted);</span>
+<span class="fc" id="L637">            ehrSearch.setUseParticipantFilter();</span>
+<span class="fc" id="L638">            return loadPlan(ehrSearch, requestContext, fields);</span>
+<span class="nc" id="L639">        } catch (Exception e) {</span>
+<span class="nc" id="L640">            throw new PKBPluginException(&quot;Exception while getting PH plan by uniqueId-&quot; + uniquePlanIds, e);</span>
+        }
+    }
+
+    private List&lt;PHPlanAttachment&gt; getAttachments(EHRRequestContext requestContext, long currentUserId, Long planId) {
+        try {
+<span class="fc" id="L646">            EHRData ehrData = beanFactory.getEhrRemote().findEHRData(planId, /*decrypt*/ requestContext);</span>
+<span class="fc" id="L647">            Long accountId = ehrData.getAccountId();</span>
+<span class="fc" id="L648">            List&lt;Attachment&gt; attachmentList = chunkedDocManager.findAttachmentsAsAttachment(planId);</span>
+<span class="fc" id="L649">            List&lt;PHPlanAttachment&gt; attachments = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L650">            attachmentList.forEach(attachment -&gt; {</span>
+<span class="fc" id="L651">                var planAttachment = new PHPlanAttachment(new SourceDetails(ehrData));</span>
+<span class="fc" id="L652">                planAttachment.setAccountId(accountId);</span>
+                // other fields to be populated from docAttachment
+<span class="fc" id="L654">                Attachment att = new Attachment();</span>
+<span class="fc" id="L655">                att.setAccountId(accountId);</span>
+<span class="fc" id="L656">                att.setUserId(currentUserId);</span>
+<span class="fc" id="L657">                att.setFilename(attachment.getFilename());</span>
+<span class="fc" id="L658">                att.setId(attachment.getId());</span>
+<span class="fc" id="L659">                att.setUploadTime(attachment.getUploadTime());</span>
+<span class="fc" id="L660">                att.setDocMetadataId(attachment.getDocMetadataId());</span>
+
+<span class="fc" id="L662">                planAttachment.setAttachment(att);</span>
+<span class="fc" id="L663">                attachments.add(planAttachment);</span>
+<span class="fc" id="L664">            });</span>
+<span class="fc" id="L665">            return attachments;</span>
+<span class="nc" id="L666">        } catch (Exception e) {</span>
+<span class="nc" id="L667">            throw new PKBPluginException(&quot;Exception while deleting phplan  record&quot;, e);</span>
+        }
+    }
+
+    private Table&lt;Long, UUID, Long&gt; getActiveVersionCount(Set&lt;Long&gt; accountIds, Set&lt;UUID&gt; uniquePlanIds, EHRRequestContext requestContext) {
+<span class="pc bpc" id="L672" title="1 of 4 branches missed.">        if (isEmpty(accountIds) || isEmpty(uniquePlanIds)) {</span>
+<span class="fc" id="L673">            return ImmutableTable.of();</span>
+        }
+<span class="fc" id="L675">        EHRSearch&lt;PHPlan&gt; ehrSearch = new EHRSearch&lt;&gt;(accountIds, PHPlan.class, PHPlan.MS_PATH_PHPLAN);</span>
+<span class="fc" id="L676">        ehrSearch.addFilter(new PKBFilter(EHRData.UNIQUE_ID, PKBFilter.Operator.IN, uniquePlanIds));</span>
+<span class="fc" id="L677">        ehrSearch.addFilter(new PKBFilter(PHPlan.PHPLAN_STATUS, PKBFilter.Operator.EQUAL, PHPlan.PlanStatus.ACTIVE.toString()));</span>
+<span class="fc" id="L678">        ehrSearch.setUseParticipantFilter();</span>
+
+        //Count method didn't work for multiple fields even after update. Hibernate didn't play ball, can be re-tried once we're off of EJBs
+        //Fist H complained about UUID cannot be mapped, once that was fixed it didn't return every field,
+        // in the end I couldn't get it to return the count too, gave up, don't have more time for this atm.
+<span class="fc" id="L683">        Table&lt;Long, UUID, List&lt;PHPlan&gt;&gt; grouped = ArrayTable.create(accountIds, uniquePlanIds);</span>
+<span class="fc" id="L684">        beanFactory.getEhrRemote().queryWithoutDecryptAndPopulateDataByAccountId(ehrSearch, PHPlan.class, requestContext)</span>
+<span class="fc" id="L685">                .forEach(r -&gt; {</span>
+<span class="fc" id="L686">                    var group = grouped.get(r.id(), r.record().getBaseFields().getUniqueId());</span>
+<span class="fc bfc" id="L687" title="All 2 branches covered.">                    if (group == null) {</span>
+<span class="fc" id="L688">                        group = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L689">                        grouped.put(r.id(), r.record().getBaseFields().getUniqueId(), group);</span>
+                    }
+<span class="fc" id="L691">                    group.add(r.record());</span>
+<span class="fc" id="L692">                });</span>
+
+<span class="fc" id="L694">        Table&lt;Long, UUID, Long&gt; result = ArrayTable.create(accountIds, uniquePlanIds);</span>
+<span class="fc" id="L695">        grouped.rowMap().forEach((accountId, uniqueMap) -&gt; {</span>
+<span class="pc bpc" id="L696" title="1 of 2 branches missed.">            if (uniqueMap != null) {</span>
+<span class="fc" id="L697">                uniqueMap.forEach((uniqueId, list) -&gt; {</span>
+<span class="fc bfc" id="L698" title="All 2 branches covered.">                    if (list != null) {</span>
+<span class="fc" id="L699">                        result.put(accountId, uniqueId, (long) list.size());</span>
+                    }
+<span class="fc" id="L701">                });</span>
+            }
+<span class="fc" id="L703">        });</span>
+
+<span class="fc" id="L705">        return result;</span>
+    }
+
+    private void getPHPlansLazies(Collection&lt;RecordWithId&lt;Long, PHPlan&gt;&gt; plans, EHRRequestContext requestContext, Lazy... fields) {
+<span class="fc bfc" id="L709" title="All 4 branches covered.">        if (isNotEmpty(plans) &amp;&amp; !Arrays.isNullOrEmpty(fields)) {</span>
+<span class="fc bfc" id="L710" title="All 4 branches covered.">            Set&lt;Long&gt; personIds = contains(fields, CREATOR_DETAILS) || contains(fields, LAST_EDITOR_DEATILS) ? new HashSet&lt;&gt;(plans.size() * 2) : emptySet();</span>
+<span class="fc bfc" id="L711" title="All 2 branches covered.">            Set&lt;Long&gt; accountIds = contains(fields, ACTIVE_VERSION_COUNT) ? new HashSet&lt;&gt;(plans.size()) : emptySet();</span>
+<span class="fc bfc" id="L712" title="All 2 branches covered.">            Set&lt;UUID&gt; planUniqueIds = contains(fields, ACTIVE_VERSION_COUNT) ? new HashSet&lt;&gt;(plans.size()) : emptySet();</span>
+<span class="fc bfc" id="L713" title="All 2 branches covered.">            for (var plan : plans) {</span>
+<span class="fc bfc" id="L714" title="All 2 branches covered.">                for (Lazy lazy : fields) {</span>
+<span class="pc bpc" id="L715" title="1 of 4 branches missed.">                    switch (lazy) {</span>
+                        case CREATOR_DETAILS:
+<span class="fc" id="L717">                            Long creatorId = plan.record().getCreatorId();</span>
+<span class="fc bfc" id="L718" title="All 2 branches covered.">                            if (creatorId != null) {</span>
+<span class="fc" id="L719">                                personIds.add(creatorId);</span>
+                            }
+                            break;
+                        case LAST_EDITOR_DEATILS:
+<span class="fc" id="L723">                            Long lastEditorId = plan.record().getLastEditorId();</span>
+<span class="fc bfc" id="L724" title="All 2 branches covered.">                            if (lastEditorId != null) {</span>
+<span class="fc" id="L725">                                personIds.add(lastEditorId);</span>
+                            }
+                            break;
+                        case ACTIVE_VERSION_COUNT:
+<span class="fc" id="L729">                            accountIds.add(plan.id());</span>
+<span class="fc" id="L730">                            planUniqueIds.add(plan.record().getBaseFields().getUniqueId());</span>
+<span class="fc" id="L731">                            break;</span>
+                        default:
+<span class="nc" id="L733">                            throw new NotImplementedException(&quot;Not implemented yet...&quot;);</span>
+                    }
+                }
+<span class="fc" id="L736">            }</span>
+
+<span class="fc" id="L738">            var personByIdMap = beanFactory.getPKBPersonBean().findPKBPersonMap(personIds);</span>
+
+<span class="fc" id="L740">            Table&lt;Long, UUID, Long&gt; counts = getActiveVersionCount(accountIds, planUniqueIds, requestContext);</span>
+
+<span class="fc bfc" id="L742" title="All 2 branches covered.">            for (var plan : plans) {</span>
+<span class="fc bfc" id="L743" title="All 2 branches covered.">                for (Lazy lazy : fields) {</span>
+<span class="pc bpc" id="L744" title="1 of 4 branches missed.">                    switch (lazy) {</span>
+                        case CREATOR_DETAILS:
+<span class="fc" id="L746">                            Long creatorId = plan.record().getCreatorId();</span>
+<span class="fc bfc" id="L747" title="All 2 branches covered.">                            if (creatorId != null) {</span>
+<span class="fc" id="L748">                                plan.record().setCreator(personByIdMap.get(creatorId));</span>
+                            }
+                            break;
+                        case LAST_EDITOR_DEATILS:
+<span class="fc" id="L752">                            Long lastEditorId = plan.record().getLastEditorId();</span>
+<span class="fc bfc" id="L753" title="All 2 branches covered.">                            if (lastEditorId != null) {</span>
+<span class="fc" id="L754">                                plan.record().setLastEditor(personByIdMap.get(lastEditorId));</span>
+                            }
+                            break;
+                        case ACTIVE_VERSION_COUNT:
+<span class="fc" id="L758">                            Long count = counts.get(plan.id(), plan.record().getBaseFields().getUniqueId());</span>
+<span class="fc bfc" id="L759" title="All 2 branches covered.">                            plan.record().setActiveVersionCount(count == null ? 0 : count.intValue());</span>
+<span class="fc" id="L760">                            break;</span>
+                        default:
+<span class="nc" id="L762">                            throw new NotImplementedException(&quot;Not implemented yet...&quot;);</span>
+                    }
+                }
+<span class="fc" id="L765">            }</span>
+        }
+<span class="fc" id="L767">    }</span>
+
+    boolean previousVersionExists(@NotNull UUID uniqueId) {
+<span class="fc" id="L770">        return beanFactory.getEhrRemote().recordExists(uniqueId);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CandidateFinderService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.registration.reset</a> &gt; <span class="el_source">CandidateFinderService.java</span></div><h1>CandidateFinderService.java</h1><pre class="source lang-java linenums">package com.pkb.action.registration.reset;
+
+import com.pkb.action.registration.reset.UserVerificationFailure.DemographicsMismatch;
+import com.pkb.action.registration.reset.demographicsvalidator.DemographicsValidator;
+import com.pkb.action.registration.reset.demographicsvalidator.DemographicsValidator.MatchResult;
+import com.pkb.action.registration.reset.demographicsvalidator.LenientDateOfBirthValidator;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.ImmutableRegistrationFailedAttemptLogDto;
+import com.pkb.datamodel.RegistrationFailedAttemptLogDto;
+import com.pkb.domain.RegistrationFailedAttemptLogService;
+import com.pkb.entities.enums.UserType;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.API;
+import io.vavr.API.Match.Pattern0;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.TreeSet;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.slf4j.Logger;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+
+import static com.pkb.action.registration.reset.ResetStepFailure.inconsistentDB;
+import static com.pkb.action.registration.reset.ResetStepFailure.noUserByEmail;
+import static com.pkb.action.registration.reset.ResetStepFailure.notRegistered;
+import static com.pkb.action.registration.reset.ResetStepFailure.tooManyInvalidDOBInputAttempts;
+import static com.pkb.action.registration.reset.ResetStepFailure.unexpectedError;
+import static com.pkb.action.registration.reset.UserVerificationFailure.demographicsMismatch;
+import static com.pkb.entities.enums.UserStatus.EMAIL_CONFIRMED;
+import static com.pkb.entities.enums.UserType.EMPLOYEE;
+import static com.pkb.entities.enums.UserType.INSTITUTE_ADMIN;
+import static com.pkb.entities.enums.UserType.ORG_COORD;
+import static com.pkb.entities.enums.UserType.PATIENT;
+import static com.pkb.entities.enums.UserType.PRIVACY_OFFICER;
+import static com.pkb.entities.enums.UserType.REG_CLINICIAN;
+import static com.pkb.entities.enums.UserType.SUPER_ADMIN;
+import static com.pkb.entities.enums.UserType.TECH_SUPPORT;
+import static com.pkb.entities.pub.PublicRegistrationFailedAttemptLog.RegistrationField.DATE_OF_BIRTH;
+import static com.pkb.user.entity.PersonContact.Lazy.PERSON_W_CONTACTS;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.Predicates.is;
+import static io.vavr.Predicates.isIn;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+import static io.vavr.control.Validation.sequence;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.time.temporal.ChronoUnit.HOURS;
+import static java.util.Comparator.comparing;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class CandidateFinderService {
+<span class="fc" id="L70">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+<span class="fc" id="L72">    private static final Pattern0&lt;Integer&gt; ZERO = $(is(0));</span>
+<span class="fc" id="L73">    private static final Pattern0&lt;Integer&gt; ONE = $(is(1));</span>
+<span class="fc" id="L74">    private static final Pattern0&lt;Integer&gt; MORE_THAN_ONE = $();</span>
+<span class="fc" id="L75">    private static final Function&lt;PKBPerson, String&gt; PUBLIC_ID_AS_STRING = ((Function&lt;PKBPerson, UUID&gt;) PKBPerson::getPublicId).andThen(UUID::toString);</span>
+
+    private final RegistrationFailedAttemptLogService failedAttemptLogService;
+    private final PhrConfig config;
+    private final UserManager userManager;
+    private final List&lt;DemographicsValidator&gt; demographicsValidators;
+    private final TeamUserManager teamUserManager;
+    private final DateTimeService dateTimeService;
+
+    public CandidateFinderService(UserManager userManager,
+                                  TeamUserManager teamUserManager,
+                                  DateTimeService dateTimeService,
+                                  RegistrationFailedAttemptLogService failedAttemptLogService,
+                                  PhrConfig config,
+<span class="fc" id="L89">                                  List&lt;DemographicsValidator&gt; demographicsValidators) {</span>
+<span class="fc" id="L90">        this.userManager = userManager;</span>
+<span class="fc" id="L91">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L92">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L93">        this.failedAttemptLogService = failedAttemptLogService;</span>
+<span class="fc" id="L94">        this.config = config;</span>
+<span class="fc" id="L95">        this.demographicsValidators = demographicsValidators;</span>
+<span class="fc" id="L96">    }</span>
+
+    /**
+     * @param email
+     *            a valid email address.
+     * @return
+     *         A registered {@link PKBPerson} with the given email address or
+     *         one of the following errors:
+     *         &lt;ul&gt;
+     *         &lt;li&gt;{@link ResetStepFailure.NoUserByEmail} when user cannot be found,&lt;/li&gt;
+     *         &lt;li&gt;{@link ResetStepFailure.NotRegistered} when email is known, but user did not complete registration,&lt;/li&gt;
+     *         &lt;li&gt;{@link ResetStepFailure.InconsistentDB} when our DB is inconsistent. E.g.:
+     *         &lt;ul&gt;
+     *         &lt;li&gt;two registered {@link PKBPerson Patient} can be found for a single email),&lt;/li&gt;
+     *         &lt;li&gt;two registered {@link UserType} can be found for a single email&lt;/li&gt;
+     *         &lt;/ul&gt;
+     *         &lt;/li&gt;
+     *         &lt;/ul&gt;
+     * @throws IllegalStateException
+     *             if DB constraints are relaxed but code is not adjusted.
+     *             E.g.: user type is a mandatory property on PKBPerson becomes optional.
+     */
+    public Either&lt;ResetStepFailure, PKBPerson&gt; findRegisteredUser(Email email) {
+        try {
+<span class="fc" id="L120">            var candidates = userManager.getPKBPersonByConfirmedOrPrimaryEmail(email, PERSON_W_CONTACTS);</span>
+
+<span class="fc" id="L122">            return Match(candidates.size()).of(</span>
+<span class="fc" id="L123">                    Case(ZERO, () -&gt; left(noUserByEmail(email))),</span>
+<span class="fc" id="L124">                    Case(ONE, () -&gt; checkIfRegistered(candidates.get(0))),</span>
+<span class="pc" id="L125">                    Case(MORE_THAN_ONE, () -&gt; findBestMatch(email, candidates)));</span>
+<span class="nc" id="L126">        } catch (Exception cause) {</span>
+<span class="nc" id="L127">            return left(unexpectedError(&quot;Something unexpected happened&quot;, cause));</span>
+        }
+    }
+
+    public Either&lt;ResetStepFailure, PKBPerson&gt; findRegisteredUserForVerification(UserVerificationCriteria criteria) {
+        try {
+<span class="fc" id="L133">            var candidates = userManager.getPKBPersonByConfirmedOrPrimaryEmail(criteria.email());</span>
+
+<span class="fc" id="L135">            Either&lt;ResetStepFailure, PKBPerson&gt; failureOrPerson = Match(candidates.size()).of(</span>
+<span class="pc" id="L136">                    Case(ZERO, () -&gt; left(noUserByEmail(criteria.email()))),</span>
+<span class="fc" id="L137">                    Case(ONE, () -&gt; matchSingleCandidate(criteria, candidates.get(0))),</span>
+<span class="pc" id="L138">                    Case(MORE_THAN_ONE, () -&gt; findBestMatchForVerification(criteria, candidates)));</span>
+
+<span class="fc" id="L140">            failureOrPerson.peek(pkbPerson -&gt;</span>
+<span class="fc" id="L141">                    failedAttemptLogService.deleteRegistrationFailedAttempts(pkbPerson.getPublicId(), DATE_OF_BIRTH));</span>
+<span class="fc" id="L142">            return failureOrPerson;</span>
+<span class="nc" id="L143">        } catch (Exception cause) {</span>
+<span class="nc" id="L144">            return left(unexpectedError(&quot;Something unexpected happened&quot;, cause));</span>
+        }
+    }
+
+    private Either&lt;ResetStepFailure, PKBPerson&gt; checkIfRegistered(PKBPerson candidate) {
+<span class="pc bpc" id="L149" title="1 of 2 branches missed.">        return userIsRegistered(candidate) ? //</span>
+<span class="fc" id="L150">                right(candidate) : //</span>
+<span class="nc" id="L151">                left(notRegistered(candidate.getPublicId()));</span>
+    }
+
+    /**
+     * We want to find a single registered user by this email address.
+     * For some multi team users (e.g.: Team Pro) we can have more than one match. For other users (like Patients) we should not.
+     */
+    private Either&lt;ResetStepFailure, PKBPerson&gt; findBestMatch(Email email, List&lt;PKBPerson&gt; candidates) {
+<span class="nc" id="L159">        return ensureSingleByUserType(email, candidates, () -&gt; candidatesWithSameUserType(candidates, () -&gt; getSingleRegisteredUser(email, candidates)));</span>
+    }
+
+    private Either&lt;ResetStepFailure, PKBPerson&gt; findBestMatchForVerification(UserVerificationCriteria criteria, List&lt;PKBPerson&gt; candidates) {
+<span class="nc" id="L163">        return ensureSingleByUserType(criteria.email(), candidates, () -&gt; candidatesWithSameUserType(candidates, () -&gt; getSingleRegisteredUserForVerification(criteria, candidates)));</span>
+    }
+
+    private Either&lt;ResetStepFailure, PKBPerson&gt; matchSingleCandidate(UserVerificationCriteria criteria, PKBPerson candidate) {
+<span class="fc" id="L167">        Optional&lt;Instant&gt; lockedUntilDate = getDateUntilUserIsLockedDueToTooManyFailedDOBInputAttempts(candidate);</span>
+<span class="fc bfc" id="L168" title="All 2 branches covered.">        if (lockedUntilDate.isPresent()) {</span>
+<span class="fc" id="L169">            return left(tooManyInvalidDOBInputAttempts(candidate.getPublicId(), lockedUntilDate.get()));</span>
+        }
+
+<span class="fc" id="L172">        var validations = demographicsValidators.stream()</span>
+<span class="fc" id="L173">                .map(validator -&gt; validator.validate(criteria, candidate).mapError(API::Seq))</span>
+<span class="fc" id="L174">                .collect(toList());</span>
+
+<span class="fc" id="L176">        return sequence(validations).fold(</span>
+                // These are genuine errors
+<span class="nc" id="L178">                failures -&gt; left(ResetStepFailure.unexpectedErrors(failures.toJavaSet())),</span>
+                // Either match or verification failures.
+                matchResults -&gt; {
+<span class="fc" id="L181">                    var demographicsAreMatching = matchResults.map(MatchResult::matched).forAll(is(true));</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">                    if (demographicsAreMatching) {</span>
+<span class="fc" id="L183">                        return checkIfRegistered(candidate);</span>
+                    } else {
+<span class="fc" id="L185">                        DemographicsMismatch unmatchedDemographics = demographicsMismatch(candidate.getPublicId(), matchResults</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">                                .filter(result -&gt; !result.matched())</span>
+<span class="fc" id="L187">                                .map(MatchResult::property)</span>
+<span class="fc" id="L188">                                .toJavaSet());</span>
+<span class="fc" id="L189">                        registerPossibleFailedDOBInput(unmatchedDemographics, candidate);</span>
+<span class="fc" id="L190">                        return left(unmatchedDemographics);</span>
+                    }
+                });
+
+    }
+
+    private Either&lt;ResetStepFailure, PKBPerson&gt; ensureSingleByUserType(Email email, List&lt;PKBPerson&gt; candidates, Supplier&lt;Either&lt;ResetStepFailure, PKBPerson&gt;&gt; action) {
+<span class="nc" id="L197">        var distinctUserTypes = getDistinctUserTypes(candidates.stream());</span>
+
+<span class="nc" id="L199">        return Match(distinctUserTypes.size()).of(</span>
+                // Exception is right, 'cause the DB does not allow this case to happen, if so, then we have a bug.
+<span class="nc" id="L201">                Case(ZERO, throwIllegalStateException(format(&quot;All %s candidates lack user type.&quot;, candidates.size()))),</span>
+                // All users have the same type. this is ok for Team Pros (as of Sept 2020), but not for Patients.
+<span class="nc" id="L203">                Case(ONE, action),</span>
+<span class="nc" id="L204">                Case(MORE_THAN_ONE, () -&gt; {</span>
+                    // At this stage we eliminate non registered users as a best effort.
+                    // As of Sept 2020, we have emails that belong to at least two PKBPersons rows, where
+                    // one of them is Patient (registered), the other is Team Pro (invited).
+<span class="nc" id="L208">                    LOGGER.warn(&quot;Dropping non registered users from candidate list&quot;);</span>
+<span class="nc" id="L209">                    LOGGER.error(&quot;Investigate PKBPerson entries with public IDs=[{}]&quot;, publicIds(candidates));</span>
+
+<span class="nc" id="L211">                    Set&lt;UserType&gt; confirmedUserTypes = getDistinctUserTypes(candidates.stream().filter(this::userIsRegistered));</span>
+
+<span class="nc" id="L213">                    return Match(confirmedUserTypes.size()).of(</span>
+<span class="nc" id="L214">                            Case(ZERO, throwIllegalStateException(format(&quot;All %s candidates lack user type.&quot;, candidates.size()))),</span>
+<span class="nc" id="L215">                            Case(ONE, action),</span>
+<span class="nc" id="L216">                            Case(MORE_THAN_ONE, () -&gt; left(inconsistentDB(format(&quot;Email=[%s] is mapped to the following user types=[%s] (PKBPerson ids=[%s])&quot;,</span>
+                                    email,
+<span class="nc" id="L218">                                    distinctUserTypes.stream().map(UserType::toString).sorted().collect(joining(&quot;,&quot;)),</span>
+<span class="nc" id="L219">                                    candidates.stream().map(candidate -&gt; Long.toString(candidate.getId())).sorted().collect(joining(&quot;,&quot;)))))));</span>
+                }));
+
+    }
+
+    private Either&lt;ResetStepFailure, PKBPerson&gt; candidatesWithSameUserType(List&lt;PKBPerson&gt; candidates, Supplier&lt;Either&lt;ResetStepFailure, PKBPerson&gt;&gt; action) {
+<span class="nc" id="L225">        UserType userType = candidates.get(0).getUserType();</span>
+<span class="nc" id="L226">        return Match(userType).of(</span>
+<span class="nc" id="L227">                Case($(isIn(PATIENT, SUPER_ADMIN, EMPLOYEE, TECH_SUPPORT)), () -&gt; {</span>
+                    // At this stage we eliminate non registered users as a best effort.
+                    // As of Sept 2020, we have emails that belong to at least two PKBPersons rows, where
+                    // at least two  entries are Patients. We have a mixture of cases:
+                    // In some cases only one of the login details are confirmed,
+                    // in some other cases we have two different login details in confirmed status!.
+<span class="nc" id="L233">                    LOGGER.warn(&quot;Dropping non registered users from candidate list (user type=[{}])&quot;, userType);</span>
+<span class="nc" id="L234">                    LOGGER.error(&quot;User type=[{}] have multiple PKBPerson entries. Public IDs=[{}]&quot;, userType, publicIds(candidates));</span>
+
+<span class="nc" id="L236">                    List&lt;PKBPerson&gt; registeredUsers = candidates.stream()</span>
+<span class="nc" id="L237">                            .filter(this::userIsRegistered)</span>
+<span class="nc" id="L238">                            .collect(toList());</span>
+
+<span class="nc" id="L240">                    return Match(registeredUsers.size()).of(</span>
+<span class="nc" id="L241">                            Case(ZERO, () -&gt; left(noUserByEmail(candidates.get(0).getEmail()))),</span>
+<span class="nc" id="L242">                            Case(ONE, () -&gt; right(registeredUsers.get(0))),</span>
+<span class="nc" id="L243">                            Case(MORE_THAN_ONE, () -&gt; left(inconsistentDB(format(&quot;User type=[%s] must be unique by email, but we have %s entries (public IDs=[%s])&quot;, userType, candidates.size(), publicIds(candidates))))));</span>
+                }),
+<span class="nc" id="L245">                Case($(isIn(REG_CLINICIAN, INSTITUTE_ADMIN, ORG_COORD, PRIVACY_OFFICER)), action),</span>
+                // Exception is right as we have a new User Type which we don't know how to handle.
+<span class="nc" id="L247">                Case($(), throwIllegalStateException(format(&quot;Missing behaviour for User Type=[%s] (%s probably has a new value)&quot;, userType, UserType.class.getSimpleName()))));</span>
+
+    }
+
+    private boolean userIsRegistered(PKBPerson candidate) {
+<span class="pc bpc" id="L252" title="1 of 2 branches missed.">        return EMAIL_CONFIRMED == candidate.getStatus();</span>
+    }
+
+    private Either&lt;ResetStepFailure, PKBPerson&gt; getSingleRegisteredUserForVerification(UserVerificationCriteria criteria, List&lt;PKBPerson&gt; candidates) {
+<span class="nc" id="L256">        var results = HashSet.ofAll(candidates)</span>
+<span class="nc" id="L257">                .map(candidate -&gt; matchSingleCandidate(criteria, candidate))</span>
+<span class="nc" id="L258">                .partition(Either::isLeft)</span>
+<span class="nc" id="L259">                .map(mismatches -&gt; mismatches.map(Either::getLeft),</span>
+<span class="nc" id="L260">                        matches -&gt; matches.map(Either::get));</span>
+
+<span class="nc" id="L262">        LOGGER.info(&quot;Eliminated {} candidates due to failures&quot;, results._1.size());</span>
+
+<span class="nc" id="L264">        return getSingleRegisteredUser(criteria.email(), results._2);</span>
+    }
+
+    private Either&lt;ResetStepFailure, PKBPerson&gt; getSingleRegisteredUser(Email email, Iterable&lt;PKBPerson&gt; candidates) {
+<span class="nc" id="L268">        TreeSet&lt;PKBPerson&gt; sortedMatches = TreeSet.of(comparing(PKBPerson::getId).reversed())</span>
+<span class="nc" id="L269">                .addAll(candidates)</span>
+<span class="nc" id="L270">                .filter(candidate -&gt; checkIfRegistered(candidate).isRight());</span>
+
+<span class="nc" id="L272">        int userCount = sortedMatches</span>
+<span class="nc" id="L273">                .distinctBy(PKBPerson::getHumanUUID)</span>
+<span class="nc" id="L274">                .size();</span>
+
+<span class="nc" id="L276">        return Match(userCount).of(</span>
+                // It's the responsibility of the next step to sync the new credentials to all other entries.
+<span class="nc" id="L278">                Case(ONE, () -&gt; right(sortedMatches.head())),</span>
+<span class="nc" id="L279">                Case($(), left(inconsistentDB(format(&quot;There are %s distinct registered users - by human uuid - for email=[%s]&quot;, userCount, Option.of(email).map(Email::address).getOrNull())))));</span>
+    }
+
+    private void registerPossibleFailedDOBInput(DemographicsMismatch demographicsMismatch, PKBPerson pkbPerson) {
+<span class="fc bfc" id="L283" title="All 2 branches covered.">        if (teamUserManager.isAffiliatedUser(pkbPerson.getId())) {</span>
+            // patients with team have unlimited number of DOB input attempts
+<span class="fc" id="L285">            return;</span>
+        }
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">        if (demographicsMismatch.getProperties().contains(LenientDateOfBirthValidator.PROPERTY)) {</span>
+<span class="fc" id="L288">            RegistrationFailedAttemptLogDto dto = ImmutableRegistrationFailedAttemptLogDto.builder()</span>
+<span class="fc" id="L289">                    .personPublicId(pkbPerson.getPublicId())</span>
+<span class="fc" id="L290">                    .registrationField(DATE_OF_BIRTH)</span>
+<span class="fc" id="L291">                    .registrationTime(dateTimeService.now())</span>
+<span class="fc" id="L292">                    .build();</span>
+<span class="fc" id="L293">            failedAttemptLogService.save(dto);</span>
+        }
+<span class="fc" id="L295">    }</span>
+
+    /**
+     * Returns a date until the user is locked if they entered invalid date of birth too many times incorrectly or
+     * {@link Optional#empty()} otherwise.
+     *
+     * @param pkbPerson the user to search too many login attempts for
+     * @return the date until the user is locked if they already reached the maximum number of invalid DOB input attempts
+     * or {@link Optional#empty()} otherwise
+     */
+    private Optional&lt;Instant&gt; getDateUntilUserIsLockedDueToTooManyFailedDOBInputAttempts(PKBPerson pkbPerson) {
+<span class="fc" id="L306">        Optional&lt;Instant&gt; lockedUntil = Optional.empty();</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">        if (teamUserManager.isAffiliatedUser(pkbPerson.getId())) {</span>
+            // patients with team association have unlimited number of DOB input attempts
+<span class="fc" id="L309">            return lockedUntil;</span>
+        }
+<span class="fc" id="L311">        int lockedHours = config.getDefinitionOfFailedDOBInputAttemptInHours();</span>
+<span class="fc" id="L312">        Instant recentTime = dateTimeService.now().minus(lockedHours, HOURS);</span>
+<span class="fc" id="L313">        List&lt;RegistrationFailedAttemptLogDto&gt; failedAttempts = failedAttemptLogService</span>
+<span class="fc" id="L314">                .findFailedAttempts(pkbPerson.getPublicId(), DATE_OF_BIRTH, recentTime);</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">        if (failedAttempts.size() &gt;= config.getNumberOfFailedDOBInputAttempts()) {</span>
+<span class="fc" id="L316">            lockedUntil = failedAttempts.stream()</span>
+<span class="fc" id="L317">                    .map(RegistrationFailedAttemptLogDto::getRegistrationTime)</span>
+<span class="fc" id="L318">                    .max(Instant::compareTo)</span>
+<span class="fc" id="L319">                    .map(instant -&gt; instant.plus(lockedHours, HOURS));</span>
+        }
+<span class="fc" id="L321">        return lockedUntil;</span>
+    }
+
+    private Supplier&lt;Either&lt;ResetStepFailure, PKBPerson&gt;&gt; throwIllegalStateException(String format) {
+<span class="nc" id="L325">        return () -&gt; {</span>
+<span class="nc" id="L326">            throw new IllegalStateException(format);</span>
+        };
+    }
+
+    private Set&lt;UserType&gt; getDistinctUserTypes(Stream&lt;PKBPerson&gt; candidates) {
+<span class="nc" id="L331">        return candidates</span>
+<span class="nc" id="L332">                .map(PKBPerson::getUserType)</span>
+<span class="nc" id="L333">                .filter(Objects::nonNull)</span>
+<span class="nc" id="L334">                .collect(toSet());</span>
+    }
+
+    private String publicIds(List&lt;PKBPerson&gt; candidates) {
+<span class="nc" id="L338">        return candidates.stream()</span>
+<span class="nc" id="L339">                .map(PUBLIC_ID_AS_STRING)</span>
+<span class="nc" id="L340">                .collect(joining(&quot;,&quot;));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

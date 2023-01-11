@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>KMSAccountKeyLoadingStrategy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.app.bean.strategies.accountkey</a> &gt; <span class="el_source">KMSAccountKeyLoadingStrategy.java</span></div><h1>KMSAccountKeyLoadingStrategy.java</h1><pre class="source lang-java linenums">package com.pkb.app.bean.strategies.accountkey;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ArrayTable;
+import com.google.common.collect.Table;
+import com.pkb.app.dto.AccountSymmetricKeyDto;
+import com.pkb.app.dto.ImmutableAccountSymmetricKeyDto;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInBgTaskEHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.util.FrameFilter;
+import com.pkb.crypto.AccountKeys;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.crypto.dto.AccountSymmetricKeyDTO;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.kms.shared.representation.GrantUserAccessToAccountRequest;
+import com.pkb.kms.shared.representation.KmsError;
+import com.pkb.tolven.PKBAccountDAOLocal;
+import io.prometheus.client.Counter;
+import io.prometheus.client.Summary;
+import io.vavr.Tuple;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.ejb.EJB;
+import javax.inject.Inject;
+import java.lang.invoke.MethodHandles;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
+
+import static com.pkb.crypto.SymmetricKey.symmetricKey;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+
+<span class="fc" id="L43">public class KMSAccountKeyLoadingStrategy implements AccountKeyLoadingStrategy {</span>
+
+<span class="fc" id="L45">    private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L47">    private static final Summary QUERY_TIMER = Summary.build()</span>
+<span class="fc" id="L48">            .name(&quot;phr_keyloader_query_time&quot;)</span>
+<span class="fc" id="L49">            .help(&quot;Latencies of key loading calls&quot;)</span>
+<span class="fc" id="L50">            .labelNames(&quot;call_type&quot;)</span>
+<span class="fc" id="L51">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L52">            .quantile(0.9, 0.01)</span>
+<span class="fc" id="L53">            .quantile(0.95, 0.005)</span>
+<span class="fc" id="L54">            .quantile(0.99, 0.001)</span>
+<span class="fc" id="L55">            .register();</span>
+
+    @VisibleForTesting
+<span class="fc" id="L58">    private static final Counter KMS_ACCOUNT_KEY_SEARCH_COUNTER = Counter.build()</span>
+<span class="fc" id="L59">            .name(&quot;phr_keyloader_kms_account_key_lookup&quot;)</span>
+<span class="fc" id="L60">            .help(&quot;KMS Result of looking up account private key&quot;)</span>
+<span class="fc" id="L61">            .labelNames(&quot;result&quot;)</span>
+<span class="fc" id="L62">            .register();</span>
+
+    @VisibleForTesting
+<span class="fc" id="L65">    private static final Counter KMS_SYMMETRIC_KEY_GET_COUNTER = Counter.build()</span>
+<span class="fc" id="L66">            .name(&quot;phr_keyloader_kms_symmetric_key_get&quot;)</span>
+<span class="fc" id="L67">            .help(&quot;KMS Result of requesting account symmetric key&quot;)</span>
+<span class="fc" id="L68">            .labelNames(&quot;result&quot;)</span>
+<span class="fc" id="L69">            .register();</span>
+    private static final String KEY_RETURNED = &quot;key_returned&quot;;
+
+    @Inject
+    private Kms kmsClient;
+
+    @EJB
+    private PKBAccountDAOLocal accountDAOBean;
+
+    @Override
+    @NotNull
+    public Optional&lt;AccountKeys&gt; getAccountKeys(@NotNull LoggedInEHRRequestContext requestContext, long accountId, UUID accountPublicId) {
+<span class="fc" id="L81">        String requestId = requestContext.getCorrelationId().toString();</span>
+
+<span class="fc bfc" id="L83" title="All 2 branches covered.">        return requestContext instanceof LoggedInBgTaskEHRRequestContext ?</span>
+<span class="fc" id="L84">                getAccountKeysForBgTask(accountPublicId, requestId) :</span>
+<span class="fc" id="L85">                getAccountKeysAsUser(requestContext, accountId, accountPublicId, requestId);</span>
+    }
+
+    @NotNull
+    //TODO Temporary Path: remove when uploaded data phase 2 is implemented (OMNI-63)
+    private Optional&lt;AccountKeys&gt; getAccountKeysForBgTask(UUID accountPublicId, String requestId) {
+<span class="fc" id="L91">        try (Summary.Timer ignored = QUERY_TIMER.labels(&quot;kms&quot;).startTimer()) {</span>
+<span class="fc" id="L92">            return kmsClient.getAccountKeysTrusted(requestId, List.of(accountPublicId))</span>
+<span class="fc" id="L93">                    .peekLeft(err -&gt; {</span>
+<span class="nc" id="L94">                        LOG.warn(&quot;Could not load keys from KMS for {}: {}. Stack: {}&quot;, accountPublicId, err,</span>
+<span class="nc" id="L95">                                FrameFilter.filter(new Exception(&quot;Could not load keys from KMS&quot;).fillInStackTrace()));</span>
+<span class="nc" id="L96">                        KMS_ACCOUNT_KEY_SEARCH_COUNTER.labels(err.getError()).inc();</span>
+<span class="nc" id="L97">                    })</span>
+<span class="fc" id="L98">                    .peek(keys -&gt; KMS_ACCOUNT_KEY_SEARCH_COUNTER.labels(&quot;key_found&quot;).inc())</span>
+<span class="fc" id="L99">                    .toJavaOptional()</span>
+<span class="fc" id="L100">                    .flatMap(keys -&gt; keys.stream().findFirst())</span>
+<span class="fc" id="L101">                    .map(AccountKeys::accountKeys);</span>
+        }
+    }
+
+    @NotNull
+    private Optional&lt;AccountKeys&gt; getAccountKeysAsUser(@NotNull LoggedInEHRRequestContext requestContext, long accountId, UUID accountPublicId, String requestId) {
+        Optional&lt;AccountKeys&gt; result;
+<span class="fc" id="L108">        try (Summary.Timer ignored = QUERY_TIMER.labels(&quot;kms&quot;).startTimer()) {</span>
+<span class="fc" id="L109">            UUID personPublicId = requestContext.getAccessingUserPublicId();</span>
+
+<span class="fc" id="L111">            result = kmsClient.getAccountKeysForSingleAccount(requestId, accountPublicId, personPublicId, false)</span>
+<span class="fc" id="L112">                    .fold(err -&gt; attemptRecoverCorruptAccountKey(err, requestId, accountPublicId, personPublicId), Either::&lt;KmsError, AccountKeysDTO&gt;right)</span>
+<span class="fc" id="L113">                    .peekLeft(err -&gt; {</span>
+                        //noinspection NewExceptionWithoutArguments
+<span class="fc" id="L115">                        LOG.warn(&quot;Could not load keys from KMS for {}: {}. Stack: {}&quot;, accountPublicId, err, FrameFilter.filter(new Exception().fillInStackTrace()));</span>
+<span class="fc" id="L116">                        KMS_ACCOUNT_KEY_SEARCH_COUNTER.labels(err.getError()).inc();</span>
+<span class="fc" id="L117">                    })</span>
+<span class="fc" id="L118">                    .peek(keys -&gt; KMS_ACCOUNT_KEY_SEARCH_COUNTER.labels(&quot;key_found&quot;).inc())</span>
+<span class="fc" id="L119">                    .toJavaOptional()</span>
+<span class="fc" id="L120">                    .map(AccountKeys::accountKeys);</span>
+        }
+
+<span class="fc" id="L123">        return result;</span>
+    }
+
+    private Either&lt;KmsError, AccountKeysDTO&gt; attemptRecoverCorruptAccountKey(KmsError error, String requestId, UUID accountPublicId, UUID personPublicId) {
+<span class="pc bpc" id="L127" title="1 of 4 branches missed.">        if (error.getType() == KmsError.Type.UNEXPECTED &amp;&amp; &quot;Unwrapping failed&quot;.equals(error.getDescription())) {</span>
+<span class="fc" id="L128">            return kmsClient.grantAccessToAccountOwner(requestId, new GrantUserAccessToAccountRequest(accountPublicId, personPublicId))</span>
+<span class="fc" id="L129">                    .mapLeft(grantAccessError -&gt; {</span>
+<span class="nc" id="L130">                        LOG.error(&quot;Error attempting to recover access to own account [{}] for user [{}] : {}&quot;, accountPublicId, personPublicId, grantAccessError.toString());</span>
+<span class="nc" id="L131">                        return error; //Return original error since our attempt to recover from it failed.</span>
+                    })
+<span class="fc" id="L133">                    .flatMap(ignored -&gt; kmsClient.getAccountKeysForSingleAccount(requestId, accountPublicId, personPublicId, true));</span>
+        }
+<span class="fc" id="L135">        return Either.left(error);</span>
+    }
+
+    @Override
+    @NotNull
+    public AccountSymmetricKeyDto getOrCreateSymmetricKey(@NotNull EHRRequestContext requestContext, long accountId) {
+<span class="fc" id="L141">        UUID accountPublicId = accountDAOBean.getAccountPublicId(accountId);</span>
+<span class="fc" id="L142">        String requestId = requestContext.getCorrelationId().toString();</span>
+
+<span class="fc" id="L144">        Either&lt;KmsError, AccountSymmetricKeyDTO&gt; kmsResult = timeKmsSymmetricKey(() -&gt; kmsClient.getSymmetricKey(requestId, accountPublicId));</span>
+
+<span class="fc" id="L146">        return kmsResult</span>
+<span class="fc" id="L147">                .map(this::createSymmetricKeyDto)</span>
+<span class="pc" id="L148">                .peekLeft(err -&gt; logKmsSymmetricKeyRequestError(err, accountPublicId))</span>
+<span class="fc" id="L149">                .peek(key -&gt; countReturnedKey(KEY_RETURNED))</span>
+<span class="pc" id="L150">                .getOrElseThrow(err  -&gt; new RuntimeException(&quot;Error creating new symmetric key: &quot; + err.toString()));</span>
+    }
+
+    @Override
+    @NotNull
+    public Map&lt;Long, AccountSymmetricKeyDto&gt; getOrCreateSymmetricKeys(@NotNull EHRRequestContext requestContext, Set&lt;Long&gt; accountIds) {
+<span class="fc" id="L156">        Map&lt;UUID, Long&gt; accountPublicIds = accountDAOBean.accountIdByAccountPublicIdMap(accountIds);</span>
+<span class="fc" id="L157">        String requestId = requestContext.getCorrelationId().toString();</span>
+
+<span class="fc" id="L159">        Either&lt;KmsError, Map&lt;UUID, AccountSymmetricKeyDTO&gt;&gt; kmsResult = timeKmsSymmetricKey(() -&gt; kmsClient.getSymmetricKeys(requestId, accountPublicIds.keySet()));</span>
+
+<span class="fc" id="L161">        return kmsResult.map(map -&gt; convert(map, accountPublicIds))</span>
+<span class="pc" id="L162">                .peekLeft(err -&gt; logKmsSymmetricKeyRequestError(err, accountPublicIds))</span>
+<span class="fc" id="L163">                .peek(key -&gt; countReturnedKey(KEY_RETURNED))</span>
+<span class="pc" id="L164">                .getOrElseThrow(err  -&gt; new RuntimeException(&quot;Error creating new symmetric keys: &quot; + err.toString()));</span>
+    }
+
+    private Map&lt;Long, AccountSymmetricKeyDto&gt; convert(Map&lt;UUID, AccountSymmetricKeyDTO&gt; input, Map&lt;UUID, Long&gt; accountPublicIds) {
+<span class="fc" id="L168">        return input.entrySet().stream()</span>
+<span class="fc" id="L169">                .collect(toMap(e -&gt; accountPublicIds.get(e.getKey()), e -&gt; createSymmetricKeyDto(e.getValue())));</span>
+    }
+
+    @Override
+    public @NotNull Table&lt;EHRRequestContext, Long, AccountSymmetricKeyDto&gt; getOrCreateSymmetricKeys(Map&lt;EHRRequestContext, Set&lt;Long&gt;&gt; accountIdsByRequestContext) {
+<span class="fc" id="L174">        var accountIds = accountIdsByRequestContext.values().stream().flatMap(Set::stream).collect(toSet());</span>
+<span class="fc" id="L175">        Map&lt;UUID, Long&gt; accountPublicIds = accountDAOBean.accountIdByAccountPublicIdMap(accountIds);</span>
+
+<span class="fc" id="L177">        String correlationId = accountIdsByRequestContext.keySet().iterator().next().getCorrelationId().toString();</span>
+
+<span class="fc" id="L179">        Either&lt;KmsError, Map&lt;UUID, AccountSymmetricKeyDTO&gt;&gt; kmsResult = timeKmsSymmetricKey(() -&gt; kmsClient.getSymmetricKeys(correlationId, accountPublicIds.keySet()));</span>
+
+<span class="fc" id="L181">        return kmsResult.map(map -&gt; convert(map, accountPublicIds, accountIdsByRequestContext))</span>
+<span class="pc" id="L182">                .peekLeft(err -&gt; logKmsSymmetricKeyRequestError(err, accountPublicIds))</span>
+<span class="fc" id="L183">                .peek(key -&gt; countReturnedKey(KEY_RETURNED))</span>
+<span class="pc" id="L184">                .getOrElseThrow(err  -&gt; new RuntimeException(&quot;Error creating new symmetric keys: &quot; + err.toString()));</span>
+    }
+
+    private &lt;R&gt; R timeKmsSymmetricKey(Callable&lt;R&gt; timeable) {
+<span class="fc" id="L188">        return QUERY_TIMER.labels(&quot;kms_symmetric_key&quot;).time(timeable);</span>
+    }
+
+    private void countReturnedKey(String label) {
+<span class="fc" id="L192">        KMS_SYMMETRIC_KEY_GET_COUNTER.labels(label).inc();</span>
+<span class="fc" id="L193">    }</span>
+
+    private Table&lt;EHRRequestContext, Long, AccountSymmetricKeyDto&gt; convert(Map&lt;UUID, AccountSymmetricKeyDTO&gt; input, Map&lt;UUID, Long&gt; accountPublicIds, Map&lt;EHRRequestContext, Set&lt;Long&gt;&gt; accountIdsByRequestContext) {
+<span class="fc" id="L196">        Map&lt;Long, Set&lt;EHRRequestContext&gt;&gt; contextByAccountId = accountIdsByRequestContext.entrySet()</span>
+<span class="fc" id="L197">                .stream()</span>
+<span class="fc" id="L198">                .flatMap(e -&gt; e.getValue().stream().map(l -&gt; Tuple.of(l, e.getKey())))</span>
+<span class="fc" id="L199">                .collect(groupingBy(t -&gt; t._1, Collectors.mapping(t -&gt; t._2, toSet())));</span>
+
+<span class="fc" id="L201">        Table&lt;EHRRequestContext, Long, AccountSymmetricKeyDto&gt; result = ArrayTable.create(accountIdsByRequestContext.keySet(), contextByAccountId.keySet());</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">        for (var entry : input.entrySet()) {</span>
+<span class="fc" id="L203">            UUID accountPublicId = entry.getKey();</span>
+<span class="fc" id="L204">            Long accountId = accountPublicIds.get(accountPublicId);</span>
+<span class="fc" id="L205">            contextByAccountId.get(accountId).forEach(rc -&gt; result.put(rc, accountId, createSymmetricKeyDto(entry.getValue())));</span>
+<span class="fc" id="L206">        }</span>
+<span class="fc" id="L207">        return result;</span>
+    }
+
+    private AccountSymmetricKeyDto createSymmetricKeyDto(AccountSymmetricKeyDTO dto) {
+<span class="fc" id="L211">        return ImmutableAccountSymmetricKeyDto.builder()</span>
+<span class="fc" id="L212">                .id(dto.getKeyId())</span>
+<span class="fc" id="L213">                .key(symmetricKey(dto))</span>
+<span class="fc" id="L214">                .build();</span>
+    }
+
+    private void logKmsSymmetricKeyRequestError(KmsError err, Object accountPublicId) {
+<span class="nc" id="L218">        LOG.warn(&quot;Could not get or create symmetric key from KMS for {} : {}&quot;, accountPublicId, err);</span>
+<span class="nc" id="L219">        countReturnedKey(err.getError());</span>
+<span class="nc" id="L220">    }</span>
+
+    @Override
+    public void reloadKeysForAccount(@NotNull EHRRequestContext requestContext, long accountId) {
+<span class="nc" id="L224">        UUID accountPublicId = accountDAOBean.getAccountPublicId(accountId);</span>
+<span class="nc" id="L225">        kmsClient.evictAccountKeys(requestContext.getCorrelationId().toString(), accountPublicId)</span>
+<span class="nc" id="L226">                .peekLeft(error -&gt; LOG.error(&quot;Error evicting keys from KMS for account {} : {}&quot;, accountId, error));</span>
+<span class="nc" id="L227">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RepositoryBackedAuthorizationDataService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.authz</a> &gt; <span class="el_source">RepositoryBackedAuthorizationDataService.java</span></div><h1>RepositoryBackedAuthorizationDataService.java</h1><pre class="source lang-java linenums">package com.pkb.authz;
+
+import com.pkb.authentication.principal.user.AuthenticatedSystemUser;
+import com.pkb.authz.data.AuthorizationData;
+import com.pkb.authz.data.AuthorizationInputs;
+import com.pkb.datamodel.LocalIdType;
+import com.pkb.datamodel.authorization.TargetOwnerData;
+import com.pkb.datamodel.team.TeamWithOrg;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.datamodel.user.Person;
+import com.pkb.datamodel.user.Professional;
+import com.pkb.datamodel.user.TeamCoordinator;
+import com.pkb.domain.repository.AuthorizationDataRepository;
+import com.pkb.entities.enums.UserType;
+import com.pkb.questionnaireservice.modelv2.Questionnaire;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireRequest;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.collection.Set;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.UUID;
+
+import static com.pkb.authz.data.ImmutableAuthorizationData.authorizationData;
+import static io.vavr.API.Map;
+import static io.vavr.API.Set;
+import static io.vavr.API.Tuple;
+import static io.vavr.collection.List.ofAll;
+import static java.util.function.Function.identity;
+
+/**
+ * Implementation of AuthorizationDataService, backed by a custom repository.
+ * This implementation tries to minimize the number of queries to repositories by using batch methods where possible.
+ */
+public class RepositoryBackedAuthorizationDataService implements AuthorizationDataService {
+
+<span class="fc" id="L38">    private static final Set&lt;Class&lt;?&gt;&gt; TARGET_METAS = Set(TeamWithOrg.class, LocalIdType.class, Questionnaire.class, QuestionnaireRequest.class);</span>
+    private final AuthorizationDataRepository authorizationDataRepository;
+
+<span class="fc" id="L41">    public RepositoryBackedAuthorizationDataService(AuthorizationDataRepository authorizationDataRepository) {</span>
+<span class="fc" id="L42">        this.authorizationDataRepository = authorizationDataRepository;</span>
+<span class="fc" id="L43">    }</span>
+
+    @Override
+    public @NotNull AuthorizationData fetch(@NotNull AuthorizationInputs inputs) {
+        // Expensive op 1, map from object IDs to person IDs
+<span class="fc" id="L48">        Map&lt;TargetMeta&lt;?&gt;, UUID&gt; targetsToUUIDs = fetchTargetsToUUIDs(ofAll(inputs.targets()));</span>
+
+<span class="fc" id="L50">        var userOrAccountPrivateKey = inputs.authenticatedIdentity().userOrAccountPrivateKey();</span>
+
+<span class="fc" id="L52">        Option&lt;Long&gt; systemUserOrgId = inputs.authenticatedSystemUser().map(AuthenticatedSystemUser::getOrgId);</span>
+
+        // Expensive op 2, fetch all the relevant data for those person IDs
+<span class="fc bfc" id="L55" title="All 2 branches covered.">        Map&lt;UUID, TargetOwnerData&gt; ownerDatasByPersonId = targetsToUUIDs.nonEmpty() </span>
+<span class="fc" id="L56">                ? ofAll(authorizationDataRepository.findByPersonPublicIds(targetsToUUIDs.values().toList(),</span>
+<span class="fc" id="L57">                        inputs.findAuthenticatedUserWithActorId(), systemUserOrgId, userOrAccountPrivateKey))</span>
+<span class="fc" id="L58">                    .toMap(it -&gt; it.person().getPublicId(), identity())</span>
+<span class="fc" id="L59">                : Map();</span>
+
+        // Regroup
+<span class="fc" id="L62">        Map&lt;TargetMeta&lt;?&gt;, TargetOwnerData&gt; targetOwnerDataMap = targetsToUUIDs</span>
+<span class="fc" id="L63">                .mapValues(ownerDatasByPersonId::get)</span>
+<span class="fc" id="L64">                .filterValues(Option::isDefined)</span>
+<span class="fc" id="L65">                .mapValues(Option::get);</span>
+
+
+<span class="fc" id="L68">        return authorizationData()</span>
+<span class="fc" id="L69">                .inputs(inputs)</span>
+<span class="fc" id="L70">                .targetOwnerData(doPostFiltering(targetOwnerDataMap))</span>
+<span class="fc" id="L71">                .build();</span>
+    }
+
+    /**
+     * It's possible to fetch the wrong target owner data: e.g. if I request a Patient resource using
+     * a Pro's ID (or vice versa)
+     *
+     * It's more efficient to filter that out here, rather than applying another query beforehand to check
+     * user types are correct.
+     */
+    private Map&lt;TargetMeta&lt;?&gt;, TargetOwnerData&gt; doPostFiltering(Map&lt;TargetMeta&lt;?&gt;, TargetOwnerData&gt; targetOwnerDataMap) {
+<span class="fc" id="L82">        return targetOwnerDataMap.reject(this::isWrongOwnerType);</span>
+    }
+
+    private boolean isWrongOwnerType(TargetMeta targetMeta, TargetOwnerData targetOwnerData) {
+<span class="fc bfc" id="L86" title="All 2 branches covered.">        if (Patient.class.isAssignableFrom(targetMeta.targetType())</span>
+<span class="fc bfc" id="L87" title="All 2 branches covered.">            &amp;&amp; targetOwnerData.person().getUserType() != UserType.PATIENT) {</span>
+<span class="fc" id="L88">            return true;</span>
+        }
+<span class="fc bfc" id="L90" title="All 2 branches covered.">        if (Professional.class.isAssignableFrom(targetMeta.targetType())</span>
+<span class="fc bfc" id="L91" title="All 2 branches covered.">            &amp;&amp; targetOwnerData.person().getUserType() != UserType.REG_CLINICIAN) {</span>
+<span class="fc" id="L92">            return true;</span>
+        }
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">        return TeamCoordinator.class.isAssignableFrom(targetMeta.targetType())</span>
+<span class="pc bnc" id="L95" title="All 2 branches missed.">                &amp;&amp; targetOwnerData.person().getUserType() != UserType.INSTITUTE_ADMIN;</span>
+    }
+
+    /**
+     * Potentially expensive database query - has to map from any supported type of object to the public ID of the
+     * person who owns the data.
+     */
+    private Map&lt;TargetMeta&lt;?&gt;, UUID&gt; fetchTargetsToUUIDs(List&lt;TargetMeta&lt;?&gt;&gt; targets) {
+<span class="fc" id="L103">        return targets.partition(it -&gt; it.personId().isDefined())</span>
+<span class="fc" id="L104">                .map(this::processTargetMetasWithOwnerIds,</span>
+                     this::processTargetMetasWithoutOwnerIds)
+<span class="fc" id="L106">                .apply(Map::merge);</span>
+    }
+
+    /**
+     * Some of the targets already have personIDs on them (for search operations usually)
+     * Shortcut those here.
+     */
+    private Map&lt;TargetMeta&lt;?&gt;, UUID&gt; processTargetMetasWithOwnerIds(List&lt;TargetMeta&lt;?&gt;&gt; targetMetas) {
+        // Partitioning was done checking presence of IDs so it is safe to call get on them
+        // noinspection OptionGetWithoutIsPresent
+<span class="fc" id="L116">        return targetMetas.toMap(identity(), it -&gt; it.personId().get());</span>
+    }
+
+    private Map&lt;TargetMeta&lt;?&gt;, UUID&gt; processTargetMetasWithoutOwnerIds(List&lt;TargetMeta&lt;?&gt;&gt; targetMetas) {
+<span class="fc" id="L120">        return targetMetas.partition(target -&gt; target.identifiers().isEmpty())</span>
+<span class="fc" id="L121">                .map(this::processTargetMetasWithoutAnyId,</span>
+                     this::processTargetMetasWithIds)
+<span class="fc" id="L123">                .apply(Map::merge);</span>
+    }
+
+    /** These targets contain neither target nor target owner ids. */
+    private Map&lt;TargetMeta&lt;?&gt;, UUID&gt; processTargetMetasWithoutAnyId(List&lt;TargetMeta&lt;?&gt;&gt; targetMetas) {
+<span class="fc" id="L128">        return Map();</span>
+    }
+
+    /**
+     * These targets contain target ids.
+     * It's a very likely yet to come functionality, that we need to resolve target ids to distinct target owner ids.
+     * We don't at the moment
+     */
+    private Map&lt;TargetMeta&lt;?&gt;, UUID&gt; processTargetMetasWithIds(List&lt;TargetMeta&lt;?&gt;&gt; targetMetas) {
+<span class="fc" id="L137">        return targetMetas.groupBy(TargetMeta::targetType)</span>
+<span class="fc" id="L138">                .flatMap(this::processTargetMetasForType);</span>
+    }
+
+    private Map&lt;TargetMeta&lt;?&gt;, UUID&gt; processTargetMetasForType(Class&lt;?&gt; targetType, List&lt;TargetMeta&lt;?&gt;&gt; targetMetas) {
+<span class="fc bfc" id="L142" title="All 2 branches covered.">        if (Person.class.isAssignableFrom(targetType)) {</span>
+<span class="fc" id="L143">            return targetMetas.toMap(tm -&gt; Tuple(tm, tm.requireUUID()));</span>
+<span class="pc bpc" id="L144" title="1 of 2 branches missed.">        } else if (TARGET_METAS.find(clazz -&gt; clazz.isAssignableFrom(targetType)).isDefined()) {</span>
+<span class="fc" id="L145">            return Map();</span>
+        } else {
+<span class="nc" id="L147">            throw new UnsupportedOperationException(&quot;Unsupported target type &quot; + targetType.getName());</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

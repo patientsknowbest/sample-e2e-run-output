@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisProcessor.java</span></div><h1>EmisProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.dataupload.emis.esv2.EmisEsBatchState;
+import com.pkb.service.dataupload.emis.esv2.batch.FileProcessor;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFile;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFileSetLists;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFileSftpSet;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.Metrics;
+import name.neuhalfen.projects.crypto.bouncycastle.openpgp.keys.keyrings.KeyringConfig;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.lang.invoke.MethodHandles;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import static com.pkb.service.dataupload.emis.esv2.batch.FileProcessor.ProcessorType.NORMAL;
+import static com.pkb.service.dataupload.emis.esv2.batch.FileProcessor.ProcessorType.VALIDATOR;
+import static com.pkb.service.dataupload.emis.esv2.batch.FileProcessor.TAG_PROCESSOR_TYPE;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class EmisProcessor {
+
+<span class="fc" id="L28">    private static final Logger LOGGER = getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final String TAG_RESULT = &quot;result&quot;;
+
+<span class="fc" id="L32">    private static final DistributionSummary EMIS_TO_BE_PROCESSED_METRIC = DistributionSummary</span>
+<span class="fc" id="L33">            .builder(&quot;pkb_phr_integration_emis_csv_batch_to_process&quot;)</span>
+<span class="fc" id="L34">            .description(&quot;Batch sizes to be processed&quot;).register(Metrics.globalRegistry);</span>
+
+
+    private final EmisBatchProcessor emisBatchProcessor;
+    private final EmisFileSetUtils emisFileSetUtils;
+    private final EmisEsBatchStateService emisEsBatchStateService;
+    private final EmisEsStatusService emisEsStatusService;
+    private final PhrConfig configuration;
+    private final EmisPersonStatHelper emisPersonStatHelper;
+
+    public EmisProcessor(@NotNull EmisBatchProcessor emisBatchProcessor, EmisFileSetUtils emisFileSetUtils, EmisEsBatchStateService emisEsBatchStateService,
+<span class="fc" id="L45">                         @NotNull EmisEsStatusService emisEsStatusService, PhrConfig configuration, EmisPersonStatHelper emisPersonStatHelper) {</span>
+<span class="fc" id="L46">        this.emisBatchProcessor = emisBatchProcessor;</span>
+<span class="fc" id="L47">        this.emisFileSetUtils = emisFileSetUtils;</span>
+<span class="fc" id="L48">        this.emisEsBatchStateService = emisEsBatchStateService;</span>
+<span class="fc" id="L49">        this.emisEsStatusService = emisEsStatusService;</span>
+<span class="fc" id="L50">        this.configuration = configuration;</span>
+<span class="fc" id="L51">        this.emisPersonStatHelper = emisPersonStatHelper;</span>
+<span class="fc" id="L52">    }</span>
+
+    public EmisInternalResult&lt;Map&lt;String, EmisEsBatchState&gt;&gt; processBatches(@NotNull VerifiedEmisFileSetLists emisBatches,
+                                                               @NotNull KeyringConfig keyringConfig, @NotNull Map&lt;String, EmisEsBatchState&gt; batchStateBySftpTag) {
+
+<span class="fc bfc" id="L57" title="All 2 branches covered.">        if (emisBatches.isEmpty()) {</span>
+<span class="fc" id="L58">            LOGGER.info(&quot;Skipped EMIS batch processing as there is nothing to process.&quot;);</span>
+<span class="fc" id="L59">            return ImmutableEmisInternalResult.of(batchStateBySftpTag, EmisStepResult.FINISHED);</span>
+        }
+
+<span class="fc" id="L62">        List&lt;VerifiedEmisFileSftpSet&gt; verifiedBatchesForProcessing =  emisBatches.verifiedBatchesForProcessing();</span>
+<span class="fc" id="L63">        List&lt;VerifiedEmisFileSftpSet&gt; verifiedBatchesForCodeValidating =  emisBatches.verifiedBatchesForCodeValidating();</span>
+
+<span class="fc" id="L65">        verifiedBatchesForProcessing.forEach(efs -&gt; EMIS_TO_BE_PROCESSED_METRIC.record(efs.verifiedEmisFileSet().filesSize().doubleValue()));</span>
+
+<span class="fc" id="L67">        LOGGER.info(&quot;Processing of {} EMIS batches started.&quot;, verifiedBatchesForProcessing.size());</span>
+<span class="fc" id="L68">        emisEsStatusService.reportCurrentBatches(verifiedBatchesForProcessing.stream().map(vefss -&gt; vefss.verifiedEmisFileSet()).collect(Collectors.toList()));</span>
+<span class="fc" id="L69">        ImmutableEmisInternalResult.Builder&lt;Map&lt;String, EmisEsBatchState&gt;&gt; result = ImmutableEmisInternalResult.builder();</span>
+<span class="fc" id="L70">        result.stepResult(EmisStepResult.FAILED);</span>
+<span class="fc" id="L71">        boolean batchSuccess = true;</span>
+<span class="fc bfc" id="L72" title="All 2 branches covered.">        if (configuration.isEmisEsForcedCodeCollectionModeEnabled()) {</span>
+<span class="fc" id="L73">            LOGGER.warn(&quot;Force failing EMIS batches to skip to code collection mode!&quot;);</span>
+<span class="fc" id="L74">            batchSuccess = false;</span>
+        }
+<span class="fc" id="L76">        List&lt;VerifiedEmisFileSftpSet&gt; processedBatches = new ArrayList&lt;&gt;(verifiedBatchesForProcessing.size());</span>
+
+<span class="fc" id="L78">        int batchIndex = 0;</span>
+<span class="fc bfc" id="L79" title="All 4 branches covered.">        while (batchSuccess &amp;&amp; batchIndex &lt; verifiedBatchesForProcessing.size()) {</span>
+<span class="fc" id="L80">            VerifiedEmisFileSftpSet emisBatchForProcessing = verifiedBatchesForProcessing.get(batchIndex);</span>
+<span class="fc" id="L81">            String currentSftpUniqueId = emisBatchForProcessing.sftpUniqueId();</span>
+<span class="fc" id="L82">            EmisEsBatchState latestAttemptedBatch = batchStateBySftpTag.get(currentSftpUniqueId);</span>
+<span class="fc" id="L83">            emisEsStatusService.reportCurrentUniqueTag(latestAttemptedBatch.getSftpUniqueId());</span>
+            try {
+<span class="fc" id="L85">                emisEsStatusService.reportBatchStart(emisBatchForProcessing.verifiedEmisFileSet().dateStamp());</span>
+
+<span class="fc" id="L87">                batchSuccess = emisBatchProcessor.processBatch(emisBatchForProcessing, keyringConfig, latestAttemptedBatch.getId());</span>
+<span class="fc bfc" id="L88" title="All 2 branches covered.">                if (batchSuccess) {</span>
+<span class="fc" id="L89">                    processedBatches.add(emisBatchForProcessing);</span>
+<span class="fc" id="L90">                    latestAttemptedBatch = updateBatchStateWithLastProcessedBatch(emisBatchForProcessing, latestAttemptedBatch);</span>
+<span class="fc" id="L91">                    batchStateBySftpTag.replace(currentSftpUniqueId, batchStateBySftpTag.get(currentSftpUniqueId) ,latestAttemptedBatch);</span>
+<span class="fc" id="L92">                    ++batchIndex;</span>
+                }
+<span class="fc" id="L94">                emisEsStatusService.reportBatchEnd();</span>
+<span class="fc" id="L95">                emisPersonStatHelper.reportBatchEnd();</span>
+<span class="nc" id="L96">            } catch (Exception e) {</span>
+<span class="nc" id="L97">                batchSuccess = false;</span>
+<span class="nc" id="L98">                LOGGER.error(&quot;Error during processing of EMIS batch {}!&quot;, emisBatchForProcessing.verifiedEmisFileSet().dateStamp(), e);</span>
+<span class="fc" id="L99">            }</span>
+<span class="fc" id="L100">            incrementProcessedBatchCounter(NORMAL, emisBatchForProcessing, batchSuccess);</span>
+<span class="fc" id="L101">        }</span>
+
+
+<span class="fc" id="L104">        result.content(batchStateBySftpTag);</span>
+
+        // if the batch failed for any reason: loop the remaining batches but JUST validate codes
+<span class="fc bfc" id="L107" title="All 2 branches covered.">        if (!batchSuccess) {</span>
+<span class="fc" id="L108">            emisEsStatusService.reportBatchError();</span>
+<span class="fc" id="L109">            LOGGER.error(&quot;EMIS batch failure! Starting validation of following batches for missing or unmatched clinical codes&quot;);</span>
+<span class="fc" id="L110">            ensureReferenceFilesProcessedAndFindMissingCodes(keyringConfig, verifiedBatchesForProcessing, batchIndex);</span>
+        }
+        //regardless of batch failure loop through verified batches which were eligible for code validating
+<span class="fc bfc" id="L113" title="All 2 branches covered.">        if (!verifiedBatchesForCodeValidating.isEmpty()) {</span>
+<span class="fc" id="L114">            LOGGER.info(&quot;Starting validation of {} batches which were verified after failure for missing or unmatched clinical codes&quot;, verifiedBatchesForCodeValidating.size());</span>
+<span class="fc" id="L115">            ensureReferenceFilesProcessedAndFindMissingCodes(keyringConfig, verifiedBatchesForCodeValidating, 0);</span>
+        }
+
+<span class="fc bfc" id="L118" title="All 2 branches covered.">        if (batchSuccess) {</span>
+<span class="fc" id="L119">            LOGGER.info(&quot;EMIS batch processing finished successfully, batches processed: {}&quot;, emisFileSetUtils.toTimestampListVerified(processedBatches, VerifiedEmisFileSftpSet::verifiedEmisFileSet));</span>
+<span class="fc" id="L120">            result.stepResult(EmisStepResult.FINISHED);</span>
+        } else {
+<span class="fc bfc" id="L122" title="All 2 branches covered.">            if (processedBatches.isEmpty()) {</span>
+<span class="fc" id="L123">                result.stepResult(EmisStepResult.FAILED);</span>
+            } else {
+<span class="fc" id="L125">                result.stepResult(EmisStepResult.FINISHED_WITH_ERRORS);</span>
+            }
+        }
+<span class="fc" id="L128">        return result.build();</span>
+    }
+
+    private boolean ensureReferenceFilesProcessedAndFindMissingCodes( @NotNull KeyringConfig keyringConfig, List&lt;VerifiedEmisFileSftpSet&gt; emisBatches, int batchIndex) {
+<span class="fc" id="L132">        boolean validationSuccess = true;</span>
+<span class="fc" id="L133">        int currentBatchIndex = batchIndex;</span>
+<span class="fc bfc" id="L134" title="All 4 branches covered.">        while (validationSuccess &amp;&amp; currentBatchIndex &lt; emisBatches.size()) {</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">            if (currentBatchIndex == batchIndex) {</span>
+<span class="fc" id="L136">                emisEsStatusService.reportCurrentBatchBeingReprocessed();</span>
+            }
+<span class="fc" id="L138">            VerifiedEmisFileSftpSet emisBatch = emisBatches.get(currentBatchIndex++);</span>
+<span class="fc" id="L139">            emisEsStatusService.reportBatchStart(emisBatch.verifiedEmisFileSet().dateStamp());</span>
+            try {
+<span class="fc" id="L141">                validationSuccess = emisBatchProcessor.processBatchValidateEmisCodes(emisBatch.verifiedEmisFileSet(), keyringConfig, emisBatch.serverDownloadDir());</span>
+<span class="nc" id="L142">            } catch (Exception e) {</span>
+<span class="nc" id="L143">                validationSuccess = false;</span>
+<span class="nc" id="L144">                LOGGER.error(&quot;Error during EMIS code validation in batch {}!&quot;, emisBatch.verifiedEmisFileSet().dateStamp(), e);</span>
+<span class="fc" id="L145">            }</span>
+<span class="fc" id="L146">            emisEsStatusService.reportBatchEnd();</span>
+<span class="fc" id="L147">            incrementProcessedBatchCounter(VALIDATOR, emisBatch, validationSuccess);</span>
+<span class="fc" id="L148">        }</span>
+
+<span class="fc" id="L150">        return validationSuccess;</span>
+    }
+
+    private EmisEsBatchState updateBatchStateWithLastProcessedBatch(VerifiedEmisFileSftpSet emisBatch, EmisEsBatchState batchState) {
+<span class="fc" id="L154">        VerifiedEmisFile exampleFileInBatch = emisBatch.verifiedEmisFileSet().files().values().iterator().next();</span>
+<span class="fc" id="L155">        batchState.setLastProcessedBatchGuid(exampleFileInBatch.guid());</span>
+<span class="fc" id="L156">        batchState.setLastProcessedBatchDatestamp(emisBatch.verifiedEmisFileSet().dateStamp());</span>
+<span class="fc" id="L157">        batchState.setLastProcessedBatchBulk(exampleFileInBatch.isBulk());</span>
+<span class="fc" id="L158">        return emisEsBatchStateService.save(batchState);</span>
+    }
+
+    protected void incrementProcessedBatchCounter(FileProcessor.ProcessorType type, VerifiedEmisFileSftpSet emisBatch, boolean result) {
+<span class="fc bfc" id="L162" title="All 2 branches covered.">        Metrics.summary(&quot;pkb_phr_integration_emis_csv_processed_batch&quot;, TAG_PROCESSOR_TYPE, type.toString(), TAG_RESULT, result ? &quot;success&quot; : &quot;failure&quot;).record(emisBatch.verifiedEmisFileSet().filesSize().doubleValue());</span>
+<span class="fc" id="L163">    }</span>
+
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

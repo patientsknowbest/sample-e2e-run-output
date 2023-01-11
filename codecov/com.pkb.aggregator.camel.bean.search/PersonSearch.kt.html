@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PersonSearch.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel.bean.search</a> &gt; <span class="el_source">PersonSearch.kt</span></div><h1>PersonSearch.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel.bean.search
+
+import com.google.common.base.Preconditions.checkState
+import com.pkb.aggregator.R4IdType
+import com.pkb.aggregator.R4Person
+import com.pkb.aggregator.camel.DOWNSTREAM_RESOURCE_ID_PROPERTY
+import com.pkb.aggregator.camel.PERSON_PAGE_LINKS_PROPERTY
+import com.pkb.aggregator.camel.PERSON_PROPERTY
+import com.pkb.aggregator.camel.SOURCED_RESOURCE_PROPERTY
+import com.pkb.aggregator.camel.UPSTREAM_SOURCE_ID_PROPERTY
+import com.pkb.aggregator.persistence.entity.PatientIdentifierMapEntry
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamResource
+import com.pkb.aggregator.service.FHIR_TYPE_PATIENT
+import com.pkb.aggregator.service.FHIR_TYPE_PERSON
+import com.pkb.aggregator.service.PatientIdentifierService
+import com.pkb.aggregator.service.dto.ResourceWithSourceId
+import com.pkb.aggregator.service.paginate.ResourcePaginator
+import org.apache.camel.Body
+import org.apache.camel.ExchangeProperties
+import org.apache.camel.ExchangeProperty
+import org.springframework.stereotype.Service
+
+@Service
+<span class="fc" id="L24">class PersonSearch(</span>
+<span class="fc" id="L25">    private val patientIdentifierService: PatientIdentifierService,</span>
+    paginator: ResourcePaginator,
+) :
+<span class="fc" id="L28">    AbstractPaginatedResourceSearch(paginator, PERSON_PROPERTY, PERSON_PAGE_LINKS_PROPERTY) {</span>
+
+    fun findDownstreamResourceId(
+        @ExchangeProperties properties: MutableMap&lt;String, Any&gt;,
+        @Body resourceWithSourceId: ResourceWithSourceId&lt;R4Person&gt;,
+    ) {
+
+        /*
+        The Person resource operates a bit differently to other resources, at least while we're only dealing with
+        ehrmigrated Person resources. A Person resource from the migrator has no identifiers or other information in
+        it - all it does is has a target link to a Patient resource, with which it shares the uuid part of the resource
+        id (so e.g in the PHR upstream, Patient/1234 is linked to by Person/1234).
+
+        All other aggregated resources currently use identifiers to link resources across upstreams, but we can't do
+        that with Person records, so for now this implementation is based on the resource id implied relationship as
+        described above. That means, to figure out what (if any) downstream id already exists for this Person resource,
+        we look up the _Patient_ that has the matching upstream resource id, and use that.
+
+        If/when we have a customer wanting to send us Person resources that break these assumptions,
+        this will need a bit more thinking and development.
+         */
+<span class="fc" id="L49">        val (source, resource) = resourceWithSourceId</span>
+<span class="fc" id="L50">        val patientResourceId = with(resource.link) {</span>
+<span class="pc bpc" id="L51" title="1 of 2 branches missed.">            checkState(this.size == 1, &quot;Expected exactly 1 link target&quot;)</span>
+<span class="fc" id="L52">            val idType = R4IdType(this.first().target.reference)</span>
+<span class="fc" id="L53">            checkState(idType.resourceType == FHIR_TYPE_PATIENT, &quot;Link target must be a Patient&quot;)</span>
+<span class="fc" id="L54">            idType</span>
+        }
+
+<span class="fc" id="L57">        val upstreamPatientResourceId = UpstreamResource(source, patientResourceId.toString())</span>
+<span class="fc" id="L58">        val patientIdentifiers = patientIdentifierService.findByUpstreamResourceIdIn(listOf(upstreamPatientResourceId))</span>
+<span class="fc bfc" id="L59" title="All 4 branches covered.">        if (patientIdentifiers.isNotEmpty()) {</span>
+<span class="fc" id="L60">            assertSameDownstreamResourceId(patientIdentifiers, resourceWithSourceId)</span>
+
+            // The downstream Person has the same uuid as the Patient, so we need to convert Patient/xxx to Person/xxx
+<span class="fc" id="L63">            val idType = R4IdType(patientIdentifiers.first().downstreamResourceId)</span>
+<span class="fc" id="L64">            properties[DOWNSTREAM_RESOURCE_ID_PROPERTY] = R4IdType(FHIR_TYPE_PERSON, idType.idPart).toString()</span>
+        }
+
+<span class="fc" id="L67">        properties[SOURCED_RESOURCE_PROPERTY] = resourceWithSourceId</span>
+<span class="fc" id="L68">    }</span>
+
+    fun findDownstreamIdByDeltaNotification(
+        @ExchangeProperties properties: MutableMap&lt;String, Any&gt;,
+        @ExchangeProperty(UPSTREAM_SOURCE_ID_PROPERTY) upstreamSourceId: UpstreamResource,
+    ) {
+        // As above, ehrmigrated Person resources have the same resource id as the corresponding patient, so we can
+        // look it up in the patient map table. This assumption may change in future
+<span class="nc" id="L76">        val idType = R4IdType(upstreamSourceId.upstreamResourceId)</span>
+<span class="nc" id="L77">        val upstreamPatientResource = upstreamSourceId.copy(</span>
+<span class="nc" id="L78">            upstreamResourceId = R4IdType(FHIR_TYPE_PATIENT, idType.idPart).toString()</span>
+        )
+<span class="nc" id="L80">        properties[DOWNSTREAM_RESOURCE_ID_PROPERTY] =</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">            patientIdentifierService.findByUpstreamResourceIdIn(listOf(upstreamPatientResource))</span>
+<span class="nc" id="L82">                .firstOrNull()</span>
+<span class="nc bnc" id="L83" title="All 2 branches missed.">                ?.let { R4IdType(it.downstreamResourceId) }</span>
+<span class="nc" id="L84">                ?.let { R4IdType(FHIR_TYPE_PERSON, it.idPart).toString() }</span>
+<span class="nc" id="L85">                ?: throw RuntimeException(&quot;Could not find downstream resource id for ${upstreamSourceId.upstreamResourceId}&quot;)</span>
+<span class="nc" id="L86">    }</span>
+
+    private fun assertSameDownstreamResourceId(
+        entries: List&lt;PatientIdentifierMapEntry&gt;,
+        resourceWithSourceId: ResourceWithSourceId&lt;R4Person&gt;
+    ) {
+<span class="fc" id="L92">        val downstreamResourceIds = entries.map { it.downstreamResourceId }.toSet()</span>
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">        if (downstreamResourceIds.size &gt; 1) {</span>
+<span class="nc" id="L94">            val (source, resource) = resourceWithSourceId</span>
+<span class="nc" id="L95">            throw RuntimeException(&quot;Found multiple downstream resource ids for ${resource.id} from $source: $downstreamResourceIds&quot;)</span>
+        }
+<span class="fc" id="L97">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

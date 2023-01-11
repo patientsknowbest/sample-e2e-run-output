@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResourceRemovalManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhirwall.service.resource.wayfinder</a> &gt; <span class="el_source">ResourceRemovalManager.java</span></div><h1>ResourceRemovalManager.java</h1><pre class="source lang-java linenums">package com.pkb.fhirwall.service.resource.wayfinder;
+
+import com.pkb.fhirwall.service.auth.ImmutableResponse;
+import com.pkb.fhirwall.service.auth.Response;
+import com.pkb.fhirwall.service.util.BundleService;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Resource;
+import org.hl7.fhir.r4.model.ResourceType;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+import static com.pkb.fhirwall.service.util.ResourceIdUtil.BASE_RESOURCE_COMPARATOR_ID;
+
+/**
+ * Handles the removal of certain elements from the responses we send back based on over-arching business rules,
+ * rather than authorization.
+ *
+ * Splitting this out from authz, enrichment etc. to keep it nice and transparent as to what's happening and why.
+ *
+ * Bundle lists are immutable (the content of the list itself is not), so to effectively do this you have to construct
+ * a new Bundle and add these resources into it as entry components, which is frustrating.
+ */
+public class ResourceRemovalManager {
+
+    private AppointmentResourceRemover appointmentResourceRemover;
+    private BundleService bundleService;
+
+    public ResourceRemovalManager(AppointmentResourceRemover appointmentResourceRemover,
+<span class="fc" id="L36">                                  BundleService bundleService) {</span>
+<span class="fc" id="L37">        this.appointmentResourceRemover = appointmentResourceRemover;</span>
+<span class="fc" id="L38">        this.bundleService = bundleService;</span>
+<span class="fc" id="L39">    }</span>
+
+    public Response applyRemovalRules(Response originalResponse) {
+<span class="fc" id="L42">        IBaseResource resource = originalResponse.resource();</span>
+<span class="fc bfc" id="L43" title="All 2 branches covered.">        if (resource instanceof Bundle) {</span>
+<span class="fc" id="L44">            var bundleResources = bundleService.getResourcesFromBundleGroupingByFhirType((Bundle)resource);</span>
+
+<span class="fc" id="L46">            Optional&lt;Response&gt; newResponse = Optional.ofNullable(bundleResources.get(ResourceType.Appointment.toString())).map(appointmentList -&gt; {</span>
+                //Apply the removal rules just to appointments for now
+<span class="fc" id="L48">                ArrayList&lt;IBaseResource&gt; resourceListCopy = new ArrayList&lt;&gt;(appointmentList);</span>
+<span class="fc" id="L49">                appointmentResourceRemover.applyRemovalRules(resourceListCopy);</span>
+
+                //Add all other resources into the now stripped-down resource list to construct the new Bundle
+                // Sort because hash maps are not deterministic as to how they bucket their values
+<span class="fc" id="L53">                List&lt;String&gt; keySet = new ArrayList&lt;&gt;(bundleResources.keySet());</span>
+<span class="fc" id="L54">                Collections.sort(keySet);</span>
+<span class="fc" id="L55">                keySet.stream()</span>
+<span class="pc bpc" id="L56" title="1 of 2 branches missed.">                        .filter(fhirType -&gt; !Objects.equals(fhirType, ResourceType.Appointment.toString()))</span>
+<span class="pc" id="L57">                        .forEach(fhirTypeNotAppointment -&gt; resourceListCopy.addAll(bundleResources.get(fhirTypeNotAppointment)));</span>
+
+<span class="fc" id="L59">                return ImmutableResponse.builder().resource(createNewBundleForResources((Bundle)originalResponse.resource(), resourceListCopy)).build();</span>
+            });
+<span class="fc" id="L61">            return newResponse.orElse(originalResponse);</span>
+        }
+        //No error here, we can pass through this for e.g. CapabilityStatements
+<span class="fc" id="L64">        return originalResponse;</span>
+    }
+
+    /**
+     * As bundles are immutable, we need to construct a new one from scratch.
+     * There are some compromises we're making here: pagination will be wonky, so I'm removing it entirely from the
+     * new Bundle. This is fine because this removal is a Wayfinder-specific concept, and they never intend to use it.
+     */
+    private Bundle createNewBundleForResources(Bundle originalBundle, Collection&lt;IBaseResource&gt; resourceListCopy) {
+<span class="fc" id="L73">        Bundle newBundle = new Bundle();</span>
+<span class="fc" id="L74">        newBundle.setTotal(resourceListCopy.size());</span>
+<span class="fc" id="L75">        newBundle.setType(originalBundle.getType());</span>
+
+<span class="fc" id="L77">        var originalBundleEntries = originalBundle.getEntry().stream()</span>
+<span class="fc" id="L78">                .collect(Collectors.groupingBy(entry -&gt; entry.getResource().getId()));</span>
+
+        //A given search should return the bundle in a predictable way. Makes testing non-flaky as well.
+        // This is possibly not required given we've sorted the key set, but seems like a safe thing to do anyway.
+<span class="fc" id="L82">        List&lt;IBaseResource&gt; resourceList = new ArrayList&lt;&gt;(resourceListCopy);</span>
+<span class="fc" id="L83">        resourceList.sort(BASE_RESOURCE_COMPARATOR_ID);</span>
+
+<span class="fc" id="L85">        resourceListCopy.forEach(resource -&gt; {</span>
+<span class="fc" id="L86">            Bundle.BundleEntryComponent originalEntryComponent = originalBundleEntries.get(resource.getIdElement().getValue()).stream()</span>
+<span class="fc" id="L87">                    .findFirst()</span>
+                    //Don't see how this is possible
+<span class="pc" id="L89">                    .orElseThrow(() -&gt; new RuntimeException(&quot;Failed to find original bundle entry for id &quot; + resource.getIdElement().getValue()));</span>
+
+<span class="fc" id="L91">            Bundle.BundleEntryComponent entryComponent = new Bundle.BundleEntryComponent();</span>
+<span class="fc" id="L92">            entryComponent.setResource((Resource)resource);</span>
+<span class="fc" id="L93">            entryComponent.setLink(originalEntryComponent.getLink());</span>
+<span class="fc" id="L94">            entryComponent.setFullUrl(originalEntryComponent.getFullUrl());</span>
+
+<span class="fc" id="L96">            newBundle.addEntry(entryComponent);</span>
+<span class="fc" id="L97">        });</span>
+
+<span class="fc" id="L99">        return newBundle;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

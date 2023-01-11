@@ -1,0 +1,2403 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EHRBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.app.bean</a> &gt; <span class="el_source">EHRBean.java</span></div><h1>EHRBean.java</h1><pre class="source lang-java linenums">package com.pkb.app.bean;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ArrayTable;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Sets;
+import com.pkb.allergy.entity.Allergy;
+import com.pkb.annotation.EHRMigratorBase;
+import com.pkb.annotation.Migrate;
+import com.pkb.app.EHRLocal;
+import com.pkb.app.EhrDataVersionResult;
+import com.pkb.app.dto.AccountSymmetricKeyDto;
+import com.pkb.app.entity.AccessLog;
+import com.pkb.app.entity.DTOMapping;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.EHRSearch.OrderByDirection;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PKBFilter;
+import com.pkb.app.entity.PKBFilter.Operator;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.app.entity.SystemTestDTO;
+import com.pkb.app.interfaces.EncryptedDataPoint;
+import com.pkb.app.interfaces.IBaseDTO;
+import com.pkb.calendar.entity.AppointmentDTO;
+import com.pkb.calendar.entity.AppointmentRequestDTO;
+import com.pkb.calendar.entity.Event;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.config.PkbPluginConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.common.testlogging.DetailLoggingProvider;
+import com.pkb.common.util.FrameFilter;
+import com.pkb.consent.entity.PatientConsentReason;
+import com.pkb.coreDevices.entity.CoreDevicesSyncRecord;
+import com.pkb.crypto.document.Document;
+import com.pkb.crypto.document.EncryptedDocument;
+import com.pkb.crypto.document.ImmutablePlaintextDocument;
+import com.pkb.crypto.document.PlaintextDocument;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.data.EHRRemote;
+import com.pkb.data.ImmutableUUIDWithMenuDataType;
+import com.pkb.data.NoopRemotingConsumer;
+import com.pkb.data.RemotingBiConsumer;
+import com.pkb.data.UUIDWithMenuDataType;
+import com.pkb.datamodel.consent.PatientConsentDTO;
+import com.pkb.diagnosis.entity.Diagnosis;
+import com.pkb.diary.entity.DiaryEntry;
+import com.pkb.ehrdata.AccessFilter;
+import com.pkb.ehrdata.ImmutableSearchSpec;
+import com.pkb.ehrdata.QueryBuilder;
+import com.pkb.ehrdata.SearchSpec;
+import com.pkb.encounter.entity.EncounterEvent;
+import com.pkb.encounter.entity.Message;
+import com.pkb.encounter.entity.PKBInvitationDetail;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.messaging.MessageStatus;
+import com.pkb.file.entity.FileDTO;
+import com.pkb.institute.InstituteLocal;
+import com.pkb.medication.entity.Medication;
+import com.pkb.model.RecordWithId;
+import com.pkb.personallibrary.entity.PersonalLibraryEntryDTO;
+import com.pkb.phplan.entity.PHPlan;
+import com.pkb.phplan.entity.PHPlanAttachment;
+import com.pkb.phplan.entity.PlanExportDTO;
+import com.pkb.radiology.entity.RadiologyImage;
+import com.pkb.radiology.entity.RadiologyResult;
+import com.pkb.symptom.entity.SymptomAlarmDTO;
+import com.pkb.symptom.entity.SymptomReportDTO;
+import com.pkb.test.UploadedDataDeletionMetadata;
+import com.pkb.test.entity.MeasurementDTO;
+import com.pkb.test.entity.PathologyReportDTO;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.tolven.PKBAccountDAOLocal;
+import com.pkb.user.PKBPersonLocal;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.CorrelationIdAroundAdvice;
+import com.pkb.util.DbUtil;
+import com.pkb.util.ValueMappingUtil;
+import com.pkb.util.mapper.AccessFilterMapper;
+import com.pkb.util.mapper.SearchSpecMapper;
+import io.prometheus.client.Histogram;
+import io.prometheus.client.Summary;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.Tuple3;
+import org.apache.commons.lang3.NotImplementedException;
+import org.apache.commons.lang3.ObjectUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.hibernate.annotations.QueryHints;
+import org.hibernate.query.NativeQuery;
+import org.hibernate.type.LongType;
+import org.hibernate.type.PostgresUUIDType;
+import org.hibernate.type.Type;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jooq.Condition;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.GroupField;
+import org.jooq.SelectFieldOrAsterisk;
+import org.jooq.impl.DSL;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.ejb.EJB;
+import javax.ejb.Local;
+import javax.ejb.Remote;
+import javax.ejb.Stateless;
+import javax.inject.Inject;
+import javax.interceptor.Interceptors;
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.persistence.Query;
+import javax.persistence.TypedQuery;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.math.BigInteger;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.IntFunction;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.pkb.util.EncryptedDocumentMapperHelper.ACCOUNT_ID;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.API.unchecked;
+import static io.vavr.Predicates.instanceOf;
+import static java.lang.String.format;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.emptyMap;
+import static java.util.Collections.singletonList;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.jooq.SQLDialect.POSTGRES;
+import static org.jooq.impl.DSL.condition;
+import static org.jooq.impl.DSL.count;
+import static org.jooq.impl.DSL.exists;
+import static org.jooq.impl.DSL.field;
+import static org.jooq.impl.DSL.select;
+import static org.jooq.impl.DSL.selectDistinct;
+import static org.jooq.impl.DSL.table;
+
+/**
+ * Manage the core.menu_data table -- this is where all PKB data points are stored. This used to be managed via Tolven code only (see
+ * MenuBean); we've made our own entity for this table (called EHRData) and now this class: - saves and fetches EHRData entities (see
+ * {@link EHRData} -- which has some &quot;query fields&quot; like string01, and some encryptable fields held in a map, serialized into XML and stored
+ * (encrypted) in the xml01 BLOB. - fetching EHRData gets fancy -- there are various ways to filter them. See {@link EHRSearch}. - handles
+ * copying data to/from EHRData entities and various data types -- Allergy, Diagnosis, TestResultDTO, MeasurementDTO, etc. based on
+ * annotations in those data type value object classes. See {@link DTOMapping}. - also migrates EHRData when needed, based on those data
+ * types and their annotations.
+ *
+ * @author robwhelan
+ */
+@Stateless(mappedName = &quot;EHRBean&quot;)
+@Interceptors(CorrelationIdAroundAdvice.class)
+@Local(EHRLocal.class)
+@Remote(EHRRemote.class)
+<span class="fc" id="L190">public class EHRBean implements EHRLocal {</span>
+
+<span class="fc" id="L192">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    @PersistenceContext
+    private EntityManager em;
+
+    @EJB
+    private InstituteLocal instituteBean;
+
+    @EJB
+    private PKBPersonLocal personBean;
+
+    @EJB
+    private PKBAccountDAOLocal pkbAccountDAOLocal;
+
+    @Inject
+    private DateTimeService dateTimeService;
+
+    @Inject
+    private PkbPluginConfig config;
+
+    @Inject
+    private DetailLoggingProvider detailLoggingProvider;
+
+    @Inject
+    private AccessFilterMapper accessFilterMapper;
+
+    @Inject
+    private SearchSpecMapper searchSpecMapper;
+
+    @Inject
+    private EHRLocalCryptoBean cryptoBean;
+
+    @Inject
+    private PhrConfig phrConfig;
+
+<span class="fc" id="L227">    private static final Summary queryDurationSummaries = Summary.build()</span>
+<span class="fc" id="L228">            .name(&quot;clinical_datatype_query_time&quot;)</span>
+<span class="fc" id="L229">            .help(&quot;Latencies of menudata queries per data type&quot;)</span>
+<span class="fc" id="L230">            .labelNames(&quot;dataType&quot;)</span>
+<span class="fc" id="L231">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L232">            .quantile(0.9, 0.01)</span>
+<span class="fc" id="L233">            .quantile(0.95, 0.005)</span>
+<span class="fc" id="L234">            .quantile(0.99, 0.001)</span>
+<span class="fc" id="L235">            .register();</span>
+
+<span class="fc" id="L237">    private static final Summary queryResultCounts = Summary.build()</span>
+<span class="fc" id="L238">            .name(&quot;clinical_datatype_query_result_count&quot;)</span>
+<span class="fc" id="L239">            .help(&quot;Count of menudata results per data type&quot;)</span>
+<span class="fc" id="L240">            .labelNames(&quot;dataType&quot;)</span>
+<span class="fc" id="L241">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L242">            .quantile(0.9, 0.01)</span>
+<span class="fc" id="L243">            .quantile(0.95, 0.005)</span>
+<span class="fc" id="L244">            .quantile(0.99, 0.001)</span>
+<span class="fc" id="L245">            .register();</span>
+
+<span class="fc" id="L247">    private static final Histogram distinctDataTypesInQuery = Histogram.build()</span>
+<span class="fc" id="L248">            .name(&quot;phr_distinct_datatypes_in_query&quot;)</span>
+<span class="fc" id="L249">            .help(&quot;Count of distinct datatypes in query&quot;)</span>
+<span class="fc" id="L250">            .linearBuckets(1, 1, 60)</span>
+<span class="fc" id="L251">            .register();</span>
+
+    /**
+     * 2014-11-01: keep this around, but re-implement: it should query EHRData objects behind the scenes, and that let's us lazy-fetch xml01
+     * only if needed. For selectively-loading an entity: see here:
+     * http://stackoverflow.com/questions/950718/how-to-return-an-entity-with-chosen-columns-using-criteria
+     */
+    @Override
+    public &lt;D&gt; List&lt;Map&lt;String, Object&gt;&gt; queryEHRDataFields(EHRSearch&lt;D&gt; search, @NotNull EHRRequestContext context) {
+        // search app.menu_data on datatype (AND account_id) and requested filters
+        List&lt;Map&lt;String, Object&gt;&gt; resultsList;
+        try {
+<span class="pc bpc" id="L263" title="2 of 4 branches missed.">            boolean decrypt = search.isEncryptedFieldsRequested() || search.getFieldsRequestedSet().isEmpty();</span>
+
+<span class="pc bpc" id="L265" title="1 of 2 branches missed.">            List&lt;EHRData&gt; results = decrypt</span>
+<span class="nc" id="L266">                    ? queryAndDecryptEHRData(search, context.getLoggedInContext().orElseThrow(() -&gt; new RuntimeException(&quot;Requested decryption without logged in context&quot;)))</span>
+<span class="fc" id="L267">                    : queryEHRData(search, context);</span>
+
+            // load into map of results
+            // each Object in the list is an array of Objects (columns returned in the order queried)
+
+<span class="fc" id="L272">            resultsList = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L273" title="All 2 branches covered.">            for (EHRData ed : results) {</span>
+<span class="fc" id="L274">                Map&lt;String, Object&gt; rowMap = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="fc bfc" id="L276" title="All 2 branches covered.">                for (String fieldName : search.getFieldsRequestedSet()) {</span>
+<span class="fc" id="L277">                    String ehrField = search.map().getEHRDataField(fieldName);</span>
+<span class="fc" id="L278">                    Object fieldValue = null;</span>
+
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">                    if (search.map().isFieldEncrypted(fieldName)) {</span>
+<span class="nc" id="L281">                        fieldValue = ed.getEncryptedField(fieldName);</span>
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">                    } else if (ehrField == null) {</span>
+<span class="nc" id="L283">                        fieldValue = ed.getField(fieldName); // try this...</span>
+                    } else {
+<span class="fc" id="L285">                        fieldValue = ed.getQueryField(ehrField);</span>
+                    }
+
+<span class="fc" id="L288">                    rowMap.put(fieldName, fieldValue);</span>
+<span class="fc" id="L289">                }</span>
+
+<span class="fc" id="L291">                resultsList.add(rowMap);</span>
+<span class="fc" id="L292">            }</span>
+<span class="nc" id="L293">        } catch (Exception e) {</span>
+<span class="nc" id="L294">            throw new RuntimeException(&quot;failed querying EHRData fields with search: &quot; + search, e);</span>
+<span class="fc" id="L295">        }</span>
+<span class="fc" id="L296">        return resultsList;</span>
+    }
+
+    @Override
+    public EHRData findEHRData(Long ehrId, @NotNull EHRRequestContext context) {
+<span class="fc" id="L301">        return findEHRData(ehrId, context, false);</span>
+    }
+
+    @Override
+    public EHRData findAndDecryptEHRData(Long ehrId, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L306">        return findEHRData(ehrId, (search) -&gt; queryAndDecryptEHRData(search, context), false);</span>
+    }
+
+    @Override
+    public List&lt;EHRData&gt; findAndDecryptEHRData(Collection&lt;Long&gt; ehrIds, @NotNull LoggedInEHRRequestContext context) {
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">        if (isEmpty(ehrIds)) {</span>
+<span class="nc" id="L312">            return emptyList();</span>
+        }
+<span class="fc" id="L314">        return queryAndDecryptEHRData(getSearchById(ehrIds), context);</span>
+    }
+
+    @Override
+    public EHRData findEHRData(Long ehrId, @NotNull EHRRequestContext context, boolean checkParticipant) {
+<span class="fc" id="L319">        return findEHRData(ehrId, (search) -&gt; queryEHRData(search, context), checkParticipant);</span>
+    }
+
+<span class="fc" id="L322">    private static final Set&lt;MenuDataType&gt; EVERY_MENU_DATA_TYPE = Sets.immutableEnumSet(EnumSet.allOf(MenuDataType.class));</span>
+
+    private EHRData findEHRData(Long ehrId, Function&lt;EHRSearch&lt;EHRData&gt;, List&lt;EHRData&gt;&gt; searcher, boolean checkParticipant) {
+<span class="fc" id="L325">        EHRSearch&lt;EHRData&gt; search = getSearchById(Collections.singletonList(ehrId));</span>
+<span class="pc bpc" id="L326" title="1 of 2 branches missed.">        if (checkParticipant) {</span>
+<span class="nc" id="L327">            search.setUseParticipantFilter();</span>
+        }
+
+<span class="fc" id="L330">        List&lt;EHRData&gt; list = searcher.apply(search);</span>
+
+<span class="fc bfc" id="L332" title="All 2 branches covered.">        if (isEmpty(list)) {</span>
+<span class="fc" id="L333">            return null;</span>
+        }
+<span class="pc bpc" id="L335" title="1 of 2 branches missed.">        if (list.size() != 1) {</span>
+<span class="nc" id="L336">            throw new RuntimeException(String.format(&quot;Unique search %s returned %s rows.&quot;, search.toString(), list.size()));</span>
+        }
+
+<span class="fc" id="L339">        return list.get(0);</span>
+    }
+
+    private EHRSearch&lt;EHRData&gt; getSearchById(Collection&lt;Long&gt; ehrIds) {
+<span class="fc" id="L343">        EHRSearch&lt;EHRData&gt; search = new EHRSearch&lt;&gt;(EHRData.class, EVERY_MENU_DATA_TYPE);</span>
+<span class="fc" id="L344">        search.addFilter(new PKBFilter(&quot;id&quot;, Operator.IN, ehrIds));</span>
+<span class="fc" id="L345">        search.setIncludeDeleted(false);</span>
+<span class="fc" id="L346">        return search;</span>
+    }
+
+    @Override
+    @Nullable
+    public &lt;T&gt; T findAndDecryptTypedData(@NotNull LoggedInEHRRequestContext requestContext, Long ehrId, Class&lt;T&gt; dtoClass) {
+<span class="fc" id="L352">        return populateDTO(findAndDecryptEHRData(ehrId, requestContext), dtoClass, requestContext);</span>
+    }
+
+    @Override
+    @Nullable
+    public &lt;T&gt; List&lt;T&gt; findAndDecryptTypedDataList(@NotNull LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; ehrIds, Class&lt;T&gt; dtoClass) {
+<span class="fc" id="L358">        return populateDTOList(findAndDecryptEHRData(ehrIds, requestContext), dtoClass, requestContext);</span>
+    }
+
+    @Override
+    public &lt;D&gt; D findAndDecryptTypedDataByUniqueId(@NotNull LoggedInEHRRequestContext requestContext, UUID uniqueId, long accountId,
+                                                   Class&lt;D&gt; dtoClass,
+                                                   MenuDataType dataType) {
+<span class="fc" id="L365">        EHRData ed = findAndDecryptEHRDataByUniqueId(uniqueId, accountId, dtoClass, dataType, requestContext);</span>
+<span class="fc" id="L366">        return populateDTO(ed, dtoClass, requestContext);</span>
+    }
+
+    @Override
+    @Nullable
+    public &lt;D&gt; EHRData findAndDecryptEHRDataByUniqueId(UUID uniqueId, Long accountId, Class&lt;D&gt; dtoClass,
+                                                       MenuDataType dataType,
+                                                       @NotNull LoggedInEHRRequestContext context) {
+        // assume that we're filtering on the &quot;uniqueId&quot; field, and getting the latest based on &quot;enteredDate&quot;
+<span class="fc" id="L375">        EHRSearch&lt;D&gt; search = new EHRSearch&lt;&gt;(accountId, dtoClass, dataType);</span>
+<span class="fc" id="L376">        search.setLatestPerTypeFilter(IBaseDTO.ENTERED_DATE, IBaseDTO.UNIQUE_ID);</span>
+<span class="fc" id="L377">        search.addFilter(new PKBFilter(IBaseDTO.UNIQUE_ID, Operator.EQUAL, uniqueId));</span>
+
+<span class="fc" id="L379">        List&lt;EHRData&gt; edList = queryAndDecryptEHRData(search, context);</span>
+
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">        if (edList.isEmpty()) {</span>
+<span class="nc" id="L382">            return null;</span>
+        }
+
+<span class="pc bpc" id="L385" title="1 of 2 branches missed.">        if (edList.size() != 1) {</span>
+<span class="nc" id="L386">            LOGGER.warn(&quot;uniqueId search {} returned {}&quot;, search, edList.size());</span>
+        }
+
+<span class="fc" id="L389">        return edList.get(0);</span>
+    }
+
+    @Override
+    public boolean recordExists(UUID uniqueId) {
+<span class="fc bfc" id="L394" title="All 2 branches covered.">        return !recordsExist(singletonList(uniqueId)).isEmpty();</span>
+    }
+
+    @Override
+    public Set&lt;UUID&gt; recordsExist(Collection&lt;UUID&gt; uniqueIds) {
+<span class="fc" id="L399">        return em.createQuery(&quot;SELECT e.uniqueId FROM EHRData e WHERE uniqueId in :uniqueIds&quot;, UUID.class)</span>
+<span class="fc" id="L400">                .setParameter(&quot;uniqueIds&quot;, uniqueIds).getResultStream().collect(toSet());</span>
+    }
+
+    @Override
+    @Deprecated
+    /**
+     * You probably don't want this method, hence the deprecation.
+     * Will return results even if the latest record is deleted if there's an older non-deleted version. e.g. ad-hoc freshdesk delete.
+     * Chances are you don't need to retrieve multiple records and actually you want the latest by enteredDate or similar.
+     */
+    public List&lt;EHRData&gt; findAllNonDeletedVersionsByAccountIdsAndUniqueIds(Collection&lt;Long&gt; accountIds, Set&lt;UUID&gt; uniqueIds, io.vavr.collection.Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys) {
+<span class="pc bpc" id="L411" title="2 of 4 branches missed.">        if (isEmpty(uniqueIds) || isEmpty(accountIds)) {</span>
+<span class="nc" id="L412">            return emptyList();</span>
+        }
+
+<span class="fc" id="L415">        BiFunction&lt;Collection&lt;Long&gt;, Collection&lt;UUID&gt;, List&lt;EHRData&gt;&gt; query = (accountIdBatch, uniqueIdbatch) -&gt; em.createQuery(</span>
+                        &quot;SELECT e &quot; +
+                                &quot; FROM EHRData e &quot; +
+                                &quot; WHERE accountId IN (:accountIds) &quot; +
+                                &quot; AND uniqueId IN (:uniqueIds) &quot; +
+                                &quot; AND deleted = false&quot;,
+                        EHRData.class)
+<span class="fc" id="L422">                .setParameter(&quot;accountIds&quot;, accountIdBatch)</span>
+<span class="fc" id="L423">                .setParameter(&quot;uniqueIds&quot;, uniqueIdbatch)</span>
+<span class="fc" id="L424">                .getResultList();</span>
+
+<span class="fc" id="L426">        List&lt;EHRData&gt; results = emptyList();</span>
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">        if (uniqueIds.size() &lt; accountIds.size()) {</span>
+<span class="nc" id="L428">            results = DbUtil.getInBatches(accountIds, accountIdBatch -&gt; query.apply(accountIdBatch, uniqueIds));</span>
+        } else {
+<span class="fc" id="L430">            results = DbUtil.getInBatches(uniqueIds, uniqueIdBatch -&gt; query.apply(accountIds, uniqueIdBatch));</span>
+        }
+
+<span class="fc" id="L433">        cryptoBean.decryptEHRDataBatch(accountIdToAccountKeys, results);</span>
+<span class="fc" id="L434">        return results;</span>
+    }
+
+    @Override
+    public List&lt;Long&gt; deleteAnyOtherForSameUniqueId(@NotNull Collection&lt;Long&gt; ids) {
+<span class="fc bfc" id="L439" title="All 2 branches covered.">        if (ids.isEmpty()) {</span>
+<span class="fc" id="L440">            return emptyList();</span>
+        }
+<span class="fc" id="L442">        Set&lt;UUID&gt; uniqueIds = em.createQuery(&quot;SELECT e.uniqueId FROM EHRData e WHERE id in :ids&quot;, UUID.class)</span>
+<span class="fc" id="L443">                .setParameter(&quot;ids&quot;, ids).getResultStream().collect(toSet());</span>
+
+<span class="pc bpc" id="L445" title="1 of 2 branches missed.">        if (uniqueIds.isEmpty()) {</span>
+<span class="nc" id="L446">            return emptyList();</span>
+        }
+
+<span class="fc" id="L449">        em.flush();</span>
+<span class="fc" id="L450">        Query query = em.createNativeQuery(</span>
+                &quot;update app.menu_data set deleted = true&quot; +
+                        &quot; where uniqueid IN :uniqueIds&quot; +
+                        &quot;   and deleted = false&quot; +
+                        &quot;   and id NOT IN :ids&quot; +
+                        &quot; RETURNING id&quot;);
+<span class="fc" id="L456">        query.setParameter(&quot;uniqueIds&quot;, uniqueIds);</span>
+<span class="fc" id="L457">        query.setParameter(&quot;ids&quot;, ids);</span>
+
+        //noinspection unchecked
+<span class="fc" id="L460">        return query.getResultList();</span>
+    }
+
+    /**
+     * See comment in {@link EHRRemote#deleteAllForUniqueForSystemProcessWithoutAuditRow}
+     */
+    @Override
+    @Deprecated
+    public Map&lt;UUIDWithMenuDataType, Long&gt; deleteAllForUniqueForSystemProcessWithoutAuditRow(@NotNull Map&lt;UUID, Long&gt; uniqueIdToAccountId) {
+<span class="fc bfc" id="L469" title="All 2 branches covered.">        if (uniqueIdToAccountId.isEmpty()) {</span>
+<span class="fc" id="L470">            return emptyMap();</span>
+        }
+
+<span class="fc" id="L473">        em.flush();</span>
+
+<span class="fc" id="L475">        List&lt;Long&gt; idsToDelete = getNonDeletedIdsMatchingUniqueIdAndAccount(uniqueIdToAccountId);</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">        if (idsToDelete.isEmpty()) {</span>
+<span class="fc" id="L477">            return emptyMap();</span>
+        }
+
+<span class="fc" id="L480">        Query query = em.createNativeQuery(</span>
+                        &quot;UPDATE app.menu_data set deleted = true&quot; +
+                                &quot; WHERE id IN :ids&quot; +
+                                &quot; RETURNING uniqueid, datatype&quot;)
+<span class="fc" id="L484">                .setParameter(&quot;ids&quot;, idsToDelete)</span>
+<span class="fc" id="L485">                .unwrap(NativeQuery.class)</span>
+<span class="fc" id="L486">                .addScalar(&quot;uniqueid&quot;, PostgresUUIDType.INSTANCE)</span>
+<span class="fc" id="L487">                .addScalar(&quot;datatype&quot;);</span>
+
+        //noinspection unchecked
+<span class="fc" id="L490">        List&lt;Object[]&gt; deleteResults = query.getResultList();</span>
+<span class="fc" id="L491">        List&lt;UUIDWithMenuDataType&gt; typed = new ArrayList&lt;&gt;(deleteResults.size());</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">        for (Object[] result : deleteResults) {</span>
+<span class="fc" id="L493">            typed.add(ImmutableUUIDWithMenuDataType.of((UUID) result[0], MenuDataType.valueOf((String) result[1])));</span>
+<span class="fc" id="L494">        }</span>
+
+<span class="fc" id="L496">        return typed.stream().collect(groupingBy(identity(), Collectors.counting()));</span>
+    }
+
+    @NotNull
+    private List&lt;Long&gt; getNonDeletedIdsMatchingUniqueIdAndAccount(@NotNull Map&lt;UUID, Long&gt; uniqueIdToAccountId) {
+<span class="fc" id="L501">        NativeQuery idQuery = em.createNativeQuery(</span>
+                        &quot;SELECT e.id, e.uniqueId, e.account_id&quot; +
+                                &quot; FROM app.menu_data e &quot; +
+                                &quot; WHERE uniqueid IN :uniqueIds&quot; +
+                                &quot; AND account_id IN :accountIds&quot; +
+                                &quot; AND deleted = false&quot;)
+<span class="fc" id="L507">                .setParameter(&quot;uniqueIds&quot;, uniqueIdToAccountId.keySet())</span>
+<span class="fc" id="L508">                .setParameter(&quot;accountIds&quot;, uniqueIdToAccountId.values())</span>
+<span class="fc" id="L509">                .unwrap(NativeQuery.class)</span>
+<span class="fc" id="L510">                .addScalar(&quot;id&quot;, LongType.INSTANCE)</span>
+<span class="fc" id="L511">                .addScalar(&quot;uniqueid&quot;, PostgresUUIDType.INSTANCE)</span>
+<span class="fc" id="L512">                .addScalar(&quot;account_id&quot;, LongType.INSTANCE);</span>
+
+        //noinspection unchecked
+<span class="fc" id="L515">        List&lt;Object[]&gt; results = idQuery.getResultList();</span>
+<span class="fc" id="L516">        List&lt;Long&gt; matchingIds = new ArrayList&lt;&gt;(results.size());</span>
+<span class="fc bfc" id="L517" title="All 2 branches covered.">        for (Object[] result : results) {</span>
+<span class="fc" id="L518">            Long id = (Long) result[0];</span>
+<span class="fc" id="L519">            UUID uuid = (UUID) result[1];</span>
+<span class="fc" id="L520">            Long accountId = (Long) result[2];</span>
+
+<span class="fc" id="L522">            Long intendedAccountId = uniqueIdToAccountId.get(uuid);</span>
+<span class="pc bpc" id="L523" title="1 of 2 branches missed.">            if (intendedAccountId.equals(accountId)) {</span>
+<span class="fc" id="L524">                matchingIds.add(id);</span>
+            }
+<span class="fc" id="L526">        }</span>
+<span class="fc" id="L527">        return matchingIds;</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;D&gt; queryTypedData(EHRSearch&lt;D&gt; search, @NotNull EHRRequestContext requestContext) {
+<span class="fc" id="L532">        return queryTypedData(search, requestContext, Collections.emptyMap());</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;D&gt; queryAndDecryptTypedData(EHRSearch&lt;D&gt; search, @NotNull LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L537">        return queryAndDecryptTypedData(search, requestContext, Collections.emptyMap());</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;D&gt; queryTypedData(EHRSearch&lt;D&gt; search, @NotNull EHRRequestContext requestContext, Map&lt;String, Object&gt; queryHints) {
+<span class="fc" id="L542">        List&lt;EHRData&gt; ehrData = queryEHRData(singletonList(search), requestContext, 0, 0, queryHints);</span>
+<span class="fc" id="L543">        return populateDTOList(ehrData, search.getDtoClass(), requestContext);</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;D&gt; queryAndDecryptTypedData(EHRSearch&lt;D&gt; search, @NotNull LoggedInEHRRequestContext requestContext, Map&lt;String, Object&gt; queryHints) {
+<span class="fc" id="L548">        List&lt;EHRData&gt; ehrData = queryAndDecryptEHRData(singletonList(search), requestContext, 0, 0, queryHints);</span>
+<span class="fc" id="L549">        return populateDTOList(ehrData, search.getDtoClass(), requestContext);</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;EHRData&gt; queryEHRData(EHRSearch&lt;D&gt; search, @NotNull EHRRequestContext context) {
+<span class="fc" id="L554">        return queryEHRData(singletonList(search), context);</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;EHRData&gt; queryAndDecryptEHRData(EHRSearch&lt;D&gt; search, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L559">        return queryAndDecryptEHRData(singletonList(search), context);</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;RecordWithId&lt;Long, D&gt;&gt; queryWithoutDecryptAndPopulateDataByAccountId(EHRSearch&lt;D&gt; search, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context) {
+<span class="fc" id="L564">        return populateDTOListWithAccount(queryEHRData(search, context), dtoClass, context);</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;RecordWithId&lt;Long, D&gt;&gt; queryDecryptAndPopulateDataByAccountId(EHRSearch&lt;D&gt; search, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L569">        return queryDecryptAndPopulateDataByAccountId(search, search.getDtoClass(), context);</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;RecordWithId&lt;Long, D&gt;&gt; queryDecryptAndPopulateDataByAccountId(EHRSearch&lt;D&gt; search, Class&lt;D&gt; dtoClass, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L574">        return populateDTOListWithAccount(queryAndDecryptEHRData(search, context), dtoClass, context);</span>
+    }
+
+    @Override
+    public &lt;D, F extends RemotingBiConsumer&lt;D&gt;&gt; List&lt;RecordWithId&lt;Long, D&gt;&gt; queryDecryptAndPopulateDataByAccountId(EHRSearch&lt;D&gt; search, @NotNull LoggedInEHRRequestContext context, Class&lt;F&gt; additionalSteps) {
+<span class="fc" id="L579">        return queryDecryptAndPopulateDataByAccountId(search, search.getDtoClass(), context, additionalSteps);</span>
+    }
+
+    @Override
+    public &lt;D, F extends RemotingBiConsumer&lt;D&gt;&gt; List&lt;RecordWithId&lt;Long, D&gt;&gt; queryDecryptAndPopulateDataByAccountId(EHRSearch&lt;D&gt; search, Class&lt;D&gt; dtoClass, @NotNull LoggedInEHRRequestContext context, Class&lt;F&gt; additionalSteps) {
+<span class="fc" id="L584">        return doPopulateDTOListWithAccount(queryAndDecryptEHRData(search, context), dtoClass, context, additionalSteps);</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;D&gt; queryDecryptAndPopulateData(EHRSearch&lt;D&gt; search, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L589">        return queryDecryptAndPopulateData(search, search.getDtoClass(), context);</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;D&gt; queryDecryptAndPopulateData(EHRSearch&lt;D&gt; search, Class&lt;D&gt; dtoClass, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L594">        return populateDTOList(queryAndDecryptEHRData(search, context), dtoClass, context);</span>
+    }
+
+    @Override
+    public &lt;D&gt; D findDecryptAndPopulate(Long ehrId, Class&lt;D&gt; dtoClass, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L599">        return populateDTO(findAndDecryptEHRData(ehrId, context), dtoClass, context);</span>
+    }
+
+    @Override
+    public List&lt;EHRData&gt; queryEHRData(List&lt;EHRSearch&lt;?&gt;&gt; unionSearches, @NotNull EHRRequestContext context) {
+<span class="fc" id="L604">        return queryEHRData(unionSearches, context, 0, 0, Collections.emptyMap());</span>
+    }
+
+    @Override
+    public List&lt;EHRData&gt; queryAndDecryptEHRData(List&lt;EHRSearch&lt;?&gt;&gt; unionSearches, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L609">        return queryAndDecryptEHRData(unionSearches, context, 0, 0);</span>
+    }
+
+    @Override
+    public List&lt;EHRData&gt; queryEHRData(List&lt;EHRSearch&lt;?&gt;&gt; unionSearches, @NotNull EHRRequestContext context, int pageSize, int offset) {
+<span class="nc" id="L614">        return queryEHRData(unionSearches, context, pageSize, offset, Collections.emptyMap());</span>
+    }
+
+    @Override
+    public List&lt;EHRData&gt; queryAndDecryptEHRData(List&lt;EHRSearch&lt;?&gt;&gt; unionSearches, @NotNull LoggedInEHRRequestContext context, int pageSize, int offset) {
+<span class="fc" id="L619">        return queryAndDecryptEHRData(unionSearches, context, pageSize, offset, Collections.emptyMap());</span>
+    }
+
+    private List&lt;EHRData&gt; queryEHRData(List&lt;EHRSearch&lt;?&gt;&gt; unionSearches, EHRRequestContext context, int pageSize, int offset, Map&lt;String, Object&gt; queryHints) {
+<span class="fc" id="L623">        return doQueryEHRData(unionSearches, false, context, pageSize, offset, queryHints, ehrData -&gt; {</span>
+<span class="fc" id="L624">        });</span>
+    }
+
+    private List&lt;EHRData&gt; queryAndDecryptEHRData(List&lt;EHRSearch&lt;?&gt;&gt; unionSearches, LoggedInEHRRequestContext context, int pageSize, int offset, Map&lt;String, Object&gt; queryHints) {
+<span class="fc" id="L628">        return doQueryEHRData(unionSearches, true, context, pageSize, offset, queryHints, cryptoBean.getEHRListDecryptor(context));</span>
+    }
+
+    /**
+     * @param cryptoClient null if the cryptoservice isn't available
+     */
+    private List&lt;EHRData&gt; doQueryEHRData(List&lt;EHRSearch&lt;?&gt;&gt; unionSearches, boolean decryptionRequired, EHRRequestContext context,
+                                         Integer pageSize, Integer offset, Map&lt;String, Object&gt; queryHints, Consumer&lt;List&lt;EHRData&gt;&gt; postProcessor) {
+
+<span class="pc bpc" id="L637" title="1 of 4 branches missed.">        if ((unionSearches == null) || unionSearches.isEmpty()) {</span>
+<span class="fc" id="L638">            LOGGER.warn(&quot;queryEHRData() called with no EHRSearch(es)&quot;);</span>
+<span class="fc" id="L639">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="fc" id="L642">        EHRSearch&lt;?&gt; firstSearch = unionSearches.get(0);</span>
+<span class="fc bfc" id="L643" title="All 2 branches covered.">        boolean usingLatestFilter = (firstSearch.getLatestFilterTypeField() != null);</span>
+        // this isn't possible unless *all* unioned queries use the same latest filter, so enforce that
+        // reason: we need to filter the results for overlap in old data (they'll all have the same enteredDate...)
+        // and we will have to process *all* results that way. We won't know which ones come from that EHRSearch.
+<span class="fc bfc" id="L647" title="All 2 branches covered.">        for (EHRSearch&lt;?&gt; search : unionSearches.subList(0, unionSearches.size() - 1)) {</span>
+<span class="pc bpc" id="L648" title="1 of 2 branches missed.">            if (ObjectUtils.notEqual(firstSearch.getLatestFilterTypeField(), search.getLatestFilterTypeField())</span>
+<span class="pc bpc" id="L649" title="1 of 2 branches missed.">                    || ObjectUtils.notEqual(firstSearch.getLatestFilterDateField(), search.getLatestFilterDateField())</span>
+<span class="pc bpc" id="L650" title="1 of 2 branches missed.">                    || ObjectUtils.notEqual(firstSearch.getLatestFilterOrderBy(), search.getLatestFilterOrderBy())</span>
+                // getLatestFilterByVisibleOnly() should not be included in this match
+            ) {
+<span class="nc" id="L653">                throw new IllegalArgumentException(&quot;unioned EHRSearches: latestFilter must be the same across all searches&quot;);</span>
+            }
+<span class="fc" id="L655">        }</span>
+
+<span class="fc" id="L657">        Tuple2&lt;String, OrderByDirection&gt; orderBy = getOptionalCrossUnionOrderBy(unionSearches)</span>
+<span class="fc" id="L658">                .orElse(Tuple.of(&quot;enteredDate&quot;, OrderByDirection.Desc));</span>
+<span class="fc" id="L659">        overrideInQueryOrderBys(unionSearches, orderBy);</span>
+
+<span class="fc" id="L661">        boolean joinPermitted = isCoreViewEnabled(context); // Enable core.view_account_links in QueryBuilder for Pros and Institute Admins</span>
+
+<span class="fc" id="L663">        List&lt;SearchSpec&gt; specs = unionSearches.stream()</span>
+<span class="fc" id="L664">                .map(search -&gt; {</span>
+<span class="fc" id="L665">                    ImmutableSearchSpec spec = searchSpecMapper.map(search);</span>
+<span class="fc" id="L666">                    EHRRequestContext actualRequestContext = search.getRequestContext().orElse(context);</span>
+<span class="fc" id="L667">                    AccessFilter accessFilter = accessFilterMapper.map(actualRequestContext, decryptionRequired, joinPermitted);</span>
+<span class="fc" id="L668">                    return spec.withAccessFilter(accessFilter);</span>
+                })
+<span class="fc" id="L670">                .collect(toList());</span>
+
+<span class="fc" id="L672">        AccessFilter accessFilter = accessFilterMapper.map(context, decryptionRequired, joinPermitted);</span>
+<span class="fc" id="L673">        org.jooq.Query jooqQuery = QueryBuilder.newInstance()</span>
+<span class="fc" id="L674">                .withAccessFilter(accessFilter)</span>
+<span class="fc" id="L675">                .withSearchSpecs(ImmutableList.copyOf(specs))</span>
+<span class="fc" id="L676">                .withPageSizeAndOffset(pageSize, offset)</span>
+<span class="fc" id="L677">                .build();</span>
+
+<span class="fc" id="L679">        String label = getDataTypeLabelFromSearches(unionSearches);</span>
+<span class="fc" id="L680">        List&lt;EHRData&gt; ehrDataList = unchecked(() -&gt; {</span>
+<span class="fc" id="L681">            try (Summary.Timer ignored = queryDurationSummaries.labels(label).startTimer()) {</span>
+<span class="fc" id="L682">                return queryEHRDataList(jooqQuery, orderBy, firstSearch, usingLatestFilter, queryHints);</span>
+            }
+<span class="fc" id="L684">        }).get();</span>
+
+<span class="fc bfc" id="L686" title="All 2 branches covered.">        if (isNotEmpty(ehrDataList)) {</span>
+<span class="fc" id="L687">            queryResultCounts.labels(label).observe(ehrDataList.size());</span>
+        }
+
+<span class="fc" id="L690">        postProcessor.accept(ehrDataList);</span>
+
+        // access logging here
+<span class="fc" id="L693">        createAccessLogEntries(ehrDataList, context);</span>
+<span class="fc" id="L694">        return ehrDataList;</span>
+    }
+
+    private boolean isCoreViewEnabled(EHRRequestContext context) {
+<span class="fc" id="L698">        return Match(context).of(</span>
+<span class="fc bfc" id="L699" title="All 4 branches covered.">                Case($(instanceOf((LoggedInEHRRequestContext.class))), ctx -&gt; ctx.isPro() || ctx.isTeamCoordinator()),</span>
+<span class="fc" id="L700">                Case($(), false)</span>
+        );
+    }
+
+    private List&lt;EHRData&gt; queryEHRDataList(
+            org.jooq.Query jooqIdQuery,
+            Tuple2&lt;String, OrderByDirection&gt; orderBy,
+            EHRSearch&lt;?&gt; firstSearch,
+            boolean usingLatestFilter,
+            Map&lt;String, Object&gt; queryHints) {
+
+<span class="fc" id="L711">        em.flush();</span>
+<span class="fc" id="L712">        Query jpaIdQuery = convertJooqQueryToJpa(jooqIdQuery, Optional.empty(), emptyMap());</span>
+        // Return value is actually BigInteger, so convert to long
+<span class="fc" id="L714">        List&lt;BigInteger&gt; bigIds = jpaIdQuery</span>
+<span class="fc" id="L715">                .setHint(QueryHints.READ_ONLY, true)</span>
+<span class="fc" id="L716">                .getResultList();</span>
+<span class="fc" id="L717">        List&lt;Long&gt; ids = bigIds.stream()</span>
+<span class="fc" id="L718">                .map(BigInteger::longValue)</span>
+<span class="fc" id="L719">                .collect(toList());</span>
+
+<span class="fc bfc" id="L721" title="All 2 branches covered.">        if (isEmpty(ids)) {</span>
+<span class="fc" id="L722">            return emptyList();</span>
+        }
+
+        // postgres has a param limit of Short.MAX_VALUE (~32K); so batch if needed ***  ***
+<span class="fc" id="L726">        List&lt;EHRData&gt; resultList = DbUtil.getInBatches(ids, config.getMenudataQueryBatchSize(), batchOdIds -&gt; executeBatch(batchOdIds, orderBy, queryHints));</span>
+
+<span class="fc" id="L728">        var sourcePersonIds = resultList.stream().map(EHRData::getSourcePersonId).collect(toSet());</span>
+<span class="fc" id="L729">        Map&lt;Long, PKBPerson&gt; pkbPersonMap = personBean.findPKBPersonMap(sourcePersonIds);</span>
+<span class="fc" id="L730">        resultList.forEach(ed -&gt; ed.setSourcePerson(pkbPersonMap.get(ed.getSourcePersonId())));</span>
+
+        // if we need to apply a &quot;latest values per type&quot; we need to remove possible overlap
+<span class="fc bfc" id="L733" title="All 2 branches covered.">        if (usingLatestFilter) {</span>
+<span class="fc" id="L734">            removeLatestFilterOverlap(resultList, firstSearch);</span>
+        }
+
+<span class="fc" id="L737">        return resultList;</span>
+    }
+
+    private List&lt;EHRData&gt; executeBatch(Collection&lt;Long&gt; ids, Tuple2&lt;String, OrderByDirection&gt; orderBy, Map&lt;String, Object&gt; queryHints) {
+<span class="fc" id="L741">        TypedQuery&lt;EHRData&gt; edQuery = em.createQuery(</span>
+                &quot;SELECT DISTINCT ed FROM EHRData ed &quot; +
+                        &quot;LEFT JOIN FETCH ed.sourceTeam &quot; +
+                        &quot;LEFT JOIN FETCH ed.sourceOrg &quot; +
+                        &quot;LEFT JOIN FETCH ed.latestPrivacyFlags &quot; +
+                        &quot;WHERE ed.id in (:ids) &quot; +
+<span class="fc" id="L747">                        format(&quot;ORDER BY ed.%s %s&quot;, orderBy._1, orderBy._2) +</span>
+                        &quot;, ed.id DESC&quot;,
+                EHRData.class);
+<span class="fc" id="L750">        edQuery.setParameter(&quot;ids&quot;, ids);</span>
+<span class="fc" id="L751">        queryHints.forEach(edQuery::setHint);</span>
+<span class="fc" id="L752">        return edQuery.getResultList();</span>
+    }
+
+    private void overrideInQueryOrderBys(List&lt;EHRSearch&lt;?&gt;&gt; unionSearches, Tuple2&lt;String, OrderByDirection&gt; crossUnionOrderBy) {
+<span class="fc bfc" id="L756" title="All 2 branches covered.">        for (EHRSearch&lt;?&gt; search : unionSearches) {</span>
+            // DON'T remove order-by if we have any limitations set... that'd be bad
+<span class="pc bpc" id="L758" title="1 of 4 branches missed.">            if ((search.getResultsMaxReturned() &lt;= 0) &amp;&amp; (search.getResultsStartPosition() &lt;= 0)) {</span>
+<span class="fc" id="L759">                search.setOrderBy(crossUnionOrderBy._1, crossUnionOrderBy._2);</span>
+            }
+<span class="fc" id="L761">        }</span>
+<span class="fc" id="L762">    }</span>
+
+    private Optional&lt;Tuple2&lt;String, OrderByDirection&gt;&gt; getOptionalCrossUnionOrderBy(@NotNull List&lt;EHRSearch&lt;?&gt;&gt; unionSearches) {
+
+        // short circuit if no unions, or no primary order-by
+<span class="pc bpc" id="L767" title="1 of 2 branches missed.">        if (unionSearches.isEmpty()) {</span>
+<span class="nc" id="L768">            return Optional.empty();</span>
+        }
+
+        // if all queries have the same order by, or ONLY the first search has an order by, use that
+<span class="fc" id="L772">        EHRSearch&lt;?&gt; firstSearch = unionSearches.get(0);</span>
+
+<span class="fc bfc" id="L774" title="All 2 branches covered.">        if (unionSearches.size() &gt; 1) {</span>
+<span class="fc bfc" id="L775" title="All 2 branches covered.">            for (EHRSearch&lt;?&gt; unionSearch : unionSearches.subList(1, unionSearches.size() - 1)) {</span>
+<span class="pc bpc" id="L776" title="1 of 2 branches missed.">                if (unionSearch.getOrderByField() != null) {</span>
+                    // return none if we find a mismatch
+<span class="pc bpc" id="L778" title="1 of 2 branches missed.">                    if (!unionSearch.getOrderByField().equals(firstSearch.getOrderByField())</span>
+<span class="pc bpc" id="L779" title="1 of 2 branches missed.">                            || unionSearch.getOrderByDirection() != firstSearch.getOrderByDirection()) {</span>
+<span class="nc" id="L780">                        return Optional.empty();</span>
+                    }
+                }
+<span class="fc" id="L783">            }</span>
+        }
+
+        // no mismatches! use that first order-by
+        // catch the case where all order-bys are null (including the first)
+<span class="fc bfc" id="L788" title="All 2 branches covered.">        String col = firstSearch.getOrderByField() != null ? firstSearch.map().getDbColumn(firstSearch.getOrderByField())</span>
+<span class="fc" id="L789">                : null;</span>
+<span class="fc bfc" id="L790" title="All 2 branches covered.">        if (col != null) {</span>
+<span class="fc" id="L791">            return Optional.of(Tuple.of(col, firstSearch.getOrderByDirection()));</span>
+        } else {
+<span class="fc" id="L793">            return Optional.empty();</span>
+        }
+    }
+
+    /**
+     * This DOES need to have consent details, oddly enough, because we need to NOT count data that's hidden due to private labels
+     */
+    @Override
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public &lt;D&gt; Map&lt;String, Long&gt; countEHRData(EHRSearch&lt;D&gt; search, @NotNull EHRRequestContext context, String groupByField) {
+        try {
+<span class="nc" id="L804">            List&lt;?&gt; counts = doCountEHRData(search, context, Optional.empty(), Map.of(groupByField, Long.class));</span>
+<span class="nc bnc" id="L805" title="All 2 branches missed.">            if (isEmpty(counts)) {</span>
+<span class="nc" id="L806">                return emptyMap();</span>
+            }
+<span class="nc" id="L808">            Map&lt;String, Long&gt; resultMap = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc bnc" id="L809" title="All 2 branches missed.">            for (Object[] result : (List&lt;Object[]&gt;) counts) {</span>
+<span class="nc" id="L810">                resultMap.put(String.valueOf(result[0]), ((BigInteger) result[1]).longValue());</span>
+<span class="nc" id="L811">            }</span>
+<span class="nc" id="L812">            return resultMap;</span>
+<span class="nc" id="L813">        } catch (Exception e) {</span>
+<span class="nc" id="L814">            throw new RuntimeException(&quot;failed counting &quot; + search.getDataTypes() + &quot; in acct(s) &quot; + search.getAccountIds(), e);</span>
+        }
+    }
+
+    @Override
+    public &lt;D&gt; long countEHRData(EHRSearch&lt;D&gt; ehrSearchDto, @NotNull EHRRequestContext context) {
+        try {
+<span class="fc" id="L821">            List&lt;?&gt; counts = doCountEHRData(ehrSearchDto, context, Optional.empty(), emptyMap());</span>
+<span class="pc bpc" id="L822" title="1 of 2 branches missed.">            if (isEmpty(counts)) {</span>
+<span class="nc" id="L823">                return 0;</span>
+            }
+<span class="pc bpc" id="L825" title="1 of 2 branches missed.">            if (1 &lt; counts.size()) {</span>
+<span class="nc" id="L826">                throw new IllegalStateException(&quot;Multiple counts found!&quot;);</span>
+            }
+<span class="fc" id="L828">            var count = counts.get(0);</span>
+<span class="pc bpc" id="L829" title="1 of 2 branches missed.">            if (count instanceof BigInteger) {</span>
+<span class="fc" id="L830">                return ((BigInteger) count).longValue();</span>
+            } else {
+<span class="nc" id="L832">                throw new NotImplementedException(&quot;Count not supported yet!&quot;);</span>
+            }
+<span class="nc" id="L834">        } catch (Exception e) {</span>
+<span class="nc" id="L835">            throw new RuntimeException(&quot;failed counting &quot; + ehrSearchDto.getDataTypes() + &quot; in acct(s) &quot; + ehrSearchDto.getAccountIds(), e);</span>
+        }
+    }
+
+    private &lt;D, E&gt; List&lt;E&gt; doCountEHRData(EHRSearch&lt;D&gt; search, @NotNull EHRRequestContext context, Optional&lt;Class&lt;E&gt;&gt; resultClass, Map&lt;String, Class&gt; typeMap) {
+<span class="fc" id="L840">        String prefixDot = &quot;ed.&quot;;</span>
+<span class="fc" id="L841">        org.jooq.Query jooqQuery = null;</span>
+
+
+<span class="fc" id="L844">        List&lt;String&gt; preppedGroupByCols = typeMap.keySet().stream()</span>
+<span class="pc" id="L845">                .map(field -&gt; search.map().getDbColumn(field))</span>
+<span class="fc" id="L846">                .collect(toList());</span>
+
+        // other filters
+<span class="fc" id="L849">        List&lt;Condition&gt; conditions = buildQueryConditions(search, /*choosingLatest */ context);</span>
+<span class="fc" id="L850">        conditions.add(condition(&quot;ed.datatype in (&quot; + menuDataTypeCast(search.getDataTypes()) + &quot;)&quot;));</span>
+<span class="fc" id="L851">        conditions.add(field(&quot;ed.account_id&quot;).in(search.getAccountIds()));</span>
+
+<span class="fc" id="L853">        DSLContext create = DSL.using(POSTGRES);</span>
+
+<span class="fc bfc" id="L855" title="All 2 branches covered.">        if (search.getLatestFilterDateField() != null) {</span>
+<span class="pc bpc" id="L856" title="1 of 2 branches missed.">            if (isNotEmpty(preppedGroupByCols)) {</span>
+<span class="nc" id="L857">                String groupCountAlias = &quot;groupCount&quot;;</span>
+<span class="nc" id="L858">                var fields = getFieldArray(preppedGroupByCols, Stream.of(count().as(groupCountAlias).cast(String.class)), identity(), size -&gt; new SelectFieldOrAsterisk[size], field -&gt; field.cast(String.class));</span>
+<span class="nc" id="L859">                var distinctFields = getFieldArray(preppedGroupByCols, Stream.of(field(prefixDot + search.getLatestFilterTypeField())), f -&gt; prefixDot + f, size -&gt; new SelectFieldOrAsterisk[size], identity());</span>
+<span class="nc" id="L860">                var groupBys = getFieldArray(preppedGroupByCols, Stream.empty(), identity(), size -&gt; new GroupField[size], identity());</span>
+<span class="nc" id="L861">                int[] orderBys = IntStream.rangeClosed(1, preppedGroupByCols.size()).toArray();</span>
+<span class="nc" id="L862">                jooqQuery = create</span>
+<span class="nc" id="L863">                        .select(fields)</span>
+<span class="nc" id="L864">                        .from(</span>
+<span class="nc" id="L865">                                selectDistinct(distinctFields)</span>
+<span class="nc" id="L866">                                        .from(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="nc" id="L867">                                        .where(conditions)</span>
+<span class="nc" id="L868">                                        .asTable(&quot;sub&quot;))</span>
+<span class="nc" id="L869">                        .groupBy(groupBys)</span>
+<span class="nc" id="L870">                        .orderBy(orderBys);</span>
+<span class="nc" id="L871">            } else { // no group by column</span>
+<span class="fc" id="L872">                jooqQuery = create</span>
+<span class="fc" id="L873">                        .select(count())</span>
+<span class="fc" id="L874">                        .from(</span>
+<span class="fc" id="L875">                                selectDistinct(field(prefixDot + search.getLatestFilterTypeField()))</span>
+<span class="fc" id="L876">                                        .from(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="fc" id="L877">                                        .where(conditions)</span>
+<span class="fc" id="L878">                                        .asTable(&quot;sub&quot;));</span>
+            }
+        } else { // no latest by type
+<span class="pc bpc" id="L881" title="1 of 2 branches missed.">            if (isNotEmpty(preppedGroupByCols)) {</span>
+<span class="nc" id="L882">                var fields = getFieldArray(preppedGroupByCols, Stream.of(count()), f -&gt; prefixDot + f, size -&gt; new SelectFieldOrAsterisk[size], identity());</span>
+<span class="nc" id="L883">                var groupBys = getFieldArray(preppedGroupByCols, Stream.empty(), f -&gt; prefixDot + f, size -&gt; new GroupField[size], identity());</span>
+<span class="nc" id="L884">                int[] orderBys = IntStream.rangeClosed(1, preppedGroupByCols.size()).toArray();</span>
+<span class="nc" id="L885">                jooqQuery = create</span>
+<span class="nc" id="L886">                        .select(fields)</span>
+<span class="nc" id="L887">                        .from(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="nc" id="L888">                        .where(conditions)</span>
+<span class="nc" id="L889">                        .groupBy(groupBys)</span>
+<span class="nc" id="L890">                        .orderBy(orderBys);</span>
+<span class="nc" id="L891">            } else { // no group by column</span>
+<span class="fc" id="L892">                jooqQuery = create</span>
+<span class="fc" id="L893">                        .select(count())</span>
+<span class="fc" id="L894">                        .from(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="fc" id="L895">                        .where(conditions);</span>
+            }
+        }
+
+<span class="fc" id="L899">        em.flush();</span>
+<span class="fc" id="L900">        Query jpaQuery = convertJooqQueryToJpa(jooqQuery, resultClass, emptyMap());</span>
+<span class="fc" id="L901">        return jpaQuery.getResultList();</span>
+    }
+
+    private &lt;D&gt; D[] getFieldArray(List&lt;String&gt; preppedGroupByCols, Stream&lt;SelectFieldOrAsterisk&gt; additionalStep, Function&lt;String, String&gt; fieldNameMapper, IntFunction&lt;D[]&gt; generator, Function&lt;Field&lt;?&gt;, Field&lt;?&gt;&gt; fieldPostProcess) {
+<span class="nc" id="L905">        return Stream.concat(preppedGroupByCols.stream().map(f -&gt; fieldPostProcess.apply(field(fieldNameMapper.apply(f)))), additionalStep).toArray(generator);</span>
+    }
+
+    /**
+     * if any type fields have the same value, remove the one with the later ID
+     */
+    private void removeLatestFilterOverlap(List&lt;EHRData&gt; resultList, EHRSearch&lt;?&gt; search) {
+<span class="fc" id="L912">        String typeField = search.getLatestFilterTypeField();</span>
+<span class="fc" id="L913">        String edTypeField = search.map().getEHRDataField(typeField);</span>
+<span class="fc" id="L914">        List&lt;EHRData&gt; removeEds = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L916">        Map&lt;Object, EHRData&gt; typeToEdMap = new HashMap&lt;&gt;();</span>
+
+<span class="fc bfc" id="L918" title="All 2 branches covered.">        for (EHRData ed : resultList) {</span>
+<span class="fc" id="L919">            Object type = ed.getQueryField(edTypeField);</span>
+<span class="fc" id="L920">            EHRData conflictEd = typeToEdMap.get(type);</span>
+<span class="pc bpc" id="L921" title="1 of 2 branches missed.">            if (conflictEd != null) {</span>
+                // fight!
+<span class="nc bnc" id="L923" title="All 2 branches missed.">                if (ed.getId() &gt; conflictEd.getId()) {</span>
+                    // new ed wins!
+<span class="nc" id="L925">                    removeEds.add(conflictEd);</span>
+<span class="nc" id="L926">                    typeToEdMap.put(type, ed);</span>
+                } else {
+                    // earlier ed wins! keep it in the map
+<span class="nc" id="L929">                    removeEds.add(ed);</span>
+                }
+            } else { // none yet
+<span class="fc" id="L932">                typeToEdMap.put(type, ed);</span>
+            }
+<span class="fc" id="L934">        }</span>
+
+<span class="fc" id="L936">        resultList.removeAll(removeEds);</span>
+<span class="fc" id="L937">    }</span>
+
+    @Override
+    public @NotNull PlaintextDocument decryptDoc(Document doc, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc bfc" id="L941" title="All 2 branches covered.">        if (doc instanceof PlaintextDocument) {</span>
+<span class="fc" id="L942">            return (PlaintextDocument) doc;</span>
+        }
+
+<span class="fc" id="L945">        return cryptoBean.decryptDoc((EncryptedDocument) doc, context);</span>
+    }
+
+    @Override
+    public @NotNull &lt;ID&gt; List&lt;RecordWithId&lt;ID, PlaintextDocument&gt;&gt; decryptDoc(Collection&lt;RecordWithId&lt;ID, Tuple2&lt;Document, LoggedInEHRRequestContext&gt;&gt;&gt; toDecrypt) {
+<span class="fc" id="L950">        List&lt;RecordWithId&lt;ID, PlaintextDocument&gt;&gt; result = new ArrayList&lt;&gt;(toDecrypt.size());</span>
+<span class="fc" id="L951">        List&lt;RecordWithId&lt;ID, Tuple2&lt;EncryptedDocument, LoggedInEHRRequestContext&gt;&gt;&gt; encrypted = new ArrayList&lt;&gt;(toDecrypt.size());</span>
+<span class="fc bfc" id="L952" title="All 2 branches covered.">        for (RecordWithId&lt;ID, Tuple2&lt;Document, LoggedInEHRRequestContext&gt;&gt; actual : toDecrypt) {</span>
+<span class="pc bpc" id="L953" title="1 of 2 branches missed.">            if (actual.record()._1 instanceof PlaintextDocument) {</span>
+<span class="nc" id="L954">                result.add(actual.switchRecord((PlaintextDocument) actual.record()._1));</span>
+            } else {
+<span class="fc" id="L956">                encrypted.add(actual.switchRecord(Tuple.of((EncryptedDocument) actual.record()._1, actual.record()._2)));</span>
+            }
+<span class="fc" id="L958">        }</span>
+
+<span class="fc" id="L960">        return Stream.concat(result.stream(), cryptoBean.decryptDoc(encrypted)).collect(toList());</span>
+    }
+
+    @Override
+    public &lt;D&gt; Map&lt;Long, List&lt;D&gt;&gt; populateMapByAccount(@NotNull EHRRequestContext requestContext, List&lt;EHRData&gt; input, Class&lt;D&gt; dtoClass) {
+<span class="nc" id="L965">        return populateDTOListWithAccount(input, dtoClass, requestContext)</span>
+<span class="nc" id="L966">                .stream()</span>
+<span class="nc" id="L967">                .collect(groupingBy(RecordWithId::id, LinkedHashMap::new, Collectors.mapping(RecordWithId::record, Collectors.toList())));</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;RecordWithId&lt;Long, D&gt;&gt; populateDTOListWithAccount(List&lt;EHRData&gt; edList, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context) {
+<span class="fc" id="L972">        return doPopulateDTOListWithAccount(edList, dtoClass, context, NoopRemotingConsumer.class);</span>
+    }
+
+    protected &lt;D, F extends RemotingBiConsumer&lt;D&gt;&gt; List&lt;RecordWithId&lt;Long, D&gt;&gt; doPopulateDTOListWithAccount(List&lt;EHRData&gt; edList, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context, Class&lt;F&gt; additionalSteps) {
+<span class="fc" id="L976">        return populateDTOList(edList, dtoClass, context, (ehrData, dto) -&gt; RecordWithId.of(ehrData.getAccountId(), dto), RecordWithId::record, additionalSteps);</span>
+    }
+
+    /**
+     * Populate annotated DTO objects with data from EHRData objects, and groups them by accountId and the given key.
+     *
+     * @param &lt;D&gt;            dto type
+     * @param &lt;K&gt;            key type
+     * @param requestContext The request context
+     * @param accountIds     every accountId which can be in {@link List&lt;EHRData&gt;}, a bit redundatnt as the list contains this information, but it means a list and iteration less.
+     * @param input          the {@link EHRData} list to convert to dtoClass
+     * @param dtoClass       the DTO class
+     * @param keyFunction    function the get the key from dtoClass
+     * @param keys           every key which might be returned by keyFunction
+     * @return {@link List} of dtoClass by accountId and key
+     */
+    &lt;D, K&gt; ArrayTable&lt;Long, K, List&lt;D&gt;&gt; populateAndGroupDTOsByAccountIdAndKey(@NotNull EHRRequestContext requestContext, Set&lt;Long&gt; accountIds, List&lt;EHRData&gt; input,
+                                                                              Class&lt;D&gt; dtoClass,
+                                                                              Function&lt;D, K&gt; keyFunction,
+                                                                              Set&lt;K&gt; keys) {
+<span class="nc" id="L996">        ArrayTable&lt;Long, K, List&lt;D&gt;&gt; result = ArrayTable.create(accountIds, keys);</span>
+<span class="nc" id="L997">        populateDTOListWithAccount(input, dtoClass, requestContext).forEach(r -&gt; {</span>
+<span class="nc" id="L998">            var dto = r.record();</span>
+<span class="nc" id="L999">            List&lt;D&gt; actual = result.get(r.id(), keyFunction.apply(dto));</span>
+<span class="nc bnc" id="L1000" title="All 2 branches missed.">            if (actual == null) {</span>
+<span class="nc" id="L1001">                actual = new LinkedList&lt;&gt;();</span>
+<span class="nc" id="L1002">                result.put(r.id(), keyFunction.apply(dto), actual);</span>
+            }
+<span class="nc" id="L1004">            actual.add(dto);</span>
+<span class="nc" id="L1005">        });</span>
+<span class="nc" id="L1006">        return result;</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;D&gt; populateDTOList(List&lt;EHRData&gt; edList, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context) {
+<span class="fc" id="L1011">        return populateDTOList(edList, dtoClass, context, (ehrData, dto) -&gt; dto, identity(), NoopRemotingConsumer.class);</span>
+    }
+
+    protected &lt;D, E, F extends RemotingBiConsumer&lt;D&gt;&gt; List&lt;E&gt; populateDTOList(List&lt;EHRData&gt; edList, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context, BiFunction&lt;EHRData, D, E&gt; enricher, Function&lt;E, D&gt; dtoProvider, Class&lt;F&gt; additionalStepsClass) {
+<span class="fc bfc" id="L1015" title="All 2 branches covered.">        if (isEmpty(edList)) {</span>
+<span class="fc" id="L1016">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="fc" id="L1019">        List&lt;E&gt; resultList = new ArrayList&lt;&gt;(edList.size());</span>
+<span class="fc" id="L1020">        Set&lt;Long&gt; orgIds = new HashSet&lt;&gt;(edList.size());</span>
+<span class="fc" id="L1021">        Set&lt;Long&gt; teamIds = new HashSet&lt;&gt;(edList.size());</span>
+<span class="fc" id="L1022">        Set&lt;Long&gt; personIds = new HashSet&lt;&gt;(edList.size());</span>
+
+<span class="fc" id="L1024">        BiConsumer&lt;EHRData, D&gt; additionalSteps = (ed, d) -&gt; {</span>
+<span class="nc" id="L1025">        };</span>
+        try {
+<span class="fc" id="L1027">            additionalSteps = additionalStepsClass.getDeclaredConstructor().newInstance().getConsumer();</span>
+<span class="nc" id="L1028">        } catch (Exception e) {</span>
+<span class="nc" id="L1029">            throw new RuntimeException(e);</span>
+<span class="fc" id="L1030">        }</span>
+<span class="fc bfc" id="L1031" title="All 2 branches covered.">        for (EHRData ed : edList) {</span>
+            try {
+<span class="fc" id="L1033">                E result = populateDTO(ed, dtoClass, context, false, enricher);</span>
+<span class="fc" id="L1034">                D dto = dtoProvider.apply(result);</span>
+<span class="fc" id="L1035">                additionalSteps.accept(ed, dto);</span>
+<span class="fc" id="L1036">                resultList.add(result);</span>
+<span class="pc bpc" id="L1037" title="1 of 2 branches missed.">                if (dto instanceof IBaseDTO) {</span>
+<span class="fc" id="L1038">                    var source = ((IBaseDTO) dto).getSource();</span>
+<span class="fc bfc" id="L1039" title="All 2 branches covered.">                    if (isOrgLoadNeeded(source)) {</span>
+<span class="fc" id="L1040">                        orgIds.add(source.getOrgId());</span>
+                    }
+<span class="fc bfc" id="L1042" title="All 2 branches covered.">                    if (isTeamLoadNeeded(source)) {</span>
+<span class="fc" id="L1043">                        teamIds.add(source.getTeamId());</span>
+                    }
+<span class="pc bpc" id="L1045" title="1 of 2 branches missed.">                    if (isPersonLoadNeeded(source)) {</span>
+<span class="nc" id="L1046">                        personIds.add(source.getPersonId());</span>
+                    }
+                }
+<span class="nc" id="L1049">            } catch (Exception e) {</span>
+<span class="nc" id="L1050">                throw new RuntimeException(&quot;Error populating dto list from ed id-&quot; + ed.getId() + &quot; account-&quot; + ed.getAccountId()</span>
+<span class="nc" id="L1051">                        + &quot; doc-&quot; + ed.getDocumentMetadataId(), e);</span>
+<span class="fc" id="L1052">            }</span>
+<span class="fc" id="L1053">        }</span>
+
+<span class="fc" id="L1055">        Map&lt;Long, String&gt; orgNames = instituteBean.getOrgNames(orgIds);</span>
+<span class="fc" id="L1056">        Map&lt;Long, String&gt; teamNames = instituteBean.getTeamNames(teamIds);</span>
+<span class="fc" id="L1057">        Map&lt;Long, PKBPerson&gt; persons = personBean.findPKBPersonMap(personIds);</span>
+
+<span class="fc bfc" id="L1059" title="All 2 branches covered.">        for (E result : resultList) {</span>
+<span class="fc" id="L1060">            D dto = dtoProvider.apply(result);</span>
+<span class="pc bpc" id="L1061" title="1 of 2 branches missed.">            if (dto instanceof IBaseDTO) {</span>
+<span class="fc" id="L1062">                populateSourceDisplayNames(((IBaseDTO) dto).getSource(), orgNames::get, teamNames::get, persons::get);</span>
+            }
+<span class="fc" id="L1064">        }</span>
+
+<span class="fc" id="L1066">        return resultList;</span>
+    }
+
+    @Override
+    public &lt;D&gt; @Nullable D populateDTO(EHRData ed, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context) {
+<span class="fc" id="L1071">        return populateDTO(ed, dtoClass, context, true);</span>
+    }
+
+    private &lt;D&gt; @Nullable D populateDTO(EHRData ed, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context, boolean populateSourceNames) {
+<span class="fc" id="L1075">        return populateDTO(ed, dtoClass, context, populateSourceNames, (ehrData, dto) -&gt; dto);</span>
+    }
+
+    private &lt;D, E&gt; @Nullable E populateDTO(EHRData ed, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context, boolean populateSourceNames, BiFunction&lt;EHRData, D, E&gt; enricher) {
+        // TODO: check whether this method should really accept nulls
+<span class="fc bfc" id="L1080" title="All 2 branches covered.">        if (ed == null) {</span>
+<span class="fc" id="L1081">            return null;</span>
+        }
+
+<span class="fc" id="L1084">        checkForMissingSubjectAndContent(ed, &quot;before mapping&quot;);</span>
+
+        try {
+<span class="fc" id="L1087">            D dto = load(ed, dtoClass, context);</span>
+<span class="pc bpc" id="L1088" title="1 of 2 branches missed.">            if (dto instanceof IBaseDTO) {</span>
+<span class="fc" id="L1089">                IBaseDTO baseDto = (IBaseDTO) dto;</span>
+<span class="fc" id="L1090">                baseDto.getBaseFields().populate(ed);</span>
+<span class="fc" id="L1091">                baseDto.getSource().init(ed);</span>
+
+<span class="fc bfc" id="L1093" title="All 2 branches covered.">                if (populateSourceNames) {</span>
+<span class="pc" id="L1094">                    populateSourceDisplayNames(baseDto.getSource(), instituteBean::getOrgName, instituteBean::getTeamName, personId -&gt; personBean.findPKBPerson(personId).getOrNull());</span>
+                }
+            }
+
+<span class="fc" id="L1098">            checkForMissingSubjectAndContent(ed, &quot;after mapping&quot;);</span>
+
+<span class="fc" id="L1100">            return enricher.apply(ed, dto);</span>
+<span class="nc" id="L1101">        } catch (IllegalAccessException | InvocationTargetException e) {</span>
+<span class="nc" id="L1102">            throw new RuntimeException(&quot;failed loading &quot; + dtoClass + &quot; DTOs from EHRData&quot;, e);</span>
+        }
+    }
+
+    private &lt;D&gt; @Nullable D load(EHRData ed, Class&lt;D&gt; dtoClass, @NotNull EHRRequestContext context) throws InvocationTargetException, IllegalAccessException {
+<span class="fc" id="L1107">        DTOMapping&lt;D&gt; dtoMapping = DTOMapping.get(dtoClass);</span>
+        // set the flag to true so that detectNonBeanSave exception can be skipped for migration
+<span class="fc" id="L1109">        ed.setMigrationInProcess(true);</span>
+        // first, EHRData field migrations (if any, and if EHRData is decrypted)
+<span class="fc" id="L1111">        boolean saveNeeded = migrateFields(ed, dtoMapping.getEhrDataFieldMigrations());</span>
+
+        // to replace the above field migrations: interface-based migrations!
+<span class="fc" id="L1114">        boolean migrateEdResult = migrateEHRData(ed, dtoMapping.getEhrMigrator());</span>
+<span class="pc bpc" id="L1115" title="1 of 4 branches missed.">        saveNeeded = saveNeeded || migrateEdResult;</span>
+
+        // must save here as migration process has potential to modify the entity
+        // code ahead makes other bean calls which triggers hibernate to flush the entity
+        // and results in a non-bean save error
+<span class="fc bfc" id="L1120" title="All 2 branches covered.">        if (saveNeeded) {</span>
+<span class="fc" id="L1121">            saveEHRData(context, ed);</span>
+            // reset the flag
+<span class="fc" id="L1123">            saveNeeded = false;</span>
+        }
+
+        // now set the migration flag back to false
+<span class="fc" id="L1127">        ed.setMigrationInProcess(false);</span>
+
+<span class="fc" id="L1129">        D dto = dtoMapping.newDTO();</span>
+
+        // encrypted fields
+<span class="fc bfc" id="L1132" title="All 2 branches covered.">        if (ed.isDecrypted()) {</span>
+
+            // encrypted fields
+<span class="fc bfc" id="L1135" title="All 2 branches covered.">            for (String fieldName : dtoMapping.getEncryptedFieldNameSet()) {</span>
+<span class="fc" id="L1136">                Method setter = dtoMapping.getEncryptedFieldSetter(fieldName); // may be null for flattened dto field</span>
+
+<span class="fc" id="L1138">                Object fieldValue = ed.getEncryptedField(fieldName);</span>
+<span class="fc" id="L1139">                DTOMapping&lt;?&gt; nestedMappingIfAny = dtoMapping.getNestedDtoMapping(fieldName);</span>
+<span class="fc" id="L1140">                DTOMapping&lt;?&gt; flattenedMappingIfAny = dtoMapping.getFlattenedDtoMapping(fieldName);</span>
+
+<span class="fc bfc" id="L1142" title="All 2 branches covered.">                if (flattenedMappingIfAny != null) {</span>
+                    // get the nested DTO (must be never-null) and set the NESTED field values inside it
+                    // future: create the nested DTO if it's null (and if there's a setter)
+<span class="fc" id="L1145">                    Method getter = dtoMapping.getEncryptedFieldGetter(fieldName);</span>
+<span class="fc" id="L1146">                    Object flatDto = getter.invoke(dto);</span>
+<span class="pc bpc" id="L1147" title="1 of 2 branches missed.">                    if (flatDto == null) {</span>
+<span class="nc" id="L1148">                        throw new IllegalStateException(&quot;Flattened DTO at &quot; + fieldName + &quot; should always be non-null from the getter! Got null.&quot;);</span>
+                    }
+
+                    // TODO: recursion here?
+
+                    // encrypted fields
+<span class="fc bfc" id="L1154" title="All 2 branches covered.">                    for (String flatFieldName : flattenedMappingIfAny.getEncryptedFieldNameSet()) {</span>
+<span class="fc" id="L1155">                        Method flatSetter = flattenedMappingIfAny.getEncryptedFieldSetter(flatFieldName);</span>
+<span class="fc" id="L1156">                        Object flatFieldValue = ed.getEncryptedField(flatFieldName);</span>
+
+<span class="fc" id="L1158">                        flatFieldValue = ValueMappingUtil.prepValueForDTO(flatFieldValue, flatSetter.getGenericParameterTypes()[0], null/* nestedMappingIfAny */, flatFieldName);</span>
+
+<span class="fc" id="L1160">                        flatSetter.invoke(flatDto, flatFieldValue);</span>
+<span class="fc" id="L1161">                    }</span>
+                    // query fields
+<span class="fc bfc" id="L1163" title="All 2 branches covered.">                    for (String flatFieldName : flattenedMappingIfAny.getQueryFieldNameSet()) {</span>
+<span class="fc" id="L1164">                        Method flatSetter = flattenedMappingIfAny.getQueryFieldSetter(flatFieldName);</span>
+<span class="fc" id="L1165">                        Object flatFieldValue = ed.getQueryField(flattenedMappingIfAny.getEHRDataField(flatFieldName));</span>
+
+                        // special handling for enum, Lists, nested DTOs
+<span class="fc" id="L1168">                        flatFieldValue = ValueMappingUtil.prepValueForDTO(flatFieldValue, flatSetter.getGenericParameterTypes()[0], null/* nestedMappingIfAny */, flatFieldName);</span>
+
+<span class="fc" id="L1170">                        flatSetter.invoke(flatDto, flatFieldValue);</span>
+<span class="fc" id="L1171">                    }</span>
+<span class="fc" id="L1172">                } else {</span>
+                    // regular single field handling -- if there's a nested DTO it'll be handled in the prepValue method
+<span class="fc" id="L1174">                    fieldValue = ValueMappingUtil.prepValueForDTO(fieldValue, setter.getGenericParameterTypes()[0], nestedMappingIfAny, fieldName);</span>
+                    try {
+<span class="fc" id="L1176">                        setter.invoke(dto, fieldValue);</span>
+<span class="nc" id="L1177">                    } catch (Exception e) {</span>
+<span class="nc bnc" id="L1178" title="All 2 branches missed.">                        LOGGER.error(&quot;Error writing field {} DTO of class {}. Value class {}; setter parameter type {}&quot;, fieldName, dtoClass, fieldValue == null ? &quot;null&quot; : fieldValue.getClass(), setter.getGenericParameterTypes()[0]);</span>
+<span class="nc" id="L1179">                        throw e;</span>
+<span class="fc" id="L1180">                    }</span>
+                }
+<span class="fc" id="L1182">            }</span>
+        }
+
+        // query fields
+<span class="fc bfc" id="L1186" title="All 2 branches covered.">        for (String fieldName : dtoMapping.getQueryFieldNameSet()) {</span>
+<span class="fc" id="L1187">            Method setter = dtoMapping.getQueryFieldSetter(fieldName);</span>
+<span class="fc" id="L1188">            Object fieldValue = ed.getQueryField(dtoMapping.getEHRDataField(fieldName));</span>
+
+<span class="fc bfc" id="L1190" title="All 2 branches covered.">            if (fieldValue != null) {</span>
+                // special handling for enum, Lists, nested DTOs
+<span class="fc" id="L1192">                fieldValue = ValueMappingUtil.prepValueForDTO(fieldValue, setter.getGenericParameterTypes()[0], null/* nestedMappingIfAny */, fieldName);</span>
+            }
+<span class="fc" id="L1194">            setter.invoke(dto, fieldValue);</span>
+<span class="fc" id="L1195">        }</span>
+<span class="fc" id="L1196">        return dto;</span>
+    }
+
+    private void checkForMissingSubjectAndContent(EHRData ed, String location) {
+<span class="fc" id="L1200">        String subject = (String) ed.getEncryptedField(&quot;subject&quot;);</span>
+<span class="fc" id="L1201">        String content = (String) ed.getEncryptedField(&quot;content&quot;);</span>
+<span class="fc bfc" id="L1202" title="All 4 branches covered.">        boolean subjectOrContentIsMissing = isBlank(subject) || isBlank(content);</span>
+<span class="fc bfc" id="L1203" title="All 4 branches covered.">        if (ed.getDataType() == MenuDataType.encounterEvent</span>
+                &amp;&amp; subjectOrContentIsMissing
+<span class="pc bpc" id="L1205" title="1 of 2 branches missed.">                &amp;&amp; ed.isDecrypted()) {</span>
+<span class="nc" id="L1206">            String exception = format(&quot;PHR-9900: encounterEvent id %d is missing subject and/or content (subject is null=%b, subject is blank=%b&quot; +</span>
+                            &quot;, content is null=%b, content is blank=%b) %s&quot;,
+<span class="nc bnc" id="L1208" title="All 2 branches missed.">                    ed.getId(),</span>
+<span class="nc bnc" id="L1209" title="All 2 branches missed.">                    subject == null,</span>
+<span class="nc bnc" id="L1210" title="All 4 branches missed.">                    subject != null &amp;&amp; subject.isBlank(),</span>
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">                    content == null,</span>
+<span class="nc bnc" id="L1212" title="All 2 branches missed.">                    content != null &amp;&amp; content.isBlank(),</span>
+                    location);
+<span class="nc bnc" id="L1214" title="All 2 branches missed.">            if (phrConfig.isExceptionForMissingSubjectAndContentEnabled()) {</span>
+<span class="nc" id="L1215">                throw new IllegalStateException(exception);</span>
+            } else {
+<span class="nc" id="L1217">                LOGGER.error(exception);</span>
+            }
+        }
+<span class="fc" id="L1220">    }</span>
+
+    /**
+     * @return true if save required
+     */
+    private boolean migrateEHRData(EHRData ed, EHRMigratorBase migrator) {
+
+        // no migration, or ED isn't decrypted: skip
+<span class="fc bfc" id="L1228" title="All 4 branches covered.">        if (migrator == null || !ed.isDecrypted()) {</span>
+<span class="fc" id="L1229">            return false;</span>
+        }
+
+        // already up to date: skip
+<span class="fc" id="L1233">        int latestMigrationVersion = migrator.getMigrationVersion();</span>
+<span class="fc bfc" id="L1234" title="All 2 branches covered.">        if (ed.getMigrationVersion() == latestMigrationVersion) {</span>
+<span class="fc" id="L1235">            return false;</span>
+        }
+
+<span class="fc" id="L1238">        migrator.migrate(ed);</span>
+
+
+        // save the changed EHRData -- otherwise Hibernate will do it for us, and if encrypted fields are changed,
+        // we'll get errors because it's not been serialized
+
+<span class="fc" id="L1244">        return true;</span>
+    }
+
+    /**
+     * @return true if save is required (changes were made)
+     */
+    private boolean migrateFields(EHRData ed, Migrate[] migrations) {
+<span class="fc bfc" id="L1251" title="All 2 branches covered.">        if (!ed.isDecrypted()) {</span>
+<span class="fc" id="L1252">            return false;</span>
+        }
+
+<span class="fc" id="L1255">        boolean saveNeeded = false;</span>
+
+<span class="fc bfc" id="L1257" title="All 2 branches covered.">        for (Migrate mig : migrations) {</span>
+            // check &quot;to&quot; first; don't overwrite!
+<span class="fc bfc" id="L1259" title="All 2 branches covered.">            if (StringUtils.isNotEmpty(mig.toEncrypted())) {</span>
+<span class="fc bfc" id="L1260" title="All 2 branches covered.">                if (ed.getEncryptedField(mig.toEncrypted()) != null) {</span>
+<span class="fc" id="L1261">                    continue;</span>
+                }
+            } else { // &quot;to&quot; query field
+<span class="fc bfc" id="L1264" title="All 2 branches covered.">                if (ed.getQueryField(mig.toQueryField().name()) != null) {</span>
+<span class="fc" id="L1265">                    continue;</span>
+                }
+            }
+
+            // get from
+            Object value;
+<span class="pc bpc" id="L1271" title="1 of 2 branches missed.">            if (StringUtils.isNotEmpty(mig.fromEncrypted())) {</span>
+<span class="fc" id="L1272">                value = ed.getEncryptedField(mig.fromEncrypted());</span>
+            } else {
+<span class="nc" id="L1274">                value = ed.getQueryField(mig.fromQueryField().name());</span>
+            }
+
+            // set in &quot;to&quot; field
+<span class="pc bpc" id="L1278" title="1 of 2 branches missed.">            if (value != null) {</span>
+<span class="nc bnc" id="L1279" title="All 2 branches missed.">                if (StringUtils.isNotEmpty(mig.toEncrypted())) {</span>
+<span class="nc" id="L1280">                    ed.setEncryptedField(mig.toEncrypted(), value);</span>
+                } else { // &quot;to&quot; query field
+<span class="nc" id="L1282">                    ed.setQueryField(mig.toQueryField().name(), value);</span>
+                }
+
+                // save the changed EHRData -- otherwise Hibernate will do it for us, and we'll get errors because it's not been serialized
+<span class="nc" id="L1286">                saveNeeded = true;</span>
+            }
+        }
+
+<span class="fc" id="L1290">        return saveNeeded;</span>
+    }
+
+    private boolean isOrgLoadNeeded(SourceDetails sd) {
+<span class="fc bfc" id="L1294" title="All 4 branches covered.">        return sd.getOrgId() != null &amp;&amp; isBlank(sd.getOrgName());</span>
+    }
+
+    private boolean isTeamLoadNeeded(SourceDetails sd) {
+<span class="fc bfc" id="L1298" title="All 4 branches covered.">        return sd.getTeamId() != null &amp;&amp; isBlank(sd.getTeamName());</span>
+    }
+
+    private boolean isPersonLoadNeeded(SourceDetails sd) {
+<span class="pc bpc" id="L1302" title="1 of 4 branches missed.">        return sd.getPersonId() != null &amp;&amp; isBlank(sd.getPersonNameText());</span>
+    }
+
+    private void populateSourceDisplayNames(SourceDetails source, Function&lt;Long, String&gt; orgNameProvider, Function&lt;Long, String&gt; teamNameProvider, Function&lt;Long, PKBPerson&gt; personProvider) {
+<span class="fc" id="L1306">        String orgName = source.getOrgName();</span>
+<span class="fc" id="L1307">        String teamName = source.getTeamName();</span>
+<span class="fc" id="L1308">        PKBPerson personForName = null;</span>
+
+        // If we have an org id but not a name, try to load it
+<span class="fc bfc" id="L1311" title="All 2 branches covered.">        if (isOrgLoadNeeded(source)) {</span>
+<span class="fc" id="L1312">            orgName = orgNameProvider.apply(source.getOrgId());</span>
+<span class="pc bpc" id="L1313" title="1 of 2 branches missed.">            if (orgName == null) { // should never hit this; but don't crash!</span>
+<span class="nc" id="L1314">                LOGGER.warn(&quot;Invalid source org ID {}&quot;, source.getOrgId());</span>
+<span class="nc" id="L1315">                orgName = &quot;(invalid org)&quot;;</span>
+            }
+        }
+
+        // If we have a team id but not a name, try to load it
+<span class="fc bfc" id="L1320" title="All 2 branches covered.">        if (isTeamLoadNeeded(source)) {</span>
+<span class="fc" id="L1321">            teamName = teamNameProvider.apply(source.getTeamId());</span>
+<span class="pc bpc" id="L1322" title="1 of 2 branches missed.">            if (teamName == null) { // should never hit this; but don't crash!</span>
+<span class="nc" id="L1323">                LOGGER.warn(&quot;Invalid source team ID {}&quot;, source.getTeamId());</span>
+<span class="nc" id="L1324">                teamName = &quot;(invalid team)&quot;;</span>
+            }
+        }
+
+        // If we have a person id but not a name, try to load it
+<span class="pc bpc" id="L1329" title="1 of 2 branches missed.">        if (isPersonLoadNeeded(source)) {</span>
+<span class="nc" id="L1330">            personForName = personProvider.apply(source.getPersonId());</span>
+<span class="nc bnc" id="L1331" title="All 2 branches missed.">            if (personForName == null) { // should never hit this; but don't crash! don't show it, either; this is possible.</span>
+<span class="nc" id="L1332">                LOGGER.warn(&quot;Invalid source person ID {}&quot;, source.getPersonId());</span>
+            }
+        }
+
+<span class="fc" id="L1336">        source.setDisplayNames(personForName, teamName, orgName);</span>
+<span class="fc" id="L1337">    }</span>
+
+    @Override
+    public &lt;D&gt; List&lt;EHRData&gt; populateEHRDataList(List&lt;D&gt; dtoList, long accountId, MenuDataType dataType,
+                                                 @NotNull EHRRequestContext requestContext) {
+<span class="fc" id="L1342">        var dtoWithContextList = dtoList.stream().map(d -&gt; Tuple.of(d, requestContext)).collect(toList());</span>
+<span class="fc" id="L1343">        return populateDtoAndEHRDataList(dtoWithContextList, accountId, dataType).stream().map(t -&gt; t._1).collect(ImmutableList.toImmutableList());</span>
+    }
+
+    @Override
+    public &lt;D&gt; Set&lt;Long&gt; populateEHRDataListAndSave(List&lt;D&gt; dtoList, long accountId, MenuDataType dataType, @NotNull EHRRequestContext context) {
+<span class="fc" id="L1348">        return saveEHRDataList(context, populateEHRDataList(dtoList, accountId, dataType, context)).stream().map(EHRData::getId).collect(toSet());</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;EHRData&gt; populateEHRDataList(List&lt;Tuple2&lt;D, EHRRequestContext&gt;&gt; dtoList, long accountId, MenuDataType dataType) {
+<span class="nc" id="L1353">        return populateDtoAndEHRDataList(dtoList, accountId, dataType).stream().map(t -&gt; t._1).collect(ImmutableList.toImmutableList());</span>
+    }
+
+    @Override
+    public &lt;D extends EncryptedDataPoint &amp; IBaseDTO&gt; List&lt;EHRData&gt; populateEHRDataListAndSave(List&lt;Tuple2&lt;D, EHRRequestContext&gt;&gt; dtoList) {
+<span class="fc" id="L1358">        return saveEHRDataList(populateEHRDataList(dtoList));</span>
+    }
+
+    @Override
+    public &lt;D extends EncryptedDataPoint &amp; IBaseDTO&gt; List&lt;Tuple2&lt;EHRData, EHRRequestContext&gt;&gt; populateEHRDataList(List&lt;Tuple2&lt;D, EHRRequestContext&gt;&gt; dtoList) {
+<span class="pc bpc" id="L1363" title="1 of 2 branches missed.">        if (isEmpty(dtoList)) {</span>
+<span class="nc" id="L1364">            return emptyList();</span>
+        }
+
+<span class="fc" id="L1367">        return dtoList.stream()</span>
+<span class="fc" id="L1368">                .map(tuple -&gt; {</span>
+<span class="fc" id="L1369">                    D dto = tuple._1;</span>
+<span class="fc" id="L1370">                    return Tuple.of(convert(dto, tuple._2), tuple._2);</span>
+                })
+<span class="fc" id="L1372">                .collect(toList());</span>
+    }
+
+    @Override
+    public EHRData populateEHRData(Object dto, long accountId, MenuDataType type, @NotNull EHRRequestContext context) {
+<span class="fc" id="L1377">        return populateEHRData(new EHRData(), dto, accountId, type, context);</span>
+    }
+
+    @Override
+    public Long populateEHRDataAndSave(Object dto, long accountId, MenuDataType type, @NotNull EHRRequestContext context) {
+<span class="fc" id="L1382">        var ehrData = populateEHRData(dto, accountId, type, context);</span>
+<span class="fc" id="L1383">        return saveEHRData(context, ehrData);</span>
+    }
+
+    @Override
+    public EHRData populateEHRData(EHRData ed, Object dto, long accountId, MenuDataType type, @NotNull EHRRequestContext context) {
+        // TODO timing priorities:
+        // size of data encrypted/decrypted
+        // timings for query: run query, fetch BLOB, steps of decryption/unmarshaling, populating DTOs...
+        // ditto, for write process
+
+<span class="pc bpc" id="L1393" title="1 of 2 branches missed.">        if (ed == null) {</span>
+            //noinspection NewExceptionWithoutArguments
+<span class="nc" id="L1395">            LOGGER.error(&quot;PHR-7258: populateEHRData called with null ed&quot;, FrameFilter.filter(new Exception().fillInStackTrace()));</span>
+            // Still throw an exception, because this will rollback the transaction
+<span class="nc" id="L1397">            throw new RuntimeException(&quot;PHR-7258: Failed to populate EHRData: null&quot;);</span>
+        }
+
+<span class="fc" id="L1400">        ed.setDataType(type);</span>
+<span class="fc" id="L1401">        ed.setAccountId(accountId);</span>
+
+<span class="fc" id="L1403">        DTOMapping&lt;?&gt; dtoMapping = DTOMapping.get((Class&lt;?&gt;) dto.getClass());</span>
+
+<span class="fc" id="L1405">        Instant now = dateTimeService.now();</span>
+        try {
+            // encrypted fields
+
+<span class="fc bfc" id="L1409" title="All 2 branches covered.">            for (String fieldName : dtoMapping.getEncryptedFieldNameSet()) {</span>
+<span class="fc" id="L1410">                Method getter = dtoMapping.getEncryptedFieldGetter(fieldName);</span>
+<span class="fc" id="L1411">                Object fieldValue = getter.invoke(dto);</span>
+<span class="fc" id="L1412">                DTOMapping&lt;?&gt; nestedMappingIfAny = dtoMapping.getNestedDtoMapping(fieldName);</span>
+<span class="fc" id="L1413">                DTOMapping&lt;?&gt; flattenedMappingIfAny = dtoMapping.getFlattenedDtoMapping(fieldName);</span>
+
+<span class="fc bfc" id="L1415" title="All 2 branches covered.">                if (flattenedMappingIfAny != null) {</span>
+<span class="pc bpc" id="L1416" title="1 of 2 branches missed.">                    if (fieldValue != null) {</span>
+                        // this could be recursive instead
+
+                        // split out as if these were fields directly in the DTO
+<span class="fc bfc" id="L1420" title="All 2 branches covered.">                        for (String nestedFieldName : flattenedMappingIfAny.getEncryptedFieldNameSet()) {</span>
+<span class="fc" id="L1421">                            Method nestedGetter = flattenedMappingIfAny.getEncryptedFieldGetter(nestedFieldName);</span>
+<span class="fc" id="L1422">                            Object nestedFieldValue = nestedGetter.invoke(fieldValue);</span>
+<span class="fc" id="L1423">                            nestedFieldValue = ValueMappingUtil.prepValueForEHRData(nestedFieldValue, null/* nestedMappingIfAny */);</span>
+
+<span class="fc" id="L1425">                            ed.setEncryptedField(nestedFieldName, nestedFieldValue);</span>
+<span class="fc" id="L1426">                        }</span>
+<span class="fc bfc" id="L1427" title="All 2 branches covered.">                        for (String nestedFieldName : flattenedMappingIfAny.getQueryFieldNameSet()) {</span>
+<span class="fc" id="L1428">                            Method nestedGetter = flattenedMappingIfAny.getQueryFieldGetter(nestedFieldName);</span>
+<span class="fc" id="L1429">                            Object nestedFieldValue = nestedGetter.invoke(fieldValue);</span>
+<span class="fc" id="L1430">                            nestedFieldValue = ValueMappingUtil.prepValueForEHRData(nestedFieldValue, null/* nestedMappingIfAny */);</span>
+
+<span class="fc" id="L1432">                            String ehrDataField = flattenedMappingIfAny.getEHRDataField(nestedFieldName);</span>
+<span class="fc" id="L1433">                            ed.setQueryField(ehrDataField, nestedFieldValue);</span>
+<span class="fc" id="L1434">                        }</span>
+
+                    }
+                } else {
+                    // regular encrypted field handling
+                    // if there's a nested DTO mapping it'll be handled in the prepValue method
+
+<span class="fc" id="L1441">                    fieldValue = ValueMappingUtil.prepValueForEHRData(fieldValue, nestedMappingIfAny);</span>
+<span class="fc" id="L1442">                    ed.setEncryptedField(fieldName, fieldValue);</span>
+                }
+<span class="fc" id="L1444">            }</span>
+
+            // query fields
+
+<span class="fc bfc" id="L1448" title="All 2 branches covered.">            for (String fieldName : dtoMapping.getQueryFieldNameSet()) {</span>
+<span class="fc" id="L1449">                Method getter = dtoMapping.getQueryFieldGetter(fieldName);</span>
+<span class="fc" id="L1450">                Object fieldValue = getter.invoke(dto);</span>
+
+<span class="fc" id="L1452">                fieldValue = ValueMappingUtil.prepValueForEHRData(fieldValue, null/* nestedMappingIfAny */);</span>
+
+<span class="fc" id="L1454">                String ehrDataField = dtoMapping.getEHRDataField(fieldName);</span>
+<span class="fc" id="L1455">                ed.setQueryField(ehrDataField, fieldValue);</span>
+<span class="fc" id="L1456">            }</span>
+
+<span class="pc bpc" id="L1458" title="1 of 2 branches missed.">            if (dto instanceof IBaseDTO) {</span>
+<span class="fc" id="L1459">                IBaseDTO baseDto = (IBaseDTO) dto;</span>
+
+                // if NO source details were provided, set to defaults and log warning (fix callers instead)
+                // once this is stable: make this a hard exception (stop new features/code paths that add data w/o source)
+<span class="pc bpc" id="L1463" title="1 of 2 branches missed.">                if (!baseDto.getSource().isPopulated()) {</span>
+<span class="nc" id="L1464">                    throw new IllegalStateException(&quot;PHRZ-105,PHRZ-104: Source is null for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+                }
+
+<span class="fc" id="L1467">                baseDto.getBaseFields().writeToEHRData(ed, now);</span>
+<span class="fc" id="L1468">                baseDto.getSource().writeToEHRData(ed);</span>
+            }
+
+            // migration handling: we've just rewritten the data for this DTO, it should now be conformant with latest mappings
+<span class="fc" id="L1472">            ed.setMigrationVersion(dtoMapping.getMigrationVersion());</span>
+<span class="nc" id="L1473">        } catch (IllegalAccessException | InvocationTargetException e) {</span>
+<span class="nc" id="L1474">            throw new RuntimeException(&quot;failed loading EHRData from dto &quot; + dto, e);</span>
+<span class="fc" id="L1475">        }</span>
+
+<span class="fc" id="L1477">        return ed;</span>
+    }
+
+    @Override
+    public &lt;T extends EncryptedDataPoint &amp; IBaseDTO&gt; EHRData convert(T dto, EHRRequestContext context) {
+<span class="fc" id="L1482">        return populateEHRData(new EHRData(), dto, dto.getPatientAccountId(), dto.getDataType(), context);</span>
+    }
+
+    /**
+     * handle adding native SQL for search.isIncludeDeleted() and getFilters() also updates filters that refer to PrivateId fields, and maps
+     * to private values
+     */
+    private List&lt;Condition&gt; buildQueryConditions(EHRSearch&lt;?&gt; search,
+                                                 EHRRequestContext requestContext) {
+
+<span class="fc" id="L1492">        List&lt;Condition&gt; conditions = Lists.newArrayList();</span>
+<span class="fc" id="L1493">        String prefixDot = &quot;ed.&quot;;</span>
+
+<span class="fc" id="L1495">        DTOMapping&lt;?&gt; dtoMapping = search.map();</span>
+<span class="fc" id="L1496">        List&lt;PKBFilter&gt; pkbFilters = search.getDataFilters(false);</span>
+
+<span class="pc bpc" id="L1498" title="1 of 2 branches missed.">        if (!search.isIncludeDeleted()) {</span>
+<span class="fc" id="L1499">            pkbFilters.add(new PKBFilter(&quot;deleted&quot;, Operator.EQUAL, false, false/*applyWhenChoosingLatest*/));</span>
+        }
+
+<span class="fc" id="L1502">        conditions.addAll(buildAccessConditions(prefixDot, requestContext, search));</span>
+
+<span class="fc bfc" id="L1504" title="All 2 branches covered.">        for (PKBFilter filter : pkbFilters) {</span>
+<span class="fc" id="L1505">            String fieldOrColumn = dtoMapping.getDbColumn(filter.getField());</span>
+<span class="pc bpc" id="L1506" title="1 of 2 branches missed.">            if (fieldOrColumn == null) {</span>
+<span class="nc" id="L1507">                fieldOrColumn = filter.getField(); // allow for a custom-written reference -- maybe calculated, etc.</span>
+            }
+<span class="fc" id="L1509">            String prefixedField = prefixDot + fieldOrColumn;</span>
+
+<span class="pc bpc" id="L1511" title="9 of 16 branches missed.">            switch (filter.getOperator()) {</span>
+                case IS_NULL:
+<span class="nc" id="L1513">                    conditions.add(field(prefixedField).isNull());</span>
+<span class="nc" id="L1514">                    break;</span>
+                case IS_NOT_NULL:
+<span class="nc" id="L1516">                    conditions.add(field(prefixedField).isNotNull());</span>
+<span class="nc" id="L1517">                    break;</span>
+                case FALSE_OR_IS_NULL:
+<span class="fc" id="L1519">                    conditions.add(</span>
+<span class="fc" id="L1520">                            field(prefixedField).eq(false)</span>
+<span class="fc" id="L1521">                                    .or(field(prefixedField).isNull()));</span>
+<span class="fc" id="L1522">                    break;</span>
+                case TRUE_AND_IS_NOT_NULL:
+<span class="nc" id="L1524">                    conditions.add(</span>
+<span class="nc" id="L1525">                            field(prefixedField).eq(true)</span>
+<span class="nc" id="L1526">                                    .and(field(prefixedField).isNotNull()));</span>
+<span class="nc" id="L1527">                    break;</span>
+                case GREATER:
+<span class="fc" id="L1529">                    conditions.add(field(prefixedField).gt(filter.getValue()));</span>
+<span class="fc" id="L1530">                    break;</span>
+                case GREATER_OR_EQUAL:
+<span class="fc" id="L1532">                    conditions.add(field(prefixedField).ge(filter.getValue()));</span>
+<span class="fc" id="L1533">                    break;</span>
+                case LESS:
+<span class="nc" id="L1535">                    conditions.add(field(prefixedField).lt(filter.getValue()));</span>
+<span class="nc" id="L1536">                    break;</span>
+                case LESS_OR_EQUAL:
+<span class="fc" id="L1538">                    conditions.add(field(prefixedField).le(filter.getValue()));</span>
+<span class="fc" id="L1539">                    break;</span>
+                case EQUAL:
+<span class="fc" id="L1541">                    conditions.add(field(prefixedField).eq(filter.getValue()));</span>
+<span class="fc" id="L1542">                    break;</span>
+                case NOT_EQUAL:
+<span class="nc" id="L1544">                    conditions.add(field(prefixedField).ne(filter.getValue()));</span>
+<span class="nc" id="L1545">                    break;</span>
+                case NOT_EQUAL_OR_NULL:
+<span class="fc" id="L1547">                    conditions.add(field(prefixedField).ne(filter.getValue()).or(field(prefixedField).isNull()));</span>
+<span class="fc" id="L1548">                    break;</span>
+                case LIKE:
+<span class="nc" id="L1550">                    conditions.add(field(prefixedField).like((String) filter.getValue()));</span>
+<span class="nc" id="L1551">                    break;</span>
+                case IN:
+<span class="fc" id="L1553">                    conditions.add(field(prefixedField).in((Collection) filter.getValue()));</span>
+<span class="fc" id="L1554">                    break;</span>
+                case NOT_IN:
+<span class="nc" id="L1556">                    conditions.add(field(prefixedField).notIn((Collection) filter.getValue()));</span>
+<span class="nc" id="L1557">                    break;</span>
+                case NOT_IN_OR_NULL:
+<span class="nc" id="L1559">                    conditions.add(field(prefixedField).notIn((Collection) filter.getValue())</span>
+<span class="nc" id="L1560">                            .or(field(prefixedField).isNull()));</span>
+<span class="nc" id="L1561">                    break;</span>
+                default:
+<span class="nc" id="L1563">                    throw new IllegalArgumentException(&quot;unrecognized EHRFilter operator: &quot; + filter.getOperator());</span>
+            }
+<span class="fc" id="L1565">        }</span>
+<span class="fc" id="L1566">        return conditions;</span>
+    }
+
+    private List&lt;Condition&gt; buildAccessConditions(String prefixDot, @NotNull EHRRequestContext requestContext, EHRSearch&lt;?&gt; search) {
+<span class="fc" id="L1570">        List&lt;Condition&gt; conditions = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L1571">        enforceContext(requestContext);</span>
+
+        // keep logic here consistent with findEHRData()
+        // TODO better/cleaner check?
+<span class="fc" id="L1575">        Optional&lt;Condition&gt; tdvCondition = Optional.empty();</span>
+
+<span class="fc bfc" id="L1577" title="All 2 branches covered.">        if (requestContext.isTeamDataViewApplicable()) {</span>
+<span class="pc bpc" id="L1578" title="1 of 2 branches missed.">            if (search.getUseParticipantFilter()) {</span>
+<span class="nc" id="L1579">                tdvCondition = Optional.of(</span>
+<span class="nc" id="L1580">                        exists(select(field(&quot;p.team_id&quot;))</span>
+<span class="nc" id="L1581">                                .from(table(&quot;public.participant&quot;).as(&quot;p&quot;))</span>
+<span class="nc" id="L1582">                                .where(field(&quot;p.uniqueid&quot;).eq(field(&quot;ed.uniqueid&quot;))</span>
+<span class="nc" id="L1583">                                        .and((field(&quot;p.team_id&quot;).eq(requestContext.getTeamId().orElse(null)))))));</span>
+            } else {
+<span class="fc" id="L1585">                tdvCondition = Optional.of(field(prefixDot + SourceDetails.EHRQUERY_TEAM_ID).eq(requestContext.getTeamId().orElse(null)));</span>
+            }
+        }
+
+        // if we do have privacy flags set, enforce those with extra filters.
+        // rules are strict -- if the data lists a flag you do not have, you're blocked... even if it also lists another flag you DO have
+<span class="fc bfc" id="L1591" title="All 2 branches covered.">        if (requestContext.isPiggyback()) {</span>
+            // If we are searching in a piggybacked context, do not set any filters
+            // TODO: can't we lock this down further?
+<span class="fc bfc" id="L1594" title="All 2 branches covered.">        } else if (!requestContext.getConsentStatus().isRequired()) {</span>
+            // User in their own account, or e.g. HL7/EMIS/SciStore/etc., or special cases
+<span class="pc bpc" id="L1596" title="1 of 2 branches missed.">        } else if (requestContext.getConsentStatus().isBreakTheGlassActive()) {</span>
+            // BTG active: no consent filtering
+<span class="pc bpc" id="L1598" title="3 of 4 branches missed.">        } else if (requestContext.getConsentStatus().getConsent().isEmpty() &amp;&amp; requestContext.isTeamDataViewApplicable()) {</span>
+            // TDV only
+<span class="nc" id="L1600">            tdvCondition.ifPresent(conditions::add);</span>
+<span class="pc bpc" id="L1601" title="1 of 2 branches missed.">        } else if (requestContext.getConsentStatus().getConsent().isPresent()) {</span>
+<span class="fc" id="L1602">            PatientConsentDTO consent = requestContext.getConsentStatus().getConsent().get();</span>
+<span class="fc bfc" id="L1603" title="All 2 branches covered.">            if (!consent.generalHealthConsentGranted()) {</span>
+<span class="fc" id="L1604">                conditions.add(buildConsentOrTdvCondition(prefixDot + &quot;requireGeneral&quot;, tdvCondition));</span>
+            }
+
+<span class="fc bfc" id="L1607" title="All 2 branches covered.">            if (!consent.mentalHealthConsentGranted()) {</span>
+<span class="fc" id="L1608">                conditions.add(buildConsentOrTdvCondition(prefixDot + &quot;requireMentalHealth&quot;, tdvCondition));</span>
+            }
+
+<span class="fc bfc" id="L1611" title="All 2 branches covered.">            if (!consent.sexualHealthConsentGranted()) {</span>
+<span class="fc" id="L1612">                conditions.add(buildConsentOrTdvCondition(prefixDot + &quot;requireSexualHealth&quot;, tdvCondition));</span>
+            }
+
+<span class="fc bfc" id="L1615" title="All 2 branches covered.">            if (!consent.socialCareConsentGranted()) {</span>
+<span class="fc" id="L1616">                conditions.add(buildConsentOrTdvCondition(prefixDot + &quot;requireSocialCare&quot;, tdvCondition));</span>
+            }
+<span class="fc" id="L1618">        } else {</span>
+<span class="nc" id="L1619">            throw new IllegalStateException(&quot;Can't authorize; unexpected consent status &quot; + requestContext.getConsentStatus());</span>
+        }
+<span class="fc" id="L1621">        return conditions;</span>
+    }
+
+    private void enforceContext(@NotNull EHRRequestContext requestContext) {
+<span class="fc" id="L1625">        checkNotNull(requestContext, &quot;can't authorize with null request context&quot;);</span>
+<span class="fc" id="L1626">        checkNotNull(requestContext.getConsentStatus(), &quot;can't authorize with null consent status&quot;);</span>
+<span class="fc" id="L1627">    }</span>
+
+    private Condition buildConsentOrTdvCondition(String prefixedField, Optional&lt;Condition&gt; tdvCondition) {
+<span class="fc" id="L1630">        Condition consentCondition = field(prefixedField).eq(false)</span>
+<span class="fc" id="L1631">                .or(field(prefixedField).isNull());</span>
+<span class="fc" id="L1632">        return tdvCondition.map(consentCondition::or).orElse(consentCondition);</span>
+    }
+
+    @Override
+    public List&lt;EHRData&gt; saveEHRDataList(@NotNull EHRRequestContext requestContext, List&lt;EHRData&gt; edList) {
+<span class="fc" id="L1637">        BiFunction&lt;EHRData, EHRData, EHRData&gt; resultMapper = (t, ehr) -&gt; ehr;</span>
+<span class="fc" id="L1638">        return saveEHRDataList(ed -&gt; requestContext, edList, identity(), resultMapper).collect(toList());</span>
+    }
+
+    @Override
+    public List&lt;EHRData&gt; saveEHRDataList(List&lt;Tuple2&lt;EHRData, EHRRequestContext&gt;&gt; edList) {
+<span class="pc bpc" id="L1643" title="1 of 2 branches missed.">        if (isEmpty(edList)) {</span>
+<span class="nc" id="L1644">            return emptyList();</span>
+        }
+<span class="fc" id="L1646">        BiFunction&lt;Tuple2&lt;EHRData, EHRRequestContext&gt;, EHRData, EHRData&gt; resultMapper = (t, ehr) -&gt; ehr;</span>
+<span class="fc" id="L1647">        return saveEHRDataList(t -&gt; t._2, edList, Tuple2::_1, resultMapper).collect(toList());</span>
+    }
+
+    private &lt;T, U&gt; Stream&lt;U&gt; saveEHRDataList(Function&lt;T, EHRRequestContext&gt; contextProvider, List&lt;T&gt; edList, Function&lt;T, EHRData&gt; edProvider, BiFunction&lt;T, EHRData, U&gt; resultProvider) {
+<span class="fc bfc" id="L1651" title="All 2 branches covered.">        if (isEmpty(edList)) {</span>
+<span class="fc" id="L1652">            return Stream.empty();</span>
+        }
+<span class="fc" id="L1654">        Set&lt;Long&gt; accountIds = new HashSet&lt;&gt;(edList.size());</span>
+<span class="fc" id="L1655">        Map&lt;EHRRequestContext, Set&lt;Long&gt;&gt; accountIdsForCryptoByRequestContext = new HashMap&lt;&gt;(edList.size()); //This is needed atm as we might end up using LocalAccountKeyLoadingStrategy</span>
+<span class="fc bfc" id="L1656" title="All 2 branches covered.">        for (T actual : edList) {</span>
+<span class="fc" id="L1657">            var ed = edProvider.apply(actual);</span>
+<span class="fc" id="L1658">            var requestContext = contextProvider.apply(actual);</span>
+<span class="fc" id="L1659">            accountIds.add(ed.getAccountId());</span>
+<span class="pc bpc" id="L1660" title="1 of 2 branches missed.">            if (ed.isEncryptionNeeded()) {</span>
+<span class="fc" id="L1661">                accountIdsForCryptoByRequestContext.computeIfAbsent(requestContext, rc -&gt; new HashSet&lt;&gt;()).add(ed.getAccountId());</span>
+            }
+<span class="fc" id="L1663">        }</span>
+
+<span class="fc" id="L1665">        var accounts = pkbAccountDAOLocal.accountPublicIdByAccountIdMap(accountIds);</span>
+<span class="fc" id="L1666">        var symmetricKeys = cryptoBean.getAccountSymmetricKeysForEncryption(accountIdsForCryptoByRequestContext);</span>
+<span class="fc" id="L1667">        BiFunction&lt;EHRRequestContext, Long, AccountSymmetricKeyDto&gt; symmetricKeyLookup = symmetricKeys::get;</span>
+<span class="fc" id="L1668">        BiConsumer&lt;EHRRequestContext, EHRData&gt; ehrDataEncryptor = (rc, ehrdata) -&gt; cryptoBean.encryptEHRData(rc, ehrdata, symmetricKeyLookup);</span>
+
+<span class="fc" id="L1670">        return edList.stream()</span>
+<span class="fc" id="L1671">                .map(t -&gt; resultProvider.apply(t, saveEHRData(contextProvider.apply(t), edProvider.apply(t), accounts::get, ehrDataEncryptor)));</span>
+    }
+
+    @Override
+    public &lt;D extends IBaseDTO&gt; Set&lt;Long&gt; saveDtoList(@NotNull EHRRequestContext requestContext, List&lt;D&gt; dtoList, long accountId, MenuDataType dataType) {
+<span class="fc" id="L1676">        var dtoWithContextList = dtoList.stream().map(d -&gt; Tuple.of(d, requestContext)).collect(toList());</span>
+<span class="fc" id="L1677">        List&lt;Tuple3&lt;EHRData, D, EHRRequestContext&gt;&gt; ehrDataList = populateDtoAndEHRDataList(dtoWithContextList, accountId, dataType);</span>
+<span class="fc" id="L1678">        Set&lt;Long&gt; ids = saveEHRDataList(requestContext, ehrDataList.stream().map(Tuple3::_1).collect(Collectors.toUnmodifiableList())).stream().map(EHRData::getId).collect(toSet());</span>
+<span class="fc" id="L1679">        ehrDataList.forEach(dataAndDto -&gt; dataAndDto._2.setId(dataAndDto._1.getId()));</span>
+<span class="fc" id="L1680">        return ids;</span>
+    }
+
+    @Override
+    public &lt;D&gt; List&lt;Tuple3&lt;EHRData, D, EHRRequestContext&gt;&gt; populateDtoAndEHRDataList(
+            List&lt;Tuple2&lt;D, EHRRequestContext&gt;&gt; dtoList,
+            long accountId,
+            MenuDataType dataType) {
+<span class="fc bfc" id="L1688" title="All 2 branches covered.">        if (isEmpty(dtoList)) {</span>
+<span class="fc" id="L1689">            return emptyList();</span>
+        }
+
+<span class="fc" id="L1692">        List&lt;Tuple3&lt;EHRData, D, EHRRequestContext&gt;&gt; edList = new ArrayList&lt;&gt;(dtoList.size());</span>
+<span class="fc bfc" id="L1693" title="All 2 branches covered.">        for (Tuple2&lt;D, EHRRequestContext&gt; tuple : dtoList) {</span>
+<span class="fc" id="L1694">            EHRData ed = populateEHRData(new EHRData(), tuple._1, accountId, dataType, tuple._2);</span>
+<span class="fc" id="L1695">            edList.add(Tuple.of(ed, tuple._1, tuple._2));</span>
+<span class="fc" id="L1696">        }</span>
+<span class="fc" id="L1697">        return edList;</span>
+    }
+
+    /**
+     * Persist if ed.id &lt;= 0; otherwise merge. If persist: the ed.id should be set after you have called this method.
+     * &lt;p&gt;
+     * Before persisting or updating the EHRData, marshal extended fields into XML and encrypt them back into xml01. Encryption uses a
+     * generated secret key. The secret key is encrypted with the Account public key, and stored in EHRData.secretKey.
+     */
+    @Override
+    public long saveEHRData(@NotNull EHRRequestContext requestContext, EHRData ed) {
+<span class="fc" id="L1708">        return saveEHRData(requestContext, ed, l -&gt; pkbAccountDAOLocal.findAccountPublicId(l).getOrNull(), (rc, ehrdata) -&gt; cryptoBean.encryptEHRData(rc, ehrdata)).getId();</span>
+    }
+
+    private EHRData saveEHRData(@NotNull EHRRequestContext requestContext, EHRData ed, Function&lt;Long, UUID&gt; accountPublicIdSupplier, BiConsumer&lt;EHRRequestContext, EHRData&gt; ehrDataEncryptor) {
+<span class="pc bpc" id="L1712" title="1 of 2 branches missed.">        if (ed.getAccountId() &lt;= 0) {</span>
+<span class="nc" id="L1713">            throw new IllegalArgumentException(&quot;accountId required to save!&quot;);</span>
+        }
+
+<span class="fc" id="L1716">        UUID accountPublicId = accountPublicIdSupplier.apply(ed.getAccountId());</span>
+<span class="pc bpc" id="L1717" title="1 of 2 branches missed.">        if (accountPublicId == null) {</span>
+<span class="nc" id="L1718">            throw new IllegalArgumentException(&quot;EHRData.accountId &quot; + ed.getAccountId() + &quot; not found&quot;);</span>
+        }
+
+        // be sure enteredDate and persistedDate are set -- required
+        // persisted date we should also set here for all new records -- don't use value passed in (fetching a DTO then saving a
+        //    new version must have a new persistedDate)
+        // don't override existing value if this is just an update to an existing record (e.g., migrating data type version)
+<span class="pc bpc" id="L1725" title="1 of 4 branches missed.">        if (ed.isNewDatapoint() || ed.getPersistedDate() == null) {</span>
+<span class="fc" id="L1726">            ed.setPersistedDate(Date.from(dateTimeService.now()));</span>
+        }
+
+<span class="fc bfc" id="L1729" title="All 2 branches covered.">        if (ed.getEnteredDate() == null) {</span>
+<span class="fc" id="L1730">            ed.setEnteredDate(ed.getPersistedDate());</span>
+        }
+
+<span class="fc" id="L1733">        handleMissingRoute(ed);</span>
+
+        // Route is not nullable; but must chase down any NOT_CAPTURED flows and fix them
+<span class="pc bpc" id="L1736" title="1 of 2 branches missed.">        if (ed.getRoute() == null) {</span>
+<span class="nc" id="L1737">            ed.setRoute(Route.NOT_CAPTURED);</span>
+        }
+
+<span class="fc" id="L1740">        handlePrivacyFlags(ed);</span>
+
+<span class="fc" id="L1742">        handleMissingUniqueId(ed);</span>
+
+<span class="fc" id="L1744">        ehrDataEncryptor.accept(requestContext, ed);</span>
+
+<span class="fc" id="L1746">        handleMissingSourceInfo(ed);</span>
+<span class="fc" id="L1747">        checkForMissingEncryptedData(ed);</span>
+
+<span class="fc" id="L1749">        handleNullDeleted(ed);</span>
+
+        // persist or update
+<span class="fc bfc" id="L1752" title="All 2 branches covered.">        if (ed.isNewDatapoint()) {</span>
+<span class="fc" id="L1753">            em.persist(ed);</span>
+        } else {
+<span class="fc" id="L1755">            em.merge(ed);</span>
+        }
+
+<span class="fc" id="L1758">        return ed;</span>
+    }
+
+    /**
+     * This nullable deleted Boolean object causes us absolutely nothing but trouble. You have to remember to do
+     * (deleted = false OR deleted IS NULL) in all your queries and it keeps catching people out.
+     * &lt;p&gt;
+     * Catch anything that had neglected to set this properly and force it to a proper boolean value.
+     * Next steps I intend to take: db backfill; non-null constraint on the db. This stops the rot.
+     * Next steps I don't intend to take: work out where in the stack is failing to set this and set it, then convert
+     * the value on EHRData to a boolean primitive.
+     */
+    private void handleNullDeleted(EHRData ed) {
+<span class="pc bpc" id="L1771" title="1 of 2 branches missed.">        if (ed.getDeletedObject() == null) {</span>
+<span class="nc" id="L1772">            ed.setDeleted(false);</span>
+        }
+<span class="fc" id="L1774">    }</span>
+
+    /**
+     * Encrypts the provided plaintext with a symmetric key.
+     * The key is either taken from the account or generated on the fly for datapoint level encryption.
+     */
+    @Override
+    public Document createDocument(@NotNull EHRRequestContext ehrRequestContext,
+                                   byte[] plaintext, long accountId, Map&lt;String, String&gt; metadata) {
+<span class="fc bfc" id="L1783" title="All 2 branches covered.">        if (!config.isDocumentEncryptionEnabled()) {</span>
+<span class="fc" id="L1784">            return ImmutablePlaintextDocument.builder()</span>
+<span class="fc" id="L1785">                    .plainText(plaintext)</span>
+<span class="fc" id="L1786">                    .metadata(metadata)</span>
+<span class="fc" id="L1787">                    .putMetadata(ACCOUNT_ID, String.valueOf(accountId))</span>
+<span class="fc" id="L1788">                    .build();</span>
+        }
+
+<span class="fc" id="L1791">        PlaintextDocument document = ImmutablePlaintextDocument.builder()</span>
+<span class="fc" id="L1792">                .plainText(plaintext)</span>
+<span class="fc" id="L1793">                .metadata(metadata)</span>
+<span class="fc" id="L1794">                .build();</span>
+
+<span class="fc bfc" id="L1796" title="All 2 branches covered.">        if (config.isDocumentDplEncryptionEnabled()) {</span>
+<span class="fc" id="L1797">            return cryptoBean.encryptDocWithDatapointLevelKey(document, accountId, ehrRequestContext);</span>
+        } else {
+<span class="fc" id="L1799">            return cryptoBean.encryptDocWithAccountLevelKey(document, accountId, ehrRequestContext);</span>
+        }
+    }
+
+    /**
+     * Encrypts the provided plaintext with a datapoint symmetric key.
+     * The keyId and algorithm is provided. Used for chunks to use the same key as the parent.
+     */
+    @Override
+    public EncryptedDocument createEncryptedDocument(@NotNull LoggedInEHRRequestContext ehrRequestContext,
+                                                     byte[] plaintext, long accountId, Map&lt;String, String&gt; metadata,
+                                                     UUID parentDplKeyId, String algorithm) {
+<span class="fc" id="L1811">        PlaintextDocument document = ImmutablePlaintextDocument.builder()</span>
+<span class="fc" id="L1812">                .plainText(plaintext)</span>
+<span class="fc" id="L1813">                .metadata(metadata)</span>
+<span class="fc" id="L1814">                .build();</span>
+
+<span class="fc" id="L1816">        return cryptoBean.encryptDocWithDatapointLevelKey(document, accountId, ehrRequestContext, parentDplKeyId, algorithm);</span>
+    }
+
+    /**
+     * Shares an encrypted document between accounts.
+     * In case of datapoint level encryption, only the key is copied and reencrypted for the new account.
+     * In case of older documents (account level encryption) the entire document is copied and reencrypted.
+     */
+    @Override
+    public void shareEncryptedDocument(@NotNull LoggedInEHRRequestContext ehrRequestContext,
+                                       @NotNull List&lt;UUID&gt; dplKeyIds,
+                                       Set&lt;Long&gt; newAccountIds) {
+<span class="fc" id="L1828">        cryptoBean.copyDatapointLevelKeys(ehrRequestContext, dplKeyIds, newAccountIds);</span>
+<span class="fc" id="L1829">    }</span>
+
+    // Initial (debugging) test: message and encounterEvent only, plus allergy &amp; medication as controls (don't expect these to have any similar errors)
+<span class="fc" id="L1832">    private static Set&lt;MenuDataType&gt; FORCE_NON_NULL_ENCRYPTED_DATA = Sets.immutableEnumSet(MenuDataType.message, MenuDataType.encounterEvent, MenuDataType.allergy, MenuDataType.medication);</span>
+
+<span class="fc" id="L1834">    private static Set&lt;MenuDataType&gt; MISSING_SUBJECT_OR_CONTENT_CHECK = Sets.immutableEnumSet(MenuDataType.message, MenuDataType.encounterEvent);</span>
+
+    private void checkForMissingEncryptedData(EHRData ed) {
+<span class="fc" id="L1837">        byte[] encryptedData = ed.getEncryptedData();</span>
+<span class="fc" id="L1838">        MenuDataType dataType = ed.getDataType();</span>
+<span class="fc" id="L1839">        long id = ed.getId();</span>
+
+        // Illegal state: do not save if encryptedData is null or empty for datatypes that must have data
+        // Initial (debugging) test: message and encounterEvent only, plus allergy &amp; medication as controls (don't expect these to have any similar errors)
+<span class="pc bpc" id="L1843" title="4 of 6 branches missed.">        if ((encryptedData == null || encryptedData.length == 0) &amp;&amp; FORCE_NON_NULL_ENCRYPTED_DATA.contains(dataType)) {</span>
+<span class="nc" id="L1844">            throw new IllegalStateException(String.format(&quot;PHR-4797: %s data point, id %d, with no encrypted data %s&quot;, dataType, id, Arrays.toString(encryptedData)));</span>
+        }
+
+        // More specific: attempt to save message/encounterEvent with null subject or null content (ignore drafts)
+<span class="fc" id="L1848">        boolean isMessageOrEncounterEvent = MISSING_SUBJECT_OR_CONTENT_CHECK.contains(dataType);</span>
+<span class="fc bfc" id="L1849" title="All 4 branches covered.">        boolean subjectOrContentIsNull = ed.getEncryptedField(&quot;subject&quot;) == null || ed.getEncryptedField(&quot;content&quot;) == null;</span>
+<span class="fc" id="L1850">        boolean isDraft = MessageStatus.INDRAFT.toString().equals(ed.getString04());</span>
+<span class="pc bpc" id="L1851" title="3 of 6 branches missed.">        if (isMessageOrEncounterEvent</span>
+                &amp;&amp; subjectOrContentIsNull
+<span class="nc bnc" id="L1853" title="All 2 branches missed.">                &amp;&amp; !isDraft &amp;&amp; !ed.isMigrationInProcess()) {</span>
+<span class="nc" id="L1854">            throw new IllegalStateException(</span>
+<span class="nc" id="L1855">                    String.format(&quot;PHR-4797: %s data point, id %d, with missing subject %b or content %b&quot;,</span>
+<span class="nc" id="L1856">                            dataType, id,</span>
+<span class="nc bnc" id="L1857" title="All 2 branches missed.">                            (ed.getEncryptedField(&quot;subject&quot;) == null),</span>
+<span class="nc bnc" id="L1858" title="All 2 branches missed.">                            (ed.getEncryptedField(&quot;content&quot;) == null)));</span>
+        }
+<span class="fc" id="L1860">    }</span>
+
+    private void handleMissingRoute(EHRData ed) {
+<span class="fc bfc" id="L1863" title="All 2 branches covered.">        if (ed.isNewDatapoint()) {</span>
+<span class="pc bpc" id="L1864" title="1 of 2 branches missed.">            if (ed.getRoute() == null) {</span>
+<span class="nc" id="L1865">                LOGGER.error(&quot;PHRZ-414 Route is null for data point!!! Fix code path to set it, and backfill DB!&quot;,</span>
+<span class="nc" id="L1866">                        FrameFilter.filter(new Exception(&quot;PHRZ-414 Route is null for data point!!! Fix code path to set it, and backfill DB!&quot;).fillInStackTrace()));</span>
+<span class="nc bnc" id="L1867" title="All 2 branches missed.">                if (config.isExceptionForNullRouteEnabled()) {</span>
+<span class="nc" id="L1868">                    throw new IllegalStateException(&quot;PHRZ-414 Route is null for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+                }
+<span class="pc bpc" id="L1870" title="1 of 2 branches missed.">            } else if (ed.getRoute() == Route.NOT_CAPTURED) {</span>
+<span class="nc" id="L1871">                LOGGER.error(&quot;PHRZ-414 Route is NOT_CAPTURED for data point!!! Fix code path to set it, and backfill DB!&quot;,</span>
+<span class="nc" id="L1872">                        FrameFilter.filter(new Exception(&quot;PHRZ-414 Route is NOT_CAPTURED for data point!!! Fix code path to set it, and backfill DB!&quot;).fillInStackTrace()));</span>
+<span class="nc bnc" id="L1873" title="All 2 branches missed.">                if (config.isExceptionForNotCapturedRouteEnabled()) {</span>
+<span class="nc" id="L1874">                    throw new IllegalStateException(&quot;PHRZ-414 Route is not captured for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+                }
+            }
+        }
+<span class="fc" id="L1878">    }</span>
+
+    private void handleMissingUniqueId(EHRData ed) {
+<span class="fc bfc" id="L1881" title="All 2 branches covered.">        if (ed.isNewDatapoint()) {</span>
+<span class="pc bpc" id="L1882" title="1 of 2 branches missed.">            if (ed.getUniqueId() == null) {</span>
+<span class="nc" id="L1883">                LOGGER.error(&quot;PHRZ-163 No uniqueId set for data point!!! Fix code path to set it, and backfill DB!&quot;,</span>
+<span class="nc" id="L1884">                        FrameFilter.filter(new Exception(&quot;PHRZ-163 No uniqueId set for data point!!! Fix code path to set it, and backfill DB!&quot;).fillInStackTrace()));</span>
+<span class="nc bnc" id="L1885" title="All 2 branches missed.">                if (config.isExceptionForNullUniqueIdEnabled()) {</span>
+<span class="nc" id="L1886">                    throw new IllegalStateException(&quot;PHRZ-163 Unique id is null for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+                }
+            }
+        }
+<span class="fc" id="L1890">    }</span>
+
+    private void handleMissingSourceInfo(EHRData ed) {
+<span class="fc bfc" id="L1893" title="All 2 branches covered.">        if (ed.isNewDatapoint()) {</span>
+<span class="pc bpc" id="L1894" title="1 of 2 branches missed.">            if (isSourceDetailMissing(ed)) {</span>
+<span class="nc" id="L1895">                throw new RuntimeException(&quot;PHRZ-105,PHRZ-104: EHR bean missing source details when being saved&quot;);</span>
+            }
+        }
+<span class="fc" id="L1898">    }</span>
+
+    // See PHR-9841 re. discrepancy with SourceChecker.RouteAndSource.isMissingSourceIds
+    @VisibleForTesting
+    boolean isSourceDetailMissing(EHRData ed) {
+<span class="fc bfc" id="L1903" title="All 6 branches covered.">        return !isSourcePersonSet(ed) &amp;&amp; !isSourceTeamSet(ed) &amp;&amp; !isSourceOrgSet(ed)</span>
+                // SciStore test results are allowed not to have source
+<span class="pc bpc" id="L1905" title="1 of 4 branches missed.">                &amp;&amp; !(ed.getDataType() == MenuDataType.loincTestResult &amp;&amp; ed.getRoute() == Route.SCISTORE)</span>
+                // Core devices sync records are allowed not to have source
+<span class="pc bpc" id="L1907" title="1 of 2 branches missed.">                &amp;&amp; !(ed.getDataType() == MenuDataType.coreDevicesSyncRecord);</span>
+    }
+
+    private boolean isSourcePersonSet(EHRData ed) {
+<span class="fc bfc" id="L1911" title="All 2 branches covered.">        return ed.getSourcePersonId() != null;</span>
+    }
+
+    private boolean isSourceTeamSet(EHRData ed) {
+<span class="pc bpc" id="L1915" title="1 of 4 branches missed.">        return ed.getSourceTeam() != null || ed.getSourceTeamId() != null;</span>
+    }
+
+    private boolean isSourceOrgSet(EHRData ed) {
+<span class="pc bpc" id="L1919" title="1 of 4 branches missed.">        return ed.getSourceOrg() != null || ed.getSourceOrgId() != null;</span>
+    }
+
+    private void handlePrivacyFlags(EHRData ed) {
+<span class="fc" id="L1923">        int numberOfFlags = ed.countPrivacyFlagsSet();</span>
+<span class="fc bfc" id="L1924" title="All 2 branches covered.">        if (numberOfFlags != 1) {</span>
+<span class="fc bfc" id="L1925" title="All 2 branches covered.">            if (numberOfFlags &lt; 1) {</span>
+                //Reverted to previous logic so the bugfix can be merged, changing to exception in next ticket in epic
+                //throw new IllegalArgumentException(&quot;PHR-4467 No privacy flag set, exactly one privacy flag must be set!&quot;);
+<span class="fc" id="L1928">                ed.setDefaultGeneralConsentIfNoneSet();</span>
+            }
+        }
+<span class="fc" id="L1931">    }</span>
+
+    /**
+     * sets deleted flag true; NON-versioned flow
+     */
+    @Override
+    public boolean deleteEHRData(Long id) {
+        // simple native update to set deleted flag
+<span class="fc" id="L1939">        em.flush();</span>
+<span class="fc" id="L1940">        Query query = em.createNativeQuery(</span>
+                &quot;update app.menu_data set deleted = true&quot; +
+                        &quot; where id = :edId&quot; +
+                        &quot;   and deleted = false&quot;);
+<span class="fc" id="L1944">        query.setParameter(&quot;edId&quot;, id);</span>
+
+<span class="fc" id="L1946">        int rowsUpdated = query.executeUpdate();</span>
+<span class="pc bpc" id="L1947" title="1 of 2 branches missed.">        return rowsUpdated &gt; 0; // if the record isn't found, or already deleted, rowsUpdate will be 0</span>
+    }
+
+    /**
+     * sets deleted flag true; NON-versioned flow
+     */
+    @Override
+    public int deleteEHRData(Collection&lt;Long&gt; ids) {
+<span class="fc bfc" id="L1955" title="All 2 branches covered.">        if (isEmpty(ids)) {</span>
+<span class="fc" id="L1956">            return 0;</span>
+        }
+        // simple native update to set deleted flag
+<span class="fc" id="L1959">        em.flush();</span>
+<span class="fc" id="L1960">        Query query = em.createNativeQuery(</span>
+                &quot;update app.menu_data set deleted = true&quot; +
+                        &quot; where id in (:edIds)&quot; +
+                        &quot;   and deleted = false&quot;);
+<span class="fc" id="L1964">        query.setParameter(&quot;edIds&quot;, ids);</span>
+
+<span class="fc" id="L1966">        return query.executeUpdate();</span>
+    }
+
+    /**
+     * sets deleted flag true for matching rows; NON-versioned flow
+     *
+     * @return number of rows deleted
+     */
+    @Override
+    public &lt;D&gt; int deleteEHRData(EHRSearch&lt;D&gt; search, @NotNull EHRRequestContext context) {
+        // native update to set deleted flag
+
+        // other filters
+<span class="nc" id="L1979">        List&lt;Condition&gt; conditions = buildQueryConditions(search, /*choosingLatest */ context);</span>
+<span class="nc" id="L1980">        conditions.add(condition(&quot;ed.datatype in (&quot; + menuDataTypeCast(search.getDataTypes()) + &quot;)&quot;));</span>
+<span class="nc" id="L1981">        conditions.add(field(&quot;ed.account_id&quot;).in(search.getAccountIds()));</span>
+
+<span class="nc" id="L1983">        DSLContext create = DSL.using(POSTGRES);</span>
+<span class="nc" id="L1984">        org.jooq.Query q = create</span>
+<span class="nc" id="L1985">                .update(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="nc" id="L1986">                .set(field(&quot;deleted&quot;), true)</span>
+<span class="nc" id="L1987">                .where(conditions);</span>
+
+<span class="nc" id="L1989">        em.flush();</span>
+<span class="nc" id="L1990">        Query jpaQuery = convertJooqQueryToJpa(q, Optional.empty(), emptyMap());</span>
+<span class="nc" id="L1991">        return jpaQuery.executeUpdate(); // if the record isn't found, or already deleted, rowsUpdate will be 0</span>
+    }
+
+    private final static String MENU_DATA_TYPE_CAST_TEMPLATE = &quot;cast ('%s' as menu_data_type)&quot;;
+
+    private String menuDataTypeCast(MenuDataType... types) {
+<span class="fc" id="L1997">        return menuDataTypeCast(Arrays.stream(types));</span>
+    }
+
+    private String menuDataTypeCast(Stream&lt;MenuDataType&gt; typeStream) {
+<span class="fc" id="L2001">        return typeStream.map(t -&gt; format(MENU_DATA_TYPE_CAST_TEMPLATE, t.name()))</span>
+<span class="fc" id="L2002">                .collect(joining(&quot;,&quot;));</span>
+    }
+
+    private String menuDataTypeCast(Set&lt;MenuDataType&gt; types) {
+<span class="fc" id="L2006">        return menuDataTypeCast(types.stream());</span>
+    }
+
+    private &lt;E&gt; javax.persistence.Query convertJooqQueryToJpa(org.jooq.Query jooqQuery, Optional&lt;Class&lt;E&gt;&gt; resultClass, Map&lt;String, Type&gt; hibernateTypeMap) {
+
+        // Extract the SQL statement from the jOOQ query
+<span class="fc" id="L2012">        javax.persistence.Query jpaQuery = resultClass</span>
+<span class="pc" id="L2013">                .map(clazz -&gt; em.createNativeQuery(jooqQuery.getSQL(), clazz))</span>
+<span class="fc" id="L2014">                .orElse(em.createNativeQuery(jooqQuery.getSQL()));</span>
+
+        // Extract the bind values from the jOOQ query
+<span class="fc" id="L2017">        List&lt;Object&gt; values = jooqQuery.getBindValues();</span>
+<span class="fc bfc" id="L2018" title="All 2 branches covered.">        for (int i = 0; i &lt; values.size(); i++) {</span>
+<span class="fc" id="L2019">            Object value = values.get(i);</span>
+<span class="fc" id="L2020">            jpaQuery.setParameter(i + 1, value);</span>
+        }
+
+<span class="pc bpc" id="L2023" title="1 of 2 branches missed.">        if (!hibernateTypeMap.isEmpty()) {</span>
+<span class="nc" id="L2024">            NativeQuery q = jpaQuery.unwrap(org.hibernate.query.NativeQuery.class);</span>
+<span class="nc" id="L2025">            hibernateTypeMap.forEach(q::addScalar);</span>
+        }
+<span class="fc" id="L2027">        return jpaQuery;</span>
+    }
+
+    /**
+     * removes the row from the database -- this data will be lost.
+     */
+    @Override
+    public boolean removeEHRData(long id) {
+<span class="fc" id="L2035">        EHRData orig = em.find(EHRData.class, id);</span>
+<span class="pc bpc" id="L2036" title="1 of 2 branches missed.">        if (orig == null) {</span>
+<span class="nc" id="L2037">            return false;</span>
+        }
+
+<span class="fc" id="L2040">        LOGGER.info(&quot;About to delete ehrdata-{} Original: dataType={},accountId={},deleted={},string01={},string02={},string03=&quot;</span>
+                        + &quot;{},string04={},string05={},date01={},date02={},persistedDate={}&quot;,
+<span class="fc" id="L2042">                id,</span>
+<span class="fc" id="L2043">                orig.getDataType(),</span>
+<span class="fc" id="L2044">                orig.getAccountId(),</span>
+<span class="fc" id="L2045">                orig.getDeleted(),</span>
+<span class="fc" id="L2046">                orig.getString01(),</span>
+<span class="fc" id="L2047">                orig.getString02(),</span>
+<span class="fc" id="L2048">                orig.getString03(),</span>
+<span class="fc" id="L2049">                orig.getString04(),</span>
+<span class="fc" id="L2050">                orig.getString05(),</span>
+<span class="fc" id="L2051">                orig.getDate01(),</span>
+<span class="fc" id="L2052">                orig.getDate02(),</span>
+<span class="fc" id="L2053">                orig.getPersistedDate(),</span>
+<span class="fc" id="L2054">                FrameFilter.filter(new Exception(&quot;Debug&quot;).fillInStackTrace()));</span>
+
+        // simple native update to set deleted flag
+<span class="fc" id="L2057">        em.flush();</span>
+
+<span class="fc" id="L2059">        Query query = em.createNativeQuery(</span>
+                &quot;delete from app.menu_data&quot; +
+                        &quot; where id = :edId&quot;);
+<span class="fc" id="L2062">        query.setParameter(&quot;edId&quot;, id);</span>
+
+<span class="fc" id="L2064">        int rowsDeleted = query.executeUpdate();</span>
+
+<span class="fc" id="L2066">        Query privacyFlagsQuery = em.createNativeQuery(&quot;delete from privacy_flags where uniqueid=:edUniqueId&quot;);</span>
+<span class="fc" id="L2067">        privacyFlagsQuery.setParameter(&quot;edUniqueId&quot;, orig.getUniqueId());</span>
+<span class="fc" id="L2068">        privacyFlagsQuery.executeUpdate();</span>
+
+<span class="pc bpc" id="L2070" title="1 of 2 branches missed.">        return rowsDeleted &gt; 0; // if the record isn't found, or already deleted, rowsUpdate will be 0</span>
+    }
+
+    @Override
+    public List&lt;EhrDataVersionResult&gt; saveNewEhrDataInDeletedState(@NotNull EHRRequestContext requestContext, SourceDetails deletedBy, List&lt;EHRData&gt; edsToDelete, Instant deleteDateOrNull) {
+<span class="pc bpc" id="L2075" title="1 of 2 branches missed.">        if (isEmpty(edsToDelete)) {</span>
+<span class="nc" id="L2076">            return emptyList();</span>
+        }
+<span class="fc" id="L2078">        List&lt;RecordWithId&lt;Long, EHRData&gt;&gt; toDelete = new ArrayList&lt;&gt;(edsToDelete.size());</span>
+<span class="fc bfc" id="L2079" title="All 2 branches covered.">        for (EHRData edToDelete : edsToDelete) {</span>
+<span class="fc" id="L2080">            Long currentId = edToDelete.getId();</span>
+<span class="fc" id="L2081">            edToDelete.setId(0);</span>
+<span class="fc" id="L2082">            edToDelete.setPersistedDate(Date.from(dateTimeService.now()));</span>
+<span class="fc bfc" id="L2083" title="All 2 branches covered.">            edToDelete.setEnteredDate((deleteDateOrNull == null) ? edToDelete.getPersistedDate() : Date.from(deleteDateOrNull));</span>
+<span class="fc" id="L2084">            edToDelete.setDeleted(true);</span>
+
+<span class="pc bpc" id="L2086" title="2 of 4 branches missed.">            if (deletedBy == null || !deletedBy.isPopulated()) {</span>
+<span class="nc" id="L2087">                throw new IllegalStateException(&quot;PHRZ-105,PHRZ-104: Source is null for data point deletion!!! Fix code path to set it&quot;);</span>
+            }
+
+<span class="fc" id="L2090">            deletedBy.writeToEHRData(edToDelete);</span>
+<span class="fc" id="L2091">            toDelete.add(RecordWithId.of(currentId, edToDelete));</span>
+<span class="fc" id="L2092">        }</span>
+<span class="fc" id="L2093">        BiFunction&lt;RecordWithId&lt;Long, EHRData&gt;, EHRData, EhrDataVersionResult&gt; resultMapper = (record, edNew) -&gt; EhrDataVersionResult.of(record.id(), edNew.getId());</span>
+<span class="fc" id="L2094">        return saveEHRDataList(ed -&gt; requestContext, toDelete, RecordWithId::record, resultMapper).collect(toList());</span>
+    }
+
+    @Override
+    public &lt;D extends IBaseDTO&gt; List&lt;EhrDataVersionResult&gt; deleteIBaseDto(@NotNull LoggedInEHRRequestContext requestContext, @NotNull List&lt;EHRData&gt; existingEds, UploadedDataDeletionMetadata deletionMetadata, Class&lt;D&gt; dtoClass, MenuDataType menuDataType) {
+<span class="pc bpc" id="L2099" title="1 of 2 branches missed.">        if (isEmpty(existingEds)) {</span>
+<span class="nc" id="L2100">            return emptyList();</span>
+        }
+
+<span class="fc bfc" id="L2103" title="All 2 branches covered.">        Long uploadedDataId = (deletionMetadata == null) ? null : deletionMetadata.getUploadedDataId();</span>
+<span class="fc bfc" id="L2104" title="All 2 branches covered.">        SourceDetails deletedBy = (deletionMetadata == null) ? new SourceDetails(requestContext) : deletionMetadata.getSourceDetails();</span>
+<span class="fc bfc" id="L2105" title="All 2 branches covered.">        Instant deletionTimestamp = (deletionMetadata == null) ? null : deletionMetadata.getTimestamp();</span>
+
+<span class="fc" id="L2107">        Map&lt;Long, Long&gt; menuDataIdToAccountIdMap = existingEds.stream().collect(toMap(EHRData::getId, EHRData::getAccountId));</span>
+<span class="fc" id="L2108">        List&lt;D&gt; dtosToDelete = populateDTOList(existingEds, dtoClass, requestContext);</span>
+<span class="fc" id="L2109">        List&lt;EHRData&gt; newVersionsToSaveAsDeleted = new ArrayList&lt;&gt;(dtosToDelete.size());</span>
+<span class="fc bfc" id="L2110" title="All 2 branches covered.">        for (D dtoToDelete : dtosToDelete) {</span>
+<span class="fc" id="L2111">            dtoToDelete.getBaseFields().setUploadedDataId(uploadedDataId);</span>
+<span class="fc" id="L2112">            newVersionsToSaveAsDeleted.add(populateEHRData(dtoToDelete, menuDataIdToAccountIdMap.get(dtoToDelete.getId()), menuDataType, requestContext));</span>
+<span class="fc" id="L2113">        }</span>
+<span class="fc" id="L2114">        return saveNewEhrDataInDeletedState(requestContext, deletedBy, newVersionsToSaveAsDeleted, deletionTimestamp);</span>
+    }
+
+    /**
+     * sets deleted flag true on matching records, plus adds new record to capture the version change
+     * &lt;p&gt;
+     * This method doesn't handle multiple data types
+     */
+    @Override
+    public &lt;D&gt; Tuple2&lt;Integer, Set&lt;UUID&gt;&gt; deleteEHRDataByUniqueId(@NotNull EHRRequestContext requestContext, EHRSearch&lt;D&gt; search, SourceDetails deletedBy,
+                                                                  Instant deleteDateOrNull) {
+        // In the search: need MS path, account id(s), uniqueID(s) filter
+<span class="pc bpc" id="L2126" title="1 of 2 branches missed.">        if (search.getLatestFilterDateField() != null) {</span>
+<span class="nc" id="L2127">            throw new IllegalArgumentException(&quot;Sorry, latest-by-type filter not yet supported for deletions&quot;);</span>
+        }
+
+<span class="fc" id="L2130">        DSLContext create = DSL.using(POSTGRES);</span>
+<span class="fc" id="L2131">        MenuDataType dataType = search.getSingleDataType();</span>
+
+        // check for the EHRData with that unique ID in those accounts (for that data type) and verify they aren't already deleted
+        // - query: uniqueId and accountId pairs, where not deleted, matching search details.
+        List&lt;Object[]&gt; uniqueIdAcctIdPairs;
+<span class="fc" id="L2136">        org.jooq.Query jooqQuery = null;</span>
+
+
+        // the EHRSearch must include a filter on the uniqueID
+        // 1-* accounts, 1-* uniqueIDs filtered for (must have at least one)
+<span class="pc bpc" id="L2141" title="1 of 2 branches missed.">        if (!search.containsFilterFor(EHRData.UNIQUE_ID)) {</span>
+<span class="nc" id="L2142">            throw new IllegalArgumentException(&quot;EHRSearch must include a filter for uniqueId&quot;);</span>
+        }
+
+        // other filters
+<span class="fc" id="L2146">        List&lt;Condition&gt; conditions = buildQueryConditions(search, requestContext);</span>
+<span class="fc" id="L2147">        conditions.add(condition(&quot;ed.datatype = &quot; + menuDataTypeCast(dataType)));</span>
+<span class="fc" id="L2148">        conditions.add(field(&quot;ed.account_id&quot;).in(search.getAccountIds()));</span>
+
+<span class="fc" id="L2150">        jooqQuery = create</span>
+<span class="fc" id="L2151">                .selectDistinct(field(&quot;uniqueId&quot;), field(&quot;account_id&quot;), field(&quot;requiresocialcare&quot;), field(&quot;requiresexualhealth&quot;), field(&quot;requirementalhealth&quot;),</span>
+<span class="fc" id="L2152">                        field(&quot;requiregeneral&quot;))</span>
+<span class="fc" id="L2153">                .from(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="fc" id="L2154">                .where(conditions);</span>
+
+<span class="fc" id="L2156">        em.flush();</span>
+<span class="fc" id="L2157">        Query jpaQuery = convertJooqQueryToJpa(jooqQuery, Optional.empty(), emptyMap());</span>
+<span class="fc" id="L2158">        jpaQuery.unwrap(org.hibernate.query.NativeQuery.class)</span>
+<span class="fc" id="L2159">                .addScalar(&quot;uniqueid&quot;, PostgresUUIDType.INSTANCE)</span>
+<span class="fc" id="L2160">                .addScalar(&quot;account_id&quot;)</span>
+<span class="fc" id="L2161">                .addScalar(&quot;requiresocialcare&quot;)</span>
+<span class="fc" id="L2162">                .addScalar(&quot;requiresexualhealth&quot;)</span>
+<span class="fc" id="L2163">                .addScalar(&quot;requirementalhealth&quot;)</span>
+<span class="fc" id="L2164">                .addScalar(&quot;requiregeneral&quot;);</span>
+<span class="fc" id="L2165">        uniqueIdAcctIdPairs = jpaQuery.getResultList();</span>
+
+<span class="fc" id="L2167">        Set&lt;UUID&gt; uniqueIdsToDelete = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L2168">        List&lt;EHRData&gt; toDeleteEhrData = new ArrayList&lt;&gt;(uniqueIdAcctIdPairs.size());</span>
+
+        // for each uniqueId / accountId pair:
+<span class="fc bfc" id="L2171" title="All 2 branches covered.">        for (Object[] uniqueIdAcctId : uniqueIdAcctIdPairs) {</span>
+<span class="fc" id="L2172">            UUID uniqueId = (UUID) uniqueIdAcctId[0];</span>
+<span class="fc" id="L2173">            long accountId = ((BigInteger) uniqueIdAcctId[1]).longValue();</span>
+<span class="fc" id="L2174">            Boolean requireGeneral = (Boolean) uniqueIdAcctId[5];</span>
+<span class="fc" id="L2175">            Boolean requireSocialCare = (Boolean) uniqueIdAcctId[2];</span>
+<span class="fc" id="L2176">            Boolean requireSexualHealth = (Boolean) uniqueIdAcctId[3];</span>
+<span class="fc" id="L2177">            Boolean requireMentalHealth = (Boolean) uniqueIdAcctId[4];</span>
+            // - insert an object with the right account ID, data type, unique ID and deleted date (entered/persisted), for each
+            // account &amp; unique ID
+<span class="fc" id="L2180">            EHRData deleteEd = new EHRData();</span>
+<span class="fc" id="L2181">            deleteEd.setDataType(dataType);</span>
+<span class="fc" id="L2182">            deleteEd.setAccountId(accountId);</span>
+<span class="fc" id="L2183">            deleteEd.setUniqueId(uniqueId);</span>
+<span class="fc" id="L2184">            uniqueIdsToDelete.add(uniqueId);</span>
+<span class="pc bpc" id="L2185" title="1 of 2 branches missed.">            deleteEd.setRequireGeneral(requireGeneral == null ? Boolean.FALSE : requireGeneral);</span>
+<span class="pc bpc" id="L2186" title="1 of 2 branches missed.">            deleteEd.setRequireSocialCare(requireSocialCare == null ? Boolean.FALSE : requireSocialCare);</span>
+<span class="pc bpc" id="L2187" title="1 of 2 branches missed.">            deleteEd.setRequireSexualHealth(requireSexualHealth == null ? Boolean.FALSE : requireSexualHealth);</span>
+<span class="pc bpc" id="L2188" title="1 of 2 branches missed.">            deleteEd.setRequireMentalHealth(requireMentalHealth == null ? Boolean.FALSE : requireMentalHealth);</span>
+<span class="fc" id="L2189">            deleteEd.setMigrationVersion(DTOMapping.get(search.getDtoClass()).getMigrationVersion());</span>
+<span class="fc" id="L2190">            toDeleteEhrData.add(deleteEd);</span>
+<span class="fc" id="L2191">        }</span>
+
+<span class="fc" id="L2193">        saveNewEhrDataInDeletedState(requestContext, deletedBy, toDeleteEhrData, deleteDateOrNull);</span>
+
+        // - set deleted flag true for matches (across accounts, given right ms ID and unique ID)
+
+        // other filters (including uniqueId)
+<span class="fc" id="L2198">        List&lt;Condition&gt; deleteConditions = buildQueryConditions(search, requestContext);</span>
+<span class="fc" id="L2199">        deleteConditions.add(condition(&quot;ed.datatype = &quot; + menuDataTypeCast(dataType)));</span>
+<span class="fc" id="L2200">        deleteConditions.add(field(&quot;ed.account_id&quot;).in(search.getAccountIds()));</span>
+
+<span class="fc" id="L2202">        jooqQuery = create</span>
+<span class="fc" id="L2203">                .update(table(&quot;app.menu_data&quot;).as(&quot;ed&quot;))</span>
+<span class="fc" id="L2204">                .set(field(&quot;deleted&quot;), true)</span>
+<span class="fc" id="L2205">                .where(deleteConditions);</span>
+
+<span class="fc" id="L2207">        em.flush();</span>
+<span class="fc" id="L2208">        convertJooqQueryToJpa(jooqQuery, Optional.empty(), emptyMap()).executeUpdate();</span>
+
+        // return the number of unique data entries (not revisions) deleted
+<span class="fc" id="L2211">        return Tuple.of(uniqueIdAcctIdPairs.size(), uniqueIdsToDelete);</span>
+    }
+
+    static class Pair&lt;X, Y&gt; {
+        private final X a;
+        private final Y b;
+
+<span class="fc" id="L2218">        Pair(X a, Y b) {</span>
+<span class="fc" id="L2219">            this.a = a;</span>
+<span class="fc" id="L2220">            this.b = b;</span>
+<span class="fc" id="L2221">        }</span>
+
+        @Override
+        public boolean equals(Object obj) {
+
+<span class="pc bpc" id="L2226" title="1 of 2 branches missed.">            if (!(obj instanceof Pair)) {</span>
+<span class="nc" id="L2227">                return false;</span>
+            }
+
+<span class="fc" id="L2230">            Pair other = (Pair) obj;</span>
+
+<span class="pc bpc" id="L2232" title="1 of 2 branches missed.">            return equals(this.a, other.a) &amp;&amp;</span>
+<span class="pc bpc" id="L2233" title="1 of 2 branches missed.">                    equals(this.b, other.b);</span>
+        }
+
+        @Override
+        public int hashCode() {
+<span class="fc" id="L2238">            return hashCode(a) * 31 + hashCode(b);</span>
+        }
+
+        private static boolean equals(Object a, Object b) {
+<span class="pc bpc" id="L2242" title="1 of 2 branches missed.">            if (a == null) {</span>
+<span class="nc bnc" id="L2243" title="All 2 branches missed.">                return b == null;</span>
+            } else {
+<span class="fc" id="L2245">                return a.equals(b);</span>
+            }
+        }
+
+        private static int hashCode(Object a) {
+<span class="pc bpc" id="L2250" title="1 of 2 branches missed.">            return (a != null ? a.hashCode() : 0);</span>
+        }
+
+        public X getA() {
+<span class="fc" id="L2254">            return this.a;</span>
+        }
+
+        public Y getB() {
+<span class="fc" id="L2258">            return this.b;</span>
+        }
+    }
+
+    /**
+     * for now force only one datatype and just check what account IDs represented in this list
+     */
+    private void createAccessLogEntries(List&lt;EHRData&gt; edList, EHRRequestContext context) {
+<span class="fc bfc" id="L2266" title="All 2 branches covered.">        if (edList.isEmpty()) {</span>
+<span class="fc" id="L2267">            return;</span>
+        }
+
+<span class="pc bpc" id="L2270" title="1 of 4 branches missed.">        if (context != null &amp;&amp; context.isAccessLogSuppressed()) {</span>
+<span class="fc" id="L2271">            LOGGER.warn(&quot;Access log for {} items suppressed&quot;, edList.size());</span>
+<span class="fc" id="L2272">            return;</span>
+        }
+
+<span class="fc" id="L2275">        Set&lt;Pair&lt;Long, MenuDataType&gt;&gt; uniqueAccountAndDataTypes = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L2276" title="All 2 branches covered.">        for (EHRData ed : edList) {</span>
+<span class="fc" id="L2277">            uniqueAccountAndDataTypes.add(new Pair(ed.getAccountId(), ed.getDataType()));</span>
+<span class="fc" id="L2278">        }</span>
+
+<span class="fc" id="L2280">        boolean breakTheGlassActive = context.getConsentStatus().isBreakTheGlassActive();</span>
+<span class="fc" id="L2281">        Long patientConsentId = context.getConsentStatus().getConsent().map(PatientConsentDTO::id).orElse(null);</span>
+
+<span class="fc" id="L2283">        Long accessingUserId = context.getMaybeAccessingUserId().orElse(null);</span>
+<span class="fc" id="L2284">        Route route = context.getAccessRoute();</span>
+<span class="fc" id="L2285">        UUID correlationId = context.getCorrelationId();</span>
+
+<span class="fc bfc" id="L2287" title="All 2 branches covered.">        for (Pair&lt;Long, MenuDataType&gt; entry : uniqueAccountAndDataTypes) {</span>
+<span class="fc" id="L2288">            em.persist(new AccessLog(entry.getA(), accessingUserId, entry.getB(), route, breakTheGlassActive, patientConsentId, Date.from(dateTimeService.now()),</span>
+                    correlationId, /* privacyFlagsId */ null));
+<span class="fc" id="L2290">        }</span>
+<span class="fc" id="L2291">    }</span>
+
+    @Override
+    @VisibleForTesting
+    public void setConfig(PkbPluginConfig config) {
+<span class="nc" id="L2296">        this.config = config;</span>
+<span class="nc" id="L2297">    }</span>
+
+    @Override
+    public PkbPluginConfig getConfig() {
+<span class="nc" id="L2301">        return config;</span>
+    }
+
+    @Override
+    @VisibleForTesting
+    public void setDateTimeService(DateTimeService dateTimeService) {
+<span class="nc" id="L2307">        this.dateTimeService = dateTimeService;</span>
+<span class="nc" id="L2308">    }</span>
+
+    @NotNull
+    private String getDataTypeLabelFromSearches(@NotNull List&lt;EHRSearch&lt;?&gt;&gt; searches) {
+<span class="pc bpc" id="L2312" title="1 of 2 branches missed.">        if (isEmpty(searches)) {</span>
+            // should never happen?
+<span class="nc" id="L2314">            LOGGER.warn(&quot;labelling a query with no datatypes specified!&quot;);</span>
+<span class="nc" id="L2315">            return &quot;NONE&quot;;</span>
+        }
+
+<span class="fc" id="L2318">        List&lt;String&gt; distinctDataTypes = searches.stream()</span>
+<span class="fc" id="L2319">                .map(EHRSearch::getDataTypes)</span>
+<span class="fc" id="L2320">                .flatMap(Collection::stream)</span>
+<span class="fc" id="L2321">                .map(MenuDataType::name)</span>
+<span class="fc" id="L2322">                .distinct()</span>
+<span class="fc" id="L2323">                .sorted()</span>
+<span class="fc" id="L2324">                .collect(toList());</span>
+
+<span class="fc" id="L2326">        distinctDataTypesInQuery.observe(distinctDataTypes.size());</span>
+<span class="fc" id="L2327">        return String.join(&quot;-&quot;, distinctDataTypes);</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L2331">    private static io.vavr.collection.Map&lt;MenuDataType, Class&lt;? extends IBaseDTO&gt;&gt; DTO_CLASSES_BY_TYPE = io.vavr.collection.LinkedHashMap.ofEntries(</span>
+<span class="fc" id="L2332">            Tuple.of(MenuDataType.allergy, Allergy.class),</span>
+<span class="fc" id="L2333">            Tuple.of(MenuDataType.appointment, AppointmentDTO.class),</span>
+<span class="fc" id="L2334">            Tuple.of(MenuDataType.appointmentRequest, AppointmentRequestDTO.class),</span>
+<span class="fc" id="L2335">            Tuple.of(MenuDataType.consentreason, PatientConsentReason.class),</span>
+<span class="fc" id="L2336">            Tuple.of(MenuDataType.coreDevicesSyncRecord, CoreDevicesSyncRecord.class),</span>
+<span class="fc" id="L2337">            Tuple.of(MenuDataType.diagnosis, Diagnosis.class),</span>
+<span class="fc" id="L2338">            Tuple.of(MenuDataType.diaryEntry, DiaryEntry.class),</span>
+<span class="fc" id="L2339">            Tuple.of(MenuDataType.encounterEvent, EncounterEvent.class),</span>
+<span class="fc" id="L2340">            Tuple.of(MenuDataType.event, Event.class),</span>
+<span class="fc" id="L2341">            Tuple.of(MenuDataType.file, FileDTO.class),</span>
+<span class="fc" id="L2342">            Tuple.of(MenuDataType.invitationDetail, PKBInvitationDetail.class),</span>
+<span class="fc" id="L2343">            Tuple.of(MenuDataType.libraryEntry, PersonalLibraryEntryDTO.class),</span>
+<span class="fc" id="L2344">            Tuple.of(MenuDataType.loincTestResult, TestResultDTO.class),</span>
+<span class="fc" id="L2345">            Tuple.of(MenuDataType.measurement, MeasurementDTO.class),</span>
+<span class="fc" id="L2346">            Tuple.of(MenuDataType.medication, Medication.class),</span>
+<span class="fc" id="L2347">            Tuple.of(MenuDataType.message, Message.class),</span>
+<span class="fc" id="L2348">            Tuple.of(MenuDataType.pathologyReport, PathologyReportDTO.class),</span>
+<span class="fc" id="L2349">            Tuple.of(MenuDataType.phplan, PHPlan.class),</span>
+<span class="fc" id="L2350">            Tuple.of(MenuDataType.phPlanAttachment, PHPlanAttachment.class),</span>
+<span class="fc" id="L2351">            Tuple.of(MenuDataType.planExport, PlanExportDTO.class),</span>
+<span class="fc" id="L2352">            Tuple.of(MenuDataType.radiologyImage, RadiologyImage.class),</span>
+<span class="fc" id="L2353">            Tuple.of(MenuDataType.radiologyResult, RadiologyResult.class),</span>
+<span class="fc" id="L2354">            Tuple.of(MenuDataType.symptomAlarm, SymptomAlarmDTO.class),</span>
+<span class="fc" id="L2355">            Tuple.of(MenuDataType.symptomReport, SymptomReportDTO.class),</span>
+<span class="fc" id="L2356">            Tuple.of(MenuDataType.systemTest, SystemTestDTO.class)</span>
+    );
+
+    @Override
+    public void runEhrDataMigrations(long accountPrivateId, MenuDataType menuDataType, @NotNull List&lt;Long&gt; ehrDataIds, @NotNull LoggedInEHRRequestContext context) {
+<span class="nc" id="L2361">        runEhrDataMigrations(accountPrivateId, menuDataType, DTO_CLASSES_BY_TYPE.get(menuDataType).get(), ehrDataIds, context);</span>
+
+<span class="nc" id="L2363">    }</span>
+
+    private &lt;T extends IBaseDTO&gt; void runEhrDataMigrations(long accountPrivateId, MenuDataType menuDataType, Class&lt;T&gt; dtoClass, @NotNull List&lt;Long&gt; ehrDataIds, @NotNull LoggedInEHRRequestContext context) {
+<span class="nc" id="L2366">        LOGGER.info(&quot;Running ehr migrations for menu data ids: {} for account {}&quot;, ehrDataIds, accountPrivateId);</span>
+<span class="nc" id="L2367">        var search = new EHRSearch&lt;&gt;(accountPrivateId, dtoClass, menuDataType);</span>
+<span class="nc" id="L2368">        search.setIncludeDeleted(true);</span>
+<span class="nc" id="L2369">        search.addFilter(new PKBFilter(&quot;id&quot;, Operator.IN, ehrDataIds));</span>
+<span class="nc" id="L2370">        populateDTOList(queryAndDecryptEHRData(List.of(search), context), search.getDtoClass(), context);</span>
+<span class="nc" id="L2371">        LOGGER.info(&quot;Finished running ehr migration batch for account {}&quot;, accountPrivateId);</span>
+<span class="nc" id="L2372">    }</span>
+
+    @Override
+    public Map&lt;MenuDataType, Integer&gt; getEhrMigrationVersions() {
+<span class="fc" id="L2376">        return DTO_CLASSES_BY_TYPE.mapValues(dtoClass -&gt; DTOMapping.get(dtoClass).getMigrationVersion()).toJavaMap();</span>
+    }
+
+    /**
+     * Delete across accounts: native SQL
+     */
+    @Override
+    public int deleteDataTypeByString01s(MenuDataType dataType, Set&lt;String&gt; strings) {
+<span class="fc bfc" id="L2384" title="All 2 branches covered.">        if (isEmpty(strings)) {</span>
+<span class="fc" id="L2385">            return 0;</span>
+        }
+        // select IDs of the relevant placeholders
+<span class="fc" id="L2388">        em.flush();</span>
+<span class="fc" id="L2389">        Query query = em.createQuery(</span>
+                &quot;UPDATE EHRData ed&quot;
+                        + &quot; SET ed.deleted = true&quot;
+                        + &quot; WHERE ed IN (&quot;
+                        + &quot;SELECT ed1&quot;
+                        + &quot; FROM EHRData ed1&quot;
+                        + &quot; WHERE ed1.dataType = :dataType&quot;
+                        + &quot; AND ed1.string01 IN (:strings)&quot;
+                        + &quot;)&quot;);
+<span class="fc" id="L2398">        query.setParameter(&quot;dataType&quot;, dataType);</span>
+<span class="fc" id="L2399">        query.setParameter(&quot;strings&quot;, strings);</span>
+<span class="fc" id="L2400">        return query.executeUpdate();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

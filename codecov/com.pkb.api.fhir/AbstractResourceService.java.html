@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractResourceService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir</a> &gt; <span class="el_source">AbstractResourceService.java</span></div><h1>AbstractResourceService.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir;
+
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import com.pkb.api.fhir.exception.ServerResponseExceptionMapper;
+import com.pkb.authz.NotAuthorizedException;
+import com.pkb.authz.NotFoundException;
+import com.pkb.domain.SystemUserTypeNotPermittedException;
+import com.pkb.domain.criteria.CriteriaResult;
+import io.vavr.Function2;
+import io.vavr.collection.List;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.hl7.fhir.dstu3.model.BaseResource;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+import static com.google.common.base.Predicates.instanceOf;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.List;
+import static io.vavr.API.Match;
+import static io.vavr.API.run;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public abstract class AbstractResourceService&lt;R extends BaseResource&gt; {
+    protected final ServerResponseExceptionMapper exceptionMapper;
+
+<span class="fc" id="L37">    protected AbstractResourceService(@NotNull ServerResponseExceptionMapper exceptionMapper) {</span>
+<span class="fc" id="L38">        this.exceptionMapper = exceptionMapper;</span>
+<span class="fc" id="L39">    }</span>
+
+    protected &lt;T&gt; Function&lt;Throwable, Either&lt;BaseServerResponseException, T&gt;&gt; minimalFlow(@NotNull Class&lt;R&gt; resourceType) {
+<span class="nc" id="L42">        return cause -&gt; left(exceptionMapper.minimalFlow(cause, resourceType));</span>
+    }
+
+    protected Consumer&lt;RuntimeException&gt; logAuthorizationError(Class&lt;R&gt; resource) {
+<span class="fc" id="L46">        return cause -&gt; {</span>
+<span class="fc" id="L47">            Logger logger = getLogger(resource);</span>
+<span class="fc" id="L48">            Match(cause).of(</span>
+<span class="fc" id="L49">                    Case($(instanceOf(NotFoundException.class)), Function2.of(this::logAuthorizationFailureMessage).apply(logger)),</span>
+<span class="fc" id="L50">                    Case($(instanceOf(NotAuthorizedException.class)), Function2.of(this::logAuthorizationFailureMessage).apply(logger)),</span>
+<span class="fc" id="L51">                    Case($(), e -&gt; run(() -&gt; logger.error(&quot;Unexpected authorization failure&quot;, e))));</span>
+<span class="fc" id="L52">        };</span>
+    }
+
+    protected Function&lt;Throwable, Either&lt;BaseServerResponseException, Option&lt;R&gt;&gt;&gt; recoverWhenResourceSearched() {
+<span class="nc" id="L56">        return cause -&gt; Match(cause).of(</span>
+<span class="nc" id="L57">                Case($(instanceOf(VirtualMachineError.class)), ExceptionUtils::rethrow),</span>
+<span class="nc" id="L58">                Case($(instanceOf(NotFoundException.class)), right(Option.none())),</span>
+<span class="nc" id="L59">                Case($(instanceOf(NotAuthorizedException.class)), right(Option.none())),</span>
+<span class="nc" id="L60">                Case($(instanceOf(Throwable.class)), this::internalError));</span>
+    }
+
+    protected BaseServerResponseException exceptionToFhir(Throwable throwable, Class&lt;R&gt; resourceType) {
+<span class="fc" id="L64">        return Match(throwable).of(</span>
+<span class="fc" id="L65">                Case($(instanceOf(SystemUserTypeNotPermittedException.class)), nae -&gt; toSystemUserTypeNotPermitted()),</span>
+<span class="fc" id="L66">                Case($(instanceOf(NotFoundException.class)), exceptionMapper.toNotFound(resourceType)),</span>
+<span class="fc" id="L67">                Case($(instanceOf(NotAuthorizedException.class)), nae -&gt; exceptionMapper.notAuthorized(NotAuthorizedException.class.cast(nae))),</span>
+<span class="fc" id="L68">                Case($(), ex -&gt; new InternalErrorException(throwable)));</span>
+    }
+
+    protected Function&lt;Throwable, Either&lt;BaseServerResponseException, List&lt;R&gt;&gt;&gt; recoverWhenResourcesSearched() {
+<span class="nc" id="L72">        return cause -&gt; Match(cause).of(</span>
+<span class="nc" id="L73">                Case($(instanceOf(VirtualMachineError.class)), ExceptionUtils::rethrow),</span>
+<span class="nc" id="L74">                Case($(instanceOf(NotFoundException.class)), right(List())),</span>
+<span class="nc" id="L75">                Case($(instanceOf(NotAuthorizedException.class)), right(List())),</span>
+<span class="nc" id="L76">                Case($(instanceOf(Throwable.class)), this::internalError));</span>
+    }
+
+    protected Function&lt;Throwable, Either&lt;BaseServerResponseException, CriteriaResult&lt;R&gt;&gt;&gt; recoverWhenPaginatedResourcesSearched() {
+<span class="nc" id="L80">        return recoverWhenPaginatedResourcesSearched(CriteriaResult::emptyCriteriaResult);</span>
+    }
+
+    protected &lt;C&gt; Function&lt;Throwable, Either&lt;BaseServerResponseException, C&gt;&gt; recoverWhenPaginatedResourcesSearched(Supplier&lt;C&gt; emptyCriteria) {
+<span class="fc" id="L84">        return cause -&gt; Match(cause).of(</span>
+<span class="fc" id="L85">                Case($(instanceOf(VirtualMachineError.class)), ExceptionUtils::rethrow),</span>
+<span class="fc" id="L86">                Case($(instanceOf(SystemUserTypeNotPermittedException.class)), ExceptionUtils::rethrow),</span>
+<span class="fc" id="L87">                Case($(instanceOf(NotFoundException.class)), right(emptyCriteria.get())),</span>
+<span class="fc" id="L88">                Case($(instanceOf(NotAuthorizedException.class)), c -&gt; right(emptyCriteria.get())),</span>
+<span class="fc" id="L89">                Case($(instanceOf(Throwable.class)), this::internalError));</span>
+    }
+
+    @Nullable
+    private Void logAuthorizationFailureMessage(Logger logger, RuntimeException e) {
+<span class="fc" id="L94">        run(() -&gt; logger.info(&quot;Authorization failure: {}&quot;, e.getMessage()));</span>
+<span class="fc" id="L95">        return null;</span>
+    }
+
+    protected BaseServerResponseException toSystemUserTypeNotPermitted() {
+<span class="fc" id="L99">        return exceptionMapper.systemUserTypeNotPermitted();</span>
+    }
+
+    private &lt;E&gt; Either&lt;BaseServerResponseException, E&gt; internalError(Throwable reason) {
+<span class="nc" id="L103">        return Either.left(new InternalErrorException(reason));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

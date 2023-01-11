@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EncounterResourceProvider.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir.resourceprovider</a> &gt; <span class="el_source">EncounterResourceProvider.java</span></div><h1>EncounterResourceProvider.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir.resourceprovider;
+
+import ca.uhn.fhir.model.api.Include;
+import ca.uhn.fhir.model.api.annotation.Description;
+import ca.uhn.fhir.rest.annotation.IncludeParam;
+import ca.uhn.fhir.rest.annotation.OptionalParam;
+import ca.uhn.fhir.rest.annotation.RequiredParam;
+import ca.uhn.fhir.rest.annotation.Search;
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.param.DateRangeParam;
+import ca.uhn.fhir.rest.param.ReferenceParam;
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import com.pkb.api.fhir.BundleMapper;
+import com.pkb.api.fhir.converter.DateRangeParamToDateRangeRestrictionConverter;
+import com.pkb.api.fhir.converter.ReferenceParamToUUIDConverter;
+import com.pkb.api.fhir.converter.ReverseIncludeConverter;
+import com.pkb.api.fhir.encounter.EncounterResourceService;
+import com.pkb.api.fhir.encounter.EncounterSearchCriteria;
+import com.pkb.api.fhir.encounter.ImmutableEncounterSearchCriteria;
+import com.pkb.api.fhir.service.AuthenticationService;
+import com.pkb.api.fhir.util.IncludeResource;
+import com.pkb.api.fhir.util.Issues;
+import com.pkb.api.fhir.util.NamedParam;
+import com.pkb.authentication.AuthenticatedIdentity;
+import com.pkb.domain.criteria.FhirCriteriaResult;
+import com.pkb.domain.criteria.ResultFilter;
+import com.pkb.domain.criteria.TemporalRangeRestriction;
+import io.vavr.collection.List;
+import io.vavr.collection.Seq;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import io.vavr.control.Validation;
+import org.hl7.fhir.dstu3.model.Bundle;
+import org.hl7.fhir.dstu3.model.Encounter;
+
+import java.time.LocalDate;
+import java.util.UUID;
+
+import static com.pkb.api.fhir.converter.ReverseIncludeConverter.PROVENANCE_TARGET_STR;
+import static com.pkb.api.fhir.util.Fhirs.invalidRequestException;
+import static io.vavr.API.Some;
+import static io.vavr.API.Stream;
+import static io.vavr.control.Either.left;
+import static org.hl7.fhir.dstu3.model.Observation.SP_DATE;
+import static org.hl7.fhir.dstu3.model.Observation.SP_PATIENT;
+import static org.hl7.fhir.dstu3.model.ResourceType.Patient;
+
+public class EncounterResourceProvider extends AbstractResourceProvider {
+
+    private static final String SP_PATIENT_DESCRIPTION = &quot;Required. Multi-value support: none. Modifier support: [&lt;type&gt;].&quot;;
+    private static final String SP_DATE_DESCRIPTION = &quot;Optional. Multi-value support: AND. Modifier support: none. Prefix support: [gt, lt, eq].&quot;;
+
+    private final AuthenticationService authenticationService;
+    private final EncounterResourceService encounterResourceService;
+    private final ReferenceParamToUUIDConverter referenceParamConverter;
+    private final DateRangeParamToDateRangeRestrictionConverter dateRangeConverter;
+    private final ReverseIncludeConverter reverseIncludeConverter;
+
+    private final BundleMapper bundleMapper;
+
+    public EncounterResourceProvider(AuthenticationService authenticationService,
+                                     EncounterResourceService encounterResourceService,
+                                     ReferenceParamToUUIDConverter referenceParamConverter,
+                                     DateRangeParamToDateRangeRestrictionConverter dateRangeConverter,
+                                     ReverseIncludeConverter reverseIncludeConverter,
+                                     BundleMapper bundleMapper) {
+<span class="fc" id="L67">        super(Encounter.class);</span>
+<span class="fc" id="L68">        this.authenticationService = authenticationService;</span>
+<span class="fc" id="L69">        this.encounterResourceService = encounterResourceService;</span>
+<span class="fc" id="L70">        this.referenceParamConverter = referenceParamConverter;</span>
+<span class="fc" id="L71">        this.dateRangeConverter = dateRangeConverter;</span>
+<span class="fc" id="L72">        this.reverseIncludeConverter = reverseIncludeConverter;</span>
+<span class="fc" id="L73">        this.bundleMapper = bundleMapper;</span>
+<span class="fc" id="L74">    }</span>
+
+    @Search
+    public Bundle findEncounter(
+            @RequiredParam(name = SP_PATIENT) @Description(value = SP_PATIENT_DESCRIPTION) ReferenceParam patient,
+            @OptionalParam(name = SP_DATE) @Description(value = SP_DATE_DESCRIPTION) DateRangeParam dateRange,
+            @IncludeParam(reverse = true, allow = { PROVENANCE_TARGET_STR }) java.util.Collection&lt;Include&gt; reverseIncludes,
+            RequestDetails request) {
+<span class="fc" id="L82">        var authenticatedIdentity = authenticationService.authenticateOrThrow(request);</span>
+<span class="fc" id="L83">        NamedParam&lt;ReferenceParam&gt; patientParam = new NamedParam&lt;&gt;(SP_PATIENT, patient, request.getParameters().get(SP_PATIENT));</span>
+<span class="fc" id="L84">        NamedParam&lt;DateRangeParam&gt; dateRangeParam = new NamedParam&lt;&gt;(SP_DATE, dateRange, request.getParameters().get(SP_DATE));</span>
+<span class="fc" id="L85">        Validation&lt;Issues, UUID&gt; issuesOrPatientId = referenceParamConverter.convertRequired(patientParam, Patient);</span>
+<span class="fc" id="L86">        Validation&lt;Issues, List&lt;IncludeResource&gt;&gt; issuesOrIncludes = reverseIncludeConverter.convert(List.ofAll(reverseIncludes));</span>
+<span class="fc" id="L87">        Validation&lt;Issues, TemporalRangeRestriction&lt;LocalDate&gt;&gt; issuesOrRestriction = dateRangeConverter.convertWithEqual(dateRangeParam);</span>
+
+<span class="fc" id="L89">        Either&lt;BaseServerResponseException, FhirCriteriaResult&lt;Encounter&gt;&gt; searchResult = Validation.combine(issuesOrPatientId, issuesOrIncludes, issuesOrRestriction)</span>
+<span class="fc" id="L90">                .ap((patientId, includes, dateRestriction) -&gt; encounterResourceService.search(buildSearchCriteria(authenticatedIdentity, patientId, includes, dateRestriction, ResultFilter.ALL)))</span>
+<span class="fc" id="L91">                .mapError(Issues::flatten)</span>
+<span class="fc" id="L92">                .fold(issues -&gt; left(invalidRequestException(issues)), $ -&gt; $.fold(Either::left, Either::right));</span>
+
+<span class="fc" id="L94">        Seq&lt;String&gt; parameters = Stream(</span>
+<span class="fc" id="L95">                Some(patientParam.getName()),</span>
+<span class="fc" id="L96">                Option.when(issuesOrRestriction.isValid(), dateRangeParam.getName()),</span>
+<span class="pc bpc" id="L97" title="1 of 4 branches missed.">                Option.when(issuesOrIncludes.isValid() &amp;&amp; !reverseIncludes.isEmpty(), ReverseIncludeConverter.PARAM_NAME))</span>
+<span class="fc" id="L98">                        .filter(Option::isDefined)</span>
+<span class="fc" id="L99">                        .map(Option::get)</span>
+<span class="fc" id="L100">                        .toList();</span>
+
+<span class="fc" id="L102">        return searchResult.fold(</span>
+<span class="fc" id="L103">                bundleMapper.toEmptyBundle(request, Some(parameters)),</span>
+<span class="fc" id="L104">                result -&gt; bundleMapper.toBundleWithIncludes(result, request, Some(parameters)));</span>
+    }
+
+    private EncounterSearchCriteria buildSearchCriteria(AuthenticatedIdentity authenticatedIdentity,
+                                                        UUID patientId,
+                                                        List&lt;IncludeResource&gt; includes,
+                                                        TemporalRangeRestriction&lt;LocalDate&gt; dateRestriction,
+                                                        ResultFilter resultFilter) {
+<span class="fc" id="L112">        return ImmutableEncounterSearchCriteria.builder()</span>
+<span class="fc" id="L113">                .authenticatedIdentity(authenticatedIdentity)</span>
+<span class="fc" id="L114">                .patientId(patientId)</span>
+<span class="fc" id="L115">                .resultFilter(resultFilter)</span>
+<span class="fc" id="L116">                .dateRestriction(dateRestriction)</span>
+<span class="fc" id="L117">                .addAllIncludes(includes)</span>
+<span class="fc" id="L118">                .build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

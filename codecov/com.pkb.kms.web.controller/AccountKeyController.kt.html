@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AccountKeyController.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.kms.web.controller</a> &gt; <span class="el_source">AccountKeyController.kt</span></div><h1>AccountKeyController.kt</h1><pre class="source lang-java linenums">package com.pkb.kms.web.controller
+
+import com.pkb.crypto.dto.AccountKeysDTO
+import com.pkb.crypto.dto.AccountPrivateKeyDTO
+import com.pkb.crypto.dto.AccountSymmetricKeyDTO
+import com.pkb.kms.service.AccessService
+import com.pkb.kms.service.AccountKeyQueryProvider
+import com.pkb.kms.service.AccountKeyService
+import com.pkb.kms.service.AccountSymmetricKeyService
+import com.pkb.kms.service.cache.KmsCacheManager
+import com.pkb.kms.service.cache.OrgAccessibleAccountPrivateKeyCacheService.Companion.ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME
+import com.pkb.kms.service.cache.UserAccessibleAccountPrivateKeyCacheService.Companion.USER_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME
+import com.pkb.kms.shared.representation.AccountKeyAvailability
+import com.pkb.kms.shared.representation.AccountPublicId
+import com.pkb.kms.shared.representation.KmsError
+import com.pkb.kms.shared.representation.OrgPublicId
+import com.pkb.kms.shared.representation.PersonPublicId
+import com.pkb.kms.shared.representation.Requester
+import com.pkb.kms.shared.representation.SymmetricKeyRequest
+import com.pkb.kms.web.ErrorException
+import io.micrometer.core.annotation.Timed
+import io.vavr.control.Either
+import org.springframework.http.HttpStatus
+import org.springframework.http.ResponseEntity
+import org.springframework.web.bind.annotation.DeleteMapping
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.PathVariable
+import org.springframework.web.bind.annotation.PostMapping
+import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
+import org.springframework.web.bind.annotation.ResponseStatus
+import org.springframework.web.bind.annotation.RestController
+
+<span class="fc" id="L35">@RestController</span>
+@RequestMapping(&quot;account_keys&quot;)
+@Timed(histogram = true, percentiles = [0.5, 0.75, 0.9, 0.95, 0.99, 0.999])
+<span class="fc" id="L38">class AccountKeyController(private val accountKeyService: AccountKeyService,</span>
+<span class="fc" id="L39">                           private val accountKeyQueryProvider: AccountKeyQueryProvider,</span>
+<span class="fc" id="L40">                           private val cacheManager: KmsCacheManager,</span>
+<span class="fc" id="L41">                           private val accountSymmetricKeyService: AccountSymmetricKeyService,</span>
+<span class="fc" id="L42">                           private val accessService: AccessService) {</span>
+
+    /**
+     * Retrieves account keys associated with the accounts specified by [accountPublicIds]
+     *
+     * Cached keys will be returned unless the caller requests full verification of access via [forceVerify]
+     *
+     * This method requires the caller to specify which user is trying to access the keys. The following logic is used:
+     *
+     * 1. retrieve user's private key from cache (fail if not available)
+     * 2. load encrypted account keys via a valid crypto path from user to target account
+     * 3. decrypt account keys, beginning with user private key and progressively decrypting any necessary intermediate
+     *   keys (org account, etc) to verify crypto access from beginning to end
+     */
+    @GetMapping(&quot;{account_public_ids}&quot;)
+<span class="nc" id="L57">    fun getAccountKeys(@PathVariable(&quot;account_public_ids&quot;) accountPublicIds: List&lt;AccountPublicId&gt;,</span>
+                       @RequestParam(value = &quot;ref_person_id&quot;) requesterPersonId: PersonPublicId?,
+                       @RequestParam(value = &quot;ref_org_id&quot;) requesterOrgId: OrgPublicId?,
+<span class="nc" id="L60">                       @RequestParam(value = &quot;force_verify&quot;, required = false) forceVerify: Boolean = false): List&lt;AccountKeysDTO&gt; =</span>
+<span class="fc" id="L61">            Requester.derive(requesterPersonId, requesterOrgId)</span>
+<span class="fc" id="L62">                    .flatMap { requester -&gt; accountKeyQueryProvider.query(accountPublicIds, requester, forceVerify) }</span>
+<span class="fc" id="L63">                    .getOrElseThrow { err -&gt; ErrorException(err) }</span>
+
+    @GetMapping(&quot;cache/status/{account_public_ids}&quot;)
+    fun getAccountKeyCacheStatus(@PathVariable(&quot;account_public_ids&quot;) accountPublicIds: List&lt;AccountPublicId&gt;): Set&lt;AccountPublicId&gt; =
+<span class="nc" id="L67">            listOf(USER_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME, ORG_ACCESSIBLE_ACCOUNT_PRIVATE_KEY_CACHE_NAME)</span>
+<span class="nc" id="L68">                    .map { cacheManager.getAll&lt;AccountPublicId, Either&lt;KmsError, AccountPrivateKeyDTO&gt;&gt;(it, accountPublicIds) }</span>
+<span class="nc" id="L69">                    .flatMap { it.keys.toList() }</span>
+<span class="nc" id="L70">                    .toSet()</span>
+
+
+    @GetMapping(&quot;cache/status_for_user/{person_public_id}&quot;)
+    fun checkAccountKeyAvailabilityForUser(@PathVariable(&quot;person_public_id&quot;) personPublicId: PersonPublicId): AccountKeyAvailability =
+<span class="fc" id="L75">        accessService.getAccessibleAccounts(personPublicId)</span>
+<span class="fc" id="L76">            .map(this::findWhichAccountsAreAvailable)</span>
+<span class="fc" id="L77">            .map{ AccountKeyAvailability(personPublicId, it.first, it.second) }</span>
+<span class="pc" id="L78">            .getOrElseThrow { err -&gt; ErrorException(err) }</span>
+
+
+
+    private fun findWhichAccountsAreAvailable(accountPublicIds: Collection&lt;AccountPublicId&gt;) : Pair&lt;Set&lt;AccountPublicId&gt;, Set&lt;AccountPublicId&gt;&gt; =
+<span class="fc" id="L83">        accountPublicIds.partition(getAvailableAccountPublicIds(accountPublicIds)::contains)</span>
+<span class="fc" id="L84">            .run { first.toSet() to  second.toSet()}</span>
+
+    private fun getAvailableAccountPublicIds(accountPublicIds: Collection&lt;AccountPublicId&gt;) =
+<span class="fc" id="L87">        accountKeyService.getAccountKeys(accountPublicIds, true).map{ it.accountPublicId }</span>
+
+    /**
+     * Generates, persists, and returns a new symmetric key for the account specified in [symmetricKeyRequest]
+     */
+    @PostMapping(&quot;symmetric_key_request&quot;)
+    @ResponseStatus(HttpStatus.CREATED)
+    fun generateSymmetricKey(@RequestBody symmetricKeyRequest: SymmetricKeyRequest): AccountSymmetricKeyDTO =
+<span class="fc" id="L95">        accountSymmetricKeyService.createAccountSymmetricKey(symmetricKeyRequest.accountPublicId)</span>
+<span class="pc" id="L96">                    .getOrElseThrow { err -&gt; ErrorException(err) }</span>
+
+    /**
+     * Generates, persists, and returns a new symmetric key for the account specified by [accountPublicIds]
+     */
+    @GetMapping(&quot;symmetric_key_request/{account_ids}&quot;)
+    fun getSymmetricKeys(@PathVariable(&quot;account_ids&quot;) accountPublicIds: List&lt;AccountPublicId&gt;): Map&lt;AccountPublicId, AccountSymmetricKeyDTO&gt; =
+<span class="fc" id="L103">            accountPublicIds.associateBy({ it }, {</span>
+<span class="fc" id="L104">                accountSymmetricKeyService.getAnyAccountSymmetricKey(it)</span>
+<span class="pc" id="L105">                        .getOrElseThrow { err -&gt; ErrorException(err) }</span>
+<span class="fc" id="L106">            })</span>
+
+    @DeleteMapping(&quot;cache&quot;)
+    fun clearCache(): ResponseEntity&lt;Void&gt; {
+<span class="fc" id="L110">        accountKeyService.evictAll(true)</span>
+<span class="fc" id="L111">        return ResponseEntity(HttpStatus.NO_CONTENT)</span>
+    }
+
+    @DeleteMapping(&quot;cache/{account_public_id}&quot;)
+<span class="nc" id="L115">    fun evictAccountKey(@PathVariable(&quot;account_public_id&quot;) accountPublicId: AccountPublicId,</span>
+                        @RequestParam(value = &quot;include_unauthenticated_key&quot;,
+<span class="nc" id="L117">                                      required = false) includeUnauthenticatedKey: Boolean = false): ResponseEntity&lt;Void&gt; {</span>
+<span class="nc" id="L118">        accountKeyService.evictKeysForAccount(accountPublicId, includeUnauthenticatedKey)</span>
+<span class="nc" id="L119">        return ResponseEntity(HttpStatus.NO_CONTENT)</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

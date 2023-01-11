@@ -1,0 +1,480 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QuestionnaireManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.questionnaire</a> &gt; <span class="el_source">QuestionnaireManager.java</span></div><h1>QuestionnaireManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.questionnaire;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.consent.entity.PatientConsent;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.encounter.entity.Message;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.Route;
+import com.pkb.institute.entity.Team;
+import com.pkb.questionnaireservice.client.QuestionnaireServiceClient;
+import com.pkb.questionnaireservice.modelv2.Answer;
+import com.pkb.questionnaireservice.modelv2.MultiSelectAnswer;
+import com.pkb.questionnaireservice.modelv2.Questionnaire;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireComponentType;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireRequest;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireResponse;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireResponseCount;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireServiceError;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireTeam;
+import com.pkb.questionnaireservice.modelv2.SearchResults;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.emailmessage.sender.impl.VelocityTemplateHandler;
+import com.pkb.service.encounter.impl.tolven.EncounterManager;
+import com.pkb.service.notification.nhs.NhsAppNotificationManager;
+import com.pkb.service.notification.nhs.pubsub.payload.NhsApiNotificationTriggerType;
+import com.pkb.service.patientconsent.DeprecatedPatientConsentManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.IdPair;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.CorrelationIdUtil;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.control.Either;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import java.io.Reader;
+import java.io.Writer;
+import java.lang.invoke.MethodHandles;
+import java.time.Instant;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import static com.pkb.util.StringUtil.LINEBREAK_TAG;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.Predicates.anyOf;
+import static io.vavr.Predicates.instanceOf;
+import static io.vavr.Predicates.isIn;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+
+public class QuestionnaireManager extends TransactionManager {
+
+<span class="fc" id="L69">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private final EncounterManager encounterManager;
+
+    private final PKBEmailMessageManager pkbEmailMessageManager;
+
+    private final UserManager userManager;
+
+    private final TeamUserManager teamUserManager;
+
+    private final ThreadPoolTaskExecutor taskExecutor;
+
+    private final TeamManager teamManager;
+
+    private final QuestionnaireResultsCsvExporter questionnaireResultsCsvExporter;
+
+    private final QuestionnaireDefinitionCsvExporter questionnaireDefinitionCsvExporter;
+
+    private final CorrelationIdUtil correlationIdUtil;
+    private final NhsAppNotificationManager nhsAppNotificationManager;
+
+    private final QuestionnaireServiceClient qsClient;
+    private final VelocityTemplateHandler velocityTemplateHandler;
+    private final DeprecatedPatientConsentManager patientConsentManager;
+
+    public QuestionnaireManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, EncounterManager encounterManager,
+            PKBEmailMessageManager pkbEmailMessageManager, ThreadPoolTaskExecutor taskExecutor, UserManager userManager, TeamUserManager teamUserManager, TeamManager teamManager,
+            QuestionnaireResultsCsvExporter questionnaireResultsCsvExporter, QuestionnaireDefinitionCsvExporter questionnaireDefinitionCsvExporter,
+            CorrelationIdUtil correlationIdUtil, QuestionnaireServiceClient qsClient,
+            NhsAppNotificationManager nhsAppNotificationManager, VelocityTemplateHandler velocityTemplateHandler, DeprecatedPatientConsentManager patientConsentManager) {
+<span class="fc" id="L99">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L100">        this.encounterManager = encounterManager;</span>
+<span class="fc" id="L101">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L102">        this.taskExecutor = taskExecutor;</span>
+<span class="fc" id="L103">        this.userManager = userManager;</span>
+<span class="fc" id="L104">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L105">        this.teamManager = teamManager;</span>
+<span class="fc" id="L106">        this.questionnaireResultsCsvExporter = questionnaireResultsCsvExporter;</span>
+<span class="fc" id="L107">        this.questionnaireDefinitionCsvExporter = questionnaireDefinitionCsvExporter;</span>
+<span class="fc" id="L108">        this.correlationIdUtil = correlationIdUtil;</span>
+<span class="fc" id="L109">        this.qsClient = qsClient;</span>
+<span class="fc" id="L110">        this.nhsAppNotificationManager = nhsAppNotificationManager;</span>
+<span class="fc" id="L111">        this.velocityTemplateHandler = velocityTemplateHandler;</span>
+<span class="fc" id="L112">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L113">    }</span>
+
+    public Either&lt;QuestionnaireException, QuestionnaireRequest&gt; sendQuestionnaireRequest(PKBPerson selectedPatient,
+                                                                                         UUID questionnaireId,
+                                                                                         Long loggedInUserId,
+                                                                                         Team team,
+                                                                                         LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc" id="L120">        PKBPerson clinician = userManager.getPKBPerson(loggedInUserId);</span>
+<span class="fc" id="L121">        return getVisibleQuestionnaireTeamByQuestionnaireIdAndTeamIds(questionnaireId, List.of(team.getPublicId()))</span>
+<span class="fc" id="L122">                .flatMap(it -&gt; requestQuestionnaire(loggedInEHRRequestContext,</span>
+                        clinician,
+                        selectedPatient,
+<span class="fc" id="L125">                        team, it.getQuestionnaire()));</span>
+    }
+
+    /**
+     * Creates a questionnaire by reading a list of questions and possible
+     * answers from a CSV file. The first column should be the questions, the
+     * second column is the type among Title, Checkbox, Radio and Text and
+     * the remaining columns are the possible answers in case of checkbox or radio
+     */
+    public Either&lt;List&lt;QuestionnaireException&gt;, QuestionnaireTeam&gt; createQuestionnaireFromCSV(String questionnaireName, Reader csv,
+            PKBPerson creatorPerson, Team team) {
+<span class="fc" id="L136">        return new QuestionnaireCSVImporter(questionnaireName, team, creatorPerson)</span>
+<span class="fc" id="L137">                .importFrom(csv, dateTimeService.now())</span>
+<span class="fc" id="L138">                .flatMap(qT -&gt; qsClient.postQuestionnaireAndLinkToTeam(correlationIdUtil.getOrDefault(), qT)</span>
+<span class="fc" id="L139">                        .mapLeft(err -&gt; List.of(matchQuestionnaireServiceErrorToQuestionnaireException(err))));</span>
+    }
+
+    public void getQuestionnaireAsCSV(Questionnaire questionnaire, Supplier&lt;Writer&gt; outputWriter) {
+<span class="fc" id="L143">        questionnaireDefinitionCsvExporter.buildQuestionnaireStreaming(questionnaire, outputWriter);</span>
+<span class="fc" id="L144">    }</span>
+
+    public Either&lt;QuestionnaireException, Questionnaire&gt; getQuestionnaireById(UUID questionnaireId) {
+<span class="fc" id="L147">        return qsClient.getQuestionnaireById(correlationIdUtil.getOrDefault(), questionnaireId).mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+    }
+
+    public Either&lt;QuestionnaireException, QuestionnaireTeam&gt; hideQuestionnaire(UUID questionnaireId, String teamCode) {
+<span class="fc" id="L151">        return setHiddenForQuestionnaire(questionnaireId, teamCode, true);</span>
+    }
+
+    public Either&lt;QuestionnaireException, QuestionnaireTeam&gt; unhideQuestionnaire(UUID questionnaireId, String teamCode) {
+<span class="fc" id="L155">        return setHiddenForQuestionnaire(questionnaireId, teamCode, false);</span>
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireTeam&gt; setHiddenForQuestionnaire(UUID questionnaireId, String teamCode, boolean hidden) {
+<span class="fc" id="L159">        UUID teamId = teamManager.getTeamPublicIdByTeamCode(teamCode);</span>
+<span class="fc" id="L160">        return getQuestionnaireTeamByQuestionnaireIdAndTeamIds(questionnaireId, List.of(teamId))</span>
+<span class="fc" id="L161">                .flatMap(</span>
+<span class="fc" id="L162">                        qt -&gt; qsClient.updateTeamLink(correlationIdUtil.getOrDefault(), qt.getQuestionnaire()</span>
+<span class="fc" id="L163">                                .createTeamLink(qt.getTeamId(), hidden, dateTimeService.now()))</span>
+<span class="fc" id="L164">                                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException))</span>
+<span class="fc" id="L165">                .peek(quesTeam -&gt; LOGGER.info(&quot;Questionnaire -{} visibility was changed to {}&quot;, questionnaireId, visibilityLog(hidden)))</span>
+<span class="fc" id="L166">                .peekLeft(err -&gt; LOGGER.error(&quot;Error while changing questionnaire -{} visibility to {}, {}&quot;, questionnaireId, visibilityLog(hidden), err));</span>
+    }
+
+    private String visibilityLog(boolean hidden) {
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        return hidden ? &quot;hidden&quot; : &quot;visible&quot;;</span>
+    }
+
+    public Either&lt;QuestionnaireException, List&lt;Questionnaire&gt;&gt; getQuestionnaireListForTeam(UUID teamPublicId, Boolean includeHidden) {
+<span class="fc" id="L174">        return qsClient.getQuestionnairesInTeam(correlationIdUtil.getOrDefault(), teamPublicId, includeHidden)</span>
+<span class="fc" id="L175">                .map(SearchResults::getResultsPage)</span>
+<span class="fc" id="L176">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+    }
+
+    public Either&lt;QuestionnaireException, List&lt;QuestionnaireTeam&gt;&gt; getQuestionnaireTeamListForTeam(UUID teamPublicId, Boolean includeHidden) {
+<span class="fc" id="L180">        return qsClient.getQuestionnaireTeamsInTeam(correlationIdUtil.getOrDefault(), teamPublicId, includeHidden)</span>
+<span class="fc" id="L181">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+    }
+
+    public Either&lt;QuestionnaireException, List&lt;QuestionnaireResponseCount&gt;&gt; getQuestionnaireResponseCountsForTeam(UUID teamPublicId) {
+<span class="fc" id="L185">        return qsClient.getQuestionnaireResponseCountsByTeamId(correlationIdUtil.getOrDefault(), teamPublicId)</span>
+<span class="fc" id="L186">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+    }
+
+    public Either&lt;QuestionnaireException, List&lt;Questionnaire&gt;&gt; getQuestionnaireListForPatient(long patientId) {
+<span class="fc" id="L190">        return qsClient.getQuestionnairesInTeams(correlationIdUtil.getOrDefault(), teamUserManager.getActiveTeamPublicIdsForPatient(patientId), false)</span>
+<span class="fc" id="L191">                .map(SearchResults::getResultsPage)</span>
+<span class="fc" id="L192">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+    }
+
+    public Either&lt;QuestionnaireException, List&lt;Questionnaire&gt;&gt; getQuestionnaireListForCarer(PKBPerson carer, PKBPerson patient) {
+<span class="fc" id="L196">        Optional&lt;PatientConsent&gt; optionalConsentOfCarer = patientConsentManager.findPatientConsentWithoutReasons(</span>
+<span class="fc" id="L197">                patient.getId(),</span>
+<span class="fc" id="L198">                carer.getId(),</span>
+                AccessingEntityType.CARER);
+
+<span class="fc" id="L201">        return optionalConsentOfCarer.map(</span>
+<span class="fc" id="L202">                patientConsent -&gt; getQuestionnaireListForPatient(patient.getId())</span>
+<span class="fc" id="L203">                        .map(questionnaires -&gt; questionnaires.stream().filter(</span>
+<span class="fc" id="L204">                                questionnaire -&gt; patientConsent.hasConsent(questionnaire.getDefaultPrivacyFlag()))</span>
+<span class="fc" id="L205">                                .collect(Collectors.toList())))</span>
+<span class="fc" id="L206">                .orElse(right(Collections.emptyList()));</span>
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireResponse&gt; postQuestionnaireResponse(QuestionnaireResponse response) {
+<span class="fc" id="L210">        return qsClient.postQuestionnaireResponse(correlationIdUtil.getOrDefault(), response)</span>
+<span class="fc" id="L211">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+    }
+
+    private String getQuestionnaireResponseMessage(QuestionnaireResponse response) {
+<span class="fc" id="L215">        return io.vavr.collection.List.ofAll(response.getAnswers())</span>
+<span class="fc" id="L216">                .foldLeft(&quot;&quot;, (str, answer) -&gt; str +</span>
+<span class="fc" id="L217">                        getAnswerStringForMessage(answer) + LINEBREAK_TAG + LINEBREAK_TAG);</span>
+    }
+
+    private String getAnswerStringForMessage(Answer answer) {
+<span class="fc" id="L221">        return Match(answer.getType()).of(</span>
+<span class="fc" id="L222">                Case($(QuestionnaireComponentType.MultiSelectQuestion), () -&gt; getMultiSelectAnswerMessage(answer)),</span>
+<span class="fc" id="L223">                Case($(isIn(QuestionnaireComponentType.SingleSelectQuestion,</span>
+<span class="fc" id="L224">                        QuestionnaireComponentType.OpenQuestion)), answer.getQuestion().getDisplayText() + LINEBREAK_TAG + answer.getAnswerText()));</span>
+    }
+
+    private String getMultiSelectAnswerMessage(Answer answer) {
+<span class="fc" id="L228">        MultiSelectAnswer multiSelectAnswer = (MultiSelectAnswer) answer;</span>
+<span class="fc" id="L229">        return multiSelectAnswer.getQuestion().getPossibleAnswers().stream()</span>
+<span class="fc" id="L230">                .map(possibleAnswer -&gt; multiSelectAnswer.getQuestion().getDisplayText() + &quot;: &quot; + possibleAnswer.getDisplayText() + LINEBREAK_TAG</span>
+<span class="fc" id="L231">                        + multiSelectAnswer.getAnswers().contains(possibleAnswer.getId()) + LINEBREAK_TAG)</span>
+<span class="fc" id="L232">                .collect(Collectors.joining(LINEBREAK_TAG));</span>
+    }
+
+    public Either&lt;QuestionnaireException, Void&gt; getQuestionnaireResultsAsCSV(Team team,
+            UUID idToDownload, QuestionnaireReportCsvExportFilter filter, Supplier&lt;Writer&gt; outputWriter, UUID loggedInPersonId) {
+<span class="fc" id="L237">        return questionnaireResultsCsvExporter.buildQuestionnaireResultsStreaming(idToDownload, team, filter, outputWriter, loggedInPersonId)</span>
+<span class="fc" id="L238">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireRequest&gt; requestQuestionnaire(LoggedInEHRRequestContext requestContext,
+            PKBPerson clinician,
+            PKBPerson patient,
+            Team team,
+            Questionnaire questionnaire) {
+<span class="fc" id="L247">        Instant createdDate = dateTimeService.now();</span>
+
+<span class="fc" id="L249">        QuestionnaireRequest questionnaireRequest = questionnaire.createRequest(createdDate,</span>
+<span class="fc" id="L250">                clinician.getPublicId(), team.getPublicId(), patient.getPublicId(), Route.WEBAPP);</span>
+
+<span class="fc" id="L252">        String content = getQuestionnaireRequestMessage(clinician, patient, questionnaireRequest);</span>
+
+<span class="fc" id="L254">        return qsClient.postQuestionnaireRequest(correlationIdUtil.getOrDefault(), questionnaireRequest)</span>
+<span class="fc" id="L255">                .peek(qr -&gt; sendCommunicationsForQuestionnaireRequest(requestContext, clinician, patient, qr, team, false, content))</span>
+<span class="fc" id="L256">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+    }
+
+    private void sendCommunicationsForQuestionnaireRequest(EHRRequestContext requestContext, PKBPerson clinician, PKBPerson patient,
+                                                          QuestionnaireRequest questionnaireRequest, Team team, Boolean massQuestionnaire, String messageContent) {
+<span class="fc" id="L261">        encounterManager.transactional(() -&gt; {</span>
+<span class="fc" id="L262">            encounterManager.saveMessageNoAttachment(requestContext, patient.getId(), questionnaireRequest.getId(),</span>
+<span class="fc" id="L263">                    true, clinician.getId(), questionnaireRequest.getQuestionnaire().getName(), messageContent, team.getDatapointPrivacyFlags(),</span>
+<span class="fc" id="L264">                    List.of(clinician.getId(), patient.getId()));</span>
+<span class="fc" id="L265">        });</span>
+<span class="fc" id="L266">        nhsAppNotificationManager.sendNotification(requestContext, patient, NhsApiNotificationTriggerType.NEW_QUESTIONNAIRE_RECEIVED);</span>
+<span class="fc" id="L267">        pkbEmailMessageManager.invitePatientToTakeQuestionnaire(clinician, patient, questionnaireRequest.getId(), massQuestionnaire, new NoConsentsRequired(), team);</span>
+<span class="fc" id="L268">    }</span>
+
+    public Either&lt;QuestionnaireException, QuestionnaireRequest&gt; selfRequestQuestionnaire(PKBPerson patient, UUID questionnaireId, UUID loggedInUserId) {
+<span class="fc bfc" id="L271" title="All 2 branches covered.">        if (!patient.isPatient()) {</span>
+<span class="fc" id="L272">            return left(new WrongUserTypeException());</span>
+        }
+<span class="fc" id="L274">        return getVisibleQuestionnaireTeamByQuestionnaireIdAndTeamIds(questionnaireId, teamUserManager.getTeamPublicIdsForPatient(patient.getId()))</span>
+<span class="fc" id="L275">                .flatMap(qT -&gt; qsClient</span>
+<span class="fc" id="L276">                        .postQuestionnaireRequest(correlationIdUtil.getOrDefault(),</span>
+<span class="fc" id="L277">                                qT.getQuestionnaire().createRequest(dateTimeService.now(), loggedInUserId, qT.getTeamId(), patient.getPublicId(), Route.WEBAPP))</span>
+<span class="fc" id="L278">                        .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException));</span>
+    }
+
+    /**
+     * Clinician asks all his patients to take a questionnaire
+     */
+    public Either&lt;QuestionnaireException, QuestionnaireTeam&gt; requestMassQuestionnaire(LoggedInEHRRequestContext requestContext, PKBPerson clinician,
+            Team team, UUID questionnaireId) {
+<span class="fc" id="L286">        return getVisibleQuestionnaireTeamByQuestionnaireIdAndTeamIds(questionnaireId, List.of(team.getPublicId()))</span>
+<span class="fc" id="L287">                .peek(it -&gt; sendMassQuestionnaireCommunications(requestContext, clinician, team, it.getQuestionnaire()));</span>
+    }
+
+    private void sendMassQuestionnaireCommunications(LoggedInEHRRequestContext requestContext, PKBPerson clinician, Team team, Questionnaire questionnaire) {
+        try {
+<span class="fc" id="L292">            SendMassQuestionnaireCommunicationsTask mailerTask = new SendMassQuestionnaireCommunicationsTask(</span>
+                    requestContext,
+                    questionnaire,
+                    clinician,
+                    team);
+<span class="fc" id="L297">            taskExecutor.execute(mailerTask);</span>
+<span class="nc" id="L298">        } catch (Exception exception) {</span>
+<span class="nc" id="L299">            throw new RuntimeException(&quot;Error while clinician-&quot; + clinician.getId() + &quot; requests mass questionnaire &quot;, exception);</span>
+<span class="fc" id="L300">        }</span>
+<span class="fc" id="L301">    }</span>
+
+    private class SendMassQuestionnaireCommunicationsTask implements Runnable {
+
+        private final PKBPerson clinician;
+        private final LoggedInEHRRequestContext requestContext;
+        private final Questionnaire questionnaire;
+        private final Team team;
+
+        SendMassQuestionnaireCommunicationsTask(LoggedInEHRRequestContext requestContext,
+                                                Questionnaire questionnaire,
+                                                PKBPerson clinician,
+<span class="fc" id="L313">                                                Team team) {</span>
+<span class="fc" id="L314">            this.requestContext = requestContext;</span>
+<span class="fc" id="L315">            this.team = team;</span>
+<span class="fc" id="L316">            this.questionnaire = questionnaire;</span>
+<span class="fc" id="L317">            this.clinician = clinician;</span>
+<span class="fc" id="L318">        }</span>
+
+        @Override
+        public void run() {
+<span class="fc" id="L322">            List&lt;IdPair&gt; acceptedPatientIds = teamUserManager.getActivePatientIds(team);</span>
+<span class="fc" id="L323">            io.vavr.collection.List.ofAll(acceptedPatientIds)</span>
+<span class="fc" id="L324">                    .map(IdPair::getPrivateId)</span>
+<span class="fc" id="L325">                    .grouped(config.getMassQuestionnaireBatchSize())</span>
+<span class="fc" id="L326">                    .forEach(batch -&gt; processPatientBatch(batch.toJavaList()));</span>
+<span class="fc" id="L327">        }</span>
+
+        private void processPatientBatch(List&lt;Long&gt; idsToProcess) {
+<span class="fc" id="L330">            var pkbPersonBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L331">            List&lt;PKBPerson&gt; patients = pkbPersonBean.findPKBPersonList(idsToProcess, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">            for (PKBPerson patient : patients) {</span>
+<span class="fc" id="L333">                QuestionnaireRequest questionnaireRequest = questionnaire.createRequest(dateTimeService.now(), clinician.getPublicId(),</span>
+<span class="fc" id="L334">                        team.getPublicId(), patient.getPublicId(), Route.WEBAPP);</span>
+<span class="fc" id="L335">                String content = getQuestionnaireRequestMessage(clinician, patient, questionnaireRequest);</span>
+<span class="fc" id="L336">                qsClient.postQuestionnaireRequest(correlationIdUtil.getOrDefault(), questionnaireRequest)</span>
+<span class="fc" id="L337">                        .peek(qr -&gt; sendCommunicationsForQuestionnaireRequest(requestContext, clinician, patient, qr, team, true, content))</span>
+<span class="pc" id="L338">                        .peekLeft(err -&gt; LOGGER.error(err.getMessage()));</span>
+<span class="fc" id="L339">            }</span>
+<span class="fc" id="L340">        }</span>
+    }
+
+    public void remindPatientAboutQuestionnaire(long clinicianId, long patientId, UUID questionnaireRequestId, Team team) {
+<span class="fc" id="L344">        PKBPerson clinician = userManager.getPKBPerson(clinicianId);</span>
+<span class="fc" id="L345">        PKBPerson patient = userManager.getPKBPerson(patientId);</span>
+<span class="fc" id="L346">        sendReminder(clinician, patient, questionnaireRequestId, team);</span>
+<span class="fc" id="L347">    }</span>
+
+    private void sendReminder(PKBPerson clinician, PKBPerson patient, UUID questionnaireRequestId, Team team) {
+        //*** NOTE: If consent levels are ever applied to questionnaires, we will need to specify the consent of the questionnaire rather than using NoConsentsRequired***
+<span class="fc" id="L351">        pkbEmailMessageManager.invitePatientToTakeQuestionnaire(clinician, patient, questionnaireRequestId,</span>
+                false, new NoConsentsRequired(), team);
+<span class="fc" id="L353">    }</span>
+
+    public Either&lt;QuestionnaireException, QuestionnaireTeam&gt; getQuestionnaireTeamByRequestIdToBeFilledOut(UUID questionnaireRequestId, PKBPerson user) {
+<span class="fc" id="L356">        return getQuestionnaireRequest(questionnaireRequestId)</span>
+<span class="fc" id="L357">                .flatMap(questionnaireRequest -&gt; {</span>
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">                    if (questionnaireRequest.getPatientId().equals(user.getPublicId())) {</span>
+<span class="fc" id="L359">                        return right(questionnaireRequestId);</span>
+                    } else {
+<span class="nc" id="L361">                        return left(new WrongUserTypeException());</span>
+                    }
+                })
+<span class="fc" id="L364">                .flatMap(questRequestId -&gt; getQuestionnaireTeamByRequestId(questionnaireRequestId));</span>
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireTeam&gt; getQuestionnaireTeamByRequestId(UUID questionnaireRequestId) {
+<span class="fc" id="L368">        return qsClient.getQuestionnaireTeamByQuestionnaireRequestId(correlationIdUtil.getOrDefault(), questionnaireRequestId)</span>
+<span class="pc" id="L369">                .mapLeft(err -&gt; (QuestionnaireException) new NotFoundQuestionnaireException())</span>
+<span class="fc" id="L370">                .flatMap(questionnaireTeam -&gt; {</span>
+<span class="fc bfc" id="L371" title="All 2 branches covered.">                    if (questionnaireTeam.getHidden()) {</span>
+<span class="fc" id="L372">                        return left(new HiddenQuestionnaireException());</span>
+                    }
+<span class="fc" id="L374">                    return right(questionnaireTeam);</span>
+                });
+    }
+    
+    public boolean isQuestionnaireRequest(UUID conversationId){
+<span class="fc" id="L379">        return qsClient.getQuestionnaireRequest(correlationIdUtil.getOrDefault(), conversationId).isRight();</span>
+    }
+
+    public Either&lt;QuestionnaireException, QuestionnaireRequest&gt; getQuestionnaireRequest(UUID questionnaireRequestId) {
+<span class="fc" id="L383">        return qsClient.getQuestionnaireRequest(correlationIdUtil.getOrDefault(), questionnaireRequestId)</span>
+<span class="fc" id="L384">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException);</span>
+    }
+
+    public Either&lt;QuestionnaireException, Message&gt; submitQuestionnaireResponseAndCreateMessage(QuestionnaireRequest request, PKBPerson patient,
+            QuestionnaireResultAnswerSupplier answerSupplier, LoggedInEHRRequestContext loggedInEHRRequestContext, PKBPerson loggedInUser,
+            List&lt;String&gt; recipientIds) {
+<span class="fc" id="L390">        UUID patientAccountId = userManager.getDefaultAccountPublicId(patient.getId());</span>
+<span class="fc" id="L391">        return request.createResponse(dateTimeService.now(), loggedInUser.getPublicId(), patientAccountId, answerSupplier)</span>
+<span class="fc" id="L392">                .checkMandatoryQuestionsHaveAnswers().mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException)</span>
+<span class="fc" id="L393">                .flatMap(this::postQuestionnaireResponse)</span>
+<span class="fc" id="L394">                .map(questionnaireResponse -&gt; encounterManager.patientSubmitsQuestionnaire(loggedInEHRRequestContext, questionnaireResponse.getQuestionnaireRequest(),</span>
+<span class="fc" id="L395">                        patient, loggedInUser.getId(), recipientIds, getQuestionnaireResponseMessage(questionnaireResponse)));</span>
+    }
+
+    public QuestionnaireException createNoRecipientException() {
+<span class="fc" id="L399">        return new NoRecipientQuestionnaireException();</span>
+    }
+
+    public QuestionnaireException createQuestionnaireNotFoundException() {
+<span class="fc" id="L403">        return new NotFoundQuestionnaireException();</span>
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireTeam&gt; getVisibleQuestionnaireTeamByQuestionnaireIdAndTeamIds(UUID questionnaireId, List&lt;UUID&gt; teamIds) {
+<span class="fc" id="L407">        return getQuestionnaireTeamByQuestionnaireIdAndTeamIds(questionnaireId, teamIds)</span>
+<span class="fc" id="L408">                .flatMap(this::checkQuestionnaireTeamNotHidden);</span>
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireTeam&gt; getQuestionnaireTeamByQuestionnaireIdAndTeamIds(UUID questionnaireId, List&lt;UUID&gt; teamIds) {
+<span class="fc" id="L412">        return qsClient.getQuestionnaireTeamByQuestionnaireIdAndTeamId(correlationIdUtil.getOrDefault(), questionnaireId, teamIds)</span>
+<span class="fc" id="L413">                .peek(questionnaireTeams -&gt; {</span>
+<span class="pc bpc" id="L414" title="1 of 2 branches missed.">                    if (questionnaireTeams.size() &gt; 1) {</span>
+<span class="nc" id="L415">                        throw new RuntimeException(&quot;Sharing questionnaires is not yet implemented, more than one questionnaireTeam corresponding to questionnaireId &quot;</span>
+                                + questionnaireId + &quot; has been found in teams {}&quot;
+<span class="nc" id="L417">                                + questionnaireTeams.toString());</span>
+                    }
+<span class="fc" id="L419">                })</span>
+<span class="fc" id="L420">                .mapLeft(this::matchQuestionnaireServiceErrorToQuestionnaireException)</span>
+<span class="fc" id="L421">                .flatMap(this::matchQuestionnaireTeamListToExceptionIfListIsEmpty);</span>
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireTeam&gt; matchQuestionnaireTeamListToExceptionIfListIsEmpty(List&lt;QuestionnaireTeam&gt; questionnaireTeams) {
+<span class="pc bpc" id="L425" title="1 of 2 branches missed.">        if (questionnaireTeams.isEmpty()) {</span>
+<span class="nc" id="L426">            return left(new NotFoundQuestionnaireException());</span>
+        }
+<span class="fc" id="L428">        return right(questionnaireTeams.get(0));</span>
+    }
+
+    private Either&lt;QuestionnaireException, QuestionnaireTeam&gt; checkQuestionnaireTeamNotHidden(QuestionnaireTeam qT) {
+<span class="fc bfc" id="L432" title="All 2 branches covered.">        if (qT.getHidden()) {</span>
+<span class="fc" id="L433">            return left(new HiddenQuestionnaireException());</span>
+        }
+<span class="fc" id="L435">        return right(qT);</span>
+    }
+
+    private QuestionnaireException matchQuestionnaireServiceErrorToQuestionnaireException(QuestionnaireServiceError err) {
+<span class="fc" id="L439">        return Match(err).of(</span>
+<span class="fc" id="L440">                Case($(instanceOf(QuestionnaireServiceError.MissingAnswerToMandatoryQuestion.class)), </span>
+<span class="fc" id="L441">                        () -&gt; logInfoAndRetrieveException(err, new MissingMandatoryAnswerException(((QuestionnaireServiceError.MissingAnswerToMandatoryQuestion) err).getQuestions()))),</span>
+<span class="fc" id="L442">                Case($(instanceOf(QuestionnaireServiceError.NameInUseError.class)),</span>
+<span class="fc" id="L443">                        () -&gt; logInfoAndRetrieveException(err, new NameInUseQuestionnaireException())),</span>
+<span class="fc" id="L444">                Case($(instanceOf(QuestionnaireServiceError.NotFoundError.class)),</span>
+<span class="fc" id="L445">                        () -&gt; logErrorAndRetrieveException(err, new NotFoundQuestionnaireException())),</span>
+<span class="fc" id="L446">                Case($(instanceOf(QuestionnaireServiceError.BadRequestError.class)),</span>
+<span class="nc" id="L447">                        () -&gt; logErrorAndRetrieveException(err, new InconsistentDataException())),</span>
+<span class="fc" id="L448">                Case($(instanceOf(QuestionnaireServiceError.IOError.class)),</span>
+<span class="fc" id="L449">                        () -&gt; logErrorAndRetrieveException(err, new QuestionnaireIOException(((QuestionnaireServiceError.IOError) err).getIoException()))),</span>
+<span class="fc" id="L450">                Case($(anyOf(instanceOf(QuestionnaireServiceError.UnexpectedError.class), instanceOf(QuestionnaireServiceError.ConflictError.class))),</span>
+<span class="nc" id="L451">                        $ -&gt; { throw new RuntimeException(&quot;Error within the questionnaire service: &quot; + err.getMessage()); }));</span>
+    }
+
+    private QuestionnaireException logErrorAndRetrieveException(QuestionnaireServiceError err, QuestionnaireException exception) {
+<span class="fc" id="L455">        LOGGER.error(err.getMessage(), exception);</span>
+<span class="fc" id="L456">        return exception;</span>
+    }
+
+    private QuestionnaireException logInfoAndRetrieveException(QuestionnaireServiceError err, QuestionnaireException exception) {
+<span class="fc" id="L460">        LOGGER.info(err.getMessage());</span>
+<span class="fc" id="L461">        return exception;</span>
+    }
+
+    private String getQuestionnaireRequestMessage(PKBPerson clinician,
+                                                  PKBPerson patient,
+                                                  QuestionnaireRequest questionnaireRequest){
+<span class="fc" id="L467">        return velocityTemplateHandler.process(</span>
+<span class="fc" id="L468">                Map.of(&quot;clinicianTitle&quot;, clinician.getTitle(),</span>
+<span class="fc" id="L469">                        &quot;clinicianFirstName&quot;, clinician.getFirstName(),</span>
+<span class="fc" id="L470">                        &quot;clinicianLastName&quot;, clinician.getLastName(),</span>
+<span class="fc" id="L471">                        &quot;patientFirstName&quot;, patient.getFirstName(),</span>
+<span class="fc" id="L472">                        &quot;patientLastName&quot;, patient.getLastName(),</span>
+<span class="fc" id="L473">                        &quot;questionnaireName&quot;, questionnaireRequest.getQuestionnaire().getName(),</span>
+<span class="fc" id="L474">                        &quot;questionnaireRequestId&quot;, questionnaireRequest.getId(),</span>
+<span class="fc" id="L475">                        &quot;patientId&quot;, patient.getId()),</span>
+                &quot;templates/messages/sendQuestionnaireRequestToPatient.vm&quot;,
+<span class="fc" id="L477">                new Locale(patient.getLanguageCode()));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CommunicationRepository.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.repository</a> &gt; <span class="el_source">CommunicationRepository.java</span></div><h1>CommunicationRepository.java</h1><pre class="source lang-java linenums">package com.pkb.domain.repository;
+
+import com.pkb.annotation.EHRField.QueryField;
+import com.pkb.datamodel.AccountKeys;
+import com.pkb.datamodel.AppMenuDataWithSourceObjects;
+import com.pkb.datamodel.Communication;
+import com.pkb.datamodel.authorization.TargetOwnerData;
+import com.pkb.datamodel.entity.mapper.CommunicationMapper;
+import com.pkb.datamodel.entity.mapper.PersonMapper;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.criteria.CriteriaResult;
+import com.pkb.domain.criteria.ImmutableCriteriaResult;
+import com.pkb.domain.criteria.TemporalRangeRestriction;
+import com.pkb.domain.internal.repository.AbstractMenuDataRepository;
+import com.pkb.domain.internal.repository.AppMenuDataRepository;
+import com.pkb.domain.internal.repository.ReferenceDatumRepository;
+import com.pkb.domain.repository.mapper.AccessFilterMapper;
+import com.pkb.domain.repository.util.BoundedDateRangeRestrictions;
+import com.pkb.ehrdata.AccessFilter;
+import com.pkb.ehrdata.ImmutableSearchSpec;
+import com.pkb.ehrdata.SearchSpec;
+import com.pkb.entities.enums.MenuDataType;
+import io.vavr.Tuple;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.collection.Set;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.time.LocalDate;
+
+import static com.pkb.domain.criteria.CriteriaResult.emptyCriteriaResult;
+import static com.pkb.ehrdata.Filter.Operator.IS_NOT_NULL;
+import static com.pkb.ehrdata.Filter.Operator.NOT_EQUAL;
+import static com.pkb.ehrdata.Filter.filter;
+import static com.pkb.ehrdata.OrderBy.Direction.Asc;
+import static io.vavr.collection.TreeMap.collector;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.util.function.Function.identity;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class CommunicationRepository extends AbstractMenuDataRepository {
+
+<span class="fc" id="L46">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+    private final CommunicationMapper communicationMapper;
+    private final AccessFilterMapper accessFilterMapper;
+    private final PersonMapper personMapper;
+
+    public CommunicationRepository(AppMenuDataRepository menuDataRepository,
+                                   ReferenceDatumRepository referenceDatumRepository,
+                                   CommunicationMapper communicationMapper,
+                                   AccessFilterMapper accessFilterMapper,
+                                   PersonRepository personRepository,
+                                   PersonMapper personMapper) {
+<span class="fc" id="L57">        super(menuDataRepository, referenceDatumRepository, personRepository);</span>
+<span class="fc" id="L58">        this.communicationMapper = communicationMapper;</span>
+<span class="fc" id="L59">        this.accessFilterMapper = accessFilterMapper;</span>
+<span class="fc" id="L60">        this.personMapper = personMapper;</span>
+<span class="fc" id="L61">    }</span>
+
+    public CriteriaResult&lt;Communication&gt; findCommunications(CommunicationQuery searchQuery) {
+
+<span class="fc" id="L65">        TargetOwnerData targetOwnerData = searchQuery.authzData().requireSingleTargetData();</span>
+
+        // Step 1: find menuData. Todo - subroutineize, or even put somewhere common
+
+<span class="fc" id="L69">        Long patientAccountId = targetOwnerData.account().getId();</span>
+<span class="fc" id="L70">        SearchSpec searchSpec = buildSearchSpec(patientAccountId, searchQuery.sent(), searchQuery.maxNumberOfResources());</span>
+<span class="fc" id="L71">        AccessFilter accessFilter = accessFilterMapper.buildAccessFilter(searchQuery.authzData());</span>
+<span class="fc" id="L72">        io.vavr.collection.List&lt;Long&gt; communicationIds = find(searchSpec, accessFilter);</span>
+
+<span class="fc bfc" id="L74" title="All 2 branches covered.">        if (communicationIds.isEmpty()) {</span>
+<span class="fc" id="L75">            return emptyCriteriaResult();</span>
+        }
+
+<span class="fc" id="L78">        long total = communicationIds.size();</span>
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        if (total == searchQuery.maxNumberOfResources()) {</span>
+<span class="fc" id="L80">            total = count(searchSpec, accessFilter);</span>
+        }
+
+<span class="fc" id="L83">        io.vavr.collection.List&lt;AppMenuDataWithSourceObjects&gt; menuData = findMenuDatasByIdsWithAttachments(communicationIds);</span>
+
+        // Step 2: map to RawCommunication which includes List&lt;Long&gt; participantIds
+
+<span class="fc" id="L87">        AccountKeys accountKeys = checkAccountKeys(targetOwnerData, menuData);</span>
+<span class="fc" id="L88">        List&lt;CommunicationMapper.RawCommunication&gt; rawCommunications = communicationMapper</span>
+<span class="fc" id="L89">                .mapToRawCommunications(menuData, accountKeys);</span>
+
+        // Step 3: fetch Persons for all participants
+
+<span class="fc" id="L93">        Set&lt;Long&gt; personIds = extractAllParticipantIds(rawCommunications);</span>
+<span class="fc" id="L94">        List&lt;Person&gt; participants = personRepository.findByIds(personIds)</span>
+<span class="fc" id="L95">                .map(personMapper::entityToDataModel);</span>
+<span class="fc" id="L96">        Map&lt;String, Person&gt; participantsByIds = participants.map(p -&gt; Tuple.of(p.getId().toString(), p)).collect(collector());</span>
+
+        // Step 3a: hack for obsolete 'private' messages which are only visible to their participants
+        // For now, drop rows which should not be returned and decrease the total.
+<span class="fc" id="L100">        Option&lt;Long&gt; maybeActorId = searchQuery.authzData().inputs().findAuthenticatedUserWithActorId();</span>
+<span class="fc" id="L101">        List&lt;CommunicationMapper.RawCommunication&gt; visibleCommunications = rawCommunications</span>
+<span class="fc" id="L102">                .filter(</span>
+                        // If it's not a 'private' message, then don't filter it.
+<span class="fc bfc" id="L104" title="All 2 branches covered.">                        c -&gt; !c.isPrivateMessage()  </span>
+                        // If it _is_ a 'private' message, then we're only allowed to see it if we're a participant.
+<span class="fc" id="L106">                        || maybeActorId.map(</span>
+<span class="pc bpc" id="L107" title="1 of 4 branches missed.">                                actorId -&gt; c.getParticipantIds().contains(actorId.toString()) || c.getSenderId().equals(actorId.toString()))</span>
+                        // No actorId means we're definitely not a participant. Hide it. 
+<span class="fc bfc" id="L109" title="All 2 branches covered.">                            .getOrElse(false))</span>
+<span class="fc" id="L110">                .collect(List.collector());</span>
+
+<span class="fc bfc" id="L112" title="All 2 branches covered.">        if (total &lt;= searchQuery.maxNumberOfResources()) {</span>
+<span class="fc" id="L113">            total = visibleCommunications.size();</span>
+        } else { 
+<span class="fc" id="L115">            LOGGER.warn(&quot;GDE-196: removed private message(s) from first page of search results&quot;);</span>
+<span class="fc" id="L116">            total = total - rawCommunications.size() + visibleCommunications.size();</span>
+        }
+
+        // Step 4: zip it all together
+<span class="fc" id="L120">        List&lt;Communication&gt; communications = communicationMapper</span>
+                // Owner of a communication is always a Patient.
+<span class="fc" id="L122">                .mapToCommunications(visibleCommunications, (Patient) targetOwnerData.person(), participantsByIds);</span>
+<span class="fc" id="L123">        return ImmutableCriteriaResult.&lt;Communication&gt;builder().total(total).addAllPage(communications).build();</span>
+
+    }
+
+    private Set&lt;Long&gt; extractAllParticipantIds(List&lt;CommunicationMapper.RawCommunication&gt; rawCommunications) {
+<span class="fc" id="L128">        return rawCommunications</span>
+<span class="fc" id="L129">                .map(rc -&gt; rc.getParticipantIds().append(rc.getSenderId()))</span>
+<span class="fc" id="L130">                .flatMap(identity())</span>
+<span class="fc" id="L131">                .map(Long::parseLong)</span>
+<span class="fc" id="L132">                .toSet();</span>
+    }
+
+    @NotNull
+    private ImmutableSearchSpec buildSearchSpec(@NotNull Long patientAccountId,
+                                                @NotNull TemporalRangeRestriction&lt;LocalDate&gt; dateRestriction,
+                                                int maxNumberOfResources) {
+<span class="fc" id="L139">        ImmutableSearchSpec.Builder searchSpecBuilder = getSearchSpecBuilder(patientAccountId, MenuDataType.message.name());</span>
+<span class="fc" id="L140">        BoundedDateRangeRestrictions.addDateRestrictions(&quot;date01&quot;, dateRestriction, searchSpecBuilder);</span>
+<span class="fc" id="L141">        searchSpecBuilder.useParticipantFilter(true);</span>
+<span class="fc" id="L142">        searchSpecBuilder.addFilter(filter(QueryField.string04.name(), NOT_EQUAL, &quot;INDRAFT&quot;));</span>
+        // GDE-1530 Skip messages with no conversation ID, they are bad data
+        // which isn't displayed in the legacy application either.
+<span class="fc" id="L145">        searchSpecBuilder.addFilter(filter(QueryField.uuid01.name(), IS_NOT_NULL));</span>
+<span class="fc" id="L146">        addOrderBy(&quot;date01&quot;, Asc, searchSpecBuilder);</span>
+<span class="fc" id="L147">        addPageFilter(maxNumberOfResources, searchSpecBuilder);</span>
+<span class="fc" id="L148">        return searchSpecBuilder.build();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

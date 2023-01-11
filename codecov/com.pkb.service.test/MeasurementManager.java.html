@@ -1,0 +1,715 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MeasurementManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.test</a> &gt; <span class="el_source">MeasurementManager.java</span></div><h1>MeasurementManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.test;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.dto.DateFilterDTO;
+import com.pkb.app.dto.PageFilterDTO;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.common.testlogging.DetailLoggingProvider;
+import com.pkb.dataupload.entity.UploadedData.Destination;
+import com.pkb.exception.PKBException;
+import com.pkb.service.dataupload.processor.UploadedDataService;
+import com.pkb.service.measurement.EHRMeasurementManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.test.entity.MeasurementDTO;
+import com.pkb.test.entity.MeasurementHistoryDTO;
+import com.pkb.test.entity.MeasurementType;
+import com.pkb.test.entity.MeasurementTypeCompoundParentInfo;
+import com.pkb.test.entity.MeasurementTypeId;
+import com.pkb.test.entity.PredefinedMeasurementType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.perf4j.StopWatch;
+import org.perf4j.commonslog.CommonsLogStopWatch;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+import static com.pkb.integration.coredevices.CoreDevicesClient.DEVICE_RECORD_TIMEZONE;
+import static com.pkb.service.dataupload.processor.ImmutableLoggedInUploadedDataProcessingContext.loggedInUploadedDataProcessingContext;
+import static com.pkb.test.entity.PredefinedMeasurementType.BMI;
+import static com.pkb.test.entity.PredefinedMeasurementType.HEIGHT;
+import static com.pkb.test.entity.PredefinedMeasurementType.WEIGHT;
+import static io.vavr.API.None;
+import static io.vavr.API.Some;
+import static java.time.LocalDate.ofInstant;
+import static java.util.Comparator.comparing;
+import static java.util.Comparator.comparingLong;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.mapping;
+import static java.util.stream.Collectors.maxBy;
+import static java.util.stream.Collectors.partitioningBy;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+import static java.util.stream.Stream.concat;
+import static org.apache.commons.collections4.CollectionUtils.subtract;
+
+/**
+ * Implementation of {@link MeasurementManager}
+ *
+ * @author robwhelan
+ */
+public class MeasurementManager extends TransactionManager {
+<span class="fc" id="L79">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final UserManager userManager;
+    private final TeamUserManager teamUserManager;
+    private final DetailLoggingProvider testLoggingService;
+    private final UploadedDataService uploadedDataService;
+    private final MeasurementUtil measurementUtil;
+    private final EHRMeasurementManager ehrMeasurementManager;
+
+    public MeasurementManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, UserManager userManager,
+                              TeamUserManager teamUserManager, DetailLoggingProvider testLoggingService, UploadedDataService uploadedDataService, MeasurementUtil measurementUtil,
+                              EHRMeasurementManager ehrMeasurementManager) {
+<span class="fc" id="L91">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L92">        this.userManager = userManager;</span>
+<span class="fc" id="L93">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L94">        this.testLoggingService = testLoggingService;</span>
+<span class="fc" id="L95">        this.uploadedDataService = uploadedDataService;</span>
+<span class="fc" id="L96">        this.measurementUtil = measurementUtil;</span>
+<span class="fc" id="L97">        this.ehrMeasurementManager = ehrMeasurementManager;</span>
+<span class="fc" id="L98">    }</span>
+
+    private List&lt;MeasurementHistoryDTO&gt; groupAndSortMeasurements(List&lt;MeasurementDTO&gt; measurements) {
+<span class="fc" id="L101">        return measurements.stream()</span>
+<span class="fc" id="L102">                .collect(groupingBy(MeasurementDTO::getMeasurementType))</span>
+<span class="fc" id="L103">                .entrySet().stream()</span>
+<span class="fc" id="L104">                .map(e -&gt; {</span>
+<span class="fc" id="L105">                    var history = new MeasurementHistoryDTO();</span>
+<span class="fc" id="L106">                    history.setMeasurementType(e.getKey());</span>
+<span class="fc" id="L107">                    history.setMeasurementList(e.getValue().stream()</span>
+<span class="fc" id="L108">                            .sorted(comparing(MeasurementDTO::getId))</span>
+<span class="fc" id="L109">                            .collect(toList()));</span>
+<span class="fc" id="L110">                    return history;</span>
+                })
+<span class="fc" id="L112">                .sorted(comparing(history -&gt; history.getMeasurementList().get(0).getId()))</span>
+<span class="fc" id="L113">                .collect(toList());</span>
+    }
+
+    public List&lt;MeasurementHistoryDTO&gt; getMeasurementHistoryList(@NotNull LoggedInEHRRequestContext requestContext,
+                                                                 @NotNull List&lt;MeasurementTypeId&gt; types,
+                                                                 long patientUserId,
+                                                                 DateFilterDTO dateFilterOrNull,
+                                                                 PKBPerson loggedInPerson) {
+<span class="fc" id="L121">        Long accountId = userManager.getDefaultAccountId(patientUserId);</span>
+<span class="fc" id="L122">        List&lt;MeasurementHistoryDTO&gt; historyList = new ArrayList&lt;&gt;();</span>
+        try {
+<span class="fc" id="L124">            syncMeasurementsUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L125">            syncMeasurementsUploadedData(requestContext, userManager.getAccountOwner(accountId));</span>
+
+<span class="fc" id="L127">            List&lt;MeasurementTypeId&gt; withPotentialLegTypes = new ArrayList&lt;&gt;(types);</span>
+
+<span class="fc" id="L129">            withPotentialLegTypes.addAll(types.stream()</span>
+<span class="fc" id="L130">                    .flatMap(type -&gt; type.asInternalId()</span>
+<span class="fc" id="L131">                            .flatMap(id -&gt; Option.of(PredefinedMeasurementType.getById(id)))</span>
+<span class="fc" id="L132">                            .map(t -&gt; PredefinedMeasurementType.getCompoundLegs(t))</span>
+<span class="fc" id="L133">                            .getOrElse(Collections.emptyList())</span>
+<span class="fc" id="L134">                            .stream().map(PredefinedMeasurementType::id))</span>
+<span class="fc" id="L135">                    .collect(toList()));</span>
+
+<span class="fc" id="L137">            var measurements = accessMeasurements(requestContext,</span>
+                    withPotentialLegTypes,
+                    dateFilterOrNull, patientUserId, null/* pageFilter */);
+
+<span class="fc" id="L141">            var historiesAll = groupAndSortMeasurements(measurements);</span>
+
+<span class="fc" id="L143">            var typesAsSet = new HashSet&lt;&gt;(types);</span>
+
+<span class="fc" id="L145">            var compoundLegsButTheParentIsNotRequestedAndTheRest = historiesAll.stream().collect(partitioningBy(hist -&gt; {</span>
+<span class="fc" id="L146">                var typeId = hist.getMeasurementType().id();</span>
+<span class="fc" id="L147">                var compoundParent = typeId.asInternalId()</span>
+<span class="fc" id="L148">                        .flatMap(id -&gt; Option.of(PredefinedMeasurementType.getById(id)))</span>
+<span class="fc" id="L149">                        .map(PredefinedMeasurementType::getType)</span>
+<span class="fc" id="L150">                        .flatMap(MeasurementType::compoundParent);</span>
+<span class="pc bnc" id="L151" title="All 2 branches missed.">                return compoundParent.fold(() -&gt; false, parentInfo -&gt; !typesAsSet.contains(parentInfo.parent()));</span>
+            }));
+
+<span class="fc" id="L154">            var withLegsAssembled = recogniseAndMoveLegsOfCompoundMeasurementsIntoMultiValuedMeasurementHistories(compoundLegsButTheParentIsNotRequestedAndTheRest.get(false));</span>
+
+<span class="fc" id="L156">            compoundLegsButTheParentIsNotRequestedAndTheRest.get(true).addAll(withLegsAssembled);</span>
+<span class="fc" id="L157">            var histories = compoundLegsButTheParentIsNotRequestedAndTheRest.get(true).stream()</span>
+<span class="fc" id="L158">                    .filter(hst -&gt; typesAsSet.contains(hst.getMeasurementType().id()))</span>
+<span class="fc" id="L159">                    .collect(toList());</span>
+
+<span class="fc" id="L161">            historyList.addAll(histories);</span>
+
+            // Check for derived variables
+<span class="pc bpc" id="L164" title="1 of 4 branches missed.">            boolean bmiWanted = types == null || types.contains(BMI.id());</span>
+
+            // Look for height and weight to calculate derived variables
+<span class="fc" id="L167">            MeasurementHistoryDTO weightHistory = null, heightHistory = null;</span>
+
+<span class="fc bfc" id="L169" title="All 2 branches covered.">            for (MeasurementHistoryDTO history : historyList) {</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">                if (history.getMeasurementType().is(WEIGHT)) {</span>
+<span class="fc" id="L171">                    weightHistory = history;</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">                } else if (history.getMeasurementType().is(HEIGHT)) {</span>
+<span class="fc" id="L173">                    heightHistory = history;</span>
+                }
+<span class="fc" id="L175">            }</span>
+
+<span class="pc bpc" id="L177" title="1 of 6 branches missed.">            if (weightHistory != null &amp;&amp; heightHistory != null &amp;&amp; bmiWanted) {</span>
+<span class="fc" id="L178">                calculateBMIHistory(Some(weightHistory), Some(heightHistory), loggedInPerson)</span>
+<span class="fc" id="L179">                        .toJavaOptional()</span>
+<span class="fc" id="L180">                        .ifPresent(bmiHist -&gt; historyList.add(0, bmiHist));</span>
+            }
+
+<span class="nc" id="L183">        } catch (Exception e) {</span>
+<span class="nc" id="L184">            throw new PKBException(&quot;failed getting measurement history for &quot; + patientUserId, e);</span>
+
+<span class="fc" id="L186">        }</span>
+
+<span class="fc" id="L188">        return historyList;</span>
+    }
+
+    public Option&lt;MeasurementHistoryDTO&gt; getMeasurementHistory(@NotNull LoggedInEHRRequestContext requestContext,
+                                                               MeasurementTypeId measurementTypeId,
+                                                               long patientUserId,
+                                                               int pageSize,
+                                                               PKBPerson loggedInPerson) {
+<span class="fc" id="L196">        Long accountId = userManager.getDefaultAccountId(patientUserId);</span>
+
+        Option&lt;MeasurementHistoryDTO&gt; history;
+<span class="fc" id="L199">        PageFilterDTO pageFilterDTO = new PageFilterDTO(pageSize, 0);</span>
+
+        try {
+<span class="fc" id="L202">            syncMeasurementsUploadedData(requestContext, accountId);</span>
+
+<span class="fc bfc" id="L204" title="All 2 branches covered.">            if (measurementTypeId.equals(BMI.id())) {</span>
+<span class="fc" id="L205">                Option&lt;MeasurementHistoryDTO&gt; weightHistory = getMeasurementHistory(requestContext,</span>
+<span class="fc" id="L206">                        WEIGHT.getType().id(), patientUserId, pageSize, loggedInPerson);</span>
+<span class="fc" id="L207">                Option&lt;MeasurementHistoryDTO&gt; heightHistory = getMeasurementHistory(requestContext,</span>
+<span class="fc" id="L208">                        HEIGHT.getType().id(), patientUserId, pageSize, loggedInPerson);</span>
+<span class="fc" id="L209">                history = calculateBMIHistory(weightHistory, heightHistory, loggedInPerson);</span>
+<span class="fc" id="L210">            } else {</span>
+<span class="fc" id="L211">                var legTypes = measurementTypeId.asInternalId()</span>
+<span class="fc" id="L212">                        .flatMap(id -&gt; Option.of(PredefinedMeasurementType.getById(id)))</span>
+<span class="fc" id="L213">                        .map(t -&gt; PredefinedMeasurementType.getCompoundLegs(t))</span>
+<span class="fc" id="L214">                        .getOrElse(List.of());</span>
+
+<span class="fc bfc" id="L216" title="All 2 branches covered.">                if (legTypes.isEmpty()) {</span>
+
+<span class="fc" id="L218">                    var measurements = accessMeasurements(requestContext,</span>
+                            measurementTypeId, null/* dateFilter */, patientUserId, pageFilterDTO);
+<span class="fc" id="L220">                    measurements.sort(comparing(MeasurementDTO::getId));</span>
+
+<span class="fc" id="L222">                    history = hideOutdatedCumulativeData(measurements, patientUserId);</span>
+<span class="fc" id="L223">                } else {</span>
+<span class="fc" id="L224">                    var maybeRecognizedMaybeLoaded =</span>
+<span class="fc" id="L225">                            recogniseAndMoveLegsOfCompoundMeasurementsIntoMultiValuedMeasurementHistories(</span>
+<span class="fc" id="L226">                                    io.vavr.collection.Stream.ofAll(legTypes)</span>
+<span class="fc" id="L227">                                            .map(PredefinedMeasurementType::getType)</span>
+<span class="fc" id="L228">                                            .map(MeasurementType::id)</span>
+<span class="fc" id="L229">                                            .flatMap(typeId -&gt;</span>
+<span class="fc" id="L230">                                                    getMeasurementHistory(requestContext, typeId, patientUserId, pageSize, loggedInPerson))</span>
+<span class="fc" id="L231">                                            .appendAll(groupAndSortMeasurements(accessMeasurements(requestContext,</span>
+                                                    measurementTypeId, null/* dateFilter */, patientUserId, pageFilterDTO)))
+<span class="fc" id="L233">                                            .toJavaList());</span>
+
+<span class="fc" id="L235">                    history = Option.ofOptional(maybeRecognizedMaybeLoaded.stream().filter(hist -&gt; hist.getMeasurementType().id().equals(measurementTypeId)).findFirst());</span>
+                }
+            }
+
+            // Sort the measurements by descending measure dates ; latest is
+            // supposed to be last in the list as per MeasurementHistoryDTO
+<span class="fc" id="L241">            history.peek(h -&gt; h.getMeasurementList().sort(comparing(MeasurementDTO::getMeasureDate)));</span>
+
+<span class="fc bfc" id="L243" title="All 2 branches covered.">            if (pageSize &gt; 0) {</span>
+                // because of legs and compound measurements, there might be more measurements than requested
+<span class="fc" id="L245">                history.peek(h -&gt; h.setMeasurementList(io.vavr.collection.Stream.ofAll(h.getMeasurementList()).take(pageSize).toJavaList()));</span>
+            }
+
+<span class="nc" id="L248">        } catch (Exception e) {</span>
+<span class="nc" id="L249">            throw new PKBException(&quot;failed getting measurement history for &quot; + patientUserId, e);</span>
+<span class="fc" id="L250">        }</span>
+
+<span class="fc" id="L252">        testLoggingService.obtainLogger(LOGGER).info(&quot;Returning history {}&quot;, history);</span>
+
+<span class="fc" id="L254">        return history;</span>
+    }
+
+    /**
+     * This wrapper around the bean call is to make sure we load queued
+     * measurements BEFORE calling it.
+     *
+     * @param measurementBean
+     * @param measurementTypeIdOrNull
+     * @param fromDateOrNull
+     * @param toDateOrNull
+     * @param patientUserId
+     * @param accountId
+     * @param pageSize
+     * @param offset
+     * @param session
+     * @return
+     */
+    private List&lt;MeasurementDTO&gt; accessMeasurements(@NotNull LoggedInEHRRequestContext requestContext,
+                                                    MeasurementTypeId measurementTypeIdOrNull, DateFilterDTO dateFilterOrNull,
+                                                    long patientUserId, PageFilterDTO pageFilterDTO) {
+<span class="fc" id="L275">        return ehrMeasurementManager.getMeasurements(requestContext, measurementTypeIdOrNull, dateFilterOrNull, patientUserId, pageFilterDTO, false/* do not fetch RRs */);</span>
+    }
+
+    private List&lt;MeasurementDTO&gt; accessMeasurements(@NotNull LoggedInEHRRequestContext requestContext,
+                                                    List&lt;MeasurementTypeId&gt; typesOrNull, DateFilterDTO dateFilterOrNull,
+                                                    long patientId, PageFilterDTO pageFilterDTO) {
+<span class="fc" id="L281">        return ehrMeasurementManager.getMeasurements(requestContext, typesOrNull, dateFilterOrNull, patientId, pageFilterDTO);</span>
+    }
+
+    List&lt;MeasurementHistoryDTO&gt; recogniseAndMoveLegsOfCompoundMeasurementsIntoMultiValuedMeasurementHistories(List&lt;MeasurementHistoryDTO&gt; histories) {
+<span class="fc" id="L285">        var historiesGroupedByCompoundParent = groupHistoriesByParent(histories);</span>
+
+<span class="fc" id="L287">        var measurementsByParentAndDate = historiesGroupedByCompoundParent.entrySet().stream()</span>
+<span class="fc" id="L288">                .collect(toMap(Map.Entry::getKey, e -&gt; groupMeasurementsByDate(e.getValue())));</span>
+
+<span class="fc" id="L290">        var measurementsByParentAndDateAndLeg = measurementsByParentAndDate.entrySet().stream()</span>
+<span class="fc" id="L291">                .collect(toMap(Map.Entry::getKey, e -&gt; e.getValue().entrySet().stream()</span>
+<span class="fc" id="L292">                        .collect(toMap(Map.Entry::getKey, entry -&gt; groupMeasurementsByLegOfParent(entry.getValue())))));</span>
+
+<span class="fc" id="L294">        var compoundMeasurementsByParent = measurementsByParentAndDateAndLeg.entrySet().stream()</span>
+<span class="fc" id="L295">                .collect(toMap(Map.Entry::getKey, e -&gt; filterMeasurementsWithOnlyOneOfEachLeg(e.getValue())))</span>
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">                .entrySet().stream().filter(e -&gt; !e.getValue().isEmpty())</span>
+<span class="fc" id="L297">                .collect(toMap(Map.Entry::getKey, Map.Entry::getValue));</span>
+
+<span class="fc bfc" id="L299" title="All 2 branches covered.">        if (compoundMeasurementsByParent.isEmpty()) {</span>
+<span class="fc" id="L300">            return histories;</span>
+        }
+
+<span class="fc" id="L303">        var newHistories = createHistoriesOfCompoundMeasurements(compoundMeasurementsByParent);</span>
+
+<span class="fc" id="L305">        var allPulledMeasurementDTO = compoundMeasurementsByParent.values().stream()</span>
+<span class="fc" id="L306">                .flatMap(list -&gt; list.stream())</span>
+<span class="fc" id="L307">                .flatMap(tuple -&gt; Stream.of(tuple._1, tuple._2))</span>
+<span class="fc" id="L308">                .collect(toSet());</span>
+
+<span class="fc" id="L310">        var historiesWithoutCompoundMeasurements = histories.stream()</span>
+<span class="fc bfc" id="L311" title="All 2 branches covered.">                .map(history -&gt; Tuple.of(history, history.getMeasurementList().stream().filter(m -&gt; !allPulledMeasurementDTO.contains(m)).collect(toList())))</span>
+<span class="pc bpc" id="L312" title="1 of 2 branches missed.">                .filter(tuple -&gt; !tuple._2.isEmpty())</span>
+<span class="fc" id="L313">                .map(tuple -&gt; {</span>
+<span class="fc" id="L314">                    var history = tuple._1;</span>
+<span class="fc" id="L315">                    history.setMeasurementList(tuple._2);</span>
+<span class="fc" id="L316">                    return history;</span>
+                })
+<span class="fc" id="L318">                .collect(toList());</span>
+
+
+<span class="fc" id="L321">        historiesWithoutCompoundMeasurements.addAll(newHistories);</span>
+<span class="fc" id="L322">        var newHistoriesAdded = historiesWithoutCompoundMeasurements.stream()</span>
+<span class="fc" id="L323">                .collect(groupingBy(history -&gt; history.getMeasurementType().id()))</span>
+<span class="fc" id="L324">                .values().stream().map(measurementHistoryList -&gt; measurementHistoryList.stream().reduce((h1, h2) -&gt; {</span>
+<span class="nc" id="L325">                    h1.getMeasurementList().addAll(h2.getMeasurementList());</span>
+<span class="nc" id="L326">                    return h1;</span>
+                }))
+<span class="fc" id="L328">                .filter(Optional::isPresent)</span>
+<span class="fc" id="L329">                .map(optional -&gt; optional.get())</span>
+<span class="fc" id="L330">                .collect(toList());</span>
+
+<span class="fc" id="L332">        return newHistoriesAdded;</span>
+    }
+
+    private List&lt;MeasurementHistoryDTO&gt; createHistoriesOfCompoundMeasurements(Map&lt;MeasurementTypeId, List&lt;Tuple2&lt;MeasurementDTO, MeasurementDTO&gt;&gt;&gt; compoundMeasurementsByParent) {
+<span class="fc" id="L336">        Function&lt;Tuple2&lt;MeasurementDTO, MeasurementDTO&gt;, MeasurementDTO&gt; mergeMeasurements = t -&gt; {</span>
+<span class="fc" id="L337">            var newMeasurement = new MeasurementDTO(t._1().getSource());</span>
+<span class="fc" id="L338">            newMeasurement.setValue(t._1().getValue());</span>
+<span class="fc" id="L339">            newMeasurement.setValue2(t._2().getValue());</span>
+<span class="fc" id="L340">            newMeasurement.setMeasureDate(t._1().getMeasureDate());</span>
+
+<span class="fc" id="L342">            return newMeasurement;</span>
+        };
+
+<span class="fc" id="L345">        return compoundMeasurementsByParent.entrySet().stream()</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">                .filter(e -&gt; !e.getValue().isEmpty())</span>
+<span class="fc" id="L347">                .map(e -&gt; {</span>
+<span class="fc" id="L348">                    var newHistory = new MeasurementHistoryDTO();</span>
+<span class="fc" id="L349">                    var t0 = PredefinedMeasurementType.getById(e.getKey().asInternalId().get());</span>
+<span class="fc" id="L350">                    newHistory.setMeasurementType(t0.getType());</span>
+<span class="fc" id="L351">                    newHistory.setMeasurementList(e.getValue().stream().map(mergeMeasurements).collect(toList()));</span>
+<span class="fc" id="L352">                    newHistory.getMeasurementList().forEach(m -&gt; m.setMeasurementType(t0));</span>
+
+<span class="fc" id="L354">                    return newHistory;</span>
+                })
+<span class="fc" id="L356">                .collect(toList());</span>
+    }
+
+    private List&lt;Tuple2&lt;MeasurementDTO, MeasurementDTO&gt;&gt; filterMeasurementsWithOnlyOneOfEachLeg(Map&lt;Instant, Map&lt;MeasurementTypeCompoundParentInfo.Leg, List&lt;MeasurementDTO&gt;&gt;&gt; measurementsByDateAndLeg) {
+<span class="fc" id="L360">        return measurementsByDateAndLeg.values().stream()</span>
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">                .filter(legMap -&gt; legMap.containsKey(MeasurementTypeCompoundParentInfo.Leg.LEG1)</span>
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">                        &amp;&amp; legMap.get(MeasurementTypeCompoundParentInfo.Leg.LEG1).size() == 1</span>
+<span class="fc bfc" id="L363" title="All 2 branches covered.">                        &amp;&amp; legMap.containsKey(MeasurementTypeCompoundParentInfo.Leg.LEG2)</span>
+<span class="fc bfc" id="L364" title="All 2 branches covered.">                        &amp;&amp; legMap.get(MeasurementTypeCompoundParentInfo.Leg.LEG2).size() == 1)</span>
+<span class="fc" id="L365">                .map(legMap -&gt; Tuple.of(legMap.get(MeasurementTypeCompoundParentInfo.Leg.LEG1).get(0),</span>
+<span class="fc" id="L366">                        legMap.get(MeasurementTypeCompoundParentInfo.Leg.LEG2).get(0)))</span>
+<span class="fc" id="L367">                .collect(toList());</span>
+    }
+
+    private Map&lt;MeasurementTypeCompoundParentInfo.Leg, List&lt;MeasurementDTO&gt;&gt; groupMeasurementsByLegOfParent(List&lt;MeasurementDTO&gt; measurements) {
+<span class="fc" id="L371">        return measurements.stream().collect(groupingBy(measurement -&gt; measurement.getMeasurementType().compoundParent().get().legOfParent()));</span>
+    }
+
+    private Map&lt;Instant, List&lt;MeasurementDTO&gt;&gt; groupMeasurementsByDate(List&lt;MeasurementHistoryDTO&gt; histories) {
+<span class="fc" id="L375">        return histories.stream()</span>
+<span class="fc" id="L376">                .flatMap(history -&gt; history.getMeasurementList().stream()</span>
+<span class="fc" id="L377">                        .map(dto -&gt; Tuple.of(dto.getMeasureDate(), dto)))</span>
+<span class="fc" id="L378">                .collect(groupingBy(Tuple2::_1, mapping(Tuple2::_2, toList())));</span>
+    }
+
+    private Map&lt;MeasurementTypeId, List&lt;MeasurementHistoryDTO&gt;&gt; groupHistoriesByParent(List&lt;MeasurementHistoryDTO&gt; histories) {
+<span class="fc" id="L382">        return histories.stream()</span>
+<span class="fc bfc" id="L383" title="All 2 branches covered.">                .filter(history -&gt; !history.getMeasurementType().compoundParent().isEmpty())</span>
+<span class="fc" id="L384">                .map(history -&gt; Tuple.of(history.getMeasurementType().compoundParent().get().parent(), history))</span>
+<span class="fc" id="L385">                .collect(groupingBy(Tuple2::_1, mapping(Tuple2::_2, toList())));</span>
+    }
+
+    Option&lt;MeasurementHistoryDTO&gt; calculateBMIHistory(Option&lt;MeasurementHistoryDTO&gt; weightHistory,
+                                                      Option&lt;MeasurementHistoryDTO&gt; heightHistory, PKBPerson loggedInPerson) {
+<span class="fc" id="L390">        List&lt;MeasurementDTO&gt; bMIList = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L392">        Function&lt;Option&lt;MeasurementHistoryDTO&gt;, Boolean&gt; isEmpty = historyMaybe -&gt;</span>
+<span class="fc" id="L393">                historyMaybe.map(MeasurementHistoryDTO::getMeasurementList)</span>
+<span class="fc" id="L394">                        .map(List::isEmpty)</span>
+<span class="fc" id="L395">                        .getOrElse(true);</span>
+
+<span class="pc bpc" id="L397" title="2 of 4 branches missed.">        if (isEmpty.apply(weightHistory) || isEmpty.apply(heightHistory)) {</span>
+<span class="nc" id="L398">            return None();</span>
+        }
+
+<span class="fc" id="L401">        Iterator&lt;MeasurementDTO&gt; weightIt = weightHistory.get().getMeasurementList().iterator();</span>
+<span class="fc" id="L402">        Iterator&lt;MeasurementDTO&gt; heightIt = heightHistory.get().getMeasurementList().iterator();</span>
+
+<span class="fc" id="L404">        MeasurementDTO latestWeight = weightIt.next();</span>
+<span class="fc" id="L405">        MeasurementDTO latestHeight = heightIt.next();</span>
+
+<span class="fc" id="L407">        boolean weightDone = false;</span>
+<span class="fc" id="L408">        boolean heightDone = false;</span>
+
+        // TODO: what is this doing? it looks like it could be simplified.
+        // It was making results with non-sequential dates (so I'm adding a sort
+        // at the end)
+        // another option:
+        // - sort all height/weight measurements by date in one list
+        // - track currentHeight and currentWeight
+        // - iterate. For each measurement:
+        // - set value into currentHeight or currentWeight. If either is still
+        // missing, continue loop.
+        // - BMI date = date of measurement
+        // - calc BMI
+        // - if the last entry in bmiList had this date as well, replace that
+        // value
+        // - important so we don't (e.g.) calculate today's BMI with last week's
+        // weight first, then with today's weight, and keep both
+        // - else add BMI into bmiList
+        do {
+<span class="fc bfc" id="L427" title="All 2 branches covered.">            if (weightDone) {</span>
+<span class="fc" id="L428">                bMIList.add(buildBMI(latestHeight.getMeasureDate(), latestWeight, latestHeight, loggedInPerson));</span>
+<span class="pc bpc" id="L429" title="1 of 2 branches missed.">                if (heightIt.hasNext()) {</span>
+<span class="nc" id="L430">                    latestHeight = heightIt.next();</span>
+                } else {
+<span class="fc" id="L432">                    heightDone = true;</span>
+                }
+<span class="fc bfc" id="L434" title="All 2 branches covered.">            } else if (heightDone) {</span>
+<span class="fc" id="L435">                bMIList.add(buildBMI(latestWeight.getMeasureDate(), latestWeight, latestHeight, loggedInPerson));</span>
+<span class="pc bpc" id="L436" title="1 of 2 branches missed.">                if (weightIt.hasNext()) {</span>
+<span class="nc" id="L437">                    latestWeight = weightIt.next();</span>
+                } else {
+<span class="fc" id="L439">                    weightDone = true;</span>
+                }
+<span class="fc bfc" id="L441" title="All 2 branches covered.">            } else if (latestWeight.getMeasureDate().equals(latestHeight.getMeasureDate())) {</span>
+<span class="fc" id="L442">                bMIList.add(buildBMI(latestWeight.getMeasureDate(), latestWeight, latestHeight, loggedInPerson));</span>
+<span class="fc bfc" id="L443" title="All 2 branches covered.">                if (weightIt.hasNext()) {</span>
+<span class="fc" id="L444">                    latestWeight = weightIt.next();</span>
+                } else {
+<span class="fc" id="L446">                    weightDone = true;</span>
+                }
+<span class="fc bfc" id="L448" title="All 2 branches covered.">                if (heightIt.hasNext()) {</span>
+<span class="fc" id="L449">                    latestHeight = heightIt.next();</span>
+                } else {
+<span class="fc" id="L451">                    heightDone = true;</span>
+                }
+<span class="fc bfc" id="L453" title="All 2 branches covered.">            } else if (latestWeight.getMeasureDate().isBefore(latestHeight.getMeasureDate())) {</span>
+<span class="fc" id="L454">                bMIList.add(buildBMI(latestWeight.getMeasureDate(), latestWeight, latestHeight, loggedInPerson));</span>
+<span class="fc bfc" id="L455" title="All 2 branches covered.">                if (weightIt.hasNext()) {</span>
+<span class="fc" id="L456">                    latestWeight = weightIt.next();</span>
+                } else {
+<span class="fc" id="L458">                    weightDone = true;</span>
+                }
+            } else {
+<span class="fc" id="L461">                bMIList.add(buildBMI(latestHeight.getMeasureDate(), latestWeight, latestHeight, loggedInPerson));</span>
+<span class="fc bfc" id="L462" title="All 2 branches covered.">                if (heightIt.hasNext()) {</span>
+<span class="fc" id="L463">                    latestHeight = heightIt.next();</span>
+                } else {
+<span class="fc" id="L465">                    heightDone = true;</span>
+                }
+            }
+<span class="fc bfc" id="L468" title="All 4 branches covered.">        } while (!heightDone || !weightDone);</span>
+
+<span class="fc" id="L470">        bMIList.removeIf(Objects::isNull);</span>
+
+        // sort the BMI list into date order
+        // sort into ascending date order
+<span class="fc" id="L474">        bMIList.sort(comparing(MeasurementDTO::getMeasureDate));</span>
+
+<span class="fc" id="L476">        MeasurementHistoryDTO bMIHistory = new MeasurementHistoryDTO();</span>
+<span class="fc" id="L477">        bMIHistory.setMeasurementType(BMI.getType());</span>
+<span class="fc" id="L478">        bMIHistory.setMeasurementList(bMIList);</span>
+
+<span class="pc bpc" id="L480" title="1 of 2 branches missed.">        if (bMIList.isEmpty()) {</span>
+<span class="nc" id="L481">            return None();</span>
+        } else {
+<span class="fc" id="L483">            return Some(bMIHistory);</span>
+        }
+    }
+
+    private MeasurementDTO buildBMI(Instant latestMeasureDate,
+                                    MeasurementDTO weightDTO,
+                                    MeasurementDTO heightDTO,
+                                    PKBPerson loggedInPerson) {
+        try {
+<span class="fc" id="L492">            SourceDetails sourceDetails = new SourceDetails();</span>
+<span class="fc" id="L493">            sourceDetails.setText(measurementUtil.makeCalculatedBMISourceText(weightDTO, heightDTO, loggedInPerson));</span>
+<span class="fc" id="L494">            MeasurementDTO bMIDTO = new MeasurementDTO(sourceDetails);</span>
+<span class="fc" id="L495">            bMIDTO.setMeasureDate(latestMeasureDate);</span>
+<span class="fc" id="L496">            bMIDTO.setMeasurementType(BMI);</span>
+<span class="fc" id="L497">            bMIDTO.setValue(weightDTO.getValue() / Math.pow(heightDTO.getValue() / 100.0, 2));</span>
+<span class="fc" id="L498">            bMIDTO.getBaseFields().generateNewRandomUniqueId();</span>
+<span class="fc" id="L499">            return bMIDTO;</span>
+<span class="nc" id="L500">        } catch (Exception e) {</span>
+<span class="nc" id="L501">            LOGGER.error(&quot;PHR-9853: Exception {} while building bmi dto for weight {}, weight value is null = {}. And height {}, height value is null= {}&quot;,</span>
+<span class="nc bnc" id="L502" title="All 4 branches missed.">                    e.getMessage(), weightDTO.toString(), weightDTO.getValue() == null, heightDTO.toString(), heightDTO.getValue() == null);</span>
+        }
+<span class="nc" id="L504">        return null;</span>
+    }
+
+    public UUID saveMeasurement(EHRRequestContext requestContext, MeasurementDTO dto, long patientUserId) {
+        try {
+<span class="fc" id="L509">            return ehrMeasurementManager.saveMeasurement(requestContext, dto, patientUserId);</span>
+<span class="nc" id="L510">        } catch (Exception e) {</span>
+<span class="nc" id="L511">            throw new PKBException(&quot;failed saving measurement for &quot; + patientUserId, e);</span>
+        }
+    }
+
+    public void saveMeasurements(EHRRequestContext requestContext, List&lt;MeasurementDTO&gt; measurementDTOs, long patientUserId) {
+        try {
+<span class="fc" id="L517">            ehrMeasurementManager.saveMeasurements(requestContext, measurementDTOs, patientUserId);</span>
+
+<span class="fc" id="L519">            testLoggingService.obtainLogger(LOGGER).info(&quot;just saved measurements {}&quot;, measurementDTOs);</span>
+
+<span class="nc" id="L521">        } catch (Exception e) {</span>
+<span class="nc" id="L522">            throw new PKBException(&quot;failed saving measurements for &quot; + patientUserId, e);</span>
+<span class="fc" id="L523">        }</span>
+<span class="fc" id="L524">    }</span>
+
+    public List&lt;MeasurementDTO&gt; getMeasurements(@NotNull LoggedInEHRRequestContext requestContext, long userId,
+                                                List&lt;PredefinedMeasurementType&gt; measurementTypes, DateFilterDTO dateFilterOrNull) {
+        try {
+            // don't send in cached private map (this is only called for
+            // exporting plans, by the coord, so there's no cache)
+            // updating the map is handled in the bean
+<span class="fc" id="L532">            Long accountId = userManager.getDefaultAccountId(userId);</span>
+<span class="fc" id="L533">            syncMeasurementsUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L534">            return ehrMeasurementManager.getMeasurements(requestContext, measurementTypes.stream().map(PredefinedMeasurementType::id).collect(toList()),</span>
+                    dateFilterOrNull, userId, null);
+<span class="nc" id="L536">        } catch (Exception e) {</span>
+<span class="nc" id="L537">            throw new PKBException(&quot;Exception while getting latest measurements for user &quot; + userId, e);</span>
+        }
+    }
+
+    public Map&lt;MeasurementTypeId, MeasurementDTO&gt; getLatestMeasurements(@NotNull LoggedInEHRRequestContext requestContext, long userId,
+                                                                        List&lt;PredefinedMeasurementType&gt; measurementTypeIds) {
+        try {
+<span class="fc" id="L544">            Long accountId = userManager.getDefaultAccountId(userId);</span>
+<span class="fc" id="L545">            syncMeasurementsUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L546">            return ehrMeasurementManager.getSingleLatestMeasurementForTypes(requestContext, userId, measurementTypeIds);</span>
+<span class="nc" id="L547">        } catch (Exception e) {</span>
+<span class="nc" id="L548">            throw new RuntimeException(&quot;Exception while getting latest measurements for user &quot; + userId, e);</span>
+        }
+    }
+
+    public Map&lt;MeasurementTypeId, MeasurementDTO&gt; getLatestMeasurements(@NotNull LoggedInEHRRequestContext requestContext, long userId,
+                                                                        List&lt;PredefinedMeasurementType&gt; measurementTypeIds, PKBPerson loggedInPerson) {
+        try {
+            // don't send in cached private map (this is only called for
+            // exporting plans, by the coord, so there's no cache)
+            // updating the map is handled in the bean
+<span class="fc" id="L558">            Long accountId = userManager.getDefaultAccountId(userId);</span>
+<span class="fc" id="L559">            syncMeasurementsUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L560">            Map&lt;MeasurementTypeId, MeasurementDTO&gt; latest = ehrMeasurementManager.getSingleLatestMeasurementForTypes(requestContext, userId, measurementTypeIds);</span>
+
+<span class="fc" id="L562">            MeasurementDTO weightDTO = latest.get(WEIGHT.getType().id());</span>
+<span class="fc" id="L563">            MeasurementDTO heightDTO = latest.get(HEIGHT.getType().id());</span>
+
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">            if (measurementTypeIds.contains(BMI.getType().id())) {</span>
+<span class="nc bnc" id="L566" title="All 2 branches missed.">                if (weightDTO != null) {</span>
+<span class="nc" id="L567">                    Instant bmiDate = weightDTO.getMeasureDate();</span>
+<span class="nc bnc" id="L568" title="All 2 branches missed.">                    if (heightDTO != null) {</span>
+<span class="nc bnc" id="L569" title="All 2 branches missed.">                        if (heightDTO.getMeasureDate().isAfter(bmiDate)) {</span>
+<span class="nc" id="L570">                            bmiDate = heightDTO.getMeasureDate();</span>
+                        }
+
+<span class="nc" id="L573">                        MeasurementDTO bmiDTO = buildBMI(bmiDate, weightDTO, heightDTO, loggedInPerson);</span>
+<span class="nc" id="L574">                        latest.put(BMI.getType().id(), bmiDTO);</span>
+                    }
+                }
+            }
+
+<span class="fc" id="L579">            return latest;</span>
+<span class="nc" id="L580">        } catch (Exception e) {</span>
+<span class="nc" id="L581">            throw new PKBException(&quot;Exception while getting latest measurements for user &quot; + userId, e);</span>
+        }
+    }
+
+    public List&lt;MeasurementHistoryDTO&gt; getLatestMeasurements(@NotNull LoggedInEHRRequestContext requestContext,
+                                                             long userId,
+                                                             int maxNumberPerMeasurementType,
+                                                             PKBPerson loggedInPerson) {
+<span class="fc" id="L589">        StopWatch sw = new CommonsLogStopWatch();</span>
+        try {
+<span class="fc" id="L591">            Long accountId = userManager.getDefaultAccountId(userId);</span>
+<span class="fc" id="L592">            syncMeasurementsUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L593">            sw.lap(&quot;getLatestMeasurements.getRemoteBeanAndSync&quot;);</span>
+
+<span class="fc" id="L595">            List&lt;MeasurementHistoryDTO&gt; historyList = ehrMeasurementManager.getLatestMeasurements(requestContext, userId, maxNumberPerMeasurementType).stream()</span>
+<span class="fc" id="L596">                    .flatMap(dto -&gt; hideOutdatedCumulativeData(dto.getMeasurementList(), userId).toJavaStream())</span>
+<span class="fc" id="L597">                    .collect(toList());</span>
+<span class="fc" id="L598">            sw.lap(&quot;getLatestMeasurements.getLatestMeasurements&quot;);</span>
+
+            // Sort on ascending measurement type ids to display in the same
+            // order as before
+<span class="fc" id="L602">            historyList.sort(comparing(o -&gt; o.getMeasurementType().id()));</span>
+<span class="fc" id="L603">            MeasurementHistoryDTO weightHistory = null, heightHistory = null;</span>
+<span class="fc bfc" id="L604" title="All 2 branches covered.">            for (MeasurementHistoryDTO history : historyList) {</span>
+<span class="fc bfc" id="L605" title="All 2 branches covered.">                if (history.getMeasurementType().is(WEIGHT)) {</span>
+<span class="fc" id="L606">                    weightHistory = history;</span>
+<span class="fc bfc" id="L607" title="All 2 branches covered.">                } else if (history.getMeasurementType().is(HEIGHT)) {</span>
+<span class="fc" id="L608">                    heightHistory = history;</span>
+                }
+
+                // Sort the measurements by descending measure dates ; latest is
+                // supposed to be last in the list as per MeasurementHistoryDTO
+<span class="fc" id="L613">                history.getMeasurementList().sort(comparing(MeasurementDTO::getMeasureDate));</span>
+
+<span class="fc" id="L615">            }</span>
+<span class="fc" id="L616">            sw.lap(&quot;getLatestMeasurements.categoriseHistory&quot;);</span>
+
+<span class="fc bfc" id="L618" title="All 4 branches covered.">            if (weightHistory != null &amp;&amp; heightHistory != null) {</span>
+<span class="fc" id="L619">                calculateBMIHistory(Some(weightHistory), Some(heightHistory), loggedInPerson)</span>
+<span class="fc" id="L620">                        .toJavaOptional()</span>
+<span class="fc" id="L621">                        .ifPresent(bmiHist -&gt; historyList.add(0, bmiHist));</span>
+            }
+<span class="fc" id="L623">            sw.stop(&quot;getLatestMeasurements.calculateBMIHistory&quot;);</span>
+
+<span class="fc" id="L625">            var historyListWithCompoundHistories = recogniseAndMoveLegsOfCompoundMeasurementsIntoMultiValuedMeasurementHistories(historyList);</span>
+<span class="fc" id="L626">            return historyListWithCompoundHistories;</span>
+<span class="nc" id="L627">        } catch (Exception e) {</span>
+<span class="nc" id="L628">            throw new PKBException(&quot;Exception while getting latest &quot; + maxNumberPerMeasurementType</span>
+                    + &quot; measurements for user &quot; + userId, e);
+        }
+    }
+
+    public UUID updateMeasurement(long patientId, MeasurementDTO measurementDTO, EHRRequestContext requestContext) {
+<span class="fc" id="L634">        return ehrMeasurementManager.updateMeasurement(patientId, measurementDTO, requestContext);</span>
+    }
+
+    public void deleteMeasurements(List&lt;Long&gt; measurementIdsToDelete, LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L638">        ehrMeasurementManager.deleteMeasurementsById(requestContext, measurementIdsToDelete);</span>
+<span class="fc" id="L639">    }</span>
+
+    public boolean deleteMeasurementByUniqueId(LoggedInEHRRequestContext requestContext, long patientId, UUID uniqueId) {
+<span class="fc" id="L642">        return ehrMeasurementManager.deleteMeasurementByUniqueId(requestContext, patientId, uniqueId);</span>
+    }
+
+    private void syncMeasurementsUploadedData(@NotNull LoggedInEHRRequestContext requestContext, Long accountId)
+            throws Exception {
+<span class="fc" id="L647">        syncMeasurementsUploadedData(requestContext, userManager.getAccountOwner(accountId));</span>
+<span class="fc" id="L648">    }</span>
+
+    private void syncMeasurementsUploadedData(@NotNull LoggedInEHRRequestContext requestContext, PKBPerson patient) {
+<span class="fc" id="L651">        uploadedDataService.synchUploadedData(</span>
+<span class="fc" id="L652">                loggedInUploadedDataProcessingContext()</span>
+<span class="fc" id="L653">                        .requestContext(requestContext.withPiggyback(true))</span>
+<span class="fc" id="L654">                        .patientId(patient.getId())</span>
+<span class="fc" id="L655">                        .destination(Destination.MEASUREMENT)</span>
+<span class="fc" id="L656">                        .build());</span>
+
+<span class="fc" id="L658">        uploadedDataService.synchUploadedData(</span>
+<span class="fc" id="L659">                loggedInUploadedDataProcessingContext()</span>
+<span class="fc" id="L660">                        .requestContext(requestContext.withPiggyback(true))</span>
+<span class="fc" id="L661">                        .patientId(patient.getId())</span>
+<span class="fc" id="L662">                        .destination(Destination.DEVICE_MEASUREMENTS)</span>
+<span class="fc" id="L663">                        .build());</span>
+<span class="fc" id="L664">    }</span>
+
+
+    /**
+     * Routine and certain fitness measurements from core devices come from Validic in one entry per day format.
+     * Multiple data requests to Validic can result duplicated measurements for the same day with different values.
+     * Only the latest measurement is the correct one for a given day.
+     */
+    @VisibleForTesting
+    List&lt;MeasurementDTO&gt; removeOutdatedDeviceData(List&lt;MeasurementDTO&gt; measurements) {
+<span class="fc" id="L674">        var nonCumulativeDeviceData = measurements.stream()</span>
+<span class="fc bfc" id="L675" title="All 2 branches covered.">                .filter(measurement -&gt; !measurement.isDailyCumulativeDeviceData());</span>
+<span class="fc" id="L676">        var cumulativeDeviceData = measurements.stream()</span>
+<span class="fc" id="L677">                .filter(MeasurementDTO::isDailyCumulativeDeviceData)</span>
+<span class="fc" id="L678">                .collect(groupingBy(this::getMeasureDate, maxBy(comparingLong(MeasurementDTO::getId))))</span>
+<span class="fc" id="L679">                .values().stream().map(Optional::get);</span>
+
+<span class="fc" id="L681">        return concat(nonCumulativeDeviceData, cumulativeDeviceData)</span>
+<span class="fc" id="L682">                .sorted(comparing(MeasurementDTO::getId))</span>
+<span class="fc" id="L683">                .collect(toList());</span>
+    }
+
+    private Option&lt;MeasurementHistoryDTO&gt; hideOutdatedCumulativeData(List&lt;MeasurementDTO&gt; measurements, long patientId) {
+<span class="fc bfc" id="L687" title="All 2 branches covered.">        if (measurements.isEmpty()) {</span>
+<span class="fc" id="L688">            return None();</span>
+        } else {
+<span class="fc" id="L690">            Set&lt;MeasurementType&gt; measurementTypeSet = measurements.stream().map(MeasurementDTO::getMeasurementType).collect(toSet());</span>
+<span class="pc bpc" id="L691" title="1 of 2 branches missed.">            if (measurementTypeSet.size() &gt; 1) {</span>
+<span class="nc" id="L692">                throw new IllegalStateException(&quot;Attempted creation of MeasurementHistoryDTO from measurements w/ multiple types, patientId&quot; +</span>
+<span class="nc" id="L693">                        patientId + &quot; typeIds &quot; + measurementTypeSet.stream().map(mt -&gt; mt.id().toString()).collect(joining(&quot;, &quot;)));</span>
+            }
+<span class="fc" id="L695">            MeasurementType measurementType = measurementTypeSet.iterator().next();</span>
+<span class="fc" id="L696">            var cleanedMeasurements = removeOutdatedDeviceData(measurements);</span>
+<span class="fc" id="L697">            var history = new MeasurementHistoryDTO();</span>
+<span class="fc" id="L698">            history.setMeasurementType(measurementType);</span>
+<span class="fc" id="L699">            history.setMeasurementList(cleanedMeasurements);</span>
+<span class="fc" id="L700">            history.setHiddenMeasurementList((ArrayList) subtract(measurements, cleanedMeasurements));</span>
+
+<span class="fc" id="L702">            var hiddenMeasurements = history.getHiddenMeasurementList();</span>
+<span class="fc bfc" id="L703" title="All 2 branches covered.">            if (!hiddenMeasurements.isEmpty()) {</span>
+<span class="fc" id="L704">                LOGGER.info(&quot;Hiding {} device measurements for patient {}.&quot;, hiddenMeasurements.size(), patientId);</span>
+            }
+
+<span class="fc" id="L707">            return Some(history);</span>
+        }
+    }
+
+    private LocalDate getMeasureDate(MeasurementDTO measurement) {
+<span class="fc" id="L712">        return ofInstant(measurement.getMeasureDate(), DEVICE_RECORD_TIMEZONE);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

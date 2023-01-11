@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisAppointmentManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.emis.appointment.service</a> &gt; <span class="el_source">EmisAppointmentManager.java</span></div><h1>EmisAppointmentManager.java</h1><pre class="source lang-java linenums">package com.pkb.emis.appointment.service;
+
+import com.google.common.collect.ImmutableList;
+import com.pkb.repository.util.EmisContextHolder;
+import com.pkb.emis.appointment.model.EmisAvailableAppointmentSlots;
+import com.pkb.emis.appointment.model.ImmutableAvailableAppointmentSlot;
+import com.pkb.emis.appointment.model.ImmutableEmisAvailableAppointmentSlots;
+import com.pkb.integrations.emis.model.EmisAppointment;
+import com.pkb.integrations.emis.model.EmisAppointmentSession;
+import com.pkb.integrations.emis.model.EmisAppointmentSessionWithSlots;
+import com.pkb.integrations.emis.model.EmisAppointmentSlot;
+import com.pkb.integrations.emis.model.EmisClinician;
+import com.pkb.integrations.emis.model.restcalls.EmisAccountLinkRequest;
+import com.pkb.integrations.emis.model.restcalls.EmisAccountLinkResponse;
+import com.pkb.integrations.emis.model.restcalls.EmisAppointmentCancelRequest;
+import com.pkb.integrations.emis.model.restcalls.EmisAppointmentCancelResponse;
+import com.pkb.integrations.emis.model.restcalls.EmisAppointmentCreateRequest;
+import com.pkb.integrations.emis.model.restcalls.EmisAppointmentCreateResponse;
+import com.pkb.integrations.emis.model.restcalls.EmisAppointmentSlotsMetaResponse;
+import com.pkb.integrations.emis.model.restcalls.EmisAppointmentSlotsResponse;
+import com.pkb.integrations.emis.model.restcalls.EmisPracticeSettingsResponse;
+import com.pkb.integrations.emis.model.restcalls.ImmutableEmisAppointmentSlotsMetaRequest;
+import com.pkb.integrations.emis.model.restcalls.ImmutableEmisAppointmentSlotsRequest;
+import com.pkb.integrations.emis.model.restcalls.ImmutableEmisAppointmentsRequest;
+import com.pkb.integrations.emis.model.restcalls.ImmutableEmisPracticeSettingsRequest;
+import com.pkb.util.Constants;
+import io.vavr.Tuple;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import static com.pkb.emis.appointment.service.ErrorCode.ACCOUNT_ALREADY_LINKED;
+import static com.pkb.emis.appointment.service.ErrorCode.APPOINTMENT_COULD_NOT_BE_CANCELLED;
+import static com.pkb.emis.appointment.service.ErrorCode.APPOINTMENT_NOT_FOUND;
+import static com.pkb.emis.appointment.service.ErrorCode.APPOINTMENT_NO_LONGER_AVAILABLE;
+import static com.pkb.emis.appointment.service.ErrorCode.APPOINTMENT_SLOT_IN_PAST;
+import static com.pkb.emis.appointment.service.ErrorCode.DEMOGRAPHICS_DO_NOT_MATCH;
+import static com.pkb.emis.appointment.service.ErrorCode.EXPIRED_LINKAGE_DETAILS;
+import static com.pkb.emis.appointment.service.ErrorCode.INTERNAL_ERROR_DURING_BOOKING;
+import static com.pkb.emis.appointment.service.ErrorCode.INTERNAL_ERROR_DURING_CANCEL;
+import static com.pkb.emis.appointment.service.ErrorCode.INTERNAL_ERROR_DURING_LINKAGE;
+import static com.pkb.emis.appointment.service.ErrorCode.INTERNAL_ERROR_DURING_RETRIEVE;
+import static com.pkb.emis.appointment.service.ErrorCode.INTERNAL_ERROR_DURING_SLOTS_REQUEST;
+import static com.pkb.emis.appointment.service.ErrorCode.INVALID_LINKAGE_DETAILS_LINKAGE_KEY;
+import static com.pkb.emis.appointment.service.ErrorCode.INVALID_LINKAGE_DETAILS_ODS_CODE;
+import static com.pkb.emis.appointment.service.ErrorCode.INVALID_LINKAGE_DETAIL_ACCOUNT_ID;
+import static com.pkb.emis.appointment.service.ErrorCode.INVALID_LINKAGE_KEY;
+import static com.pkb.emis.appointment.service.ErrorCode.NO_REGISTERED_ONLINE_USER_FOUND;
+import static com.pkb.emis.appointment.service.ErrorCode.REACHED_MAX_BOOKING_COUNT;
+import static com.pkb.emis.appointment.service.ErrorCode.REACHED_UNVERIFIED_USER_MAX_BOOKING_COUNT;
+
+public class EmisAppointmentManager {
+
+<span class="fc" id="L60">    private static final ImmutableList&lt;ErrorCode&gt; APPOINTMENTS_ERROR_CODES = ImmutableList.of(INTERNAL_ERROR_DURING_RETRIEVE);</span>
+
+    private final SessionManagingEmisApiClient sessionManagingEmisApiClient;
+
+<span class="fc" id="L64">    public EmisAppointmentManager(SessionManagingEmisApiClient sessionManagingEmisApiClient) {</span>
+<span class="fc" id="L65">        this.sessionManagingEmisApiClient = sessionManagingEmisApiClient;</span>
+<span class="fc" id="L66">    }</span>
+
+    public Either&lt;ErrorCode, ImmutableList&lt;EmisAppointment&gt;&gt; retrieveAppointments(EmisContextHolder emisContextHolder, ZonedDateTime fromDate, ZonedDateTime toDate) {
+<span class="fc" id="L69">        ImmutableEmisAppointmentsRequest request = ImmutableEmisAppointmentsRequest.builder()</span>
+<span class="fc" id="L70">                .fetchPreviousAppointments(true)</span>
+<span class="fc" id="L71">                .build();</span>
+
+<span class="fc" id="L73">        return sessionManagingEmisApiClient.makeCallWithRetryInSession(emisContextHolder, request, APPOINTMENTS_ERROR_CODES)</span>
+<span class="fc" id="L74">                .map(result -&gt; {</span>
+<span class="pc bpc" id="L75" title="1 of 2 branches missed.">                    if (toDate != null) {</span>
+<span class="nc" id="L76">                        LocalDate startOfPreviousMonth = fromDate.minusMonths(1).withDayOfMonth(1).withHour(1).toLocalDate(); // 1:00am 1st of month</span>
+<span class="nc" id="L77">                        LocalDate toDateLocal = toDate.toLocalDate();</span>
+<span class="nc" id="L78">                        return result.getAppointments().stream()</span>
+<span class="nc" id="L79">                                .filter(ea -&gt; appointmentBetweenDates(ea, startOfPreviousMonth, toDateLocal))</span>
+<span class="nc" id="L80">                                .collect(ImmutableList.toImmutableList());</span>
+                    } else {
+<span class="fc" id="L82">                        return result.getAppointments();</span>
+                    }
+                });
+    }
+
+    private boolean appointmentBetweenDates(EmisAppointment emisAppointment, LocalDate startOfPreviousMonth, LocalDate toDateLocal) {
+<span class="nc" id="L88">        LocalDate appointmentStart = emisAppointment.getStartTime().toLocalDate();</span>
+<span class="nc bnc" id="L89" title="All 4 branches missed.">        return (appointmentStart.isBefore(toDateLocal) || appointmentStart.isEqual(toDateLocal)) &amp;&amp;</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">                appointmentStart.isAfter(startOfPreviousMonth);</span>
+    }
+
+<span class="fc" id="L93">    private static final ImmutableList&lt;ErrorCode&gt; REGISTRATION_ERROR_CODES = ImmutableList.of(</span>
+            DEMOGRAPHICS_DO_NOT_MATCH,
+            INVALID_LINKAGE_KEY,
+            ACCOUNT_ALREADY_LINKED,
+            INVALID_LINKAGE_DETAIL_ACCOUNT_ID,
+            INVALID_LINKAGE_DETAILS_LINKAGE_KEY,
+            INVALID_LINKAGE_DETAILS_ODS_CODE,
+            EXPIRED_LINKAGE_DETAILS,
+            INTERNAL_ERROR_DURING_LINKAGE,
+            NO_REGISTERED_ONLINE_USER_FOUND);
+
+    public Either&lt;ErrorCode, String&gt; registerForUse(EmisContextHolder emisContextHolder, EmisAccountLinkRequest request) {
+<span class="fc" id="L105">        return sessionManagingEmisApiClient.linkToGPPractice(emisContextHolder, request, REGISTRATION_ERROR_CODES)</span>
+<span class="fc" id="L106">                .map(EmisAccountLinkResponse::getAccessIdentityGuid);</span>
+    }
+
+<span class="fc" id="L109">    private static final ImmutableList&lt;ErrorCode&gt; SLOTS_ERROR_CODES = ImmutableList.of(INTERNAL_ERROR_DURING_SLOTS_REQUEST);</span>
+
+    public Either&lt;ErrorCode, EmisAvailableAppointmentSlots&gt; getAvailableAppointmentSlots(EmisContextHolder emisContextHolder, ZoneId zoneId) {
+<span class="fc" id="L112">        return sessionManagingEmisApiClient.makeCallWithRetryInSession(emisContextHolder, ImmutableEmisAppointmentSlotsRequest.builder().build(), SLOTS_ERROR_CODES)</span>
+<span class="fc" id="L113">                .map(EmisAppointmentSlotsResponse::getSessions)</span>
+<span class="fc" id="L114">                .flatMap(slots -&gt; sessionManagingEmisApiClient.makeCallWithRetryInSession(emisContextHolder, ImmutableEmisAppointmentSlotsMetaRequest.builder().build(), SLOTS_ERROR_CODES)</span>
+<span class="fc" id="L115">                        .map(EmisAppointmentSlotsMetaResponse::getSessions)</span>
+<span class="fc" id="L116">                        .map(sessions -&gt; Tuple.of(slots, sessions)))</span>
+<span class="fc" id="L117">                .map(slotsDetails -&gt; {</span>
+<span class="fc" id="L118">                    ImmutableList&lt;EmisAppointmentSessionWithSlots&gt; emisAppointmentSessionsWithSlots = slotsDetails._1();</span>
+<span class="fc" id="L119">                    ImmutableList&lt;EmisAppointmentSession&gt; emisAppointmentSessions = slotsDetails._2();</span>
+<span class="fc" id="L120">                    List&lt;EmisAvailableAppointmentSlots.AvailableAppointmentSlot&gt; availableAppointmentSlots = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L121">                    emisAppointmentSessionsWithSlots.forEach(easws -&gt; easws.getSlots().forEach(emisAppointmentSlot -&gt; emisAppointmentSessions.forEach(emisAppointmentSession -&gt; {</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">                        if (emisAppointmentSession.getSessionId() == easws.getSessionId()) {</span>
+<span class="fc" id="L123">                            availableAppointmentSlots.add(createAvailableAppointmentSlot(emisAppointmentSlot, emisAppointmentSession, zoneId));</span>
+                        }
+<span class="fc" id="L125">                    })));</span>
+
+<span class="fc" id="L127">                    return ImmutableEmisAvailableAppointmentSlots.builder()</span>
+<span class="fc" id="L128">                            .addAllAvailableAppointmentSlots(availableAppointmentSlots)</span>
+<span class="fc" id="L129">                            .build();</span>
+
+                });
+    }
+
+    private EmisAvailableAppointmentSlots.AvailableAppointmentSlot createAvailableAppointmentSlot(EmisAppointmentSlot emisAppointmentSlot, EmisAppointmentSession emisAppointmentSession, ZoneId zoneId) {
+<span class="fc" id="L135">        return ImmutableAvailableAppointmentSlot.builder()</span>
+<span class="fc" id="L136">                .slotId(emisAppointmentSlot.getSlotId())</span>
+<span class="fc" id="L137">                .sessionId(emisAppointmentSession.getSessionId())</span>
+<span class="fc" id="L138">                .clinician(getCliniciansName(emisAppointmentSession.getClinicians()))</span>
+<span class="fc" id="L139">                .location(emisAppointmentSession.getLocation().getLocationName())</span>
+<span class="fc" id="L140">                .type(emisAppointmentSession.getSessionType().name())</span>
+<span class="fc" id="L141">                .startTime(emisAppointmentSlot.getStartTime().atZone(Constants.APPLICATION_TZ).withZoneSameInstant(zoneId))</span>
+<span class="fc" id="L142">                .endTime(emisAppointmentSlot.getEndTime().atZone(Constants.APPLICATION_TZ).withZoneSameInstant(zoneId))</span>
+<span class="fc" id="L143">                .slotTypeStatus(emisAppointmentSlot.getSlotTypeStatus().name())</span>
+<span class="fc" id="L144">                .slotTypeName(emisAppointmentSlot.getSlotTypeName())</span>
+<span class="fc" id="L145">                .build();</span>
+    }
+
+    @NotNull
+    public Either&lt;ErrorCode, EmisPracticeSettingsResponse&gt; getPracticeSettings(EmisContextHolder emisContextHolder, String practiceCode) {
+<span class="fc" id="L150">        return sessionManagingEmisApiClient.makeCallWithRetryInSession(</span>
+                emisContextHolder,
+<span class="fc" id="L152">                ImmutableEmisPracticeSettingsRequest.builder().practiceCode(practiceCode).build(),</span>
+<span class="fc" id="L153">                ImmutableList.of());</span>
+    }
+
+    @NotNull
+    public Either&lt;ErrorCode, String&gt; getNationalPracticeCode(EmisContextHolder emisContextHolder) {
+<span class="fc" id="L158">        return sessionManagingEmisApiClient.getNationalPracticeCode(emisContextHolder);</span>
+    }
+
+    @NotNull
+    public Either&lt;ErrorCode, SessionData&gt; getSessionInfo(EmisContextHolder emisContextHolder) {
+<span class="fc" id="L163">        return sessionManagingEmisApiClient.getSessionInfo(emisContextHolder);</span>
+    }
+
+    @NotNull
+    public static String getCliniciansName(List&lt;EmisClinician&gt; emisClinicians) {
+<span class="fc" id="L168">        return emisClinicians.stream()</span>
+<span class="fc" id="L169">                .map(emisClinician -&gt; emisClinician.getTitle() + &quot; &quot; + emisClinician.getForenames() + &quot; &quot; + emisClinician.getSurname())</span>
+<span class="fc" id="L170">                .collect(Collectors.joining(&quot;, &quot;));</span>
+    }
+
+<span class="fc" id="L173">    private static final ImmutableList&lt;ErrorCode&gt; APPOINTMENT_BOOKING_ERRORS = ImmutableList.of(</span>
+            REACHED_MAX_BOOKING_COUNT,
+            APPOINTMENT_SLOT_IN_PAST,
+            REACHED_UNVERIFIED_USER_MAX_BOOKING_COUNT,
+            APPOINTMENT_NO_LONGER_AVAILABLE,
+            APPOINTMENT_NOT_FOUND,
+            INTERNAL_ERROR_DURING_BOOKING);
+
+    @NotNull
+    public Either&lt;ErrorCode, Boolean&gt; bookAnAppointment(EmisContextHolder emisContextHolder, EmisAppointmentCreateRequest appointmentCreateData) {
+<span class="fc" id="L183">        return sessionManagingEmisApiClient.makeCallWithRetryInSession(emisContextHolder, appointmentCreateData, APPOINTMENT_BOOKING_ERRORS)</span>
+<span class="fc" id="L184">                .map(EmisAppointmentCreateResponse::bookingCreated);</span>
+    }
+
+<span class="fc" id="L187">    private static final ImmutableList&lt;ErrorCode&gt; APPOINTMENT_CANCELATION_ERRORS = ImmutableList.of(</span>
+            APPOINTMENT_COULD_NOT_BE_CANCELLED,
+            APPOINTMENT_NOT_FOUND,
+            INTERNAL_ERROR_DURING_CANCEL);
+
+    @NotNull
+    public Either&lt;ErrorCode, Boolean&gt; cancelAnAppointment(EmisContextHolder emisContextHolder, EmisAppointmentCancelRequest request) {
+<span class="fc" id="L194">        return sessionManagingEmisApiClient.makeCallWithRetryInSession(emisContextHolder, request, APPOINTMENT_CANCELATION_ERRORS)</span>
+<span class="fc" id="L195">                .map(EmisAppointmentCancelResponse::isCancelled);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

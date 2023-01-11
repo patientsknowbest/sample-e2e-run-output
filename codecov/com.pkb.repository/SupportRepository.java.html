@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SupportRepository.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.repository</a> &gt; <span class="el_source">SupportRepository.java</span></div><h1>SupportRepository.java</h1><pre class="source lang-java linenums">package com.pkb.repository;
+
+import com.pkb.phoenix.shared.structures.request.EmailDeletionTaskRequest;
+import com.pkb.phoenix.shared.structures.request.MessageDeletionRequestBatch;
+import com.pkb.phoenix.shared.structures.response.ImmutableMessageDeletionOutcome;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.SqlParameter;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.simple.SimpleJdbcCall;
+import org.springframework.jdbc.core.simple.SimpleJdbcCallOperations;
+import org.springframework.util.LinkedCaseInsensitiveMap;
+
+import java.util.ArrayList;
+import java.util.Optional;
+import java.util.stream.Stream;
+
+import static com.pkb.phoenix.shared.structures.response.MessageDeletionTaskResponse.MessageDeletionOutcome;
+import static java.sql.Types.ARRAY;
+import static java.sql.Types.BIGINT;
+import static java.sql.Types.VARCHAR;
+
+/**
+ * We have stored procedures for all task types implemented in Phoenix.
+ * In this class, we call the stored procedure and handle the results, which perform operations on the database
+ * for the given task.
+ *
+ * @param jdbcTemplate
+ */
+public class SupportRepository {
+
+    private static final String SCHEMA_PUBLIC = &quot;public&quot;;
+<span class="fc" id="L32">    private static final Integer TABLE_ALREADY_EXISTS = 3;</span>
+
+    private final SimpleJdbcCallOperations getMessageDeletion;
+    private final SimpleJdbcCallOperations getEmailDeletion;
+    private final JdbcTemplate jdbcTemplate;
+    private final SupportTempBackupTableRepository supportTempBackupTableRepository;
+
+<span class="fc" id="L39">    public SupportRepository(JdbcTemplate jdbcTemplate, SupportTempBackupTableRepository supportTempBackupTableRepository) {</span>
+<span class="fc" id="L40">        this.getMessageDeletion = createMessageDeletion(jdbcTemplate);</span>
+<span class="fc" id="L41">        this.getEmailDeletion = createEmailDeletion(jdbcTemplate);</span>
+<span class="fc" id="L42">        this.jdbcTemplate = jdbcTemplate;</span>
+<span class="fc" id="L43">        this.supportTempBackupTableRepository = supportTempBackupTableRepository;</span>
+
+<span class="fc" id="L45">    }</span>
+
+    public Stream&lt;MessageDeletionOutcome&gt; messageDeletion(String[] teamCodes, MessageDeletionRequestBatch deletion) {
+<span class="fc" id="L48">        return getMessageDeletion.execute(new MapSqlParameterSource(&quot;freshdeskId&quot;, deletion.freshDeskId())</span>
+<span class="fc" id="L49">                .addValue(&quot;messageIds&quot;, deletion.messageIds().toArray(String[]::new))</span>
+<span class="fc" id="L50">                .addValue(&quot;teamCodes&quot;, teamCodes))</span>
+<span class="fc" id="L51">                .values().stream()</span>
+<span class="fc" id="L52">                .flatMap(o -&gt; ((ArrayList) o).stream())</span>
+<span class="fc" id="L53">                .map(o -&gt; {</span>
+<span class="fc" id="L54">                    var valuesMap = (LinkedCaseInsensitiveMap) o;</span>
+<span class="fc" id="L55">                    return new ImmutableMessageDeletionOutcome.Builder()</span>
+<span class="fc" id="L56">                            .freshdeskId(deletion.freshDeskId())</span>
+<span class="fc" id="L57">                            .uniqueId(String.valueOf(valuesMap.get(&quot;message_unique_id&quot;)))</span>
+<span class="fc" id="L58">                            .message((String) Optional.ofNullable(valuesMap.get(&quot;error&quot;)).orElse(&quot;&quot;))</span>
+<span class="fc" id="L59">                            .patientRead((Boolean) Optional.ofNullable(valuesMap.get(&quot;read_by_patient&quot;)).orElse(false))</span>
+<span class="fc" id="L60">                            .carersRead((Integer) Optional.ofNullable(valuesMap.get(&quot;read_by_carer&quot;)).orElse(0))</span>
+<span class="fc" id="L61">                            .prosRead((Integer) Optional.ofNullable(valuesMap.get(&quot;read_by_non_team_prof&quot;)).orElse(0))</span>
+<span class="fc" id="L62">                            .outcome(String.valueOf(valuesMap.get(&quot;status&quot;)))</span>
+<span class="fc" id="L63">                            .build();</span>
+                });
+    }
+
+    public Optional&lt;Integer&gt; emailDeletion(EmailDeletionTaskRequest task) {
+
+<span class="fc" id="L69">        String backupTableNumber = task.freshDeskId();</span>
+
+        // Check if backup table already exists for this ticket
+<span class="fc bfc" id="L72" title="All 2 branches covered.">        if (supportTempBackupTableRepository.isTableExists(backupTableNumber)) {</span>
+            //If so then an we need to inform the user.
+<span class="fc" id="L74">            return Optional.of(TABLE_ALREADY_EXISTS);</span>
+        }
+
+<span class="fc" id="L77">        return getEmailDeletion.execute(new MapSqlParameterSource(&quot;text&quot;, backupTableNumber)</span>
+<span class="fc" id="L78">                .addValue(&quot;person_id&quot;, task.privateId())</span>
+<span class="fc" id="L79">                .addValue(&quot;email&quot;, task.email())</span>
+<span class="fc" id="L80">                .addValue(&quot;deregistereddate&quot;, task.date()))</span>
+<span class="fc" id="L81">                .values()</span>
+<span class="fc" id="L82">                .stream()</span>
+<span class="fc" id="L83">                .flatMap(o -&gt; ((ArrayList) o).stream())</span>
+<span class="fc" id="L84">                .map(o -&gt; {</span>
+<span class="fc" id="L85">                    var valuesMap = (LinkedCaseInsensitiveMap) o;</span>
+<span class="fc" id="L86">                    return valuesMap.get(&quot;result&quot;);</span>
+                })
+<span class="fc" id="L88">                .findFirst();</span>
+    }
+
+    private SimpleJdbcCallOperations createMessageDeletion(JdbcTemplate jdbcTemplate) {
+<span class="fc" id="L92">        return new SimpleJdbcCall(jdbcTemplate)</span>
+<span class="fc" id="L93">                .withSchemaName(SCHEMA_PUBLIC)</span>
+<span class="fc" id="L94">                .withFunctionName(&quot;f_delete_messages&quot;)</span>
+<span class="fc" id="L95">                .declareParameters(</span>
+                        new SqlParameter(&quot;freshdeskId&quot;, VARCHAR),
+                        new SqlParameter(&quot;messageIds&quot;, ARRAY),
+                        new SqlParameter(&quot;teamCodes&quot;, ARRAY))
+<span class="fc" id="L99">                .withoutProcedureColumnMetaDataAccess();</span>
+    }
+
+    private SimpleJdbcCallOperations createEmailDeletion(JdbcTemplate jdbcTemplate) {
+<span class="fc" id="L103">        return new SimpleJdbcCall(jdbcTemplate)</span>
+<span class="fc" id="L104">                .withSchemaName(SCHEMA_PUBLIC)</span>
+<span class="fc" id="L105">                .withFunctionName(&quot;f_deregister_patient&quot;)</span>
+<span class="fc" id="L106">                .declareParameters(</span>
+                        new SqlParameter(&quot;text&quot;, VARCHAR),
+                        new SqlParameter(&quot;person_id&quot;, BIGINT),
+                        new SqlParameter(&quot;email&quot;, VARCHAR),
+                        new SqlParameter(&quot;deregistereddate&quot;, VARCHAR))
+<span class="fc" id="L111">                .withoutProcedureColumnMetaDataAccess();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,316 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TreatmentPlanApiHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.util</a> &gt; <span class="el_source">TreatmentPlanApiHelper.java</span></div><h1>TreatmentPlanApiHelper.java</h1><pre class="source lang-java linenums">package com.pkb.api.util;
+
+import com.google.common.collect.ArrayTable;
+import com.google.common.collect.ImmutableTable;
+import com.google.common.collect.Sets;
+import com.google.common.collect.Table;
+import com.pkb.api.error.ApiAuthError;
+import com.pkb.api.error.ApiValidationError;
+import com.pkb.api.v1.model.ApiAttachment;
+import com.pkb.api.v1.model.ApiMetric;
+import com.pkb.api.v1.model.ApiTreatmentPlan;
+import com.pkb.api.v1.model.ApiTreatmentPlan.Field;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.plantemplate.PHPlanTemplate;
+import com.pkb.entities.enums.TemplateStatus;
+import com.pkb.institute.entity.Team;
+import com.pkb.model.RecordWithId;
+import com.pkb.phplan.entity.PHPlan;
+import com.pkb.phplan.entity.PHPlan.ApprovalStatus;
+import com.pkb.phplan.entity.PHPlan.EditableStatus;
+import com.pkb.phplan.entity.PHPlan.PlanStatus;
+import com.pkb.phplan.entity.PHPlanAttachment;
+import com.pkb.phplan.entity.PHPlanTemplate.TemplateFieldLabel;
+import com.pkb.phplan.entity.PlanField;
+import com.pkb.phplan.entity.TemplateMetric;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.phplan.PlanManager;
+import com.pkb.service.phplan.PlanTemplateManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.test.LoincManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.symptom.entity.Symptom;
+import com.pkb.test.entity.LoincTest;
+import com.pkb.test.entity.MeasurementType;
+import com.pkb.test.entity.PredefinedMeasurementType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.DateUtil;
+import com.pkb.util.LocalizedTextProvider;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.phplan.entity.TemplateMetric.MetricType.LAB_TEST;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+public class TreatmentPlanApiHelper extends ApiHelper {
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L67">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final PlanManager planManager;
+    private final PatientConsentManager patientConsentManager;
+    private final PlanTemplateManager planTemplateManager;
+    private final TeamUserManager teamUserManager;
+    private final UserManager userManager;
+    private final String pathToAttachments;
+    private final DateTimeService dateTimeService;
+    private final DateUtil dateUtil;
+    private LoincManager loincManager;
+
+    public TreatmentPlanApiHelper(PlanManager planManager, PatientConsentManager patientConsentManager,
+                                  PlanTemplateManager planTemplateManager, TeamUserManager teamUserManager,
+                                  UserManager userManager, String pathToAttachments,
+                                  @NotNull DateTimeService dateTimeService, DateUtil dateUtil,
+                                  LoincManager loincManager,
+                                  LocalizedTextProvider localizedTextProvider) {
+<span class="fc" id="L85">        super(localizedTextProvider);</span>
+<span class="fc" id="L86">        this.planManager = planManager;</span>
+<span class="fc" id="L87">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L88">        this.planTemplateManager = planTemplateManager;</span>
+<span class="fc" id="L89">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L90">        this.userManager = userManager;</span>
+<span class="fc" id="L91">        this.pathToAttachments = pathToAttachments;</span>
+<span class="fc" id="L92">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L93">        this.dateUtil = dateUtil;</span>
+<span class="fc" id="L94">        this.loincManager = loincManager;</span>
+<span class="fc" id="L95">    }</span>
+
+    public List&lt;ApiTreatmentPlan&gt; getPlanForPatient(@NotNull LoggedInEHRRequestContext requestContext, long patientId, PKBPerson currentUser) {
+        // does current user (clinician/carer) have access to patient's account?
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">        if (!patientConsentManager.hasAccessToUser(requestContext, patientId)) {</span>
+<span class="nc" id="L100">            throw new ApiAuthError(&quot;current user &quot; + currentUser.getId() + &quot; does not have&quot; +</span>
+                    &quot; access to patient &quot; + patientId);
+        }
+
+<span class="fc" id="L104">        Long accountId = userManager.getDefaultAccountId(patientId);</span>
+
+        // WARNING: this doesn't populate the plan fields!
+<span class="fc" id="L107">        List&lt;PHPlan&gt; allPlans = planManager.getPHPlans(requestContext, currentUser.getId(), accountId, 0, 0);</span>
+
+<span class="fc" id="L109">        Set&lt;Long&gt; planIds = new HashSet&lt;&gt;(allPlans.size());</span>
+<span class="fc" id="L110">        Set&lt;UUID&gt; planUniqueIds = new HashSet&lt;&gt;(allPlans.size());</span>
+        // only return APPROVED, ACTIVE and INDRAFT plans
+<span class="fc" id="L112">        Set&lt;PlanStatus&gt; requiredPlanStatuses = Sets.immutableEnumSet(PlanStatus.APPROVED, PlanStatus.ACTIVE, PlanStatus.INDRAFT);</span>
+<span class="fc" id="L113">        List&lt;PHPlan&gt; result = allPlans.stream()</span>
+<span class="fc" id="L114">                .filter(plan -&gt; requiredPlanStatuses.contains(plan.getStatus()))</span>
+<span class="fc" id="L115">                .peek(plan -&gt; {</span>
+<span class="fc" id="L116">                    planIds.add(plan.getId());</span>
+<span class="fc" id="L117">                    planUniqueIds.add(plan.getBaseFields().getUniqueId());</span>
+<span class="fc" id="L118">                })</span>
+<span class="fc" id="L119">                .collect(toList());</span>
+
+<span class="fc" id="L121">        var attachmentsByPlanAndAccountId = planManager.getAttachments(planIds, requestContext, Collections.singleton(accountId));</span>
+<span class="fc" id="L122">        var plansForAccountIds = planManager.getPHPlanForAccountId(planUniqueIds, requestContext, Collections.singleton(accountId), false/*includeDeleted*/);</span>
+<span class="fc" id="L123">        Table&lt;UUID, Long, PHPlan&gt; plansByUniqueIdAndAccountId = getTable(plansForAccountIds, planUniqueIds, Collections.singleton(accountId));</span>
+<span class="fc" id="L124">        var labtestIds = plansForAccountIds.stream()</span>
+<span class="fc" id="L125">                .filter(r -&gt; isNotEmpty(r.record().getMetrics()))</span>
+<span class="fc" id="L126">                .flatMap(r -&gt; r.record().getMetrics().stream())</span>
+<span class="fc bfc" id="L127" title="All 2 branches covered.">                .filter(metric -&gt; metric.getMetricType() == LAB_TEST)</span>
+<span class="fc" id="L128">                .map(TemplateMetric::getMetricId)</span>
+<span class="fc" id="L129">                .collect(toSet());</span>
+<span class="fc" id="L130">        Map&lt;Long, LoincTest&gt; loincTests = loincManager.getLoincTestsByIds(labtestIds, Collectors.toMap(LoincTest::getId, identity()));</span>
+
+<span class="fc" id="L132">        return result.stream()</span>
+<span class="fc" id="L133">                .map(plan -&gt; {</span>
+<span class="fc" id="L134">                    PHPlan fullPlan = plansByUniqueIdAndAccountId.get(plan.getBaseFields().getUniqueId(), accountId);</span>
+<span class="fc" id="L135">                    List&lt;PHPlanAttachment&gt; attachments = attachmentsByPlanAndAccountId.get(plan.getId(), accountId);</span>
+<span class="fc" id="L136">                    return convert(fullPlan, attachments, loincTests);</span>
+                })
+<span class="fc" id="L138">                .collect(toList());</span>
+    }
+
+    private Table&lt;UUID, Long, PHPlan&gt; getTable(List&lt;RecordWithId&lt;Long, PHPlan&gt;&gt; plansForAccountIds, Set&lt;UUID&gt; planUniqueIds, Set&lt;Long&gt; accountIds) {
+<span class="pc bpc" id="L142" title="1 of 4 branches missed.">        if (isEmpty(plansForAccountIds) || isEmpty(accountIds)) {</span>
+<span class="fc" id="L143">            return ImmutableTable.of();</span>
+        }
+<span class="fc" id="L145">        Table&lt;UUID, Long, PHPlan&gt; plansByUniqueIdAndAccountId = ArrayTable.create(planUniqueIds, accountIds);</span>
+<span class="fc" id="L146">        plansForAccountIds.forEach(r -&gt; plansByUniqueIdAndAccountId.put(r.record().getBaseFields().getUniqueId(), r.id(), r.record()));</span>
+<span class="fc" id="L147">        return plansByUniqueIdAndAccountId;</span>
+    }
+
+    public UUID createTreatmentPlanForPatient(@NotNull LoggedInEHRRequestContext requestContext, ApiTreatmentPlan treatmentPlan,
+                                              PKBPerson currentUser) {
+<span class="nc" id="L152">        Long patientId = treatmentPlan.getPatientId();</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">        if ((patientId == null)) {</span>
+<span class="nc" id="L154">            throw new ApiValidationError(&quot;Please specify a patient id for the plan&quot;);</span>
+        }
+<span class="nc bnc" id="L156" title="All 2 branches missed.">        if (!patientConsentManager.hasAccessToUser(requestContext, patientId)) {</span>
+<span class="nc" id="L157">            throw new ApiAuthError(&quot;current user &quot; + currentUser.getId()</span>
+                    + &quot; does not have access to patient &quot; + patientId);
+        }
+<span class="nc" id="L160">        PHPlan newPlan = new PHPlan(new SourceDetails(requestContext));</span>
+<span class="nc" id="L161">        newPlan.setName(treatmentPlan.getName());</span>
+
+        // fields
+<span class="nc" id="L164">        int seq = 0;</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">        for (TemplateFieldLabel label : TemplateFieldLabel.values()) {</span>
+<span class="nc" id="L166">            Field sourceField = treatmentPlan.fieldForLabel(label.name());</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">            if (sourceField == null) {</span>
+<span class="nc" id="L168">                throw new ApiValidationError(&quot;Please specify a treatment plan field for &quot; + label);</span>
+            }
+
+<span class="nc" id="L171">            PlanField newField = new PlanField();</span>
+<span class="nc" id="L172">            newField.setLabel(label);</span>
+<span class="nc" id="L173">            newField.setSequence((long) seq);</span>
+<span class="nc bnc" id="L174" title="All 2 branches missed.">            if (sourceField.getText() == null) {</span>
+<span class="nc" id="L175">                throw new ApiValidationError(&quot;Please provide non-null text for the field &quot; + label</span>
+                        + &quot;. This can be an empty string if you do not wish to use the field&quot;);
+            }
+<span class="nc" id="L178">            newField.setText(sourceField.getText());</span>
+
+<span class="nc" id="L180">            newPlan.addField(newField);</span>
+<span class="nc" id="L181">            seq++;</span>
+        }
+
+<span class="nc" id="L184">        Long accountId = userManager.getDefaultAccountId(patientId);</span>
+
+        // set other fields we need that don't come from the DTO
+<span class="nc" id="L187">        Instant now = dateTimeService.now();</span>
+        // need a clinician ID; use current user
+<span class="nc" id="L189">        Long creatorId = currentUser.getId();</span>
+        // need a template id!  get for institute of the clinician
+<span class="nc" id="L191">        Team team = teamUserManager.findPrimaryTeam(requestContext, currentUser.getId()).orElseThrow(() -&gt; new RuntimeException(&quot;No team for current user&quot;));</span>
+<span class="nc" id="L192">        List&lt;PHPlanTemplate&gt; planTemplates = planTemplateManager.getTemplateListByStatus(team.getId(), TemplateStatus.ACTIVE);</span>
+<span class="nc" id="L193">        Long templateId = planTemplates.get(0).getId();</span>
+
+<span class="nc" id="L195">        newPlan.setCreationDate(Date.from(now));</span>
+<span class="nc" id="L196">        newPlan.setLastEditedOn(Date.from(now));</span>
+
+<span class="nc bnc" id="L198" title="All 2 branches missed.">        if (!currentUser.isTeamCoordinator()) {</span>
+            // clinician creator
+<span class="nc" id="L200">            newPlan.setCreatorId(creatorId);</span>
+<span class="nc" id="L201">            newPlan.setLastEditorId(creatorId);</span>
+        }
+
+<span class="nc" id="L204">        newPlan.setStatus(PlanStatus.ACTIVE);</span>
+<span class="nc" id="L205">        newPlan.setTemplateId(templateId);</span>
+<span class="nc" id="L206">        newPlan.getBaseFields().generateNewRandomUniqueId();</span>
+<span class="nc" id="L207">        newPlan.setVersion(0L);</span>
+<span class="nc" id="L208">        newPlan.setApprovalStatus(ApprovalStatus.NULL);</span>
+<span class="nc" id="L209">        newPlan.setEditableStatus(EditableStatus.ALL);</span>
+<span class="nc" id="L210">        newPlan.setDescription(treatmentPlan.getDescription());</span>
+<span class="nc" id="L211">        newPlan.setCreationDate(treatmentPlan.getCreationDate());</span>
+
+<span class="nc" id="L213">        newPlan.setPatientId(patientId);</span>
+
+<span class="nc" id="L215">        Long id = planManager.savePHPlan(requestContext, accountId, newPlan);</span>
+
+        // todo: this is highly inefficient but is a safe temporary fix so iQudos can get the plan unique ID while we wait for /v2/
+        // after /v2/ is released, no-one should need to use this method call:
+<span class="nc" id="L219">        return (planManager.getPHPlanForUserIdAccountIdPlanId(requestContext, currentUser.getId(), accountId, id)).getBaseFields().getUniqueId();</span>
+    }
+
+    private ApiTreatmentPlan convert(PHPlan plan, List&lt;PHPlanAttachment&gt; attachments, Map&lt;Long, LoincTest&gt; loincTests) {
+<span class="pc bpc" id="L223" title="1 of 2 branches missed.">        if (plan == null) {</span>
+<span class="nc" id="L224">            return null;</span>
+        }
+
+<span class="fc" id="L227">        ApiTreatmentPlan atp = new ApiTreatmentPlan();</span>
+<span class="fc" id="L228">        atp.setId(plan.getBaseFields().getUniqueId().toString());</span>
+<span class="fc" id="L229">        atp.setVersion(plan.getVersion());</span>
+<span class="fc" id="L230">        atp.setCreationDate(plan.getCreationDate());</span>
+<span class="fc" id="L231">        atp.setDescription(plan.getDescription());</span>
+
+<span class="fc" id="L233">        atp.setName(plan.getName());</span>
+<span class="fc" id="L234">        atp.setPatientId(plan.getPatientId());</span>
+<span class="fc" id="L235">        atp.setLastEditedOn(plan.getLastEditedOn());</span>
+<span class="fc" id="L236">        atp.setLastEditedOnISO(dateUtil.formatTimestampIso8601(plan.getLastEditedOn()));</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">        for (PlanField pf : plan.getPlanFields()) {</span>
+<span class="fc" id="L238">            atp.addField(pf.getLabel().name(), pf.getText());</span>
+<span class="fc" id="L239">        }</span>
+<span class="fc" id="L240">        List&lt;TemplateMetric&gt; metrics = plan.getMetrics();</span>
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">        if (isNotEmpty(metrics)) {</span>
+<span class="fc" id="L242">            atp.setSymptoms(new ArrayList&lt;&gt;());</span>
+<span class="fc" id="L243">            atp.setMeasurements(new ArrayList&lt;&gt;());</span>
+<span class="fc" id="L244">            atp.setTests(new ArrayList&lt;&gt;());</span>
+
+<span class="fc bfc" id="L246" title="All 2 branches covered.">            for (TemplateMetric templateMetric : metrics) {</span>
+
+<span class="fc" id="L248">                ApiMetric apiMetric = new ApiMetric();</span>
+
+<span class="pc bpc" id="L250" title="1 of 4 branches missed.">                switch (templateMetric.getMetricType()) {</span>
+
+                    case SYMPTOM:
+
+<span class="fc" id="L254">                        Symptom symptom = Symptom.getById(templateMetric.getMetricId());</span>
+<span class="fc" id="L255">                        apiMetric.setId(String.valueOf(symptom.getId()));</span>
+<span class="fc" id="L256">                        apiMetric.setName(symptom.getName());</span>
+<span class="fc" id="L257">                        apiMetric.setApiRef(symptom.getApiRef());</span>
+<span class="fc" id="L258">                        atp.getSymptoms().add(apiMetric);</span>
+<span class="fc" id="L259">                        break;</span>
+
+                    case MEASUREMENT:
+
+<span class="fc" id="L263">                        PredefinedMeasurementType parent = PredefinedMeasurementType.getById(templateMetric.getMetricId());</span>
+<span class="fc" id="L264">                        apiMetric.setId(String.valueOf(parent.id()));</span>
+<span class="fc" id="L265">                        apiMetric.setName(getText(parent.getType().displayName()));</span>
+<span class="fc" id="L266">                        apiMetric.setApiRef(parent.apiRef());</span>
+<span class="fc" id="L267">                        atp.getMeasurements().add(apiMetric);</span>
+<span class="fc bfc" id="L268" title="All 2 branches covered.">                        for (PredefinedMeasurementType child0 : parent.getChildTypes()) {</span>
+<span class="fc" id="L269">                            ApiMetric childApiMetric = new ApiMetric();</span>
+<span class="fc" id="L270">                            MeasurementType child = child0.getType();</span>
+<span class="fc" id="L271">                            childApiMetric.setId(String.valueOf(child.id()));</span>
+<span class="fc" id="L272">                            childApiMetric.setName(getText(child.displayName()));</span>
+<span class="fc" id="L273">                            childApiMetric.setApiRef(child0.apiRef());</span>
+<span class="fc" id="L274">                            atp.getMeasurements().add(childApiMetric);</span>
+<span class="fc" id="L275">                        }</span>
+
+<span class="fc" id="L277">                        break;</span>
+
+                    case LAB_TEST:
+
+<span class="fc" id="L281">                        LoincTest test = loincTests.get(templateMetric.getMetricId());</span>
+<span class="fc" id="L282">                        apiMetric.setId(&quot;&quot; + test.getId());</span>
+<span class="fc" id="L283">                        apiMetric.setApiRef(test.getTestCode());</span>
+<span class="fc" id="L284">                        apiMetric.setName(getText(test.getNameKey()));</span>
+<span class="fc" id="L285">                        atp.getTests().add(apiMetric);</span>
+
+<span class="fc" id="L287">                        break;</span>
+
+                    default:
+                        break;
+                }
+
+<span class="fc" id="L293">            }</span>
+        }
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">        if (attachments != null) {</span>
+<span class="fc" id="L296">            atp.setAttachments(new ArrayList&lt;&gt;());</span>
+<span class="fc bfc" id="L297" title="All 2 branches covered.">            for (PHPlanAttachment attachment : attachments) {</span>
+<span class="fc" id="L298">                ApiAttachment api = new ApiAttachment();</span>
+<span class="fc" id="L299">                api.setId(&quot;&quot; + attachment.getAttachmentId());</span>
+<span class="fc" id="L300">                api.setDescription(attachment.getFilename());</span>
+<span class="fc" id="L301">                api.setLabel(attachment.getLabel());</span>
+<span class="fc" id="L302">                api.setMediaType(attachment.getMediaType());</span>
+<span class="fc" id="L303">                api.setName(attachment.getName());</span>
+<span class="fc" id="L304">                api.setUploadTime(attachment.getUploadTime());</span>
+<span class="fc" id="L305">                atp.getAttachments().add(api);</span>
+
+<span class="fc" id="L307">                api.setContentUrl(pathToAttachments + api.getId());</span>
+
+<span class="fc" id="L309">            }</span>
+        }
+
+<span class="fc" id="L312">        return atp;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,298 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BatchingBatchDataProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.batch.impl</a> &gt; <span class="el_source">BatchingBatchDataProcessor.java</span></div><h1>BatchingBatchDataProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.batch.impl;
+
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Table;
+import com.pkb.common.base.StreamUtils;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.data.UUIDWithMenuDataType;
+import com.pkb.dataupload.emis.esv2.EmisEsProcessedRow;
+import com.pkb.entities.enums.CodingDataType;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.externalid.service.ExternalIdService;
+import com.pkb.institute.entity.Org;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.dataupload.emis.esv2.EmisEsManager;
+import com.pkb.service.dataupload.emis.esv2.EmisEsProcessedRowService;
+import com.pkb.service.dataupload.emis.esv2.EmisEsStatusService;
+import com.pkb.service.dataupload.emis.esv2.EmisOrgHelper;
+import com.pkb.service.dataupload.emis.esv2.batch.BatchDataProcessor;
+import com.pkb.service.dataupload.emis.esv2.batch.EmisProcessorAborter;
+import com.pkb.service.dataupload.emis.esv2.model.BaseEmisEsDomainModel;
+import com.pkb.service.dataupload.emis.esv2.model.PKBPersonInfo;
+import com.pkb.service.dataupload.emis.esv2.sorting.ResultWithId;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Function1;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.collection.HashMap;
+import io.vavr.collection.Map;
+import io.vavr.collection.Set;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Collection;
+import java.util.EnumSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Stream;
+
+import static com.pkb.externalid.entity.ExternalIdScheme.EMIS_SCHEME;
+
+public abstract class BatchingBatchDataProcessor&lt;T extends BaseEmisEsDomainModel&gt; extends BatchDataProcessor&lt;T&gt; {
+
+    private static final String EMIS_DUPLICATE_RECORD_DELETED_NAME = &quot;pkb_phr_integration_emis_csv_duplicate_delete&quot;;
+    private static final String TYPE_TAG = &quot;type&quot;;
+<span class="fc" id="L54">    private static final Counter DUPLICATE_DELETE_COUNTER = Counter.builder(EMIS_DUPLICATE_RECORD_DELETED_NAME)</span>
+<span class="fc" id="L55">            .tag(TYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L56">            .description(&quot;Number of rows deleted due to being duplicated in EMIS CSV (mostly GP changes cause this)&quot;)</span>
+<span class="fc" id="L57">            .register(Metrics.globalRegistry);</span>
+
+    protected final DateTimeService dateTimeService;
+
+    protected final ExternalIdService externalIdService;
+
+    protected final INotificationManager notificationManager;
+
+<span class="fc" id="L65">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L67">    protected static final java.util.Map&lt;CodingDataType, Activity.Action&gt; DELETE_ACTION_MAP = Maps.immutableEnumMap(new ImmutableMap.Builder&lt;CodingDataType, Activity.Action&gt;()</span>
+<span class="fc" id="L68">            .put(CodingDataType.ALLERGY_DISORDER, Activity.Action.DELETED_ALLERGY)</span>
+<span class="fc" id="L69">            .put(CodingDataType.DIAGNOSIS, Activity.Action.DELETED_DIAGNOSIS)</span>
+<span class="fc" id="L70">            .put(CodingDataType.MEDICATION, Activity.Action.DELETED_MEDICATION_RECORD)</span>
+<span class="fc" id="L71">            .build());</span>
+<span class="fc" id="L72">    protected static final java.util.Map&lt;CodingDataType, Activity.Action&gt; UPDATE_ACTION_MAP = Maps.immutableEnumMap(new ImmutableMap.Builder&lt;CodingDataType, Activity.Action&gt;()</span>
+<span class="fc" id="L73">            .put(CodingDataType.ALLERGY_DISORDER, Activity.Action.UPDATED_ALLERGY)</span>
+<span class="fc" id="L74">            .put(CodingDataType.DIAGNOSIS, Activity.Action.UPDATED_DIAGNOSIS)</span>
+<span class="fc" id="L75">            .put(CodingDataType.MEASUREMENT, Activity.Action.UPLOADED_MEASUREMENTS)</span>
+<span class="fc" id="L76">            .build());</span>
+
+<span class="fc" id="L78">    private static final java.util.Map&lt;MenuDataType, CodingDataType&gt; MENU_DATA_TO_CODING_DATA_TYPE = Maps.immutableEnumMap(new ImmutableMap.Builder&lt;MenuDataType, CodingDataType&gt;()</span>
+<span class="fc" id="L79">            .put(MenuDataType.allergy,  CodingDataType.ALLERGY_DISORDER)</span>
+<span class="fc" id="L80">            .put(MenuDataType.diagnosis, CodingDataType.DIAGNOSIS)</span>
+<span class="fc" id="L81">            .put(MenuDataType.measurement, CodingDataType.MEASUREMENT)</span>
+<span class="fc" id="L82">            .put(MenuDataType.medication, CodingDataType.MEDICATION)</span>
+<span class="fc" id="L83">            .build());</span>
+
+<span class="fc" id="L85">    private enum NoCodingDataTypeReason {OBSERVATION_DELTA, UNKNOWN}</span>
+
+    private Either&lt;NoCodingDataTypeReason, CodingDataType&gt; getCodingDataTypeForMenuDataType(MenuDataType menuDataType) {
+<span class="fc bfc" id="L88" title="All 2 branches covered.">        if (menuDataType == MenuDataType.observationDelta) {</span>
+            //Can't be sure which codingDataType an obsevationDelta is for
+<span class="fc" id="L90">            return Either.left(NoCodingDataTypeReason.OBSERVATION_DELTA);</span>
+        }
+
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">        if (!MENU_DATA_TO_CODING_DATA_TYPE.containsKey(menuDataType)) {</span>
+<span class="nc" id="L94">            return Either.left(NoCodingDataTypeReason.UNKNOWN);</span>
+        }
+
+<span class="fc" id="L97">        return Either.right(MENU_DATA_TO_CODING_DATA_TYPE.get(menuDataType));</span>
+    }
+
+    private String getCodingDataTypeOrErrorDescForMenuDataType(UUIDWithMenuDataType uuidWithMenuDataType) {
+<span class="fc" id="L101">        return getCodingDataTypeForMenuDataType(uuidWithMenuDataType.getMenuDataType())</span>
+<span class="fc" id="L102">                .peekLeft(noCodingDataTypeReason -&gt; {</span>
+<span class="pc bpc" id="L103" title="1 of 2 branches missed.">                    if (noCodingDataTypeReason == NoCodingDataTypeReason.UNKNOWN) {</span>
+                        //we've run into bad data like this before, e.g. https://pkbdev.atlassian.net/browse/PHR-8653
+                        //check what's going on, is there a new bug?
+<span class="nc" id="L106">                        LOGGER.error(&quot;Soft deleted uuid {} with menu data type {}, more bad data?&quot;, uuidWithMenuDataType.getUuid(), uuidWithMenuDataType.getMenuDataType());</span>
+                    }
+<span class="fc" id="L108">                })</span>
+<span class="fc" id="L109">                .fold(Enum::toString, Enum::toString);</span>
+    }
+
+    private boolean processTimed(List&lt;ResultWithId&lt;T, Long&gt;&gt; rows, EmisEsProcessedRow fileState) {
+<span class="fc" id="L113">        return recordTime(&quot;processBatchOfRecords&quot;, () -&gt; process(rows, fileState));</span>
+    }
+
+    abstract boolean process(List&lt;ResultWithId&lt;T, Long&gt;&gt; rows, EmisEsProcessedRow fileState);
+
+    public BatchingBatchDataProcessor(EmisEsProcessedRowService emisEsProcessedRowService, EmisEsManager emisEsManager, EmisProcessorAborter emisProcessAborter, Kms kmsClient, PhrConfig config, DateTimeService dateTimeService, ExternalIdService externalIdService, INotificationManager notificationManager, EmisEsStatusService emisEsStatusService, EmisOrgHelper emisOrgHelper) {
+<span class="fc" id="L119">        super(emisEsProcessedRowService, emisEsManager, emisProcessAborter, kmsClient, config, emisEsStatusService, emisOrgHelper);</span>
+<span class="fc" id="L120">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L121">        this.externalIdService = externalIdService;</span>
+<span class="fc" id="L122">        this.notificationManager = notificationManager;</span>
+<span class="fc" id="L123">    }</span>
+
+    protected void notify(PKBPersonInfo pi, Org org, Activity.Action action) {
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        if (pi.isContactable()) {</span>
+            //todo: workaround for notifications to be fixed in PHR-3468
+<span class="fc" id="L128">            notificationManager.notifyUserAboutActivityByOtherUser(getEmisContextWithDefaultTeam(org), new Activity(action, pi.id(), org.getId(), dateTimeService.now()), true,</span>
+                    new NoConsentsRequired());
+        }
+<span class="fc" id="L131">    }</span>
+
+    @Override
+    public Tuple2&lt;Boolean, EmisEsProcessedRow&gt; process(@NotNull Stream&lt;? extends ResultWithId&lt;T, Long&gt;&gt; rows, @NotNull EmisEsProcessedRow fileState) {
+<span class="fc" id="L135">        long total = 0;</span>
+<span class="fc" id="L136">        boolean result = true;</span>
+<span class="fc" id="L137">        String entityClassName = interfaceClass().getSimpleName();</span>
+<span class="fc" id="L138">        Iterator&lt;? extends ResultWithId&lt;T, Long&gt;&gt; rowIterator = rows.iterator();</span>
+        List&lt;ResultWithId&lt;T, Long&gt;&gt; buffer;
+<span class="fc" id="L140">        EmisEsProcessedRow currentFileState = fileState;</span>
+        do {
+<span class="fc" id="L142">            buffer = recordTime(&quot;pullRecords&quot;, () -&gt; StreamUtils.pull(rowIterator, getBatchSize()));</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">            if (!buffer.isEmpty()) {</span>
+<span class="fc" id="L144">                LOGGER.info(&quot;Pulled {} {} from the entity stream.&quot;, buffer.size(), entityClassName);</span>
+<span class="fc" id="L145">                ResultWithId&lt;T, Long&gt; last = buffer.get(buffer.size() - 1);</span>
+<span class="fc" id="L146">                emisEsStatusService.reportTotalRows(last.numberOfRecords());</span>
+<span class="fc" id="L147">                result &amp;= processTimed(buffer, currentFileState);</span>
+<span class="fc bfc" id="L148" title="All 4 branches covered.">                if (result &amp;&amp; !isPostProcessingRequired()) {</span>
+<span class="fc" id="L149">                    currentFileState = updateLastProcessedRow(currentFileState, last.getRowId());</span>
+                }
+<span class="fc" id="L151">                total += buffer.size();</span>
+<span class="fc" id="L152">                emisEsStatusService.reportCurrentRows(total);</span>
+<span class="fc" id="L153">                LOGGER.info(&quot;Processed {} / {} items of class {}.&quot;, total, last.numberOfRecords(), entityClassName);</span>
+            }
+<span class="fc bfc" id="L155" title="All 2 branches covered.">        } while (!buffer.isEmpty());</span>
+<span class="fc" id="L156">        return new Tuple2&lt;&gt;(result, currentFileState);</span>
+    }
+
+    abstract int getBatchSize();
+
+    protected Table&lt;String, UUID, UUID&gt; getOrCreateExternalIdsTimed(Set&lt;T&gt; saveableRecords, Set&lt;T&gt; deletableRecords, Function1&lt;T, String&gt; guidExtractor, Map&lt;T, Org&gt; recordToOrg) {
+<span class="fc" id="L162">        return recordTime(&quot;externalIdLookup&quot;, () -&gt; getOrCreateExternalIds(saveableRecords, deletableRecords, guidExtractor, recordToOrg));</span>
+    }
+
+    private Table&lt;String, UUID, UUID&gt; getOrCreateExternalIds(Set&lt;T&gt; saveableRecords, Set&lt;T&gt; deletableRecords, Function1&lt;T, String&gt; guidExtractor, Map&lt;T, Org&gt; recordToOrg) {
+<span class="fc" id="L166">        Set&lt;Tuple2&lt;UUID, String&gt;&gt; externalIdsWithOrg = saveableRecords.addAll(deletableRecords)</span>
+<span class="fc" id="L167">                .map(r -&gt; Tuple.of(recordToOrg.apply(r).getPublicId(), guidExtractor.apply(r)));</span>
+
+<span class="fc" id="L169">        return externalIdService.lookupOrCreateUniqueIdsForExternalIdsAcrossOrgs(EMIS_SCHEME, externalIdsWithOrg);</span>
+    }
+
+    public Table&lt;String, UUID, UUID&gt; getExternalIdsTimed(io.vavr.collection.Set&lt;String&gt; externalIds) {
+<span class="fc" id="L173">        return recordTime(&quot;externalIdLookup&quot;, () -&gt; getExternalIds(externalIds));</span>
+    }
+
+    private Table&lt;String, UUID, UUID&gt; getExternalIds(io.vavr.collection.Set&lt;String&gt; externalIds) {
+<span class="fc" id="L177">        return externalIdService.lookupUniqueIdsForExternalIdsAcrossOrgs(EMIS_SCHEME, externalIds);</span>
+    }
+
+    protected Map&lt;UUID, EnumSet&lt;CodingDataType&gt;&gt; handleDeletableRecordsTimed(Set&lt;T&gt; records,
+                                                                             Function1&lt;T, String&gt; guidExtractor,
+                                                                             Function1&lt;java.util.Map&lt;UUID, Long&gt;, java.util.Map&lt;UUIDWithMenuDataType, Long&gt;&gt; deleteFunction,
+                                                                             Table&lt;String, UUID, UUID&gt; observationGuidToUniqueId,
+                                                                             Map&lt;T, Org&gt; recordToOrg, Map&lt;T, Long&gt; defaultAccountIds) {
+<span class="fc" id="L185">        return recordTime(&quot;deletedByType&quot;, () -&gt; handleDeletableRecords(records, guidExtractor, deleteFunction, observationGuidToUniqueId, recordToOrg, defaultAccountIds));</span>
+    }
+
+    private Map&lt;UUID, EnumSet&lt;CodingDataType&gt;&gt; handleDeletableRecords(Set&lt;T&gt; records,
+                                                                      Function1&lt;T, String&gt; guidExtractor,
+                                                                      Function1&lt;java.util.Map&lt;UUID, Long&gt;, java.util.Map&lt;UUIDWithMenuDataType, Long&gt;&gt; deleteFunction,
+                                                                      Table&lt;String, UUID, UUID&gt; observationGuidToUniqueId,
+                                                                      Map&lt;T, Org&gt; recordToOrg,
+                                                                      Map&lt;T, Long&gt; defaultAccountIds) {
+<span class="fc" id="L194">        var internalIdToAccountId = new java.util.HashMap&lt;UUID, Long&gt;(records.size());</span>
+<span class="fc" id="L195">        records.forEach(record -&gt; {</span>
+<span class="fc" id="L196">            Long patientAccountId = defaultAccountIds.get(record).get();</span>
+<span class="fc" id="L197">            Org org = recordToOrg.get(record).get();</span>
+<span class="fc" id="L198">            observationGuidToUniqueId.row(guidExtractor.apply(record)).entrySet().stream()</span>
+<span class="fc" id="L199">                    .filter(e -&gt; e.getKey().equals(org.getPublicId()))</span>
+<span class="fc" id="L200">                    .forEach(e -&gt; internalIdToAccountId.put(e.getValue(), patientAccountId));</span>
+<span class="fc" id="L201">        });</span>
+
+<span class="fc" id="L203">        java.util.Map&lt;UUIDWithMenuDataType, Long&gt; uuidAndTypeToCountDeleted = deleteWithAudit(deleteFunction, internalIdToAccountId);</span>
+
+<span class="fc" id="L205">        incrementDeleteHandlingCounters(uuidAndTypeToCountDeleted);</span>
+
+<span class="fc" id="L207">        return transformDeleteResultToIncludeCodingDataType(uuidAndTypeToCountDeleted);</span>
+    }
+
+    private void incrementDeleteHandlingCounters(java.util.Map&lt;UUIDWithMenuDataType, Long&gt; uuidAndTypeToCountDeleted) {
+<span class="fc" id="L211">        uuidAndTypeToCountDeleted.keySet()</span>
+<span class="fc" id="L212">                .forEach(uuidAndType -&gt; {</span>
+<span class="fc" id="L213">                    incrementProcessedRowsCounter(ProcessedRowStatus.DELETED, 1);</span>
+<span class="fc" id="L214">                    incrementProcessedCodedDataCounter(ProcessedRowStatus.DELETED, getCodingDataTypeOrErrorDescForMenuDataType(uuidAndType), 1);</span>
+<span class="fc" id="L215">                });</span>
+<span class="fc" id="L216">    }</span>
+
+    private HashMap&lt;UUID, EnumSet&lt;CodingDataType&gt;&gt; transformDeleteResultToIncludeCodingDataType(java.util.Map&lt;UUIDWithMenuDataType, Long&gt; uuidAndTypeToCountDeleted) {
+<span class="fc" id="L219">        java.util.Map&lt;UUID, EnumSet&lt;CodingDataType&gt;&gt; deletedTypesByUuid = new java.util.HashMap&lt;&gt;(uuidAndTypeToCountDeleted.size());</span>
+<span class="fc" id="L220">        uuidAndTypeToCountDeleted.keySet()</span>
+<span class="fc" id="L221">                .stream()</span>
+<span class="fc" id="L222">                .filter(uuidAndType -&gt; getCodingDataTypeForMenuDataType(uuidAndType.getMenuDataType()).isRight())</span>
+<span class="fc" id="L223">                .forEach(uuidAndType -&gt; {</span>
+<span class="fc" id="L224">                    EnumSet&lt;CodingDataType&gt; codingDataTypes = deletedTypesByUuid.computeIfAbsent(uuidAndType.getUuid(), k -&gt; EnumSet.noneOf(CodingDataType.class));</span>
+<span class="fc" id="L225">                    codingDataTypes.add(getCodingDataTypeForMenuDataType(uuidAndType.getMenuDataType()).get());</span>
+<span class="fc" id="L226">                });</span>
+<span class="fc" id="L227">        return HashMap.ofAll(deletedTypesByUuid);</span>
+    }
+
+    protected void deleteOldGpDatapointsToPreventDuplicates(Collection&lt;T&gt; records,
+                                                            Function1&lt;T, String&gt; guidExtractor,
+                                                            Function1&lt;java.util.Map&lt;UUID, Long&gt;, java.util.Map&lt;UUIDWithMenuDataType, Long&gt;&gt; deleteFunction,
+                                                            Table&lt;String, UUID, UUID&gt; observationGuidToUniqueId,
+                                                            Map&lt;T, Org&gt; recordToOrg,
+                                                            Map&lt;T, Long&gt; defaultAccountIds) {
+<span class="fc" id="L236">        var internalIdToAccountId = new java.util.HashMap&lt;UUID, Long&gt;(records.size());</span>
+<span class="fc" id="L237">        records.forEach(record -&gt; {</span>
+<span class="fc" id="L238">            Long patientAccountId = defaultAccountIds.get(record).get();</span>
+<span class="fc" id="L239">            Org org = recordToOrg.get(record).get();</span>
+<span class="fc" id="L240">            observationGuidToUniqueId.row(guidExtractor.apply(record)).entrySet().stream()</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">                    .filter(e -&gt; !e.getKey().equals(org.getPublicId()))</span>
+<span class="fc" id="L242">                    .forEach(e -&gt; internalIdToAccountId.put(e.getValue(), patientAccountId));</span>
+<span class="fc" id="L243">        });</span>
+
+<span class="fc" id="L245">        java.util.Map&lt;UUIDWithMenuDataType, Long&gt; uuidAndTypeToCountDeleted = deleteWithAudit(deleteFunction, internalIdToAccountId);</span>
+<span class="fc" id="L246">        incrementOldGpDatapointsMetric(uuidAndTypeToCountDeleted);</span>
+<span class="fc" id="L247">    }</span>
+
+    private void incrementOldGpDatapointsMetric(java.util.Map&lt;UUIDWithMenuDataType, Long&gt; uuidAndTypeToCountDeleted) {
+<span class="fc" id="L250">        uuidAndTypeToCountDeleted.keySet()</span>
+<span class="fc" id="L251">                .forEach(uuidAndType -&gt; {</span>
+<span class="fc" id="L252">                    Long amountDeleted = uuidAndTypeToCountDeleted.get(uuidAndType);</span>
+<span class="fc" id="L253">                    String typeDeletedDesc = getCodingDataTypeOrErrorDescForMenuDataType(uuidAndType);</span>
+<span class="fc" id="L254">                    Metrics.counter(EMIS_DUPLICATE_RECORD_DELETED_NAME, TYPE_TAG, typeDeletedDesc).increment(amountDeleted);</span>
+<span class="fc" id="L255">                });</span>
+<span class="fc" id="L256">    }</span>
+
+    /**
+     * delete all rows for the given uniqueid.
+     * e.g. when patient switches GP practice we assign a new uniqueid specific to the new org,
+     *  so we need to tidy up the old uniqueid records to avoid duplicates
+     * e.g. when we receive a record from EMIS that says it should be deleted
+     *
+     * In these cases, it might be odd if the record 'disappears' without an audit. Ideally we'd have a solid auditing
+     * mechanism for menu_data (e.g. deletedBy source fields and deletedDate), but we don't.
+     * Whilst it would be nice to add that, we're in the middle of a major migration to fhir so it seems like a waste
+     * of time, instead just log a line so at least it's possible to find out it was EMIS that caused the record to be
+     * deleted
+     *
+     * @param saveResult
+     */
+    private java.util.Map&lt;UUIDWithMenuDataType, Long&gt; deleteWithAudit(Function1&lt;java.util.Map&lt;UUID, Long&gt;, java.util.Map&lt;UUIDWithMenuDataType, Long&gt;&gt; deleteFunction, java.util.Map&lt;UUID, Long&gt; internalIdsToDelete) {
+<span class="fc" id="L273">        var uuidAndTypeToCountDeleted = deleteFunction.apply(internalIdsToDelete);</span>
+<span class="fc" id="L274">        uuidAndTypeToCountDeleted.keySet()</span>
+<span class="fc" id="L275">                .forEach(uuidAndType -&gt; LOGGER.info(&quot;Deleted {} records for uuid {}&quot;, uuidAndTypeToCountDeleted.get(uuidAndType), uuidAndType.getUuid()));</span>
+<span class="fc" id="L276">        return uuidAndTypeToCountDeleted;</span>
+    }
+
+
+    protected void notifyAboutDeletion(Set&lt;T&gt; deletableRecords, Map&lt;UUID, EnumSet&lt;CodingDataType&gt;&gt; deletionResults, Function1&lt;T, String&gt; guidExtractor, Map&lt;T, Org&gt; recordToOrg, Table&lt;String, UUID, UUID&gt; observationGuidToUniqueId, Map&lt;T, PKBPersonInfo&gt; pkbPersons) {
+<span class="fc" id="L281">        deletableRecords.forEach(cro -&gt; {</span>
+<span class="fc" id="L282">            Org org = recordToOrg.get(cro).getOrNull();</span>
+<span class="fc" id="L283">            var internalUniqueId = observationGuidToUniqueId.get(guidExtractor.apply(cro), org);</span>
+<span class="fc" id="L284">            deletionResults.get(internalUniqueId).forEach(</span>
+<span class="nc" id="L285">                    typesForUuid -&gt; typesForUuid.forEach(</span>
+<span class="nc" id="L286">                            cdt -&gt; notify(pkbPersons.apply(cro), org, DELETE_ACTION_MAP.get(cdt))</span>
+                    )
+            );
+<span class="fc" id="L289">        });</span>
+<span class="fc" id="L290">    }</span>
+
+    protected boolean addedDueToGpChange(T record, Function1&lt;T, String&gt; guidExtractor, java.util.Map&lt;String, Long&gt; internalIdCounts) {
+<span class="fc bfc" id="L293" title="All 2 branches covered.">        return 1L &lt; internalIdCounts.get(guidExtractor.apply(record));</span>
+    }
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

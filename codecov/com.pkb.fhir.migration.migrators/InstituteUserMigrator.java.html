@@ -1,0 +1,206 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InstituteUserMigrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration.migrators</a> &gt; <span class="el_source">InstituteUserMigrator.java</span></div><h1>InstituteUserMigrator.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration.migrators;
+
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.entities.pub.PublicInstituteUser;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.entities.pub.PublicTeam;
+import com.pkb.fhir.common.exception.MigrationEntityNotFoundException;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import com.pkb.fhir.migration.service.InstituteUserService;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.Consent;
+import org.hl7.fhir.r4.model.DomainResource;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Practitioner;
+import org.hl7.fhir.r4.model.PractitionerRole;
+import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.ResourceType;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.entities.enums.FhirConsentSource.INSTITUTEUSER;
+import static com.pkb.entities.enums.SponsorshipStatus.ACTIVE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.CREATE_OR_UPDATE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.DELETE;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+
+public class InstituteUserMigrator extends BaseFhirMigrator {
+
+    //See https://dev.patientsknowbest.com/home/fhir-api/identifier-systems
+    private static final String INSTITUTEUSER_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/instituteuser-legacy-identifier&quot;;
+
+    // See https://dev.patientsknowbest.com/home/fhir-api/structuredefinition
+    private static final String INSTITUTEUSER_SPONSORSHIP_STATUS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/instituteuser-sponsorship-status&quot;;
+    private static final String INSTITUTEUSER_STATUS_UPDATED_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/instituteuser-status-updated&quot;;
+    private static final String INSTITUTEUSER_CONTACT_OPTIONS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/instituteuser-contact-options&quot;;
+    private static final String INSTITUTEUSER_USER_TYPE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/instituteuser-types&quot;;
+
+
+    private final InstituteUserService instituteUserService;
+
+    public InstituteUserMigrator(PersonService personService, TeamService teamService, OrgService orgService,
+                                 Hl7PartnerService hl7PartnerService, InstituteUserService instituteUserService) {
+<span class="fc" id="L57">        super(personService, teamService, orgService, hl7PartnerService);</span>
+<span class="fc" id="L58">        this.instituteUserService = instituteUserService;</span>
+<span class="fc" id="L59">    }</span>
+
+    /**
+     * A single Practitioner PKBPerson can only have 1 active instituteuser row, but we create ones which are
+     * invited, inactive etc. to maintain full audit and functionality.
+     *
+     * A given human being can be active in multiple teams by having multiple different pkbpersons. Whee!
+     *
+     * For Patients, these become Consent links between the Organization and the Patient.
+     */
+    @Override
+    Either&lt;MigrationException, List&lt;ResourceAndOperation&gt;&gt; migrate(@NotNull PublicFhirStoreSync fhirStoreSync) {
+<span class="fc bfc" id="L71" title="All 2 branches covered.">        if (fhirStoreSync.isDeleteOperation()) {</span>
+            DomainResource toDelete;
+<span class="fc bfc" id="L73" title="All 2 branches covered.">            if (fhirStoreSync.getSyncDetails().isPractitionerRole()) {</span>
+<span class="fc" id="L74">                toDelete = new PractitionerRole();</span>
+<span class="fc" id="L75">                IdType idTypePractitionerRole = new IdType(ResourceType.PractitionerRole.name(),</span>
+<span class="fc" id="L76">                        String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()));</span>
+<span class="fc" id="L77">                toDelete.setId(idTypePractitionerRole);</span>
+<span class="fc" id="L78">            }</span>
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">            else if (fhirStoreSync.getSyncDetails().isConsent()) {</span>
+<span class="fc" id="L80">                toDelete = new Consent();</span>
+<span class="fc" id="L81">                IdType idTypeConsent = new IdType(ResourceType.Consent.name(),</span>
+<span class="fc" id="L82">                        String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()));</span>
+<span class="fc" id="L83">                toDelete.setId(idTypeConsent);</span>
+<span class="fc" id="L84">            }</span>
+            else  {
+<span class="nc" id="L86">                return left(new MigrationException(&quot;Unexpected resource target [&quot; + fhirStoreSync.getSyncDetails().getResourceTarget()</span>
+<span class="nc" id="L87">                        + &quot;] for institute user migration with sync: &quot; + fhirStoreSync.getId()));</span>
+            }
+<span class="fc" id="L89">            return right(ResourceAndOperation.all(List.of(toDelete), DELETE));</span>
+        }
+
+<span class="fc" id="L92">        return Option.ofOptional(instituteUserService.findOptionalByIdFetchTeam(fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="pc" id="L93">                .toEither(() -&gt; (MigrationException)new MigrationEntityNotFoundException(&quot;Failed to sync instituteuser to fhir store for source id &quot;</span>
+<span class="nc" id="L94">                        + fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="fc" id="L95">                .map(instituteUser -&gt; ResourceAndOperation.all(List.of(transformInstituteUserToFhir(fhirStoreSync,</span>
+                        instituteUser)), CREATE_OR_UPDATE));
+    }
+
+    @NotNull
+    private DomainResource transformInstituteUserToFhir(@NotNull PublicFhirStoreSync sync, @NotNull PublicInstituteUser instituteUser) {
+<span class="fc bfc" id="L101" title="All 2 branches covered.">        if (sync.getSyncDetails().isPractitionerRole()) {</span>
+<span class="fc" id="L102">            return transformInstituteUserToPractitionerRole(instituteUser);</span>
+<span class="pc bpc" id="L103" title="1 of 2 branches missed.">        } else if (sync.getSyncDetails().isConsent()) {</span>
+<span class="fc" id="L104">            return transformInstituteUserToConsent(instituteUser);</span>
+        } else {
+<span class="nc" id="L106">            throw new MigrationException(&quot;Unexpected resource target [&quot; + sync.getSyncDetails().getResourceTarget()</span>
+<span class="nc" id="L107">                    + &quot;] for institute user migration with sync: &quot; + sync.getId());</span>
+        }
+    }
+
+    @NotNull
+    private PractitionerRole transformInstituteUserToPractitionerRole(@NotNull PublicInstituteUser instituteUser) {
+<span class="fc" id="L113">        PractitionerRole practitionerRole = new PractitionerRole();</span>
+<span class="fc" id="L114">        practitionerRole.setId(String.valueOf(instituteUser.getPublicId()));</span>
+<span class="fc" id="L115">        practitionerRole.addIdentifier(getPkbIdentifier(instituteUser.getId(), INSTITUTEUSER_LEGACY_PRIMARY_KEY_SYSTEM_URL));</span>
+
+<span class="fc" id="L117">        UUID personPublicId = getPersonPublicId(instituteUser);</span>
+<span class="fc" id="L118">        practitionerRole.setPractitioner(new Reference(new Practitioner().setId(String.valueOf(personPublicId))));</span>
+
+<span class="fc" id="L120">        UUID teamPublicId = getTeamPublicId(instituteUser);</span>
+<span class="fc" id="L121">        practitionerRole.setOrganization(new Reference(new Organization().setId(String.valueOf(teamPublicId))));</span>
+
+        //We're going to do two things here: store this in the active boolean, and preserve the specific value in
+        // an extension.
+<span class="fc" id="L125">        Optional.ofNullable(instituteUser.getSponsorshipStatus()).ifPresent(sponsorshipStatus -&gt; {</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">            practitionerRole.setActive(sponsorshipStatus == ACTIVE);</span>
+<span class="fc" id="L127">            addExtension(sponsorshipStatus.name(), INSTITUTEUSER_SPONSORSHIP_STATUS_EXTENSION_URL, practitionerRole);</span>
+<span class="fc" id="L128">        });</span>
+
+<span class="fc" id="L130">        addCommonExtensions(instituteUser, practitionerRole);</span>
+
+<span class="fc" id="L132">        return practitionerRole;</span>
+    }
+
+    private UUID getPersonPublicId(@NotNull PublicInstituteUser instituteUser) {
+<span class="fc" id="L136">        return personService.findPersonOptional(instituteUser.getPersonId())</span>
+<span class="fc" id="L137">                .map(PublicPKBPerson::getPublicId)</span>
+<span class="pc" id="L138">                .orElseThrow(() -&gt; new MigrationEntityNotFoundException(&quot;No linked person for institute_user &quot; + instituteUser.getId()));</span>
+    }
+
+    private UUID getTeamPublicId(@NotNull PublicInstituteUser instituteUser) {
+<span class="fc" id="L142">        Optional&lt;PublicTeam&gt; team = Optional.ofNullable(instituteUser.getTeam());</span>
+<span class="fc" id="L143">        return team.map(PublicTeam::getPublicId)</span>
+<span class="pc" id="L144">                .orElseThrow(() -&gt; new MigrationEntityNotFoundException(&quot;No linked team for institute_user &quot; + instituteUser.getId()));</span>
+    }
+
+    @NotNull
+    private Consent transformInstituteUserToConsent(@NotNull PublicInstituteUser instituteUser) {
+<span class="fc" id="L149">        Consent consent = new Consent();</span>
+<span class="fc" id="L150">        consent.setId(String.valueOf(instituteUser.getPublicId()));</span>
+<span class="fc" id="L151">        consent.addIdentifier(getPkbIdentifier(instituteUser.getId(), INSTITUTEUSER_LEGACY_PRIMARY_KEY_SYSTEM_URL));</span>
+
+<span class="fc" id="L153">        addConsentScope(consent);</span>
+
+<span class="fc" id="L155">        UUID personPublicId = getPersonPublicId(instituteUser);</span>
+<span class="fc" id="L156">        consent.setPatient(new Reference(new Patient().setId(String.valueOf(personPublicId))));</span>
+
+<span class="fc" id="L158">        UUID teamPublicId = getTeamPublicId(instituteUser);</span>
+<span class="fc" id="L159">        consent.addOrganization(new Reference(new Organization().setId(String.valueOf(teamPublicId))));</span>
+
+<span class="fc" id="L161">        Coding coding = new Coding();</span>
+<span class="fc" id="L162">        coding.setSystem(CONSENT_CATEGORY_URL);</span>
+<span class="fc" id="L163">        coding.setCode(INSTITUTEUSER.name());</span>
+<span class="fc" id="L164">        CodeableConcept consentCategory = new CodeableConcept();</span>
+<span class="fc" id="L165">        consentCategory.setCoding(List.of(coding));</span>
+<span class="fc" id="L166">        consent.setCategory(List.of(consentCategory));</span>
+
+        //We're going to do two things here: store this as the status, and preserve the specific value in
+        // an extension.
+<span class="fc" id="L170">        Optional.ofNullable(instituteUser.getSponsorshipStatus()).ifPresent(sponsorshipStatus -&gt; {</span>
+<span class="fc" id="L171">            setConsentStatus(consent, sponsorshipStatus);</span>
+<span class="fc" id="L172">            addExtension(sponsorshipStatus.name(), INSTITUTEUSER_SPONSORSHIP_STATUS_EXTENSION_URL, consent);</span>
+<span class="fc" id="L173">        });</span>
+
+<span class="fc" id="L175">        addCommonExtensions(instituteUser, consent);</span>
+<span class="fc" id="L176">        return consent;</span>
+    }
+
+    void setConsentStatus(Consent consent, SponsorshipStatus sponsorshipStatus) {
+<span class="pc bpc" id="L180" title="2 of 4 branches missed.">        switch (sponsorshipStatus) {</span>
+            case ACTIVE:
+<span class="fc" id="L182">                consent.setStatus(Consent.ConsentState.ACTIVE);</span>
+<span class="fc" id="L183">                return;</span>
+            case INACTIVE:
+<span class="nc" id="L185">                consent.setStatus(Consent.ConsentState.INACTIVE);</span>
+<span class="nc" id="L186">                return;</span>
+            case INVITED:
+            case INVITED_TO_UPGRADE:
+<span class="fc" id="L189">                consent.setStatus(Consent.ConsentState.PROPOSED);</span>
+<span class="fc" id="L190">                return;</span>
+            default:
+<span class="nc" id="L192">                throw new MigrationException(&quot;Unexpected sponsorship status type: &quot; + sponsorshipStatus);</span>
+        }
+    }
+
+    private void addCommonExtensions(@NotNull PublicInstituteUser instituteUser, @NotNull DomainResource resource) {
+<span class="fc" id="L197">        addExtension(instituteUser.getStatusUpdatedOn(), INSTITUTEUSER_STATUS_UPDATED_EXTENSION_URL, resource);</span>
+
+<span class="fc" id="L199">        Optional.ofNullable(instituteUser.getContactable())</span>
+<span class="fc" id="L200">                .ifPresent(contactOptions -&gt; addExtension(contactOptions.name(), INSTITUTEUSER_CONTACT_OPTIONS_EXTENSION_URL, resource));</span>
+
+<span class="fc" id="L202">        Optional.ofNullable(instituteUser.getUserType())</span>
+<span class="fc" id="L203">                .ifPresent(userType -&gt; addExtension(userType.name(), INSTITUTEUSER_USER_TYPE_EXTENSION_URL, resource));</span>
+<span class="fc" id="L204">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

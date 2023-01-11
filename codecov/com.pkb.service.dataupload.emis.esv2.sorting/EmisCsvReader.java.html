@@ -1,0 +1,228 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisCsvReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.sorting</a> &gt; <span class="el_source">EmisCsvReader.java</span></div><h1>EmisCsvReader.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.sorting;
+
+import com.fasterxml.jackson.databind.MappingIterator;
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.fasterxml.jackson.dataformat.csv.CsvMapper;
+import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import com.google.common.collect.ImmutableMap;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFile;
+import com.pkb.service.dataupload.emis.esv2.pgp.EmisPGPInputStreamProvider;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import name.neuhalfen.projects.crypto.bouncycastle.openpgp.keys.keyrings.KeyringConfig;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.lang.invoke.MethodHandles;
+import java.nio.charset.Charset;
+import java.nio.file.Path;
+import java.security.NoSuchProviderException;
+import java.util.Map;
+import java.util.Spliterator;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
+
+import static com.fasterxml.jackson.databind.DeserializationFeature.ACCEPT_EMPTY_STRING_AS_NULL_OBJECT;
+import static com.pkb.service.dataupload.emis.esv2.EmisCsvMapperFactory.getEmisCsvMapper;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * Utility to read an EMIS csv and map the rows to the domain object, skipping any previously processed rows.
+ */
+@Component
+<span class="fc" id="L42">public class EmisCsvReader {</span>
+
+    @Autowired
+    private PhrConfig config;
+
+    @Autowired
+    private EmisPGPInputStreamProvider emisPGPInputStreamProvider;
+
+    private static class RowSpliterator&lt;T&gt; implements Spliterator&lt;ResultWithId&lt;T, Long&gt;&gt; {
+
+        private final MappingIterator&lt;T&gt; mappingIterator;
+<span class="fc" id="L53">        private long countRowsRead = 0;</span>
+<span class="fc" id="L54">        private long totalRows = 0;</span>
+        private RowFilter filter;
+
+<span class="fc" id="L57">        public RowSpliterator(MappingIterator&lt;T&gt; mappingIterator, long totalRows, RowFilter filter) {</span>
+<span class="fc" id="L58">            this.mappingIterator = mappingIterator;</span>
+<span class="fc" id="L59">            this.totalRows = totalRows;</span>
+<span class="fc" id="L60">            this.filter = filter;</span>
+<span class="fc" id="L61">        }</span>
+
+        @Override
+        public boolean tryAdvance(Consumer&lt;? super ResultWithId&lt;T, Long&gt;&gt; action) {
+            try {
+<span class="fc bfc" id="L66" title="All 2 branches covered.">                while (mappingIterator.hasNextValue()) {</span>
+<span class="fc" id="L67">                    T value = mappingIterator.nextValue();</span>
+<span class="fc" id="L68">                    countRowsRead++;</span>
+<span class="fc bfc" id="L69" title="All 2 branches covered.">                    if (!filter.shouldFilter(countRowsRead)) {</span>
+<span class="fc" id="L70">                        incrementCounter(RETRIEVED_ROWS_COUNTER_NAME, value.getClass());</span>
+<span class="fc" id="L71">                        ResultWithId&lt;T, Long&gt; result = ImmutableResultWithId.of(value, new RowId&lt;&gt;(countRowsRead), totalRows);</span>
+<span class="fc" id="L72">                        action.accept(result);</span>
+<span class="pc bpc" id="L73" title="1 of 2 branches missed.">                        if (countRowsRead % 10000 == 0) {</span>
+<span class="nc" id="L74">                            LOGGER.info(&quot;RowSpliterator {} advanced {} times&quot;, this.hashCode(), countRowsRead);</span>
+                        }
+<span class="fc" id="L76">                        return true;</span>
+                    }
+<span class="fc" id="L78">                }</span>
+<span class="fc" id="L79">                return false;</span>
+<span class="nc" id="L80">            } catch (Exception e) {</span>
+<span class="nc" id="L81">                throw new RuntimeException(e);</span>
+            }
+        }
+
+        @Override
+        @Nullable
+        public Spliterator&lt;ResultWithId&lt;T, Long&gt;&gt; trySplit() {
+<span class="nc" id="L88">            return null; // cannot split</span>
+        }
+
+        @Override
+        public long estimateSize() {
+<span class="nc" id="L93">            return Long.MAX_VALUE;</span>
+        }
+
+        @Override
+        public int characteristics() {
+<span class="fc" id="L98">            return Spliterator.ORDERED &amp; Spliterator.IMMUTABLE &amp; Spliterator.NONNULL;</span>
+        }
+    }
+
+<span class="fc" id="L102">    private static final Map&lt;CsvSchema.ColumnType, String&gt; JACKSON_TO_DB_TYPE_MAP = ImmutableMap.of(</span>
+            CsvSchema.ColumnType.NUMBER, &quot;DECIMAL(31)&quot;,
+            CsvSchema.ColumnType.BOOLEAN, &quot;BOOLEAN&quot;);
+
+    private static final String METRIC_TYPE_TAG = &quot;type&quot;;
+    private static final String INCOMING_ROWS_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_sorter_incoming&quot;;
+<span class="fc" id="L108">    private static final Counter INCOMING_ROWS_COUNTER = Counter.builder(INCOMING_ROWS_COUNTER_NAME)</span>
+<span class="fc" id="L109">            .tag(METRIC_TYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L110">            .description(&quot;Number of rows parsed&quot;)</span>
+<span class="fc" id="L111">            .register(Metrics.globalRegistry);</span>
+
+    private static final String SKIPPED_ROWS_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_sorter_skipped&quot;;
+<span class="fc" id="L114">    private static final Counter SKIPPED_ROWS_COUNTER = Counter.builder(SKIPPED_ROWS_COUNTER_NAME)</span>
+<span class="fc" id="L115">            .tag(METRIC_TYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L116">            .description(&quot;Number of rows skipped because it was previously handled&quot;)</span>
+<span class="fc" id="L117">            .register(Metrics.globalRegistry);</span>
+
+    private static final String RETRIEVED_ROWS_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_sorter_retrieved&quot;;
+<span class="fc" id="L120">    private static final Counter RETRIEVED_ROWS_COUNTER = Counter.builder(RETRIEVED_ROWS_COUNTER_NAME)</span>
+<span class="fc" id="L121">            .tag(METRIC_TYPE_TAG, &quot;&quot;)</span>
+<span class="fc" id="L122">            .description(&quot;Number of model entities retrieved after sorting&quot;)</span>
+<span class="fc" id="L123">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L125">    private static final Logger LOGGER = getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    /**
+     * Validate all rows in a file can succesfully be mapped to the provided rowclass and then sets up a stream
+     *
+     * @param filePath                CSV file to read
+     * @param keyringConfig           PGP keyring
+     * @param rowClass                The POJO that CSV rows should be mapped to
+     * @param previousProcessingState The stream will skip any rows until after this row identifier
+     * @param emisFile                The verified EMIS file with hash details etc
+     * @param &lt;T&gt;                     Type of the POJO
+     * @return A stream of POJOs extracted from the CSV in the existing order
+     * @throws IOException            if there is a problem with the data binding
+     * @throws RuntimeException       in case of other fatal issues
+     */
+    public &lt;T&gt; EmisRecordStream&lt;T&gt; buildStream(@NotNull Path filePath,
+                                               @NotNull KeyringConfig keyringConfig,
+                                               @NotNull Class&lt;T&gt; rowClass,
+                                               @NotNull VerifiedEmisFile emisFile,
+                                               @Nullable RowId&lt;Long&gt; previousProcessingState) throws IOException, NoSuchProviderException {
+<span class="fc" id="L145">        RowFilter filter = new RowFilter(previousProcessingState);</span>
+<span class="fc" id="L146">        long totalCount = emisFile.rowCount();</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">        long countToProcess = totalCount - (filter.isEmpty() ? 0 : filter.getFilterUntilAfter().getId());</span>
+<span class="fc" id="L148">        long skipped = totalCount - countToProcess;</span>
+<span class="fc" id="L149">        Metrics.counter(INCOMING_ROWS_COUNTER_NAME, METRIC_TYPE_TAG, rowClass.getSimpleName()).increment(totalCount);</span>
+<span class="fc" id="L150">        Metrics.counter(SKIPPED_ROWS_COUNTER_NAME, METRIC_TYPE_TAG, rowClass.getSimpleName()).increment(skipped);</span>
+
+<span class="fc bfc" id="L152" title="All 2 branches covered.">        if (!filter.isEmpty()) {</span>
+<span class="fc" id="L153">            LOGGER.info(&quot;Skipping previously processed records, {} records skipped passing record id {}&quot;, rowClass.getSimpleName(),</span>
+<span class="fc" id="L154">                    filter.getFilterUntilAfter().getId());</span>
+        }
+
+<span class="fc" id="L157">        InputStream pgpInputStream = emisPGPInputStreamProvider.decryptingInputStream(filePath, keyringConfig);</span>
+<span class="fc" id="L158">        CsvMapper csvMapper = getEmisCsvMapper();</span>
+<span class="fc" id="L159">        CsvSchema csvSchema = csvMapper.typedSchemaFor(rowClass).withNullValue(&quot;&quot;).withHeader();</span>
+<span class="fc" id="L160">        ObjectReader rowReader = getRowReader(rowClass, csvMapper, csvSchema);</span>
+<span class="fc" id="L161">        MappingIterator&lt;T&gt; rowMapper = rowReader.readValues(new InputStreamReader(pgpInputStream, Charset.forName(config.getEmisEsCsvEncoding())));</span>
+<span class="fc" id="L162">        Stream&lt;ResultWithId&lt;T, Long&gt;&gt; recordStream = StreamSupport</span>
+<span class="fc" id="L163">                .stream(new RowSpliterator&lt;&gt;(rowMapper, countToProcess, filter), false)</span>
+<span class="fc" id="L164">                .onClose(() -&gt; {</span>
+                    try {
+<span class="fc" id="L166">                        pgpInputStream.close();</span>
+<span class="nc" id="L167">                    } catch (IOException e) {</span>
+<span class="nc" id="L168">                        throw new RuntimeException(e);</span>
+<span class="fc" id="L169">                    }</span>
+<span class="fc" id="L170">                });</span>
+<span class="fc" id="L171">        return new EmisRecordStream&lt;&gt;(recordStream);</span>
+    }
+
+    private &lt;T&gt; ObjectReader getRowReader(@NotNull Class&lt;T&gt; rowClass, CsvMapper csvMapper, CsvSchema csvSchema) {
+<span class="fc" id="L175">        return csvMapper.readerFor(rowClass).with(csvSchema).withFeatures(ACCEPT_EMPTY_STRING_AS_NULL_OBJECT);</span>
+    }
+
+    private class RowFilter {
+        private final RowId&lt;Long&gt; filterUntilAfter;
+
+        /**
+         * @param filterUntilAfter - the last row number that should be filtered
+         */
+<span class="fc" id="L184">        public RowFilter(RowId&lt;Long&gt; filterUntilAfter) {</span>
+<span class="fc" id="L185">            this.filterUntilAfter = filterUntilAfter;</span>
+<span class="fc" id="L186">        }</span>
+
+        public RowId&lt;Long&gt; getFilterUntilAfter() {
+<span class="fc" id="L189">            return filterUntilAfter;</span>
+        }
+
+        public boolean isEmpty() {
+<span class="fc bfc" id="L193" title="All 2 branches covered.">            return filterUntilAfter == null;</span>
+        }
+
+        public boolean shouldFilter(Long id) {
+<span class="fc bfc" id="L197" title="All 2 branches covered.">            if (filterUntilAfter == null</span>
+<span class="fc bfc" id="L198" title="All 2 branches covered.">              || id &gt; filterUntilAfter.getId()) {</span>
+<span class="fc" id="L199">                return false;</span>
+            }
+
+<span class="fc" id="L202">            return true;</span>
+        }
+    }
+
+    private static &lt;T&gt; void incrementCounter(String name, Class&lt;T&gt; rowClass) {
+<span class="fc" id="L207">        Metrics.counter(name, METRIC_TYPE_TAG, rowClass.getSimpleName()).increment();</span>
+<span class="fc" id="L208">    }</span>
+
+    public class EmisRecordStream&lt;T&gt; implements Closeable {
+        Stream&lt;ResultWithId&lt;T, Long&gt;&gt; recordStream;
+
+<span class="fc" id="L213">        EmisRecordStream(Stream&lt;ResultWithId&lt;T, Long&gt;&gt; recordStream) {</span>
+<span class="fc" id="L214">            this.recordStream = recordStream;</span>
+<span class="fc" id="L215">        }</span>
+
+        @Override
+        public void close() throws IOException {
+<span class="fc" id="L219">            recordStream.close();</span>
+<span class="fc" id="L220">        }</span>
+
+        public Stream&lt;ResultWithId&lt;T, Long&gt;&gt; getRecordStream() {
+<span class="fc" id="L223">            return recordStream;</span>
+        }
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

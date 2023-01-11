@@ -1,0 +1,898 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisEsManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisEsManager.java</span></div><h1>EmisEsManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.CacheLoader;
+import com.github.benmanes.caffeine.cache.Caffeine;
+import com.github.benmanes.caffeine.cache.LoadingCache;
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
+import com.google.common.collect.Table;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.coding.entity.CodingReceived;
+import com.pkb.coding.entity.CodingSearchCriteria;
+import com.pkb.coding.entity.CodingTranslationCodingFields;
+import com.pkb.common.ClearableInternalState;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.common.util.FrameFilter;
+import com.pkb.dataupload.emis.esv2.csv.EmisEsAdminOrganisation;
+import com.pkb.dataupload.emis.esv2.csv.EmisEsAdminPatient;
+import com.pkb.dataupload.emis.esv2.csv.EmisEsAdminUserInRole;
+import com.pkb.dataupload.emis.esv2.csv.EmisEsCodingClinicalCode;
+import com.pkb.dataupload.emis.esv2.csv.EmisEsCodingDrugCode;
+import com.pkb.domain.AccountService;
+import com.pkb.emis.es.entity.EmisEsObservationDelta;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.OrgExternalIdType;
+import com.pkb.institute.ImmutableOrgMergeHelper;
+import com.pkb.institute.OrgMergeHelper;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.OrgSurvivingState;
+import com.pkb.service.code.CodingTranslationService;
+import com.pkb.service.coding.CodingManager;
+import com.pkb.service.dataupload.emis.es.util.EmisEsDemographicsUtil;
+import com.pkb.service.dataupload.emis.esv2.converters.EmisReadCodeConverter;
+import com.pkb.service.dataupload.emis.esv2.mapping.AdminOrganisationMapper;
+import com.pkb.service.dataupload.emis.esv2.mapping.AdminPatientMapper;
+import com.pkb.service.dataupload.emis.esv2.mapping.AdminUserInRoleMapper;
+import com.pkb.service.dataupload.emis.esv2.mapping.CodingClinicalCodeMapper;
+import com.pkb.service.dataupload.emis.esv2.mapping.CodingDrugCodeMapper;
+import com.pkb.service.dataupload.emis.esv2.model.AdminOrganisation;
+import com.pkb.service.dataupload.emis.esv2.model.AdminPatient;
+import com.pkb.service.dataupload.emis.esv2.model.AdminUserInRole;
+import com.pkb.service.dataupload.emis.esv2.model.CodingClinicalCode;
+import com.pkb.service.dataupload.emis.esv2.model.CodingDrugCode;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutableAdminPatient;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutableLoincCodeAndUnit;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutableOrgIdSnomedCTCodeAndUnit;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutablePKBPersonInfo;
+import com.pkb.service.dataupload.emis.esv2.model.LoincCodeAndUnit;
+import com.pkb.service.dataupload.emis.esv2.model.OrgIdSnomedCTCodeAndUnit;
+import com.pkb.service.dataupload.emis.esv2.model.PKBPersonInfo;
+import com.pkb.service.dataupload.emis.esv2.sorting.ResultWithId;
+import com.pkb.service.emis.EmisEsObservationDeltaManager;
+import com.pkb.service.institute.OrgSurvivingStateService;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.test.LoincManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.test.entity.LoincMapping;
+import com.pkb.test.entity.LoincTest;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.PatientIdentifiers;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.binder.cache.CaffeineCacheMetrics;
+import io.vavr.Function1;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.collection.HashMap;
+import io.vavr.collection.Map;
+import io.vavr.control.Either;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.Serializable;
+import java.lang.invoke.MethodHandles;
+import java.math.BigInteger;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BiFunction;
+import java.util.stream.Collectors;
+
+import static com.pkb.service.dataupload.emis.es.util.EmisEsDateUtil.getTimezoneOfOrg;
+import static com.pkb.service.dataupload.emis.esv2.CodeSystems.EMIS_CUSTOM_CODE;
+import static com.pkb.service.dataupload.emis.esv2.CodeSystems.READ_V_2;
+import static com.pkb.service.dataupload.emis.esv2.model.Constants.PATIENT_TYPE_REGULAR;
+import static java.util.Collections.emptyMap;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+public class EmisEsManager extends TransactionManager implements ClearableInternalState {
+
+<span class="fc" id="L113">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L115">    private final Collection&lt;Cache&lt;?, ?&gt;&gt; caches = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L117">    @VisibleForTesting</span>
+<span class="fc" id="L118">    final Cache&lt;Tuple2&lt;String, Long&gt;, PKBPersonInfo&gt; personCache = createAndRegisterCache(&quot;emis.guava.person_info&quot;);</span>
+
+<span class="fc" id="L120">    private final LoadingCache&lt;String, EmisEsAdminOrganisation&gt; emisAdminOrgCache = createAndRegisterCache(&quot;emis.cache.admin_org&quot;, new CacheLoader&lt;&gt;() {</span>
+        @Override
+        public @Nullable EmisEsAdminOrganisation load(String esAdminOrganisationGuid) throws Exception {
+<span class="fc" id="L123">            return findEmisEsAdminOrganisationByGuid(esAdminOrganisationGuid);</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends String, ? extends EmisEsAdminOrganisation&gt; loadAll(Set&lt;? extends String&gt; esAdminOrganisationGuids) throws Exception {
+<span class="fc" id="L128">            return findEmisEsAdminOrganisationByGuid((Set&lt;String&gt;) esAdminOrganisationGuids).stream()</span>
+<span class="fc" id="L129">                    .collect(Collectors.toMap(EmisEsAdminOrganisation::getOrganisationGuid, identity()));</span>
+        }
+    });
+
+<span class="fc" id="L133">    private final LoadingCache&lt;String, OrgMergeHelper&gt; orgCache = createAndRegisterCache(&quot;emis.guava.org&quot;, new CacheLoader&lt;&gt;() {</span>
+        @Override
+        public @Nullable OrgMergeHelper load(String esAdminOrganisationGuid) throws Exception {
+<span class="nc" id="L136">            OrgMergeHelper result = null;</span>
+<span class="nc" id="L137">            EmisEsAdminOrganisation entity = emisAdminOrgCache.get(esAdminOrganisationGuid);</span>
+<span class="nc bnc" id="L138" title="All 4 branches missed.">            if ((entity != null) &amp;&amp; isNotBlank(entity.getOdsCode())) {</span>
+<span class="nc" id="L139">                result = findOrgsByODSCode(entity.getOdsCode());</span>
+            }
+<span class="nc" id="L141">            return result;</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends String, ? extends OrgMergeHelper&gt; loadAll(Set&lt;? extends String&gt; esAdminOrganisationGuids) throws Exception {
+<span class="fc" id="L146">            Collection&lt;EmisEsAdminOrganisation&gt; adminOrgs = emisAdminOrgCache.getAll(esAdminOrganisationGuids).values();</span>
+<span class="fc" id="L147">            var odsCodes = adminOrgs.stream()</span>
+<span class="fc" id="L148">                    .map(EmisEsAdminOrganisation::getOdsCode)</span>
+<span class="fc" id="L149">                    .filter(StringUtils::isNotBlank)</span>
+<span class="fc" id="L150">                    .collect(toSet());</span>
+
+<span class="fc" id="L152">            var pkbOrgsByOdsCode = findOrgsByODSCode(odsCodes);</span>
+<span class="fc" id="L153">            return adminOrgs.stream()</span>
+<span class="fc" id="L154">                    .filter(adminOrg -&gt; pkbOrgsByOdsCode.containsKey(adminOrg.getOdsCode()))</span>
+<span class="fc" id="L155">                    .collect(Collectors.toMap(EmisEsAdminOrganisation::getOrganisationGuid, adminOrg -&gt; pkbOrgsByOdsCode.get(adminOrg.getOdsCode())));</span>
+        }
+    });
+
+<span class="fc" id="L159">    private final LoadingCache&lt;String, EmisEsAdminPatient&gt; adminPatientCache = createAndRegisterCache(&quot;emis.guava.admin_patient&quot;, new CacheLoader&lt;&gt;() {</span>
+        @Override
+        public @Nullable EmisEsAdminPatient load(String guid) throws Exception {
+<span class="nc" id="L162">            return emisEsTableService.findEmisEsAdminPatientByGuid(guid);</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends String, ? extends EmisEsAdminPatient&gt; loadAll(Set&lt;? extends String&gt; patientGuids) throws Exception {
+<span class="fc" id="L167">            return emisEsTableService.findEmisEsAdminPatientByGuids((Set&lt;String&gt;) patientGuids)</span>
+<span class="fc" id="L168">                    .stream()</span>
+<span class="fc" id="L169">                    .collect(Collectors.toMap(EmisEsAdminPatient::getPatientGuid, identity()));</span>
+        }
+    });
+
+<span class="fc" id="L173">    private final Cache&lt;String, Boolean&gt; adminPatientStatelessProcessingDeletedOverride = createAndRegisterLongCache(&quot;emis.guava.admin_patient_stateless_deleted_override&quot;,</span>
+<span class="fc" id="L174">            config.getEmisAdminPatientStatelessOverideCacheSize());</span>
+
+<span class="fc" id="L176">    private final Cache&lt;Long, Map&lt;Integer, Integer&gt;&gt; orgMergedPatientIdMapCache = createAndRegisterCache(&quot;emis.guava.merged_patient_id&quot;);</span>
+
+<span class="fc" id="L178">    private final LoadingCache&lt;BigInteger, CodingClinicalCode&gt; codeCache = createAndRegisterCache(&quot;emis.guava.clinical_codes&quot;, new CacheLoader&lt;&gt;() {</span>
+        @Override
+        public @Nullable CodingClinicalCode load(BigInteger codeId) throws Exception {
+<span class="nc" id="L181">            return emisEsTableService.findEmisEsCodingClinicalCodeByCodeId(codeId)</span>
+<span class="nc" id="L182">                    .map(eccc -&gt; codingClinicalCodeMapper.fromJpaEntity(eccc, null))</span>
+<span class="nc" id="L183">                    .orElse(null);</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends BigInteger, ? extends CodingClinicalCode&gt; loadAll(Set&lt;? extends BigInteger&gt; codeIds) throws Exception {
+<span class="fc" id="L188">            return emisEsTableService.findEmisEsCodingClinicalCodeByCodeId((Set&lt;BigInteger&gt;) codeIds).stream()</span>
+<span class="fc" id="L189">                    .collect(toMap(EmisEsCodingClinicalCode::getCodeId, eeccc -&gt; codingClinicalCodeMapper.fromJpaEntity(eeccc, null)));</span>
+        }
+    });
+
+<span class="fc" id="L193">    private final LoadingCache&lt;BigInteger, CodingDrugCode&gt; drugCodeCache = createAndRegisterCache(&quot;emis.guava.drug_codes&quot;, new CacheLoader&lt;&gt;() {</span>
+        @Override
+        public @Nullable CodingDrugCode load(BigInteger codeId) throws Exception {
+<span class="nc" id="L196">            return emisEsTableService.findEmisEsCodingDrugCodeByCodeId(codeId)</span>
+<span class="nc" id="L197">                    .map(e -&gt; codingDrugCodeMapper.fromJpaEntity(e, null))</span>
+<span class="nc" id="L198">                    .orElse(null);</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends BigInteger, ? extends CodingDrugCode&gt; loadAll(Set&lt;? extends BigInteger&gt; codeIds) throws Exception {
+<span class="fc" id="L203">            return emisEsTableService.findEmisEsCodingDrugCodeByCodeId((Set&lt;BigInteger&gt;) codeIds).stream()</span>
+<span class="fc" id="L204">                    .collect(toMap(EmisEsCodingDrugCode::getCodeId, eecdc -&gt; codingDrugCodeMapper.fromJpaEntity(eecdc, null)));</span>
+        }
+    });
+
+<span class="fc" id="L208">    private final LoadingCache&lt;String, EmisEsAdminUserInRole&gt; adminUserInRoleCache = createAndRegisterCache(&quot;emis.guava.admin_user_in_role&quot;, new CacheLoader&lt;&gt;() {</span>
+        @Override
+        public @Nullable EmisEsAdminUserInRole load(String guid) throws Exception {
+<span class="nc" id="L211">            return emisEsTableService.findEmisEsAdminUserInRoleByGuid(guid);</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends String, ? extends EmisEsAdminUserInRole&gt; loadAll(Set&lt;? extends String&gt; userInRoleGuids) throws Exception {
+<span class="fc" id="L216">            return emisEsTableService.findEmisEsAdminUserInRoleByGuid((Set&lt;String&gt;) userInRoleGuids)</span>
+<span class="fc" id="L217">                    .stream()</span>
+<span class="fc" id="L218">                    .collect(Collectors.toMap(EmisEsAdminUserInRole::getUserInRoleGuid, identity()));</span>
+        }
+    });
+
+<span class="fc" id="L222">    private final LoadingCache&lt;String, CodingTranslationCodingFields&gt; codingtranslationCache = createAndRegisterCache(&quot;emis.cache.coding_translation&quot;, new CacheLoader&lt;&gt;() {</span>
+
+        @Override
+        public @Nullable CodingTranslationCodingFields load (String snomedCode) throws Exception {
+<span class="nc" id="L226">            return codingTranslationService.getBySnomedCodeMappedToLoinc(snomedCode).orElse(null);</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends String, ? extends CodingTranslationCodingFields&gt; loadAll(Set&lt;? extends String&gt; snomedCodes) throws Exception {
+<span class="nc" id="L231">            return codingTranslationService.getAllBySnomedCodesMappedToLoinc((Set&lt;String&gt;) snomedCodes)</span>
+<span class="nc" id="L232">                    .stream()</span>
+<span class="nc" id="L233">                    .collect(toMap(CodingTranslationCodingFields::getSourceCode, identity()));</span>
+        }
+    });
+
+<span class="fc" id="L237">    private final LoadingCache&lt;LoincCodeAndUnit, LoincTest&gt; loincTestCache = createAndRegisterCache(&quot;emis.cache.loinc_test&quot;, new CacheLoader&lt;&gt;() {</span>
+
+        @Override
+        public @Nullable LoincTest load(LoincCodeAndUnit loincCodeAndUnit) throws Exception {
+<span class="nc" id="L241">            return loincManager.findLoincTestByLoincCodeAndUnits(loincCodeAndUnit.loincCode(), loincCodeAndUnit.unit()).orElse(null);</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends LoincCodeAndUnit, ? extends LoincTest&gt; loadAll(Set&lt;? extends LoincCodeAndUnit&gt; loincCodesAndUnits) throws Exception {
+<span class="nc" id="L246">            Set&lt;String&gt; loincCodes = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L247">            Set&lt;String&gt; units = new HashSet&lt;&gt;();</span>
+
+<span class="nc" id="L249">            loincCodesAndUnits.forEach(loincCodeAndUnit -&gt; {</span>
+<span class="nc" id="L250">                loincCodes.add(loincCodeAndUnit.loincCode());</span>
+<span class="nc" id="L251">                units.add(loincCodeAndUnit.unit());</span>
+<span class="nc" id="L252">            });</span>
+
+<span class="nc" id="L254">            return loincManager.findLoincTestsByLoincCodesAndUnits(loincCodes, units)</span>
+<span class="nc" id="L255">                    .collect(toMap(lt -&gt; ImmutableLoincCodeAndUnit.builder().loincCode(lt.getLoinc()).unit(lt.getUnit()).build(), identity()));</span>
+        }
+    });
+
+<span class="fc" id="L259">    private final LoadingCache&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; loincMappingCache = createAndRegisterCache(&quot;emis.cache.loinc_mapping&quot;, new CacheLoader&lt;&gt;() {</span>
+
+        @Override
+        public @Nullable LoincMapping load(OrgIdSnomedCTCodeAndUnit orgIdAndSnomedCodeAndUnit) throws Exception {
+<span class="nc" id="L263">            return loincManager.findLoincMapping(orgIdAndSnomedCodeAndUnit.orgId(), orgIdAndSnomedCodeAndUnit.snomedCTCode(), CodeSystems.SNOMED_CT, orgIdAndSnomedCodeAndUnit.unit());</span>
+        }
+
+        @Override
+        public java.util.Map&lt;? extends OrgIdSnomedCTCodeAndUnit, ? extends LoincMapping&gt; loadAll(Set&lt;? extends OrgIdSnomedCTCodeAndUnit&gt; orgIdSnomedCTCodeAndUnits) {
+<span class="nc" id="L268">            Set&lt;Long&gt; orgIds = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L269">            Set&lt;String&gt; testCodes = new HashSet&lt;&gt;();</span>
+<span class="nc" id="L270">            Set&lt;String&gt; units = new HashSet&lt;&gt;();</span>
+
+<span class="nc" id="L272">            orgIdSnomedCTCodeAndUnits.forEach(orgIdSnomedCTCodeAndUnit -&gt; {</span>
+<span class="nc" id="L273">                orgIds.add(orgIdSnomedCTCodeAndUnit.orgId());</span>
+<span class="nc" id="L274">                testCodes.add(orgIdSnomedCTCodeAndUnit.snomedCTCode());</span>
+<span class="nc" id="L275">                units.add(orgIdSnomedCTCodeAndUnit.unit());</span>
+<span class="nc" id="L276">            });</span>
+
+<span class="nc" id="L278">            java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; result = new java.util.HashMap&lt;&gt;();</span>
+
+<span class="nc" id="L280">            loincManager.findLoincMappings(orgIds, testCodes, units, CodeSystems.SNOMED_CT).forEach(lm -&gt; {</span>
+<span class="nc" id="L281">                OrgIdSnomedCTCodeAndUnit orgIdSnomedCTCodeAndUnit = ImmutableOrgIdSnomedCTCodeAndUnit.builder()</span>
+<span class="nc" id="L282">                        .orgId(lm.getOrg().getId())</span>
+<span class="nc" id="L283">                        .snomedCTCode(lm.getTestCode())</span>
+<span class="nc" id="L284">                        .unit(lm.getUnit())</span>
+<span class="nc" id="L285">                        .build();</span>
+<span class="nc" id="L286">                var previous = result.put(orgIdSnomedCTCodeAndUnit, lm);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">                if (previous != null) {</span>
+<span class="nc" id="L288">                    throw new IllegalStateException(&quot;Duplicate LoincMapping for orgId: &quot; + lm.getOrg().getId() + &quot; snomedCTCode: &quot; + lm.getTestCode() + &quot; unit: &quot; + lm.getUnit());</span>
+                }
+<span class="nc" id="L290">            });</span>
+
+<span class="nc" id="L292">            return result;</span>
+        }
+    });
+
+    private final EmisReadCodeConverter emisReadCodeConverter;
+    private final UserManager userManager;
+    private final TeamManager teamManager;
+    private final EmisEsWhitelistService emisEsWhitelist;
+    private final AdminOrganisationMapper adminOrganisationMapper;
+    private final AdminPatientMapper adminPatientMapper;
+    private final CodingClinicalCodeMapper codingClinicalCodeMapper;
+    private final CodingDrugCodeMapper codingDrugCodeMapper;
+    private final AdminUserInRoleMapper adminUserInRoleMapper;
+    private final EmisEsMissingCodeHelper missingCodeHelper;
+    private final EmisOrgHelper emisOrgHelper;
+    private final EmisEsTableService emisEsTableService;
+    private final AccountService accountService;
+    private final EmisEsDummyPatientService emisEsDummyPatientService;
+    private final OrgSurvivingStateService orgSurvivingStateService;
+    private final CodingManager codingManager;
+    private final EmisEsObservationDeltaManager emisEsObservationDeltaManager;
+    private final CodingTranslationService codingTranslationService;
+    private final LoincManager loincManager;
+
+    public EmisEsManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, EmisReadCodeConverter emisReadCodeConverter,
+                         UserManager userManager, TeamManager teamManager, EmisEsWhitelistService emisEsWhitelist, AdminOrganisationMapper adminOrganisationMapper,
+                         AdminPatientMapper adminPatientMapper, CodingClinicalCodeMapper codingClinicalCodeMapper, CodingDrugCodeMapper codingDrugCodeMapper,
+                         AdminUserInRoleMapper adminUserInRoleMapper, EmisEsMissingCodeHelper missingCodeHelper, EmisOrgHelper emisOrgHelper, EmisEsTableService emisEsTableService,
+                         AccountService accountService, EmisEsDummyPatientService emisEsDummyPatientService, OrgSurvivingStateService orgSurvivingStateService, CodingManager codingManager,
+                         EmisEsObservationDeltaManager emisEsObservationDeltaManager,
+                         CodingTranslationService codingTranslationService, LoincManager loincManager) {
+<span class="fc" id="L323">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L324">        this.emisReadCodeConverter = emisReadCodeConverter;</span>
+<span class="fc" id="L325">        this.userManager = userManager;</span>
+<span class="fc" id="L326">        this.teamManager = teamManager;</span>
+<span class="fc" id="L327">        this.emisEsWhitelist = emisEsWhitelist;</span>
+<span class="fc" id="L328">        this.adminOrganisationMapper = adminOrganisationMapper;</span>
+<span class="fc" id="L329">        this.adminPatientMapper = adminPatientMapper;</span>
+<span class="fc" id="L330">        this.codingClinicalCodeMapper = codingClinicalCodeMapper;</span>
+<span class="fc" id="L331">        this.codingDrugCodeMapper = codingDrugCodeMapper;</span>
+<span class="fc" id="L332">        this.adminUserInRoleMapper = adminUserInRoleMapper;</span>
+<span class="fc" id="L333">        this.missingCodeHelper = missingCodeHelper;</span>
+<span class="fc" id="L334">        this.emisOrgHelper = emisOrgHelper;</span>
+<span class="fc" id="L335">        this.emisEsTableService = emisEsTableService;</span>
+<span class="fc" id="L336">        this.accountService = accountService;</span>
+<span class="fc" id="L337">        this.emisEsDummyPatientService = emisEsDummyPatientService;</span>
+<span class="fc" id="L338">        this.orgSurvivingStateService = orgSurvivingStateService;</span>
+<span class="fc" id="L339">        this.codingManager = codingManager;</span>
+<span class="fc" id="L340">        this.emisEsObservationDeltaManager = emisEsObservationDeltaManager;</span>
+<span class="fc" id="L341">        this.codingTranslationService = codingTranslationService;</span>
+<span class="fc" id="L342">        this.loincManager = loincManager;</span>
+<span class="fc" id="L343">    }</span>
+
+    // Methods migrated from DataUploadManager
+
+    // Methods below marked private operate on JPA entities and should not be presented in the manager API.
+    // These are used internally by other public methods and mapped to domain objects. They can be merged into
+    // the single public method calls if desired.
+
+    private EmisEsAdminOrganisation saveEmisEsAdminOrganisation(EmisEsAdminOrganisation entity) {
+<span class="fc" id="L352">        var result = emisEsTableService.saveEmisEsAdminOrganisation(entity);</span>
+<span class="fc" id="L353">        emisAdminOrgCache.put(result.getOrganisationGuid(), result);</span>
+<span class="fc" id="L354">        return result;</span>
+    }
+
+    public EmisEsAdminOrganisation saveAdminOrganisation(AdminOrganisation adminOrganisation, ZoneId zoneId) {
+<span class="fc" id="L358">        return saveEmisEsAdminOrganisation(adminOrganisationMapper.toJpaEntity(adminOrganisation, zoneId));</span>
+    }
+
+    public Map&lt;UUID, Long&gt; getAccountPublicIds(List&lt;Long&gt; accountIds) {
+<span class="fc" id="L362">        return HashMap.ofAll(accountService.findAccountPublicIds(accountIds));</span>
+    }
+
+    private List&lt;EmisEsAdminPatient&gt; saveEmisEsAdminPatients(List&lt;EmisEsAdminPatient&gt; entities) {
+<span class="fc" id="L366">        List&lt;EmisEsAdminPatient&gt; result = emisEsTableService.saveEmisEsAdminPatients(entities);</span>
+<span class="fc" id="L367">        result.forEach(patient -&gt; adminPatientCache.put(patient.getPatientGuid(), patient));</span>
+<span class="fc" id="L368">        return result;</span>
+    }
+
+    public List&lt;EmisEsAdminPatient&gt; saveAdminPatients(List&lt;Pair&lt;AdminPatient, ZoneId&gt;&gt; lookupData) {
+<span class="fc" id="L372">        return saveEmisEsAdminPatients(lookupData.stream()</span>
+<span class="fc" id="L373">                .map(p -&gt; adminPatientMapper.toJpaEntity(p.getLeft(), p.getRight())).collect(toList()));</span>
+    }
+
+    public EmisEsAdminUserInRole saveAdminUserInRole(AdminUserInRole adminUserInRole, ZoneId zoneId) {
+<span class="fc" id="L377">        return saveEmisEsAdminUserInRole(adminUserInRoleMapper.toJpaEntity(adminUserInRole, zoneId));</span>
+    }
+
+    private EmisEsAdminUserInRole saveEmisEsAdminUserInRole(EmisEsAdminUserInRole entity) {
+<span class="fc" id="L381">        EmisEsAdminUserInRole result = emisEsTableService.saveEmisEsAdminUserInRole(entity);</span>
+<span class="pc bpc" id="L382" title="1 of 2 branches missed.">        if (result != null) {</span>
+<span class="fc" id="L383">            adminUserInRoleCache.put(result.getUserInRoleGuid(), result);</span>
+        }
+<span class="fc" id="L385">        return result;</span>
+    }
+
+    public void clearStatelessAdminPatientOverrides() {
+        //these shouldn't be cached between sftps, the next sftp could statefully process adminpatients
+<span class="fc" id="L390">        adminPatientStatelessProcessingDeletedOverride.invalidateAll();</span>
+<span class="fc" id="L391">    }</span>
+
+    public void clearStatelessAdminPatientDeletedOverride(String patientGuid) {
+<span class="fc" id="L394">        adminPatientStatelessProcessingDeletedOverride.invalidate(patientGuid);</span>
+<span class="fc" id="L395">    }</span>
+
+    public void addStatelessAdminPatientDeletedOverride(String patientGuid, boolean handleAsDeleted) {
+<span class="fc" id="L398">        adminPatientStatelessProcessingDeletedOverride.put(patientGuid, handleAsDeleted);</span>
+<span class="fc" id="L399">    }</span>
+
+    public Boolean getStatelessAdminPatientDeletedOverrideIfExists(String patientGuid) {
+<span class="fc" id="L402">        return adminPatientStatelessProcessingDeletedOverride.getIfPresent(patientGuid);</span>
+    }
+
+    public List&lt;EmisEsCodingClinicalCode&gt; saveEmisEsCodingClinicalCodes(List&lt;EmisEsCodingClinicalCode&gt; entities) {
+<span class="fc" id="L406">        return emisEsTableService.saveEmisEsCodingClinicalCodes(entities);</span>
+    }
+
+    public List&lt;EmisEsCodingDrugCode&gt; saveEmisEsCodingDrugCodes(List&lt;EmisEsCodingDrugCode&gt; entities) {
+<span class="fc" id="L410">        return emisEsTableService.saveEmisEsCodingDrugCodes(entities);</span>
+    }
+
+    private EmisEsAdminOrganisation findEmisEsAdminOrganisationByGuid(String guid) {
+<span class="fc" id="L414">        return emisEsTableService.findEmisEsAdminOrganisationByGuid(guid);</span>
+    }
+
+    private List&lt;EmisEsAdminOrganisation&gt; findEmisEsAdminOrganisationByGuid(Collection&lt;String&gt; guids) {
+<span class="fc" id="L418">        return emisEsTableService.findEmisEsAdminOrganisationByGuid(guids);</span>
+    }
+
+    public &lt;K extends Serializable&gt; Map&lt;K, CodingReceived&gt; ensureCodingReceivedIfMatched(Map&lt;K, CodingReceived&gt; searchCoding) {
+<span class="fc" id="L422">        var codingsAndSystems = convertCodingReceivedToSearchCriteria(searchCoding);</span>
+<span class="fc" id="L423">        return HashMap.ofAll(codingManager.ensureCodingReceivedIfMatchForEmisEs(codingsAndSystems.toJavaMap()));</span>
+    }
+
+    @VisibleForTesting
+    &lt;K&gt; Map&lt;K, Tuple2&lt;CodingReceived, Set&lt;CodingSearchCriteria&gt;&gt;&gt; convertCodingReceivedToSearchCriteria(Map&lt;K, CodingReceived&gt; searchCoding) {
+<span class="fc" id="L428">        return searchCoding.mapValues(v -&gt; {</span>
+            Set&lt;CodingSearchCriteria&gt; candidates;
+<span class="fc bfc" id="L430" title="All 2 branches covered.">            if (isBlank(v.getCode1())) {</span>
+<span class="fc" id="L431">                candidates = ImmutableSet.of(new CodingSearchCriteria(v.getCode2(), v.getCodeSystem2(), true));</span>
+            } else {
+<span class="fc bfc" id="L433" title="All 2 branches covered.">                if (CodeSystems.SNOMED_CT.equals(v.getCodeSystem1())) {</span>
+<span class="fc" id="L434">                    candidates = ImmutableSet.of(new CodingSearchCriteria(v.getCode1(), v.getCodeSystem1(), true));</span>
+<span class="pc bpc" id="L435" title="3 of 4 branches missed.">                    if (isNotBlank(v.getCode2()) &amp;&amp; !v.getCode2().equals(v.getCode1())) {</span>
+<span class="nc" id="L436">                        LOGGER.warn(&quot;PHR-7405 Ignoring double coding, should be looked at! {}&quot;, v);</span>
+                    }
+                } else {
+<span class="fc" id="L439">                    var candidatesBuilder = ImmutableSet.&lt;CodingSearchCriteria&gt;builder();</span>
+<span class="fc" id="L440">                    candidatesBuilder.add(new CodingSearchCriteria(v.getCode1(), EMIS_CUSTOM_CODE, false));</span>
+<span class="fc" id="L441">                    emisReadCodeConverter.convert(v.getCode1())</span>
+<span class="fc" id="L442">                            .ifPresent(s -&gt; candidatesBuilder.add(new CodingSearchCriteria(s, READ_V_2, false)));</span>
+<span class="pc bpc" id="L443" title="1 of 2 branches missed.">                    if (isNotBlank(v.getCode2())) {</span>
+<span class="fc" id="L444">                        candidatesBuilder.add(new CodingSearchCriteria(v.getCode2(), v.getCodeSystem2(), true));</span>
+                    }
+<span class="fc" id="L446">                    candidates = candidatesBuilder.build();</span>
+                }
+            }
+<span class="fc" id="L449">            return Tuple.of(v, candidates);</span>
+        });
+    }
+
+    public Optional&lt;PKBPersonInfo&gt; getPKBPersonInfoCachedOrRetrieve(EHRRequestContext requestContext, AdminPatient esPatient, Org org) {
+<span class="nc" id="L454">        Tuple2&lt;String, Long&gt; cacheKey = getCacheKey(esPatient, org);</span>
+<span class="nc" id="L455">        PKBPersonInfo cachedPersonInfo = personCache.getIfPresent(cacheKey);</span>
+<span class="nc bnc" id="L456" title="All 2 branches missed.">        if (cachedPersonInfo != null) {</span>
+<span class="nc" id="L457">            return Optional.of(cachedPersonInfo);</span>
+        }
+<span class="nc" id="L459">        return retrieveAndCachePkbPersonInfo(requestContext, esPatient, org);</span>
+    }
+
+    public java.util.Map&lt;Tuple2&lt;Org, AdminPatient&gt;, Either&lt;RuntimeException, Optional&lt;PKBPersonInfo&gt;&gt;&gt; getPKBPersonInfoCachedOrRetrieve(EHRRequestContext requestContext, Collection&lt;Tuple2&lt;Org, AdminPatient&gt;&gt; records) {
+
+<span class="fc" id="L464">        var recordsMap = records.stream().collect(toMap(k -&gt; getCacheKey(k), identity(), (v1, v2) -&gt; v1));</span>
+
+<span class="fc" id="L466">        var availablePersonInfos = personCache.getAllPresent(recordsMap.keySet());</span>
+
+<span class="fc" id="L468">        var missingKeys = Sets.difference(recordsMap.keySet(), availablePersonInfos.keySet());</span>
+
+<span class="fc" id="L470">        var misingRecrods = missingKeys.stream().map(k -&gt; recordsMap.get(k)).collect(toList());</span>
+
+<span class="fc" id="L472">        var fetchedPersonInfos = retrieveAndCachePkbPersonInfo(requestContext, misingRecrods);</span>
+
+<span class="fc bfc" id="L474" title="All 2 branches covered.">        if (fetchedPersonInfos.isEmpty()) {</span>
+<span class="fc" id="L475">            java.util.Map&lt;Tuple2&lt;Org, AdminPatient&gt;, Either&lt;RuntimeException, Optional&lt;PKBPersonInfo&gt;&gt;&gt; resultMap = new java.util.HashMap&lt;&gt;();</span>
+<span class="fc" id="L476">            availablePersonInfos.forEach((key, value) -&gt; resultMap.put(recordsMap.get(key), Either.right(Optional.of(value))));</span>
+<span class="fc" id="L477">            return resultMap;</span>
+        }
+
+<span class="fc" id="L480">        availablePersonInfos.forEach((key, value) -&gt; fetchedPersonInfos.put(recordsMap.get(key), Either.right(Optional.of(value))));</span>
+
+<span class="fc" id="L482">        return fetchedPersonInfos;</span>
+    }
+
+    public Optional&lt;PKBPersonInfo&gt; retrieveAndCachePkbPersonInfo(EHRRequestContext requestContext, AdminPatient esPatient, Org org) {
+<span class="fc" id="L486">        Tuple2&lt;String, Long&gt; cacheKey = getCacheKey(esPatient, org);</span>
+<span class="fc" id="L487">        personCache.invalidate(cacheKey);</span>
+
+<span class="fc" id="L489">        PatientIdentifiers identifiers = convert(requestContext, esPatient, org);</span>
+
+<span class="fc" id="L491">        Optional&lt;PKBPersonInfo&gt; personInfo = userManager</span>
+<span class="fc" id="L492">                .lookupSinglePatient(identifiers)</span>
+<span class="fc" id="L493">                .map(p -&gt; {</span>
+<span class="fc" id="L494">                    boolean dummyPatient = emisEsDummyPatientService.isPatientDummy(p.getId());</span>
+<span class="fc" id="L495">                    return ImmutablePKBPersonInfo.builder()</span>
+<span class="fc" id="L496">                                    .id(p.getId())</span>
+<span class="fc" id="L497">                                    .isContactable(p.isContactable())</span>
+<span class="fc" id="L498">                                    .isDummyPatient(dummyPatient)</span>
+<span class="fc" id="L499">                                    .build();</span>
+                        }
+                );
+
+<span class="fc" id="L503">        personInfo.ifPresent(p -&gt; personCache.put(cacheKey, p));</span>
+<span class="fc" id="L504">        return personInfo;</span>
+    }
+
+    private Tuple2&lt;String, Long&gt; getCacheKey(Tuple2&lt;Org, AdminPatient&gt; input) {
+<span class="fc" id="L508">        return getCacheKey(input._2, input._1);</span>
+    }
+
+    private Tuple2&lt;String, Long&gt; getCacheKey(AdminPatient adminPatient, Org org) {
+<span class="fc" id="L512">        return Tuple.of(adminPatient.patientGuid(), org.getId());</span>
+    }
+
+    public java.util.Map&lt;Tuple2&lt;Org, AdminPatient&gt;, Either&lt;RuntimeException, Optional&lt;PKBPersonInfo&gt;&gt;&gt; retrieveAndCachePkbPersonInfo(EHRRequestContext requestContext, Collection&lt;Tuple2&lt;Org, AdminPatient&gt;&gt; records) {
+<span class="fc bfc" id="L516" title="All 2 branches covered.">        if (isEmpty(records)) {</span>
+<span class="fc" id="L517">            return emptyMap();</span>
+        }
+<span class="fc" id="L519">        java.util.Map&lt;PatientIdentifiers, Tuple2&lt;Tuple2&lt;Org, AdminPatient&gt;, Tuple2&lt;String, Long&gt;&gt;&gt; identifierToCacheKeyMap = new java.util.HashMap&lt;&gt;(records.size());</span>
+<span class="fc" id="L520">        records.stream().map(t -&gt; Tuple.of(t, convert(getContext(requestContext, t._1), t._2, t._1)))</span>
+<span class="fc" id="L521">                .forEach(t -&gt; identifierToCacheKeyMap.computeIfAbsent(t._2, pi -&gt; Tuple.of(t._1, getCacheKey(t._1))));</span>
+
+<span class="fc" id="L523">        identifierToCacheKeyMap.forEach((pi, t) -&gt; personCache.invalidate(t._2));</span>
+
+<span class="fc" id="L525">        var eitherErrorOrMaybePersonByIdentifierMap = userManager.lookupSinglePatients(identifierToCacheKeyMap.keySet());</span>
+
+        //find happy-path cases to cache
+<span class="fc" id="L528">        var personByIdentiferMap = eitherErrorOrMaybePersonByIdentifierMap.entrySet().stream()</span>
+<span class="fc" id="L529">                .filter(entry -&gt; entry.getValue().isRight())</span>
+<span class="fc" id="L530">                .filter(entry -&gt; entry.getValue().get().isPresent())</span>
+<span class="fc" id="L531">                .collect(toMap(java.util.Map.Entry::getKey, entry -&gt; entry.getValue().get().orElseThrow()));</span>
+
+<span class="fc" id="L533">        cacheFoundPatients(identifierToCacheKeyMap, personByIdentiferMap);</span>
+
+<span class="fc" id="L535">        return eitherErrorOrMaybePersonByIdentifierMap.entrySet().stream().collect(toMap(</span>
+<span class="fc" id="L536">                k -&gt; identifierToCacheKeyMap.get(k.getKey())._1,</span>
+<span class="fc" id="L537">                v -&gt; v.getValue().map(maybePerson -&gt; Optional.ofNullable(personCache.getIfPresent(identifierToCacheKeyMap.get(v.getKey())._2)))));</span>
+    }
+
+    private void cacheFoundPatients(java.util.Map&lt;PatientIdentifiers, Tuple2&lt;Tuple2&lt;Org, AdminPatient&gt;, Tuple2&lt;String, Long&gt;&gt;&gt; identifierToCacheKeyMap,
+                                    java.util.Map&lt;PatientIdentifiers, PKBPerson&gt; foundPersonByIdentiferMap) {
+<span class="fc" id="L542">        Set&lt;Long&gt; personIdsFound = foundPersonByIdentiferMap.values().stream()</span>
+<span class="fc" id="L543">                .map(PKBPerson::getId)</span>
+<span class="fc" id="L544">                .collect(toSet());</span>
+
+<span class="fc" id="L546">        var personIdToDummyMap = emisEsDummyPatientService.arePatientsDummy(personIdsFound);</span>
+
+<span class="fc" id="L548">        foundPersonByIdentiferMap.forEach((patientIdentifiers, person) -&gt; {</span>
+<span class="fc" id="L549">            var personInfo = ImmutablePKBPersonInfo.builder()</span>
+<span class="fc" id="L550">                    .id(person.getId())</span>
+<span class="fc" id="L551">                    .isContactable(person.isContactable())</span>
+<span class="fc" id="L552">                    .isDummyPatient(personIdToDummyMap.get(person.getId()))</span>
+<span class="fc" id="L553">                    .build();</span>
+<span class="fc" id="L554">            personCache.put(identifierToCacheKeyMap.get(patientIdentifiers)._2, personInfo);</span>
+<span class="fc" id="L555">        });</span>
+<span class="fc" id="L556">    }</span>
+
+    private EHRRequestContext getContext(EHRRequestContext requestContext, Org o) {
+<span class="pc bpc" id="L559" title="2 of 4 branches missed.">        if (o != null &amp;&amp; requestContext.getOrg().isEmpty()) {</span>
+<span class="fc" id="L560">            return requestContext.withOrg(o);</span>
+        }
+<span class="nc" id="L562">        return requestContext;</span>
+    }
+
+    private PatientIdentifiers convert(EHRRequestContext requestContext, AdminPatient esPatient, Org org) {
+<span class="fc" id="L566">        PatientIdentifiers.Builder idBuilder = new PatientIdentifiers.Builder();</span>
+
+<span class="fc" id="L568">        EmisEsDemographicsUtil.parseNhsNumber(esPatient.nhsNumber(), requestContext)</span>
+<span class="fc" id="L569">                .ifPresent(idBuilder::withNationalId);</span>
+
+<span class="fc" id="L571">        EmisEsDemographicsUtil.parsePatientNumber(esPatient.patientNumber(), org, requestContext)</span>
+<span class="fc" id="L572">                .ifPresent(idBuilder::withOrgLevelId);</span>
+
+<span class="fc" id="L574">        idBuilder.withEmisEsPersonGuid(esPatient.personGuid());</span>
+
+<span class="fc" id="L576">        return idBuilder.build();</span>
+    }
+
+    public java.util.Map&lt;String, OrgMergeHelper&gt; lookupPKBOrgs(Collection&lt;String&gt; esAdminOrganisationGuids) {
+<span class="fc" id="L580">        return orgCache.getAll(esAdminOrganisationGuids);</span>
+    }
+
+    private List&lt;Org&gt; findOrgByODSCode(Collection&lt;String&gt; odsCodes) {
+<span class="fc" id="L584">        emisOrgHelper.reportOdsCodes(odsCodes);</span>
+<span class="fc" id="L585">        return teamManager.getOrgsByOrgExternalIdType(OrgExternalIdType.ODS, odsCodes, Org.Lazy.TEAMS, Org.Lazy.EXTERNAL_IDS);</span>
+    }
+
+    private Optional&lt;OrgSurvivingState&gt; getSurvivorOrgSurvivingStateByODSCode(String odsCode) {
+<span class="nc" id="L589">        return orgSurvivingStateService.getSurvivorStateByOdsCode(odsCode);</span>
+    }
+
+    private java.util.Map&lt;String, OrgSurvivingState&gt; getSurvivorOrgsSurvivingStateByOdsCodes(Collection&lt;String&gt; odsCodes) {
+<span class="fc" id="L593">        return orgSurvivingStateService.getAllSurvivorStateByOdsCodes(odsCodes).stream().collect(toMap(OrgSurvivingState::getExternalIdValue, identity()));</span>
+    }
+
+    private OrgMergeHelper findOrgsByODSCode(String odsCode) {
+<span class="nc" id="L597">        Optional&lt;OrgSurvivingState&gt; optionalOrgSurvivingState = Optional.empty();</span>
+<span class="nc" id="L598">        List&lt;Org&gt; orgs = findOrgByODSCode(List.of(odsCode));</span>
+<span class="nc bnc" id="L599" title="All 2 branches missed.">        if (orgs.size() &gt; 1) {</span>
+<span class="nc" id="L600">            optionalOrgSurvivingState = getSurvivorOrgSurvivingStateByODSCode(odsCode);</span>
+        }
+<span class="nc" id="L602">        return ImmutableOrgMergeHelper.of(orgs, odsCode, optionalOrgSurvivingState);</span>
+    }
+
+    public java.util.Map&lt;String, OrgMergeHelper&gt; findOrgsByODSCode(Collection&lt;String&gt; odsCodes) {
+<span class="fc" id="L606">        List&lt;Org&gt; orgs = findOrgByODSCode(odsCodes);</span>
+<span class="fc" id="L607">        boolean isSurvivorStatesNeeded = false;</span>
+<span class="fc" id="L608">        java.util.Map&lt;String, List&lt;Org&gt;&gt; orgsByOdsCode = new java.util.HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L609" title="All 2 branches covered.">        for (Org org : orgs) {</span>
+<span class="fc" id="L610">            Set&lt;String&gt; odsCodesByOrg = org.getOdsCodes().collect(Collectors.toSet());</span>
+<span class="pc bpc" id="L611" title="1 of 2 branches missed.">            if (isEmpty(odsCodesByOrg)) {</span>
+<span class="nc" id="L612">                throw new IllegalStateException(&quot;No ODS code for Org: &quot; + org.getId());</span>
+            }
+<span class="fc bfc" id="L614" title="All 2 branches covered.">            for (String odsCode : odsCodesByOrg) {</span>
+<span class="fc bfc" id="L615" title="All 2 branches covered.">                if (orgsByOdsCode.containsKey(odsCode)) {</span>
+<span class="fc" id="L616">                    orgsByOdsCode.get(odsCode).add(org);</span>
+<span class="fc" id="L617">                    isSurvivorStatesNeeded = true;</span>
+                }
+<span class="fc" id="L619">                orgsByOdsCode.computeIfAbsent(odsCode, k -&gt; new ArrayList&lt;&gt;(List.of(org)));</span>
+<span class="fc" id="L620">            }</span>
+<span class="fc" id="L621">        }</span>
+<span class="fc bfc" id="L622" title="All 2 branches covered.">        java.util.Map&lt;String, OrgSurvivingState&gt; odsToSurvivingState = isSurvivorStatesNeeded ? getSurvivorOrgsSurvivingStateByOdsCodes(odsCodes) : emptyMap();</span>
+
+<span class="fc" id="L624">        return orgsByOdsCode.entrySet().stream().collect(toMap(java.util.Map.Entry::getKey,</span>
+<span class="fc" id="L625">                e -&gt; ImmutableOrgMergeHelper.of(e.getValue(), e.getKey(), Optional.ofNullable(odsToSurvivingState.get(e.getKey())))));</span>
+    }
+
+    public java.util.Map&lt;String, AdminPatient&gt; lookupAdminPatient(Collection&lt;Tuple2&lt;String, Org&gt;&gt; patientGuidWithOrg) {
+<span class="fc" id="L629">        var patientGuids = patientGuidWithOrg.stream().map(t -&gt; t._1).collect(toSet());</span>
+<span class="fc" id="L630">        var adminPatients = adminPatientCache.getAll(patientGuids);</span>
+
+<span class="fc" id="L632">        return patientGuidWithOrg.stream()</span>
+<span class="fc" id="L633">                .map(e -&gt; Tuple.of(e._1, convertToAdminPatient(adminPatients.get(e._1), e)))</span>
+<span class="fc bfc" id="L634" title="All 2 branches covered.">                .filter(t -&gt; t._2 != null)</span>
+<span class="fc" id="L635">                .collect(Collectors.toMap(t -&gt; t._1, t -&gt; t._2));</span>
+    }
+
+    private AdminPatient convertToAdminPatient(EmisEsAdminPatient entity, Tuple2&lt;String, Org&gt; input) {
+<span class="fc bfc" id="L639" title="All 2 branches covered.">        if (entity == null) {</span>
+<span class="fc" id="L640">            return null;</span>
+        }
+<span class="fc" id="L642">        return adminPatientMapper.fromJpaEntity(entity, getTimezoneOfOrg(input._2));</span>
+    }
+
+    public java.util.Map&lt;String, AdminUserInRole&gt; lookupAdminUserInRole(Collection&lt;Tuple2&lt;String, Org&gt;&gt; userInRoleGuidWithOrg) {
+<span class="fc" id="L646">        var userInRoleGuids = userInRoleGuidWithOrg.stream().map(t -&gt; t._1).collect(toSet());</span>
+<span class="fc" id="L647">        var adminUserInRoles = adminUserInRoleCache.getAll(userInRoleGuids);</span>
+
+<span class="fc" id="L649">        return userInRoleGuidWithOrg.stream()</span>
+<span class="fc" id="L650">                .map(e -&gt; Tuple.of(e._1, convertToAdminUserInRole(adminUserInRoles.get(e._1), e)))</span>
+<span class="fc bfc" id="L651" title="All 2 branches covered.">                .filter(t -&gt; t._2 != null)</span>
+<span class="fc" id="L652">                .distinct()</span>
+<span class="fc" id="L653">                .collect(Collectors.toMap(t -&gt; t._1, t -&gt; t._2));</span>
+    }
+
+    private AdminUserInRole convertToAdminUserInRole(EmisEsAdminUserInRole entity, Tuple2&lt;String, Org&gt; input) {
+<span class="fc bfc" id="L657" title="All 2 branches covered.">        if (entity == null) {</span>
+<span class="fc" id="L658">            return null;</span>
+        }
+<span class="fc" id="L660">        return adminUserInRoleMapper.fromJpaEntity(entity, getTimezoneOfOrg(input._2));</span>
+    }
+
+    /**
+     * Dummy, temporary, emergency, etc. patients
+     * EMIS should filter these for us but they've not been able, yet.
+     */
+    public boolean isIgnoredPatientType(AdminPatient patient) {
+<span class="fc" id="L668">        Optional&lt;Boolean&gt; maybeRegularPatient = patient.patientTypeDescription()</span>
+<span class="fc" id="L669">                .map(StringUtils::trimToNull)</span>
+<span class="fc" id="L670">                .map(PATIENT_TYPE_REGULAR::equals);</span>
+<span class="pc bpc" id="L671" title="1 of 8 branches missed.">        boolean ignorePatient = (maybeRegularPatient.isEmpty() &amp;&amp; !patient.isHandleAsDischargedOrDeleted()) || (maybeRegularPatient.isPresent() &amp;&amp; !maybeRegularPatient.get());</span>
+<span class="fc" id="L672">        boolean isDummy = isDummy(patient);</span>
+
+<span class="fc bfc" id="L674" title="All 2 branches covered.">        if (!config.isEmisEsDummyPatientsEnabled()) {</span>
+<span class="fc bfc" id="L675" title="All 4 branches covered.">            return ignorePatient || isDummy;</span>
+        }
+
+<span class="fc bfc" id="L678" title="All 2 branches covered.">        if (config.isEmisEsDummyPatientsForced()) {</span>
+<span class="pc bpc" id="L679" title="1 of 4 branches missed.">            return ignorePatient || !isDummy;</span>
+        }
+
+<span class="fc" id="L682">        return ignorePatient;</span>
+    }
+
+    public boolean isDummy(AdminPatient adminPatient) {
+<span class="fc" id="L686">        return adminPatient.dummyType().orElse(false);</span>
+    }
+
+    public boolean validateNoDummyPatientCrossover(AdminPatient adminPatient, boolean pkbPersonIsDummy) {
+<span class="fc" id="L690">        boolean adminPatientIsDummy = isDummy(adminPatient);</span>
+<span class="fc bfc" id="L691" title="All 2 branches covered.">        if (adminPatientIsDummy != pkbPersonIsDummy) {</span>
+<span class="fc" id="L692">            LOGGER.error(&quot;Emis dummy patient mismatch. pkbperson dummy = {}, adminpatient dummy = {}, adminpatient = {}&quot;,</span>
+<span class="fc" id="L693">                    pkbPersonIsDummy,</span>
+<span class="fc" id="L694">                    adminPatientIsDummy,</span>
+                    adminPatient,
+<span class="fc" id="L696">                    FrameFilter.filter(new Exception(&quot;Emis dummy patient mismatch&quot;).fillInStackTrace()));</span>
+<span class="fc" id="L697">            return false;</span>
+        }
+<span class="fc" id="L699">        return true;</span>
+    }
+
+    public java.util.Map&lt;BigInteger, CodingClinicalCode&gt; lookupClinicalCode(Collection&lt;BigInteger&gt; codeIds) {
+<span class="fc" id="L703">        return codeCache.getAll(codeIds);</span>
+    }
+
+    public java.util.Map&lt;BigInteger, CodingDrugCode&gt; lookupDrugCodes(Collection&lt;BigInteger&gt; codeIds) {
+<span class="fc" id="L707">        return drugCodeCache.getAll(codeIds);</span>
+    }
+
+    public void trackMissingClinicalCode(BigInteger codeId, List&lt;String&gt; orgOdsCodes) {
+<span class="fc" id="L711">        missingCodeHelper.trackMissingClinicalCode(codeId, orgOdsCodes);</span>
+<span class="fc" id="L712">    }</span>
+
+    public void trackMissingClinicalCode(BigInteger codeId, String orgOdsCode) {
+<span class="nc" id="L715">        missingCodeHelper.trackMissingClinicalCode(codeId, Collections.singletonList(orgOdsCode));</span>
+<span class="nc" id="L716">    }</span>
+
+    public void removeMissingClinicalCodesIfPreviouslyAdded(List&lt;EmisEsCodingClinicalCode&gt; codes) {
+<span class="fc" id="L719">        missingCodeHelper.removeMissingClinicalCodesIfPreviouslyAdded(codes);</span>
+<span class="fc" id="L720">    }</span>
+
+    public void trackUnmatchedCodingReceived(CodingReceived codingReceived) {
+<span class="fc" id="L723">        missingCodeHelper.trackUnmatchedCodingReceived(codingReceived);</span>
+<span class="fc" id="L724">    }</span>
+
+    public void trackMissingDrugCode(BigInteger codeId, String drugRecordGuid) {
+<span class="fc" id="L727">        missingCodeHelper.trackMissingDrugCode(codeId, drugRecordGuid);</span>
+<span class="fc" id="L728">    }</span>
+
+    public void removeMissingDrugCodesIfPreviouslyAdded(List&lt;EmisEsCodingDrugCode&gt; codes) {
+<span class="fc" id="L731">        missingCodeHelper.removeMissingDrugCodesIfPreviouslyAdded(codes);</span>
+<span class="fc" id="L732">    }</span>
+
+    public void trackMissingLoincTest(LoincCodeAndUnit loincCodeAndUnit) {
+<span class="nc" id="L735">        missingCodeHelper.trackMissingLoincTests(loincCodeAndUnit);</span>
+<span class="nc" id="L736">    }</span>
+
+    /**
+     * EMIS merges patient records but still sends both the obsolete &amp; primary patient records (as separate patients &amp; patient numbers)
+     * convert any obsolete patient IDs into the primary value
+     * See PHR-4218
+     */
+    public AdminPatient fixMergedPatientId(@NotNull AdminPatient adminPatient, @NotNull Org org) {
+        // short circuit if we're missing the patient ID
+<span class="fc bfc" id="L745" title="All 2 branches covered.">        if (adminPatient.patientNumber().isEmpty()) {</span>
+<span class="fc" id="L746">            return adminPatient;</span>
+        }
+<span class="fc" id="L748">        Integer patientNumber = adminPatient.patientNumber().get();</span>
+<span class="fc" id="L749">        Map&lt;Integer, Integer&gt; obsoleteToPrimaryIdMap = orgMergedPatientIdMapCache.getIfPresent(org.getId());</span>
+<span class="fc bfc" id="L750" title="All 2 branches covered.">        if (obsoleteToPrimaryIdMap == null) {</span>
+            /* 2018-08-16 RobW: temporary hack; revert once we can call into the new service layer from phr-service */
+<span class="fc" id="L752">            java.util.Map&lt;Integer, Integer&gt; utilMap = /*emisEsMergedOrgLevelIdService*/userManager.findObsoleteToPrimaryIdMap(org.getId());</span>
+<span class="fc" id="L753">            obsoleteToPrimaryIdMap = HashMap.ofAll(utilMap);</span>
+<span class="fc" id="L754">            orgMergedPatientIdMapCache.put(org.getId(), obsoleteToPrimaryIdMap);</span>
+        }
+<span class="fc bfc" id="L756" title="All 2 branches covered.">        if (obsoleteToPrimaryIdMap.containsKey(patientNumber)) {</span>
+<span class="fc" id="L757">            return ImmutableAdminPatient.builder()</span>
+<span class="fc" id="L758">                    .from(adminPatient)</span>
+<span class="fc" id="L759">                    .patientNumber(obsoleteToPrimaryIdMap.get(patientNumber).get())</span>
+<span class="fc" id="L760">                    .build();</span>
+        } else {
+<span class="fc" id="L762">            return adminPatient;</span>
+        }
+    }
+
+    public boolean isAllowedPatient(@NotNull AdminPatient adminPatient, @NotNull OrgMergeHelper orgMergeHelper) {
+<span class="fc" id="L767">        return emisEsWhitelist.isAllowedPatient(adminPatient, orgMergeHelper);</span>
+    }
+
+    /**
+     * @return true if whitelist filtering is enabled, and if this org is not listed with a &quot;*&quot; whitelist entry
+     */
+    public boolean isFilteredByPatientWhitelist(@NotNull Org org) {
+<span class="fc" id="L774">        return emisEsWhitelist.isFilteredByPatientWhitelist(org);</span>
+    }
+
+    public Optional&lt;EmisEsAdminOrganisation&gt; findEmisAdminOrganization(String esAdminOrganisationGuid) {
+<span class="fc" id="L778">        return Optional.ofNullable(emisAdminOrgCache.get(esAdminOrganisationGuid));</span>
+    }
+
+    public Tuple2&lt;Boolean, EmisEsAdminOrganisation&gt; isInWhitelist(@NotNull AdminPatient adminPatient) {
+<span class="fc" id="L782">        EmisEsAdminOrganisation entity = emisAdminOrgCache.get(adminPatient.organisationGuid());</span>
+<span class="fc bfc" id="L783" title="All 2 branches covered.">        if (entity == null) {</span>
+<span class="fc" id="L784">            return Tuple.of(false, null);</span>
+        }
+<span class="fc" id="L786">        return Tuple.of(emisEsWhitelist.isAllowedPatient(adminPatient, entity), entity);</span>
+    }
+
+
+    public java.util.Map&lt;String, CodingTranslationCodingFields&gt; lookupCodingTranslations(Collection&lt;String&gt; snomedCodes) {
+<span class="fc" id="L791">        return codingtranslationCache.getAll(snomedCodes);</span>
+    }
+
+    public java.util.Map&lt;LoincCodeAndUnit, LoincTest&gt; lookupLoincTests(Collection&lt;LoincCodeAndUnit&gt; loincCodesAndUnits) {
+<span class="fc" id="L795">        return loincTestCache.getAll(loincCodesAndUnits);</span>
+    }
+
+    public java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; lookupLoincMappings(Collection&lt;OrgIdSnomedCTCodeAndUnit&gt; orgIdsAndCodesAndUnits) {
+<span class="fc" id="L799">        return loincMappingCache.getAll(orgIdsAndCodesAndUnits);</span>
+    }
+
+    public List&lt;LoincMapping&gt; saveMissingLoincMappings(Collection&lt;LoincMapping&gt; loincMappings) {
+<span class="fc" id="L803">        return loincManager.addLoincMappings(loincMappings);</span>
+    }
+
+    @Override
+    public void clearState() {
+<span class="fc" id="L808">        invalidateCaches();</span>
+<span class="fc" id="L809">        emisEsTableService.clearState();</span>
+<span class="fc" id="L810">        LOGGER.info(&quot;Cleared internal states&quot;);</span>
+<span class="fc" id="L811">    }</span>
+
+    private void invalidateCaches() {
+<span class="fc" id="L814">        caches.forEach(Cache::invalidateAll);</span>
+<span class="fc" id="L815">    }</span>
+
+    private &lt;K, V&gt; Cache&lt;K, V&gt; createAndRegisterCache(String cacheName) {
+<span class="fc" id="L818">        Cache&lt;K, V&gt; cache = Caffeine.newBuilder().maximumSize(config.getEmisSupportCacheSize()).expireAfterWrite(1, TimeUnit.HOURS).recordStats().build();</span>
+<span class="fc" id="L819">        registerCache(cacheName, cache);</span>
+<span class="fc" id="L820">        return cache;</span>
+    }
+
+    private &lt;K, V&gt; LoadingCache&lt;K, V&gt; createAndRegisterCache(String cacheName, CacheLoader&lt;K, V&gt; loader) {
+<span class="fc" id="L824">        LoadingCache&lt;K, V&gt; cache = Caffeine.newBuilder().maximumSize(config.getEmisSupportCacheSize()).expireAfterWrite(1, TimeUnit.HOURS).recordStats().build(loader);</span>
+<span class="fc" id="L825">        registerCache(cacheName, cache);</span>
+<span class="fc" id="L826">        return cache;</span>
+    }
+
+    private &lt;K, V&gt; Cache&lt;K, V&gt; createAndRegisterLongCache(String cacheName, int maxSize) {
+<span class="fc" id="L830">        Cache&lt;K, V&gt; cache = Caffeine.newBuilder().maximumSize(maxSize).recordStats().build();</span>
+<span class="fc" id="L831">        registerCache(cacheName, cache);</span>
+<span class="fc" id="L832">        return cache;</span>
+    }
+
+    private &lt;K, V&gt; void registerCache(String cacheName, Cache&lt;K, V&gt; cache) {
+<span class="fc" id="L836">        caches.add(cache);</span>
+<span class="fc" id="L837">        CaffeineCacheMetrics.monitor(Metrics.globalRegistry, cache, cacheName);</span>
+<span class="fc" id="L838">    }</span>
+
+    public List&lt;EmisEsObservationDelta&gt; getObservationDeltas(@NotNull LoggedInEHRRequestContext requestContext, Long patientAccountId,
+                                                             EmisEsObservationDelta.DeltaType deltaType) {
+<span class="fc" id="L842">        return emisEsObservationDeltaManager.getObservationDeltas(requestContext, patientAccountId, deltaType);</span>
+    }
+
+    public Table&lt;UUID, Long, MenuDataType&gt; getUniqueIdToDeltaOriginalDataTypeMap(Collection&lt;UUID&gt; uniqueIds) {
+<span class="fc" id="L846">        return emisEsObservationDeltaManager.getOriginalDataTypeForDeltas(uniqueIds);</span>
+    }
+
+    void deleteEmisEsObservationDeltaById(long deltaId) {
+<span class="fc" id="L850">        emisEsObservationDeltaManager.softDelete(deltaId);</span>
+<span class="fc" id="L851">    }</span>
+
+    public &lt;U&gt; Map&lt;U, OrgMergeHelper&gt; getRecordToOrgMap(io.vavr.collection.List&lt;ResultWithId&lt;U, Long&gt;&gt; records, Function1&lt;U, String&gt; orgGuidExtractor) {
+<span class="fc" id="L854">        return getRecordToOrgMap(records, orgGuidExtractor, (record, maybeOrg) -&gt; {</span>
+<span class="fc bfc" id="L855" title="All 2 branches covered.">            if (maybeOrg.isPresent()) {</span>
+<span class="fc" id="L856">                return maybeOrg.get();</span>
+            }
+
+<span class="fc" id="L859">            var maybeEmisOrgRecord = findEmisAdminOrganization(orgGuidExtractor.apply(record));</span>
+<span class="fc bfc" id="L860" title="All 2 branches covered.">            if (maybeEmisOrgRecord.isPresent()) {</span>
+<span class="pc" id="L861">                var odsCode = maybeEmisOrgRecord.get().findOdsCode().orElseThrow(() -&gt; new IllegalStateException(&quot;No ODS code: &quot; + maybeEmisOrgRecord.get()));</span>
+<span class="pc bpc" id="L862" title="1 of 2 branches missed.">                if (emisEsWhitelist.isWhitelistedOrg(odsCode)) {</span>
+<span class="nc" id="L863">                    throw new IllegalStateException(&quot;Org setup is missing! Either remove Org from whitelist or create Org with ODS or add ODS code to Org! &quot; + maybeEmisOrgRecord.get());</span>
+                } else {
+<span class="fc" id="L865">                    emisOrgHelper.logIfOrgWasntSeenYet(maybeEmisOrgRecord.get(), &quot;EMIS Org [{}] appeared in feed skipping&quot;, record);</span>
+<span class="fc" id="L866">                    return null;</span>
+                }
+            } else {
+<span class="fc" id="L869">                throw new IllegalStateException(&quot;Missing EMIS org record for org guid &quot; + orgGuidExtractor.apply(record));</span>
+            }
+        });
+    }
+
+    public &lt;U&gt; Map&lt;U, Optional&lt;OrgMergeHelper&gt;&gt; getRecordToMaybeOrgMap(io.vavr.collection.List&lt;ResultWithId&lt;U, Long&gt;&gt; records, Function1&lt;U, String&gt; orgGuidExtractor) {
+<span class="fc" id="L875">        return getRecordToOrgMap(records, orgGuidExtractor, (record, maybeOrg) -&gt; maybeOrg);</span>
+    }
+
+    private &lt;U, R&gt; Map&lt;U, R&gt; getRecordToOrgMap(io.vavr.collection.List&lt;ResultWithId&lt;U, Long&gt;&gt; records, Function1&lt;U, String&gt; orgGuidExtractor, BiFunction&lt;U, Optional&lt;OrgMergeHelper&gt;, R&gt; resultMapper) {
+<span class="fc" id="L879">        var orgGuids = records.map(rwi -&gt; orgGuidExtractor.apply(rwi.getValue())).toJavaSet();</span>
+<span class="fc" id="L880">        var orgMap = lookupPKBOrgs(orgGuids);</span>
+<span class="fc" id="L881">        return records.toMap(ResultWithId::getValue,</span>
+                        r -&gt; {
+<span class="fc" id="L883">                            String orgGuid = orgGuidExtractor.apply(r.getValue());</span>
+<span class="fc" id="L884">                            emisOrgHelper.reportOrgGuid(orgGuid);</span>
+<span class="fc" id="L885">                            return resultMapper.apply(r.getValue(), Optional.ofNullable(orgMap.get(orgGuid)));</span>
+                        })
+<span class="fc bfc" id="L887" title="All 2 branches covered.">                .filter(urTuple2 -&gt; urTuple2._2 != null);</span>
+    }
+
+    public boolean isWhitelistedOrg(String odsCode) {
+<span class="fc" id="L891">        return emisEsWhitelist.isWhitelistedOrg(odsCode);</span>
+    }
+
+    public boolean isWhitelistedOrg(Org org) {
+<span class="fc" id="L895">        return emisEsWhitelist.isWhitelistedOrg(org);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

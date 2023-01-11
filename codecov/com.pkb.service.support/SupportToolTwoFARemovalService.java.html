@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SupportToolTwoFARemovalService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.support</a> &gt; <span class="el_source">SupportToolTwoFARemovalService.java</span></div><h1>SupportToolTwoFARemovalService.java</h1><pre class="source lang-java linenums">package com.pkb.service.support;
+
+import com.pkb.VersionDetails;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.domain.duplicate.person.PersonService;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.TwoFactorAuthState;
+import com.pkb.phoenix.shared.structures.request.TwoFARemovalTaskRequest;
+import com.pkb.phoenix.shared.structures.response.ImmutableTwoFARemovalTaskResponse;
+import com.pkb.phoenix.shared.structures.response.TaskResponseStatus;
+import com.pkb.service.twofactor.TwoFactorAuthenticationService;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import org.apache.camel.Consume;
+import org.apache.camel.ProducerTemplate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.lang.invoke.MethodHandles;
+import java.util.Date;
+import java.util.Optional;
+
+public class SupportToolTwoFARemovalService {
+    public static final String INBOUND_REQUEST_TWO_FA_REMOVAL = &quot;direct:inboundRequestTwoFARemoval&quot;;
+    public static final String OUTBOUND_TWO_FA_REMOVAL_COMPLETE = &quot;direct:outboundTwoFARemovalComplete&quot;;
+<span class="fc" id="L27">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+    private final ProducerTemplate producer;
+    private final TwoFactorAuthenticationService twoFactorAuthenticationService;
+    private final PersonService personService;
+    private final UserManager userManager;
+    private final DateTimeService dateTimeService;
+
+    public SupportToolTwoFARemovalService(ProducerTemplate producer,
+            TwoFactorAuthenticationService twoFactorAuthenticationService,
+            PersonService personService,
+            UserManager userManager,
+<span class="fc" id="L38">            DateTimeService dateTimeService) {</span>
+<span class="fc" id="L39">        this.producer = producer;</span>
+<span class="fc" id="L40">        this.twoFactorAuthenticationService = twoFactorAuthenticationService;</span>
+<span class="fc" id="L41">        this.personService = personService;</span>
+<span class="fc" id="L42">        this.userManager = userManager;</span>
+<span class="fc" id="L43">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L44">    }</span>
+
+    @Transactional
+    @Consume(INBOUND_REQUEST_TWO_FA_REMOVAL)
+    public void twoFARemovalRequest(TwoFARemovalTaskRequest task) {
+
+<span class="fc" id="L50">        var builder = new ImmutableTwoFARemovalTaskResponse.Builder()</span>
+<span class="fc" id="L51">                .taskId(task.taskId())</span>
+<span class="fc" id="L52">                .requestId(task.requestId());</span>
+
+        try {
+
+<span class="fc" id="L56">            var person = personService.findPersonIdByEmail(task.email()).stream().findFirst().orElseThrow(() -&gt; new RuntimeException(&quot;No person found for email: &quot; + task.email()));</span>
+<span class="pc" id="L57">            var pkbPerson = userManager.findPKBPerson(person).getOrElseThrow(() -&gt; new RuntimeException(&quot;No person found for id: &quot; + person));</span>
+
+<span class="fc bfc" id="L59" title="All 2 branches covered.">            if (pkbPerson.getTwoFactorAuthState() == TwoFactorAuthState.ACTIVE) {</span>
+<span class="pc" id="L60">                var result = removeTwoFa(pkbPerson, createVersionDetails(pkbPerson)).orElseThrow(() -&gt; new RuntimeException(&quot;An error occurred during the process&quot;));</span>
+
+<span class="fc" id="L62">                builder.results(String.format(&quot;Two-factor authentication was successfully disabled for user with ID: %s and email: %s&quot;, result.getId(), task.email()));</span>
+<span class="fc" id="L63">                LOGGER.info(&quot;Two-factor authentication was removed via Support-tool. Freshdesk Id: {} User Id: {}&quot;, task.freshDeskId(), result.getId());</span>
+<span class="fc" id="L64">            } else {</span>
+<span class="fc" id="L65">                builder.results(&quot;Two factor authentication for person is not active!&quot;);</span>
+            }
+
+<span class="fc" id="L68">            builder.status(TaskResponseStatus.SUCCESS);</span>
+<span class="fc" id="L69">            builder.errorMessage(&quot;&quot;);</span>
+<span class="fc" id="L70">        } catch (Exception cause) {</span>
+<span class="fc" id="L71">            LOGGER.error(&quot;Error disabling 2FA via Support-Tool: &quot;, cause);</span>
+<span class="fc" id="L72">            builder</span>
+<span class="fc" id="L73">                    .status(TaskResponseStatus.ERROR)</span>
+<span class="fc" id="L74">                    .errorMessage(cause.getMessage());</span>
+
+        } finally {
+<span class="fc" id="L77">            producer.sendBody(OUTBOUND_TWO_FA_REMOVAL_COMPLETE, builder.build());</span>
+        }
+<span class="fc" id="L79">    }</span>
+
+    private Optional&lt;PKBPerson&gt; removeTwoFa(PKBPerson person, VersionDetails versionDetails) {
+<span class="fc" id="L82">        return twoFactorAuthenticationService.forceDisable(person, versionDetails);</span>
+    }
+
+    private VersionDetails createVersionDetails(PKBPerson person) {
+<span class="fc" id="L86">        VersionDetails versionDetails = new VersionDetails();</span>
+
+        //Person's private ID is used here as sourcePersonId since it is not possible to refer to the ID of the support-user in keycloak from PHR.
+<span class="fc" id="L89">        versionDetails.setSourcePersonId(person.getId());</span>
+<span class="fc" id="L90">        versionDetails.setEnteredDate(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L91">        versionDetails.setAccessRoute(Route.SUPPORT_TOOL);</span>
+<span class="fc" id="L92">        return versionDetails;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

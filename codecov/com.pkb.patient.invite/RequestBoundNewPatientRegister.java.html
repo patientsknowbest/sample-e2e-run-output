@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestBoundNewPatientRegister.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.patient.invite</a> &gt; <span class="el_source">RequestBoundNewPatientRegister.java</span></div><h1>RequestBoundNewPatientRegister.java</h1><pre class="source lang-java linenums">package com.pkb.patient.invite;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.datamodel.consent.PatientConsentUpdateTemplate;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.exception.MailException;
+import com.pkb.institute.entity.Team;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.patient.OrgLevelIdValidator;
+import com.pkb.patient.TeamLevelIdValidator;
+import com.pkb.patient.invite.PatientRegister.FailedInvitation;
+import com.pkb.patient.invite.PatientRegister.SuccessType;
+import com.pkb.patient.invite.PatientRegister.SuccessfulInvitation;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.util.PKBConstants;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Optional;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.function.Consumer;
+
+import static com.pkb.common.base.ErrorBuilder.errorOf;
+import static com.pkb.crypto.util.RandomUtil.randomPassword;
+import static com.pkb.patient.invite.PatientRegister.FailedInvitation.failureForUnknownReason;
+import static com.pkb.patient.invite.PatientRegister.SuccessType.NEW_ACCOUNT_CREATED;
+import static com.pkb.patient.invite.PatientRegister.SuccessType.NEW_ACCOUNT_CREATED_AND_INVITATION_SENT;
+import static com.pkb.util.EmailUtil.Quantity.BULK;
+import static java.util.Collections.singletonList;
+
+/**
+ * &lt;pre&gt;
+ * For each HTTP request an instance of {@link RequestBoundNewPatientRegister} is created.
+ * Parameters like request context, inviter (team coordinator) and patient consent must be set after instance creation.
+ * {@link #registerPatientWithTeam(InvitationDto, Team)} this way only takes arguments that are really part of business functionality:
+ * 1. invitation dto and
+ * 2. team to where new Patient should be invited.
+ * &lt;/pre&gt;
+ */
+public class RequestBoundNewPatientRegister {
+
+<span class="fc" id="L54">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private static final int TEMPORARY_PASSWORD_LENGTH = 10;
+    private static final String ERROR_CODE = &quot;patient.bulk.invitation.unknown.error&quot;;
+    private static final String ERROR = &quot;Failed unexpectedly&quot;;
+
+    private final TeamUserManager teamUserManager;
+    private final PatientConsentManager patientConsentManager;
+
+    private LoggedInEHRRequestContext requestContext;
+    private PKBPerson coordinator;
+
+<span class="fc" id="L65">    RequestBoundNewPatientRegister(TeamUserManager teamUserManager, PatientConsentManager patientConsentManager) {</span>
+<span class="fc" id="L66">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L67">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L68">    }</span>
+
+    RequestBoundNewPatientRegister withRequestContext(LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L71">        this.requestContext = requestContext;</span>
+<span class="fc" id="L72">        return this;</span>
+    }
+
+    RequestBoundNewPatientRegister withCoordinator(PKBPerson coordinator) {
+<span class="fc" id="L76">        this.coordinator = coordinator;</span>
+<span class="fc" id="L77">        return this;</span>
+    }
+
+    Either&lt;FailedInvitation, SuccessfulInvitation&gt; registerPatientWithTeam(InvitationDto invitation, Team invitingTeam,
+                                                                           @NotNull PatientConsentUpdateTemplate patientConsentTemplate) {
+<span class="fc" id="L82">        PKBPersonDTO patientDto = pkbPersonDtoFrom(invitation, invitingTeam);</span>
+<span class="fc" id="L83">        List&lt;ValidNationalId&gt; nationalId = getNationalId(invitation).map(List::of).orElse(List.of());</span>
+<span class="fc" id="L84">        return getValidatedOrgLevelIds(invitingTeam, invitation, requestContext).flatMap((orgLevelIds -&gt; getValidatedTeamLevelIds(invitingTeam, invitation, requestContext).flatMap(</span>
+<span class="fc" id="L85">                teamLevelIds -&gt; teamUserManager.transactional(() -&gt; {</span>
+<span class="fc" id="L86">                    PKBPerson patient = null;</span>
+                    try {
+<span class="fc" id="L88">                        patient = teamUserManager.createPatientForCoord(</span>
+                                requestContext,
+                                patientDto,
+                                invitingTeam,
+                                nationalId,
+                                orgLevelIds,
+                                teamLevelIds,
+                                coordinator,
+                                BULK);
+<span class="fc" id="L97">                        patientConsentManager.ensureTeamLinkAndUpdatePatientConsent(requestContext, patientConsentTemplate.apply(patient.getId()));</span>
+<span class="fc bfc" id="L98" title="All 2 branches covered.">                        SuccessType successType = patientDto.getStatus() == UserStatus.CREATED ? NEW_ACCOUNT_CREATED_AND_INVITATION_SENT : NEW_ACCOUNT_CREATED;</span>
+<span class="fc" id="L99">                        return Either.right(new SuccessfulInvitation(successType, patient));</span>
+<span class="nc" id="L100">                    } catch (MailException cause) {</span>
+                        //TODO: This seems wrong as depending on where the exception is thrown we end up having half done DB update, as the excepton is silently swallowed and some steps might not been done.
+                        //We're also reporting unknown error, while it might have been only the email not sent out, everything else was successfully done in DB, leaving an inconsistent state.
+<span class="nc bnc" id="L103" title="All 2 branches missed.">                        Long patientId = patient == null ? null : patient.getId();</span>
+<span class="nc" id="L104">                        LOGGER.error(&quot;Failed sending email on registering patient {} for team {}, this might left the record in an inconsistent state&quot;, patientId,</span>
+<span class="nc" id="L105">                                invitingTeam.getId(), cause);</span>
+<span class="nc" id="L106">                        return Either.left(failureForUnknownReason(singletonList(errorOf(ERROR_CODE, ERROR))));</span>
+                    }
+                }))));
+    }
+
+    private PKBPersonDTO pkbPersonDtoFrom(InvitationDto invitation, Team invitingTeam) {
+<span class="fc" id="L112">        PKBPersonDTO patientDto = new PKBPersonDTO();</span>
+
+<span class="fc" id="L114">        InviteeDto invitee = invitation.getInvitee();</span>
+
+<span class="fc" id="L116">        updateName(patientDto, invitee.getName());</span>
+<span class="fc" id="L117">        invitee.findAddress().ifPresent(updateAddress(patientDto));</span>
+<span class="fc" id="L118">        invitee.findEmail().ifPresent(patientDto::setUserName);</span>
+<span class="fc" id="L119">        invitee.findEmail().ifPresent(patientDto::setEmailId);</span>
+
+<span class="fc" id="L121">        patientDto.setUserType(UserType.PATIENT);</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">        patientDto.setStatus(invitee.findEmail().isPresent() ? UserStatus.CREATED : UserStatus.NOCONTACT);</span>
+<span class="fc" id="L123">        patientDto.setPassword(randomPassword(TEMPORARY_PASSWORD_LENGTH));</span>
+<span class="fc" id="L124">        patientDto.setCountry(invitingTeam.getCountry());</span>
+<span class="fc" id="L125">        patientDto.setTimeZoneId(PKBConstants.DEFAULT_TIMEZONE_ID);</span>
+
+<span class="fc" id="L127">        invitee.findDateOfBirth()</span>
+<span class="fc" id="L128">                .map(LocalDate::toString)</span>
+<span class="fc" id="L129">                .ifPresent(patientDto::setDateOfBirthString);</span>
+
+<span class="fc" id="L131">        return patientDto;</span>
+    }
+
+    private Optional&lt;ValidNationalId&gt; getNationalId(InvitationDto invitation) {
+<span class="fc" id="L135">        InviteeIdsDto inviteeIds = invitation.getInvitee().getInviteeIds();</span>
+
+<span class="fc" id="L137">        return inviteeIds.findNationalId();</span>
+    }
+
+    private void updateName(PKBPersonDTO patientDto, NameDto name) {
+<span class="fc" id="L141">        patientDto.setFirstName(name.getFirstName());</span>
+<span class="fc" id="L142">        patientDto.setLastName(name.getLastName());</span>
+<span class="fc" id="L143">        name.findTitle().ifPresent(patientDto::setTitle);</span>
+<span class="fc" id="L144">    }</span>
+
+    private Consumer&lt;AddressDto&gt; updateAddress(PKBPersonDTO patientDto) {
+<span class="fc" id="L147">        return address -&gt; {</span>
+<span class="fc" id="L148">            address.findCounty().ifPresent(patientDto::setState);</span>
+<span class="fc" id="L149">            address.findPostCode().ifPresent(patientDto::setPostalCode);</span>
+<span class="fc" id="L150">            address.findCity().ifPresent(patientDto::setCity);</span>
+<span class="fc" id="L151">            address.findAddressPartOne().ifPresent(patientDto::setAddress1);</span>
+<span class="fc" id="L152">            address.findAddressPartTwo().ifPresent(patientDto::setAddress2);</span>
+<span class="fc" id="L153">        };</span>
+    }
+
+    private Either&lt;FailedInvitation, SortedSet&lt;OrgLevelId&gt;&gt; getValidatedOrgLevelIds(Team invitingTeam, InvitationDto invitation, EHRRequestContext requestContext) {
+<span class="fc" id="L157">        return new OrgLevelIdValidator(invitingTeam.getOrg()).validate(invitation, requestContext)</span>
+<span class="fc" id="L158">                .map(maybeOrgLevelId -&gt; maybeOrgLevelId.map(this::singleton).orElse(emptySortedSet()))</span>
+<span class="fc" id="L159">                .mapLeft(FailedInvitation::failedOnOrgLevelIdType);</span>
+    }
+
+    private Either&lt;FailedInvitation, SortedSet&lt;TeamLevelId&gt;&gt; getValidatedTeamLevelIds(Team invitingTeam, InvitationDto invitation, EHRRequestContext requestContext) {
+<span class="fc" id="L163">        return new TeamLevelIdValidator(invitingTeam)</span>
+<span class="fc" id="L164">                .validate(invitation, requestContext)</span>
+<span class="fc" id="L165">                .map(maybeTeamLevelId -&gt; maybeTeamLevelId.map(this::singleton).orElse(emptySortedSet()))</span>
+<span class="fc" id="L166">                .mapLeft(FailedInvitation::failedOnTeamLevelIdType);</span>
+    }
+
+    private &lt;E&gt; SortedSet&lt;E&gt; singleton(E element) {
+<span class="fc" id="L170">        TreeSet&lt;E&gt; set = new TreeSet&lt;&gt;();</span>
+<span class="fc" id="L171">        set.add(element);</span>
+<span class="fc" id="L172">        return set;</span>
+    }
+
+    private &lt;T&gt; TreeSet&lt;T&gt; emptySortedSet() {
+<span class="fc" id="L176">        return new TreeSet&lt;&gt;();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

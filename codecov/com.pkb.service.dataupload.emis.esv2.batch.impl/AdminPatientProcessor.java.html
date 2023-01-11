@@ -1,0 +1,550 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AdminPatientProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.batch.impl</a> &gt; <span class="el_source">AdminPatientProcessor.java</span></div><h1>AdminPatientProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.batch.impl;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.dataupload.emis.esv2.EmisEsProcessedRow;
+import com.pkb.dataupload.emis.esv2.csv.EmisEsAdminOrganisation;
+import com.pkb.emis.es.entity.EmisEsPersonGuid;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.exception.ConflictingPatientIdentifiersException;
+import com.pkb.exception.MultiplePatientSameIdentifierException;
+import com.pkb.externalid.service.ExternalIdService;
+import com.pkb.institute.OrgMergeHelper;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.dataupload.emis.esv2.EmisEsDummyPatientService;
+import com.pkb.service.dataupload.emis.esv2.EmisEsManager;
+import com.pkb.service.dataupload.emis.esv2.EmisEsProcessedRowService;
+import com.pkb.service.dataupload.emis.esv2.EmisEsStatusService;
+import com.pkb.service.dataupload.emis.esv2.EmisOrgHelper;
+import com.pkb.service.dataupload.emis.esv2.batch.BatchItemProcessor;
+import com.pkb.service.dataupload.emis.esv2.batch.EmisProcessorAborter;
+import com.pkb.service.dataupload.emis.esv2.batch.ImmutableItemContext;
+import com.pkb.service.dataupload.emis.esv2.batch.ItemContext;
+import com.pkb.service.dataupload.emis.esv2.model.AdminPatient;
+import com.pkb.service.dataupload.emis.esv2.model.Constants;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileType;
+import com.pkb.service.dataupload.emis.esv2.model.PKBPersonInfo;
+import com.pkb.service.dataupload.emis.esv2.sorting.ResultWithId;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamService;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.OrgLevelIdType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PKBPersonHelper;
+import com.pkb.util.PersonAmbiguityHandler;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.text.MessageFormat;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.function.BiPredicate;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static com.pkb.service.dataupload.emis.es.util.EmisEsDateUtil.DEFAULT_ZONE_ID;
+import static com.pkb.service.dataupload.emis.esv2.batch.FileProcessor.ProcessorType.NORMAL;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections.CollectionUtils.isNotEmpty;
+
+public class AdminPatientProcessor extends BatchingBatchDataProcessor&lt;AdminPatient&gt; {
+
+<span class="fc" id="L81">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L82">    private static final EmisFileType TYPE = EmisFileType.ADMIN_PATIENT;</span>
+
+    private final TeamUserManager teamUserManager;
+    private final UserManager userManager;
+    private final BatchItemProcessor&lt;AdminPatient, PKBPersonDTO&gt; adminPatientItemProcessor;
+
+    private final PatientConsentManager patientConsentManager;
+    private final PKBPersonHelper pkbPersonHelper;
+    private final TeamService teamService;
+    private final EmisEsDummyPatientService emisEsDummyPatientService;
+
+<span class="fc" id="L93">    private final BiPredicate&lt;String, String&gt; stringPropertyChanged = (source,</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">                                                                       destination) -&gt; !StringUtils.equals(StringUtils.trimToNull(source), StringUtils.trimToNull(destination));</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">    private final BiPredicate propertyChanged = (source, destination) -&gt; !Objects.equals(source, destination);</span>
+<span class="fc" id="L96">    private final BiPredicate&lt;String, String&gt; notifyOnSignificantChange = (source, destination) -&gt; !StringUtils</span>
+<span class="fc bfc" id="L97" title="All 2 branches covered.">            .equalsIgnoreCase(StringUtils.trimToNull(source), StringUtils.trimToNull(destination));</span>
+<span class="fc" id="L98">    private final BiPredicate alwaysNotify = (source, destination) -&gt; true;</span>
+
+    private static final String EVENT_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_batchprocessor_patients&quot;;
+    private static final String TAG_STATUS = &quot;status&quot;;
+<span class="fc" id="L102">    private static final Counter EVENT_COUNTER = Counter.builder(EVENT_COUNTER_NAME)</span>
+<span class="fc" id="L103">            .tag(TAG_STATUS, &quot;&quot;)</span>
+<span class="fc" id="L104">            .description(&quot;Metrics for capturing notable events in processing EMIS ES AdminPatient records&quot;)</span>
+<span class="fc" id="L105">            .register(Metrics.globalRegistry);</span>
+
+    public AdminPatientProcessor(EmisEsProcessedRowService emisEsProcessedRowService, EmisEsManager emisEsManager,
+                                 EmisProcessorAborter emisProcessAborter, Kms kmsClient, PhrConfig config,
+                                 DateTimeService dateTimeService, ExternalIdService externalIdService,
+                                 INotificationManager notificationManager, TeamService teamService,
+                                 TeamUserManager teamUserManager, UserManager userManager,
+                                 BatchItemProcessor&lt;AdminPatient,
+                                 PKBPersonDTO&gt; adminPatientItemProcessor, PatientConsentManager patientConsentManager,
+                                 PKBPersonHelper pkbPersonHelper, EmisEsStatusService emisEsStatusService,
+                                 EmisOrgHelper emisOrgHelper,
+                                 EmisEsDummyPatientService emisEsDummyPatientService) {
+<span class="fc" id="L117">        super(emisEsProcessedRowService, emisEsManager, emisProcessAborter, kmsClient, config, dateTimeService, externalIdService, notificationManager, emisEsStatusService, emisOrgHelper);</span>
+<span class="fc" id="L118">        this.teamService = teamService;</span>
+<span class="fc" id="L119">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L120">        this.userManager = userManager;</span>
+<span class="fc" id="L121">        this.adminPatientItemProcessor = adminPatientItemProcessor;</span>
+<span class="fc" id="L122">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L123">        this.pkbPersonHelper = pkbPersonHelper;</span>
+<span class="fc" id="L124">        this.emisEsDummyPatientService = emisEsDummyPatientService;</span>
+<span class="fc" id="L125">    }</span>
+
+    private static void incrementEventCounter(String status) {
+<span class="fc" id="L128">        Metrics.counter(EVENT_COUNTER_NAME, TAG_STATUS, status).increment();</span>
+<span class="fc" id="L129">    }</span>
+
+<span class="fc" id="L131">    private static final Counter MISSING_TO_DELETE_PATIENT_COUNTER = Counter.builder(&quot;pkb_phr_integration_emis_csv_batchprocessor_patient_to_delete_not_found&quot;)</span>
+<span class="fc" id="L132">            .description(&quot;Patient cannot be found in database which we supposed to delete. We might not have received a re-bulk yet or it is a genuine error.&quot;)</span>
+<span class="fc" id="L133">            .register(Metrics.globalRegistry);</span>
+
+
+    @Override
+    public Class&lt;AdminPatient&gt; interfaceClass() {
+<span class="fc" id="L138">        return AdminPatient.class;</span>
+    }
+
+    @Override
+    public boolean canProcess(@NotNull EmisFileType fileType) {
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">        return fileType == TYPE;</span>
+    }
+
+    @Override
+    public boolean process(List&lt;ResultWithId&lt;AdminPatient, Long&gt;&gt; rows, EmisEsProcessedRow fileState) {
+<span class="fc" id="L148">        Map&lt;String, EmisEsAdminOrganisation&gt; orgsWithNotWhitelistedPeople = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L149">        Set&lt;String&gt; errorMessages = new HashSet&lt;&gt;();</span>
+
+<span class="fc" id="L151">        Map&lt;String, OrgMergeHelper&gt; orgGuidToOrgMap = buildOrgByOrgGuidMap(rows);</span>
+<span class="fc" id="L152">        Map&lt;String, Org&gt; orgGuidToSurvivorOrgMap = orgGuidToOrgMap.entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, e -&gt; e.getValue().getOrg()));</span>
+
+<span class="fc" id="L154">        warmupPersonInfoCache(rows, orgGuidToSurvivorOrgMap, context);</span>
+
+<span class="fc" id="L156">        boolean result = rows.stream().map(resultWithId -&gt; {</span>
+            try {
+<span class="fc" id="L158">                emisProcessAborter.executeTestControl(TYPE, resultWithId.getRowId().getId());</span>
+<span class="fc" id="L159">                AdminPatient adminPatientNeedsIdFix = resultWithId.getValue();</span>
+<span class="fc" id="L160">                Optional&lt;OrgMergeHelper&gt; orgMergeHelper = Optional.empty();</span>
+<span class="fc" id="L161">                boolean errorFound = false;</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">                if (!emisEsManager.isIgnoredPatientType(adminPatientNeedsIdFix)) {</span>
+<span class="fc" id="L163">                    orgMergeHelper = Optional.ofNullable(orgGuidToOrgMap.get(adminPatientNeedsIdFix.organisationGuid()));</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">                    if (orgMergeHelper.isEmpty()) {</span>
+<span class="fc" id="L165">                        Tuple2&lt;Boolean, EmisEsAdminOrganisation&gt; isWhitelisted = emisEsManager.isInWhitelist(adminPatientNeedsIdFix);</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">                        if (isWhitelisted._1) {</span>
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">                            String odsCode = isWhitelisted._2 == null ? &quot;&quot; : &quot; ods: &quot; + isWhitelisted._2.getOdsCode();</span>
+<span class="fc" id="L168">                            errorFound = true;</span>
+<span class="fc" id="L169">                            errorMessages.add(&quot;Cannot find org but it is already whitelisted with GUID: &quot; + adminPatientNeedsIdFix.organisationGuid() + odsCode);</span>
+<span class="fc" id="L170">                        } else {</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">                            if (isWhitelisted._2 == null) {</span>
+<span class="fc" id="L172">                                errorFound = true;</span>
+<span class="fc" id="L173">                                errorMessages.add(&quot;Cannot find EmisEsAdminOrganisation for GUID: &quot; + adminPatientNeedsIdFix.organisationGuid());</span>
+                            } else {
+<span class="fc" id="L175">                                orgsWithNotWhitelistedPeople.putIfAbsent(isWhitelisted._2.getOrganisationGuid(), isWhitelisted._2);</span>
+                            }
+                        }
+                    }
+                }
+
+<span class="fc bfc" id="L181" title="All 2 branches covered.">                if (errorFound) {</span>
+<span class="fc" id="L182">                    return false;</span>
+                }
+
+<span class="fc" id="L185">                var zoneId = orgMergeHelper.map(o -&gt; this.getTimezoneOfOrg(o.getOrg(), () -&gt; {</span>
+                    // missing timeZoneId isn't okay
+<span class="nc" id="L187">                    throw new IllegalStateException(&quot;null timeZoneId for org &quot; + o.getOrg().getCode());</span>
+<span class="fc" id="L188">                })).orElse(DEFAULT_ZONE_ID);</span>
+
+                // EMIS merges patient records but still sends both the obsolete &amp; primary patient records (as separate patients &amp; patient numbers)
+                // convert any obsolete patient IDs into the primary value
+                // PHR-4218
+<span class="fc" id="L193">                AdminPatient adminPatient = orgMergeHelper</span>
+<span class="fc" id="L194">                        .map(o -&gt; emisEsManager.fixMergedPatientId(adminPatientNeedsIdFix, o.getOrg()))</span>
+<span class="fc" id="L195">                        .orElse(adminPatientNeedsIdFix);</span>
+
+<span class="fc" id="L197">                saveAdminPatient(zoneId, adminPatient, orgMergeHelper);</span>
+
+<span class="fc" id="L199">                return processAdminPatient(orgMergeHelper, adminPatient);</span>
+<span class="fc" id="L200">            } catch (Exception e) {</span>
+<span class="fc" id="L201">                LOGGER.error(&quot;Failed to process patient {} record id: {}&quot;, resultWithId.getValue().patientGuid(), resultWithId.getRowId().getId(), e);</span>
+<span class="fc" id="L202">                return false;</span>
+            }
+<span class="fc bfc" id="L204" title="All 4 branches covered.">        }).reduce((l, r) -&gt; l &amp;&amp; r).orElse(true);</span>
+
+<span class="fc bfc" id="L206" title="All 2 branches covered.">        if (!orgsWithNotWhitelistedPeople.isEmpty()) {</span>
+<span class="fc" id="L207">            String orgs = orgsWithNotWhitelistedPeople.values().stream().map(e -&gt; &quot;guid:&quot; + e.getOrganisationGuid() + &quot; ods:&quot; + e.getOdsCode())</span>
+<span class="fc" id="L208">                    .collect(Collectors.joining(&quot;\n&quot;));</span>
+<span class="fc" id="L209">            LOGGER.warn(&quot;Not whitelisted people found in following Orgs:\n{}&quot;, orgs);</span>
+        }
+
+<span class="fc bfc" id="L212" title="All 2 branches covered.">        if (!errorMessages.isEmpty()) {</span>
+<span class="fc" id="L213">            LOGGER.error(&quot;Errors during processing:\n{}&quot;, String.join(&quot;\n&quot;, errorMessages));</span>
+<span class="fc" id="L214">            result = false;</span>
+        }
+<span class="fc" id="L216">        return result;</span>
+    }
+
+    @NotNull
+    protected Boolean processAdminPatient(Optional&lt;OrgMergeHelper&gt; orgMergeHelper, AdminPatient adminPatient) {
+<span class="fc" id="L221">        return recordTime(&quot;save&quot;, () -&gt; orgMergeHelper</span>
+<span class="fc" id="L222">                .filter(o -&gt; emisEsManager.isAllowedPatient(adminPatient, o))</span>
+<span class="fc" id="L223">                .map(o -&gt; {</span>
+<span class="fc" id="L224">                    var defaultCreateTeam = getDefaultPatientCreateTeamForOrg(o.getOrg());</span>
+<span class="fc" id="L225">                    var requestContext = getEmisContextWithDefaultTeam(o.getOrg());</span>
+<span class="fc" id="L226">                    Either&lt;RuntimeException, Optional&lt;PKBPersonInfo&gt;&gt; lookupResult = getPKBPersonInfoOrExceptionIfMultiple(adminPatient, o.getOrg(), requestContext);</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">                    if (lookupResult.isLeft()) {</span>
+<span class="fc" id="L228">                        LOGGER.warn(&quot;EMIS ES AdminPatient received matches multiple PKBPerson records: Org Code={}&quot;, o.getOrg().getCode());</span>
+<span class="fc" id="L229">                        incrementEventCounter(&quot;nhsnum-clash&quot;);</span>
+<span class="fc" id="L230">                        return true; // skip, don't fail</span>
+                    } else {
+<span class="fc" id="L232">                        PKBPersonInfo pkbPersonInfo = lookupResult.get().orElse(null);</span>
+<span class="fc" id="L233">                        return handleDemographics(requestContext, adminPatient, o.getOrg(), defaultCreateTeam, pkbPersonInfo);</span>
+                    }
+
+<span class="fc" id="L236">                }).orElse(true));</span>
+    }
+
+    protected void saveAdminPatient(java.time.ZoneId zoneId, AdminPatient adminPatient, Optional&lt;OrgMergeHelper&gt; o) {
+<span class="fc" id="L240">        recordTime(&quot;emisSave&quot;, () -&gt; emisEsManager.saveAdminPatients(Collections.singletonList(Pair.of(adminPatient, zoneId))));</span>
+<span class="fc" id="L241">    }</span>
+
+    private Map&lt;String, OrgMergeHelper&gt; buildOrgByOrgGuidMap(List&lt;ResultWithId&lt;AdminPatient, Long&gt;&gt; rows) {
+<span class="fc" id="L244">        Set&lt;String&gt; orgGuids = rows.stream()</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">                .filter(resultWithId -&gt; !emisEsManager.isIgnoredPatientType(resultWithId.getValue()))</span>
+<span class="fc" id="L246">                .map(resultWithId -&gt; resultWithId.getValue().organisationGuid())</span>
+<span class="fc" id="L247">                .collect(Collectors.toSet());</span>
+<span class="fc" id="L248">        return emisEsManager.lookupPKBOrgs(orgGuids);</span>
+    }
+
+    @Override
+    public int getBatchSize() {
+<span class="fc" id="L253">        return config.getEmisEsProcessingBatchSize();</span>
+    }
+
+    private boolean createPatient(@NotNull EHRRequestContext requestContext, AdminPatient adminPatient, Org org, Team defaultCreateTeam)
+            throws IllegalStateException {
+
+        PKBPersonDTO dto;
+        try {
+<span class="fc" id="L261">            ItemContext ctx = ImmutableItemContext.builder().requestContext(requestContext).org(org).build();</span>
+<span class="fc" id="L262">            dto = adminPatientItemProcessor.processItem(ctx, adminPatient);</span>
+<span class="nc" id="L263">        } catch (Exception e) {</span>
+<span class="nc" id="L264">            LOGGER.error(&quot;Failed to process patient: ex processing values received for adminPatient: {}&quot;, adminPatient.patientGuid(), e);</span>
+<span class="nc" id="L265">            return false;</span>
+<span class="fc" id="L266">        }</span>
+
+<span class="fc" id="L268">        return addPatientToEmisDefaultTeam(requestContext, defaultCreateTeam, patientCreateTeam -&gt; {</span>
+            try {
+<span class="fc" id="L270">                String authBy = MessageFormat.format(&quot;{0} ({1})&quot;, patientCreateTeam.getName(), patientCreateTeam.getId());</span>
+<span class="fc" id="L271">                PKBPerson pkbPerson = teamUserManager.createPatientForEmisEsAPI(requestContext,</span>
+                                                                                dto,
+                                                                                patientCreateTeam,
+                                                                                authBy);
+
+<span class="fc bfc" id="L276" title="All 2 branches covered.">                if (adminPatient.dummyType().orElse(false)) {</span>
+<span class="fc" id="L277">                    emisEsDummyPatientService.createDummyPatientRecord(pkbPerson.getId(), adminPatient.patientGuid());</span>
+                }
+
+<span class="fc" id="L280">                LOGGER.debug(&quot;Created patient id {} for EMIS&quot;, pkbPerson.getId());</span>
+
+<span class="fc" id="L282">                return Either.right(pkbPerson);</span>
+<span class="nc" id="L283">            } catch (Exception exception) {</span>
+<span class="nc" id="L284">                return Either.left(exception);</span>
+            }
+        });
+    }
+
+    private boolean addPatientToEmisDefaultTeam(EHRRequestContext requestContext, Team defaultCreateTeam, Function&lt;Team, Either&lt;Exception, PKBPerson&gt;&gt; createOrResolvePkbPerson) {
+<span class="fc" id="L290">        return emisEsManager.transactional(() -&gt; {</span>
+<span class="pc" id="L291">            var pkbPerson = createOrResolvePkbPerson.apply(defaultCreateTeam).getOrElseThrow(exception -&gt; exception);</span>
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">            if (0 &lt; teamService.addToTeams(pkbPerson, Collections.singletonList(defaultCreateTeam), requestContext)) {</span>
+<span class="fc" id="L293">                LOGGER.debug(&quot;Added patient id {} for {}&quot;, pkbPerson.getId(), defaultCreateTeam);</span>
+            }
+<span class="fc" id="L295">            return true;</span>
+        });
+    }
+
+    private boolean updatePatient(EHRRequestContext requestContext, AdminPatient adminPatient, Org org, Team defaultCreateTeam,
+                                  PKBPerson pkbPerson, boolean pkbPersonIsDummy) {
+<span class="fc bfc" id="L301" title="All 2 branches covered.">        if (!emisEsManager.validateNoDummyPatientCrossover(adminPatient, pkbPersonIsDummy)) {</span>
+            //skip this patient
+<span class="fc" id="L303">            incrementEventCounter(&quot;dummy-crossover&quot;);</span>
+<span class="fc" id="L304">            return true;</span>
+        }
+
+        // Sync org network if national id is added
+<span class="fc" id="L308">        boolean syncRequired = false;</span>
+<span class="fc" id="L309">        boolean notificationRequired = false;</span>
+        PKBPersonDTO dto;
+        try {
+<span class="fc" id="L312">            ItemContext ctx = ImmutableItemContext.builder().requestContext(requestContext).org(org).build();</span>
+<span class="fc" id="L313">            dto = adminPatientItemProcessor.processItem(ctx, adminPatient);</span>
+<span class="nc" id="L314">        } catch (Exception e) {</span>
+<span class="nc" id="L315">            LOGGER.error(&quot;Failed to process patient: exception processing values received for adminPatient: {}&quot;, adminPatient.patientGuid(), e);</span>
+<span class="nc" id="L316">            return false;</span>
+<span class="fc" id="L317">        }</span>
+
+<span class="pc bpc" id="L319" title="2 of 4 branches missed.">        if (dto != null &amp;&amp; dto.getEmisEsPersonGuid() != null) {</span>
+<span class="fc bfc" id="L320" title="All 2 branches covered.">            if (pkbPerson.getEmisEsPersonGuid() == null</span>
+<span class="fc bfc" id="L321" title="All 2 branches covered.">                    || !pkbPerson.getEmisEsPersonGuid().getValue().equals(dto.getEmisEsPersonGuid())) {</span>
+
+<span class="fc bfc" id="L323" title="All 2 branches covered.">                if (pkbPerson.getEmisEsPersonGuid() != null) {</span>
+<span class="fc" id="L324">                    LOGGER.error(&quot;Matched patient {} has an existing person guid {} that differs from provided person guid {}, updating&quot;,</span>
+<span class="fc" id="L325">                            pkbPerson.getId(),</span>
+<span class="fc" id="L326">                            pkbPerson.getEmisEsPersonGuid().getValue(),</span>
+<span class="fc" id="L327">                            dto.getEmisEsPersonGuid());</span>
+                }
+
+<span class="fc bfc" id="L330" title="All 2 branches covered.">                if (pkbPerson.getEmisEsPersonGuid() == null) {</span>
+<span class="fc" id="L331">                    pkbPerson.setEmisEsPersonGuid(new EmisEsPersonGuid());</span>
+                }
+
+<span class="fc" id="L334">                pkbPerson.getEmisEsPersonGuid().setPerson(pkbPerson);</span>
+<span class="fc" id="L335">                pkbPerson.getEmisEsPersonGuid().setValue(dto.getEmisEsPersonGuid());</span>
+<span class="fc" id="L336">                syncRequired = true;</span>
+            }
+        }
+
+<span class="fc bfc" id="L340" title="All 2 branches covered.">        if (isNotEmpty(dto.getNationalIds())) {</span>
+<span class="fc" id="L341">            NationalId providedNhsNumber = dto.getNationalIds().iterator().next();</span>
+<span class="fc" id="L342">            boolean changed = pkbPerson.addOrUpdateNationalId(requestContext, providedNhsNumber, dateTimeService.now());</span>
+<span class="fc bfc" id="L343" title="All 2 branches covered.">            if (changed) {</span>
+<span class="fc" id="L344">                notificationRequired |= syncRequired |= changed;</span>
+            }
+        }
+
+<span class="fc" id="L348">        boolean patientNumberChanged = addPatientNumberIfMissing(requestContext, adminPatient, org, pkbPerson, dto);</span>
+<span class="fc" id="L349">        notificationRequired |= patientNumberChanged;</span>
+<span class="fc" id="L350">        syncRequired |= patientNumberChanged;</span>
+
+
+<span class="fc" id="L353">        notificationRequired |= updatePropertyIfChanged(dto.getTitle(), pkbPerson.getTitle(), stringPropertyChanged,</span>
+<span class="fc" id="L354">                notifyOnSignificantChange, pkbPerson::setTitle);</span>
+<span class="fc" id="L355">        notificationRequired |= updatePropertyIfChanged(dto.getLastName(), pkbPerson.getLastName(), stringPropertyChanged,</span>
+<span class="fc" id="L356">                notifyOnSignificantChange, pkbPerson::setLastName);</span>
+<span class="fc" id="L357">        notificationRequired |= updatePropertyIfChanged(dto.getFirstName(), pkbPerson.getFirstName(), stringPropertyChanged,</span>
+<span class="fc" id="L358">                notifyOnSignificantChange, pkbPerson::setFirstName);</span>
+<span class="fc" id="L359">        notificationRequired |= updatePropertyIfChanged(dto.getMiddleName(), pkbPerson.getMiddleName(), stringPropertyChanged,</span>
+<span class="fc" id="L360">                notifyOnSignificantChange, pkbPerson::setMiddleName);</span>
+
+        // TODO: pkbPerson::getDateOfBirthString is @deprecated but recommended approach causes unnecessary processing below - reverse deprecation of getDateOfBirthString?
+        //        String existingDateOfBirthString = pkbPerson.findDateOfBirth().map(PKBConstants.DATE_OF_BIRTH_FORMATTER::format).orElse(null);
+        //        notificationRequired |= updatePropertyIfChanged(dto.getDateOfBirthString(), existingDateOfBirthString, stringPropertyChanged, pkbPerson::setDateOfBirthString);
+<span class="fc" id="L365">        notificationRequired |= updatePropertyIfChanged(dto.getDateOfBirthString(), pkbPerson.getDateOfBirthString(), stringPropertyChanged,</span>
+<span class="fc" id="L366">                notifyOnSignificantChange, pkbPerson::setDateOfBirthString);</span>
+
+<span class="fc" id="L368">        notificationRequired |= updatePropertyIfChanged(dto.getGender(), pkbPerson.getGender(), propertyChanged, alwaysNotify,</span>
+<span class="fc" id="L369">                pkbPerson::setGender);</span>
+<span class="fc" id="L370">        notificationRequired |= updatePropertyIfChanged(dto.getAddress1(), pkbPerson.getAddress1(), stringPropertyChanged,</span>
+<span class="fc" id="L371">                notifyOnSignificantChange, pkbPerson::setAddress1);</span>
+<span class="fc" id="L372">        notificationRequired |= updatePropertyIfChanged(dto.getAddress2(), pkbPerson.getAddress2(), stringPropertyChanged,</span>
+<span class="fc" id="L373">                notifyOnSignificantChange, pkbPerson::setAddress2);</span>
+<span class="fc" id="L374">        notificationRequired |= updatePropertyIfChanged(dto.getCity(), pkbPerson.getCity(), stringPropertyChanged,</span>
+<span class="fc" id="L375">                notifyOnSignificantChange, pkbPerson::setCity);</span>
+<span class="fc" id="L376">        notificationRequired |= updatePropertyIfChanged(dto.getState(), pkbPerson.getState(), stringPropertyChanged,</span>
+<span class="fc" id="L377">                notifyOnSignificantChange, pkbPerson::setState);</span>
+<span class="fc" id="L378">        notificationRequired |= updatePropertyIfChanged(dto.getPostalCode(), pkbPerson.getPostalCode(), stringPropertyChanged,</span>
+<span class="fc" id="L379">                notifyOnSignificantChange, pkbPerson::setPostalCode);</span>
+<span class="fc" id="L380">        notificationRequired |= updatePropertyIfChanged(dto.getPhone(), pkbPerson.getPhone(), stringPropertyChanged,</span>
+<span class="fc" id="L381">                notifyOnSignificantChange, pkbPerson::setPhone);</span>
+
+<span class="fc bfc" id="L383" title="All 2 branches covered.">        pkbPersonHelper.validateDeathTimestamp(dto.getDeathTimestamp() == null ? null : dto.getDeathTimestamp().toInstant());</span>
+<span class="fc" id="L384">        boolean updatedDeceasedTimestamp = updatePropertyIfChanged(dto.getDeathTimestamp(), pkbPerson.getDeathTimestamp(), propertyChanged,</span>
+<span class="fc" id="L385">                alwaysNotify, pkbPerson::setDeathTimestamp);</span>
+<span class="pc bpc" id="L386" title="1 of 4 branches missed.">        if (updatedDeceasedTimestamp &amp;&amp; dto.getDeathTimestamp() != null) {</span>
+<span class="fc" id="L387">            pkbPerson.setStatus(UserStatus.DEAD, dateTimeService.now());</span>
+        }
+
+<span class="fc" id="L390">        boolean finalSyncRequired = syncRequired;</span>
+<span class="fc bfc" id="L391" title="All 4 branches covered.">        boolean finalNotificationRequired = notificationRequired &amp;&amp; !updatedDeceasedTimestamp;</span>
+<span class="fc" id="L392">        return emisEsManager.transactional(() -&gt; {</span>
+<span class="fc" id="L393">            userManager.updateUser(requestContext, pkbPerson);</span>
+
+<span class="fc bfc" id="L395" title="All 4 branches covered.">            if (finalSyncRequired || !teamService.hasActiveConsentRecord(pkbPerson, org)) {</span>
+<span class="fc" id="L396">                teamService.addToTeams(pkbPerson, Collections.singletonList(defaultCreateTeam), requestContext);</span>
+            }
+
+<span class="fc bfc" id="L399" title="All 4 branches covered.">            if (pkbPerson.isContactable() &amp;&amp; finalNotificationRequired) {</span>
+<span class="fc" id="L400">                notificationManager.notifyUserAboutActivityByOtherUser(requestContext,</span>
+<span class="fc" id="L401">                        new Activity(Activity.Action.UPLOADED_PATIENT_PROFILE_UPDATE, pkbPerson.getId(), org.getId(), dateTimeService.now()), true, new NoConsentsRequired());</span>
+            }
+
+<span class="fc" id="L404">            return true;</span>
+        });
+    }
+
+    @VisibleForTesting
+    protected boolean addPatientNumberIfMissing(EHRRequestContext context, AdminPatient adminPatient, Org org, PKBPerson pkbPerson, PKBPersonDTO dto) {
+<span class="fc" id="L410">        SortedSet&lt;OrgLevelId&gt; orgLevelIds = dto.getOrgLevelIds();</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">        if (isNotEmpty(dto.getOrgLevelIds())) {</span>
+<span class="fc" id="L412">            OrgLevelIdType olidt = org.getOrgLevelIdType(Constants.ORG_LEVEL_ID_TYPE_AA, Constants.ORG_LEVEL_ID_TYPE_TC);</span>
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">            if (olidt == null) {</span>
+<span class="nc" id="L414">                throw new IllegalStateException(&quot;No orglevelidtype for EMIS PatientNumber set for this GP Practice. Org=&quot; + org.getId());</span>
+            }
+
+<span class="pc bpc" id="L417" title="1 of 2 branches missed.">            if (orgLevelIds.size() &gt; 1) {</span>
+<span class="nc" id="L418">                throw new IllegalStateException(&quot;More than one orglevelid provided for patient. adminPatient &quot; + adminPatient.patientGuid() + &quot; processingId &quot; + adminPatient.processingId());</span>
+            }
+
+<span class="fc" id="L421">            OrgLevelId providedOrgLevelId = orgLevelIds.first();</span>
+
+<span class="fc" id="L423">            Option&lt;PKBPerson&gt; maybePerson = PersonAmbiguityHandler.getMaybePersonOrNone(userManager.getPKBPersonByOrgLevelId(providedOrgLevelId),&quot;orgLevelId&quot;);</span>
+<span class="fc bfc" id="L424" title="All 2 branches covered.">            if (maybePerson.isEmpty()) {</span>
+<span class="fc" id="L425">                pkbPerson.addOrgLevelId(context, providedOrgLevelId, dateTimeService.now());</span>
+<span class="fc" id="L426">                return true;</span>
+            } else {
+<span class="fc" id="L428">                PKBPerson existingPerson = maybePerson.get();</span>
+<span class="pc bpc" id="L429" title="1 of 2 branches missed.">                if (!existingPerson.getId().equals(pkbPerson.getId())) {</span>
+<span class="nc" id="L430">                    throw new IllegalStateException(&quot;Found different patient &quot; + existingPerson.getId() + &quot; with patient number we were going to use for &quot; + pkbPerson.getId() +</span>
+<span class="nc" id="L431">                            &quot; whilst processing &quot; + adminPatient.patientGuid() + &quot; processingId &quot; + adminPatient.processingId());</span>
+                }
+            }
+        }
+<span class="fc" id="L435">        return false;</span>
+    }
+
+    private void dischargePatient(@NotNull EHRRequestContext context, @NotNull Org org, @NotNull PKBPerson person) {
+<span class="fc" id="L439">        LOGGER.info(&quot;Processing patient [{}] discharge for org [{}]&quot;, person.getId(), org.getId());</span>
+<span class="fc" id="L440">        Set&lt;Team&gt; teams = org.getTeams().stream()</span>
+<span class="fc" id="L441">                .map(team -&gt; doDischargePatient(context, org, person, team))</span>
+<span class="fc" id="L442">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L443">                .collect(toSet());</span>
+
+<span class="fc" id="L445">        sendDischargeNotificationEmail(context, org, person, teams);</span>
+<span class="fc" id="L446">    }</span>
+
+    @Nullable
+    private Team doDischargePatient(@NotNull EHRRequestContext context, @NotNull Org org, @NotNull PKBPerson person, Team team) {
+<span class="fc bfc" id="L450" title="All 2 branches covered.">        if (patientConsentManager.dischargePatientFromTeam(context, person.getId(), team.getId())) {</span>
+<span class="fc" id="L451">            LOGGER.info(&quot;Discharged patient [{}] from team [{}]&quot;, person.getId(), team.getId());</span>
+<span class="fc" id="L452">            return team;</span>
+        }
+<span class="fc" id="L454">        return null;</span>
+    }
+
+    private void sendDischargeNotificationEmail(@NotNull EHRRequestContext context, @NotNull Org org, @NotNull PKBPerson person, @NotNull Set&lt;Team&gt; dischargedFrom) {
+<span class="pc bpc" id="L458" title="1 of 2 branches missed.">        if (dischargedFrom.isEmpty()) {</span>
+<span class="nc" id="L459">            LOGGER.info(&quot;Patient [{}] not discharged from any team&quot;, person.getId());</span>
+<span class="nc" id="L460">            return;</span>
+        }
+
+<span class="fc" id="L463">        patientConsentManager</span>
+<span class="fc" id="L464">                .getCaregivers(person.getId())</span>
+<span class="fc" id="L465">                .forEach(carerPerson -&gt; notificationManager.notifyCarerAboutPatientBeingDischarged(context, org, person, carerPerson));</span>
+
+<span class="fc" id="L467">        notificationManager.notifyPatientAboutBeingDischarged(context, org, person);</span>
+<span class="fc" id="L468">    }</span>
+
+    private boolean handleDemographics(EHRRequestContext context, AdminPatient adminPatient,
+                                       Org org, Team defaultCreateTeam, @Nullable PKBPersonInfo pkbPersonInfo) {
+
+<span class="fc bfc" id="L473" title="All 2 branches covered.">        if (pkbPersonInfo == null) {</span>
+<span class="fc bfc" id="L474" title="All 2 branches covered.">            if (adminPatient.isHandleAsDischargedOrDeleted()) {</span>
+<span class="fc" id="L475">                MISSING_TO_DELETE_PATIENT_COUNTER.increment();</span>
+<span class="fc" id="L476">                LOGGER.warn(&quot;Skipping patient deletion without patient found in database. Org id: {}, patient: {}&quot;, org.getId(), adminPatient);</span>
+<span class="fc" id="L477">                return true;</span>
+<span class="pc bpc" id="L478" title="1 of 4 branches missed.">            } else if (adminPatient.nhsNumber().map(StringUtils::trimToNull).isEmpty() &amp;&amp; adminPatient.patientNumber().isEmpty()) {</span>
+<span class="nc" id="L479">                LOGGER.error(&quot;Failed to process patient: can't create without an identifier: {}&quot;, adminPatient);</span>
+<span class="nc" id="L480">                return false;</span>
+            }
+        }
+
+        try {
+            // We are referencing the handling of HL7 A28 and A31 messages
+            // to implement the create and update of EMIS ES sourced patients
+<span class="fc bfc" id="L487" title="All 2 branches covered.">            if (pkbPersonInfo == null) {</span>
+<span class="fc" id="L488">                return createPatient(context, adminPatient, org, defaultCreateTeam);</span>
+            } else {
+                // Update or discharge an existing PKB Patient
+<span class="fc" id="L491">                PKBPerson pkbPatient = userManager.getPKBPerson(pkbPersonInfo.id(), PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">                if (adminPatient.isHandleAsDischargedOrDeleted()) {</span>
+<span class="fc" id="L493">                    dischargePatient(context, org, pkbPatient);</span>
+<span class="fc" id="L494">                    return true;</span>
+                }
+<span class="fc" id="L496">                return updatePatient(context, adminPatient, org, defaultCreateTeam, pkbPatient, pkbPersonInfo.isDummyPatient());</span>
+            }
+<span class="nc" id="L498">        } catch (IllegalStateException e) {</span>
+<span class="nc" id="L499">            LOGGER.error(&quot;Failed to process patient: exception from create|update|discharge&quot;, e);</span>
+        }
+<span class="nc" id="L501">        return false;</span>
+    }
+
+    private &lt;T&gt; boolean updatePropertyIfChanged(@Nullable T source, @Nullable T destination, @NotNull BiPredicate&lt;T, T&gt; hasChanged,
+                                                @NotNull BiPredicate&lt;T, T&gt; shouldNotify, @NotNull Consumer&lt;T&gt; setter) {
+<span class="fc bfc" id="L506" title="All 2 branches covered.">        if (hasChanged.test(source, destination)) {</span>
+<span class="fc" id="L507">            setter.accept(source);</span>
+<span class="fc" id="L508">            return shouldNotify.test(source, destination);</span>
+        }
+<span class="fc" id="L510">        return false;</span>
+    }
+
+    private Either&lt;RuntimeException, Optional&lt;PKBPersonInfo&gt;&gt; getPKBPersonInfoOrExceptionIfMultiple(AdminPatient adminPatient, Org o, EHRRequestContext requestContext) {
+        try {
+<span class="fc" id="L515">            return Either.right(emisEsManager.retrieveAndCachePkbPersonInfo(requestContext, adminPatient, o));</span>
+<span class="fc" id="L516">        } catch (ConflictingPatientIdentifiersException | MultiplePatientSameIdentifierException e) {</span>
+<span class="fc" id="L517">            return Either.left(e);</span>
+        }
+    }
+
+    protected void warmupPersonInfoCache(List&lt;ResultWithId&lt;AdminPatient, Long&gt;&gt; rows, Map&lt;String, Org&gt; orgGuidToOrgMap, EHRRequestContext requestContext) {
+<span class="fc" id="L522">        var warmupKeys = rows.stream().map(resultWithId -&gt; Tuple.of(orgGuidToOrgMap.get(resultWithId.getValue().organisationGuid()), resultWithId.getValue()))</span>
+<span class="fc bfc" id="L523" title="All 2 branches covered.">                .filter(t -&gt; t._1 != null)</span>
+<span class="fc" id="L524">                .filter(t -&gt; emisEsManager.isWhitelistedOrg(t._1))</span>
+<span class="fc" id="L525">                .collect(Collectors.toList());</span>
+
+<span class="fc" id="L527">        emisEsManager.retrieveAndCachePkbPersonInfo(requestContext, warmupKeys);</span>
+<span class="fc" id="L528">    }</span>
+
+    @Override
+    public boolean isPostProcessingRequired() {
+<span class="fc" id="L532">        return false;</span>
+    }
+
+    @Override
+    protected boolean doPostProcess(EmisEsProcessedRow rowState) {
+<span class="nc" id="L537">        return true;</span>
+    }
+
+    @Override
+    public ProcessorType getProcessorType() {
+<span class="fc" id="L542">        return NORMAL;</span>
+    }
+
+    @Override
+    public EmisFileType getSupportedType() {
+<span class="fc" id="L547">        return TYPE;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

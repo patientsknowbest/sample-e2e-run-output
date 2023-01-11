@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AuthorizationDataRepository.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.repository</a> &gt; <span class="el_source">AuthorizationDataRepository.java</span></div><h1>AuthorizationDataRepository.java</h1><pre class="source lang-java linenums">package com.pkb.domain.repository;
+
+import com.google.common.base.Preconditions;
+import com.pkb.crypto.AccountPrivateKey;
+import com.pkb.crypto.UserPrivateKey;
+import com.pkb.datamodel.authorization.TargetOwnerData;
+import com.pkb.datamodel.entity.mapper.AccountKeysMapper;
+import com.pkb.domain.internal.repository.AccountSymmetricKeyRepository;
+import com.pkb.domain.repository.mapper.TargetOwnerDataMapper;
+import com.pkb.domain.repository.util.TargetOwnerDataHolder;
+import com.pkb.entities.core.CoreAccount;
+import com.pkb.entities.core.CoreAccountSymmetricKey;
+import com.pkb.entities.core.UserAccountKeyLink;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.entities.pub.PublicViewConsent;
+import io.prometheus.client.Counter;
+import io.prometheus.client.Histogram;
+import io.prometheus.client.Summary;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.hibernate.transform.ResultTransformer;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.persistence.EntityManager;
+import java.lang.invoke.MethodHandles;
+import java.util.UUID;
+
+import static io.vavr.API.List;
+import static io.vavr.API.Map;
+
+/**
+ * Not a Spring data JPA repository, because there isn't a single corresponding 'entity'
+ * in this case. It's a few entities being retrieved in one query for authorization.
+ */
+public class AuthorizationDataRepository {
+
+<span class="fc" id="L41">    private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L43">    private static final Summary FETCH_DURATION = Summary.build()</span>
+<span class="fc" id="L44">            .name(&quot;pkb_phr_authz_fetch_duration&quot;)</span>
+<span class="fc" id="L45">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L46">            .quantile(0.9, 0.01)</span>
+<span class="fc" id="L47">            .quantile(0.95, 0.005)</span>
+<span class="fc" id="L48">            .quantile(0.99, 0.001)</span>
+<span class="fc" id="L49">            .labelNames(&quot;stage&quot;)</span>
+<span class="fc" id="L50">            .help(&quot;Time needed to fetch info from database as part of authz&quot;)</span>
+<span class="fc" id="L51">            .register();</span>
+
+<span class="fc" id="L53">    private static final Histogram FETCH_SIZE_HISTOGRAM = Histogram.build()</span>
+<span class="fc" id="L54">            .exponentialBuckets(1, 2, 17)</span>
+<span class="fc" id="L55">            .name(&quot;pkb_phr_authz_fetch_size&quot;)</span>
+<span class="fc" id="L56">            .help(&quot;Batch query sizes&quot;)</span>
+<span class="fc" id="L57">            .labelNames(&quot;stage&quot;)</span>
+<span class="fc" id="L58">            .register();</span>
+
+<span class="fc" id="L60">    private static final Counter RELOAD_COUNTER = Counter.build()</span>
+<span class="fc" id="L61">            .name(&quot;pkb_phr_authz_reload_count&quot;)</span>
+<span class="fc" id="L62">            .help(&quot;Count the number of times symmetric keys have to be reloaded due to the needed one not being present&quot;)</span>
+<span class="fc" id="L63">            .register();</span>
+
+    private final AccountKeysMapper accountKeysMapper;
+
+    private final AccountSymmetricKeyRepository accountSymmetricKeyRepository;
+
+    private final TargetOwnerDataMapper targetOwnerDataMapper;
+
+    private final EntityManager entityManager;
+
+    public AuthorizationDataRepository(AccountKeysMapper accountKeysMapper,
+                                       AccountSymmetricKeyRepository accountSymmetricKeyRepository,
+                                       TargetOwnerDataMapper targetOwnerDataMapper,
+<span class="fc" id="L76">                                       EntityManager entityManager) {</span>
+<span class="fc" id="L77">        this.accountKeysMapper = accountKeysMapper;</span>
+<span class="fc" id="L78">        this.accountSymmetricKeyRepository = accountSymmetricKeyRepository;</span>
+<span class="fc" id="L79">        this.targetOwnerDataMapper = targetOwnerDataMapper;</span>
+<span class="fc" id="L80">        this.entityManager = entityManager;</span>
+<span class="fc" id="L81">    }</span>
+
+    @SuppressWarnings({&quot;deprecation&quot;, &quot;unchecked&quot;, &quot;try&quot;})
+    public List&lt;TargetOwnerData&gt; findByPersonPublicIds(List&lt;UUID&gt; personPublicIds,
+                                                       Option&lt;Long&gt; accessingPersonId,
+                                                       Option&lt;Long&gt; accessingSystemUserOrgId,
+                                                       Either&lt;UserPrivateKey, AccountPrivateKey&gt; userOrAccountPrivateKey) {
+<span class="pc bpc" id="L88" title="1 of 4 branches missed.">        Preconditions.checkArgument(accessingSystemUserOrgId.isDefined() || accessingPersonId.isDefined(),</span>
+                &quot;One of accessingPersonId or accessingOrgId must be set!&quot;);
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">        if (personPublicIds.isEmpty()) {</span>
+<span class="nc" id="L91">            LOG.warn(&quot;Authz attempted with no target person ids&quot;);</span>
+<span class="nc" id="L92">            return List();</span>
+        }
+
+        //TODO (PHR-8393) - Split this query
+        // Load initial data
+<span class="fc" id="L97">        FETCH_SIZE_HISTOGRAM.labels(&quot;userinfo&quot;).observe(personPublicIds.size());</span>
+<span class="fc" id="L98">        List&lt;TargetOwnerDataHolder&gt; userInfo = FETCH_DURATION.labels(&quot;userinfo&quot;).time(() -&gt; {</span>
+<span class="fc" id="L99">            org.hibernate.query.Query&lt;TargetOwnerDataHolder&gt; query = entityManager.createQuery(</span>
+                    &quot;SELECT patient, account, consent\n&quot; +
+                            &quot;FROM PublicPKBPerson patient\n&quot; +
+                            &quot;JOIN FETCH CoreAccount account ON account.id = patient.defaultAccountId\n&quot; +
+                            &quot;LEFT OUTER JOIN FETCH PublicViewConsent consent ON consent.patient = patient\n&quot; +
+                            &quot;  AND consent.accessingPerson.id = :accessingPersonId\n&quot; +
+                            &quot;  AND consent.patientPublicId IN (:personPublicIds)\n&quot; +
+                            &quot;LEFT OUTER JOIN FETCH consent.accessingPerson\n&quot; +
+                            &quot;LEFT OUTER JOIN FETCH consent.accessingTeam accessingTeam\n&quot; +
+                            &quot;LEFT OUTER JOIN FETCH accessingTeam.org accessingOrg\n&quot; +
+                            &quot;LEFT OUTER JOIN FETCH patient.optoutDetails\n&quot; +
+                            &quot;WHERE patient.publicId IN (:personPublicIds) &quot; +
+                            &quot;ORDER BY patient.publicId&quot;)
+<span class="fc" id="L112">                    .setParameter(&quot;personPublicIds&quot;, personPublicIds.asJava())</span>
+                    // Used for also fetching consent, System user can't have consent.
+<span class="fc" id="L114">                    .setParameter(&quot;accessingPersonId&quot;, accessingPersonId.getOrElse((Long)null))</span>
+<span class="fc" id="L115">                    .unwrap(org.hibernate.query.Query.class)</span>
+<span class="fc" id="L116">                    .setResultTransformer(new TargetOwnerDataResultTransformer());</span>
+<span class="fc" id="L117">            return List.ofAll(query.list());</span>
+        });
+
+        // Don't bother with other queries if we got no results
+<span class="fc bfc" id="L121" title="All 2 branches covered.">        if (userInfo.isEmpty()) {</span>
+<span class="fc" id="L122">            return List();</span>
+        }
+
+        // Load account keys where accessible, and copy them into the target data holder
+<span class="fc" id="L126">        List&lt;Long&gt; accountIds = userInfo.map(ui -&gt; ui.getAccount().getId());</span>
+<span class="fc" id="L127">        FETCH_SIZE_HISTOGRAM.labels(&quot;accountkeys&quot;).observe(accountIds.size());</span>
+<span class="fc" id="L128">        Map&lt;Long, List&lt;UserAccountKeyLink&gt;&gt; accountIdToUserAccountKeyLinkMap = FETCH_DURATION.labels(&quot;accountkeys&quot;).time(() -&gt;</span>
+<span class="fc" id="L129">            List.ofAll(entityManager.createQuery(</span>
+                &quot;SELECT link FROM UserAccountKeyLink link\n&quot; +
+                        &quot;WHERE (link.personId = :accessingPersonId OR link.orgId = :orgId)\n&quot; +
+                        &quot;  AND link.accountId IN (:accountIds)&quot;,
+                UserAccountKeyLink.class)
+<span class="fc" id="L134">                .setParameter(&quot;accessingPersonId&quot;, accessingPersonId.getOrElse((Long)null))</span>
+<span class="fc" id="L135">                .setParameter(&quot;orgId&quot;, accessingSystemUserOrgId.getOrElse((Long)null))</span>
+<span class="fc" id="L136">                .setParameter(&quot;accountIds&quot;, accountIds.asJava())</span>
+<span class="fc" id="L137">                .getResultList())</span>
+<span class="fc" id="L138">            .groupBy(UserAccountKeyLink::getAccountId));</span>
+
+        // Load account symmetric keys, mapped to account public ids
+        // This will eventually be replaced with KMS call(s).
+<span class="fc" id="L142">        var accessibleAccountIds = accountIdToUserAccountKeyLinkMap.keySet().toList();</span>
+        Map&lt;UUID, List&lt;CoreAccountSymmetricKey&gt;&gt; accountSymmetricKeyMap;
+<span class="fc" id="L144">        try (Summary.Timer ignored = FETCH_DURATION.labels(&quot;symmetrickeys&quot;).startTimer()) {</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">            if (accessibleAccountIds.isEmpty()) {</span>
+<span class="fc" id="L146">                accountSymmetricKeyMap = Map();</span>
+            } else {
+<span class="fc" id="L148">                FETCH_SIZE_HISTOGRAM.labels(&quot;symmetrickeys&quot;).observe(accessibleAccountIds.size());</span>
+<span class="fc" id="L149">                accountSymmetricKeyMap = accountSymmetricKeyRepository</span>
+<span class="fc" id="L150">                        .findEncryptedSymmetricKeysByAccountIds(accessibleAccountIds)</span>
+<span class="fc" id="L151">                        .groupBy(key -&gt; key.getAccount().getPublicId());</span>
+            }
+        }
+
+        // Set keys in the data holder for each account, and pass the whole shebang off to the mapper
+<span class="fc" id="L156">        userInfo.forEach(ui -&gt; {</span>
+<span class="fc" id="L157">            CoreAccount account = ui.getAccount();</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">            if (accessingSystemUserOrgId.isDefined()) {</span>
+                // to use org account private key for decryption
+<span class="fc" id="L160">                ui.setLink(accountIdToUserAccountKeyLinkMap</span>
+<span class="fc" id="L161">                        .getOrElse(account.getId(), List())</span>
+<span class="fc" id="L162">                        .headOption()</span>
+<span class="fc" id="L163">                        .map(userAccountKeyLink -&gt; {</span>
+<span class="fc" id="L164">                            userAccountKeyLink.setOrgAccountPrivateKey(null);</span>
+<span class="fc" id="L165">                            return userAccountKeyLink;</span>
+                        })
+<span class="fc" id="L167">                        .getOrElse((UserAccountKeyLink) null));</span>
+            } else {
+<span class="fc" id="L169">                ui.setLink(accountIdToUserAccountKeyLinkMap</span>
+<span class="fc" id="L170">                        .getOrElse(account.getId(), List())</span>
+<span class="fc" id="L171">                        .headOption()</span>
+<span class="fc" id="L172">                        .getOrElse((UserAccountKeyLink) null));</span>
+            }
+
+<span class="fc" id="L175">            ui.setUserOrAccountPrivateKey(userOrAccountPrivateKey);</span>
+<span class="fc" id="L176">            ui.setAccountSymmetricKeys(accountSymmetricKeyMap.getOrElse(account.getPublicId(), List()));</span>
+
+            // Ugh! Need to revisit this probably - the idea is to make sure repositories have a way to reload keys,
+            // but in a decoupled way (i.e. not just dependent on another repository) so the KMS can be swapped in later
+<span class="fc" id="L180">            ui.setKeyReloader(() -&gt; {</span>
+<span class="nc" id="L181">                RELOAD_COUNTER.inc();</span>
+<span class="nc" id="L182">                List&lt;CoreAccountSymmetricKey&gt; encryptedSymmetricKeys = accountSymmetricKeyRepository.findEncryptedSymmetricKeys(account.getPublicId());</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">                if (LOG.isDebugEnabled()) {</span>
+<span class="nc" id="L184">                    LOG.debug(&quot;Reloaded symmetric keys for account {}/{} (ids={})&quot;,</span>
+<span class="nc" id="L185">                            account.getId(),</span>
+<span class="nc" id="L186">                            account.getPublicId(),</span>
+<span class="nc" id="L187">                            encryptedSymmetricKeys.map(CoreAccountSymmetricKey::getId));</span>
+
+                } else {
+<span class="nc" id="L190">                    LOG.info(&quot;Reloaded symmetric keys for account {}/{} (size={})&quot;,</span>
+<span class="nc" id="L191">                            account.getId(),</span>
+<span class="nc" id="L192">                            account.getPublicId(),</span>
+<span class="nc" id="L193">                            encryptedSymmetricKeys.size());</span>
+                }
+<span class="nc" id="L195">                return accountKeysMapper.map(</span>
+                        userOrAccountPrivateKey,
+<span class="nc" id="L197">                        ui.getLink(),</span>
+                        encryptedSymmetricKeys);
+            });
+<span class="fc" id="L200">        });</span>
+<span class="fc" id="L201">        return targetOwnerDataMapper.map(userInfo);</span>
+    }
+
+    @NotNull
+    private UUID getAccountPublicId(@NotNull TargetOwnerDataHolder dataHolder) {
+<span class="nc" id="L206">        return dataHolder.getAccount().getPublicId();</span>
+    }
+
+    @NotNull
+    private UUID getAccountPublicId(@NotNull CoreAccountSymmetricKey symmetricKey) {
+<span class="nc" id="L211">        return symmetricKey.getAccount().getPublicId();</span>
+    }
+
+    private static class TargetOwnerDataResultTransformer implements ResultTransformer {
+
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public Object transformTuple(Object[] tuple, String[] aliases) {
+<span class="fc" id="L220">            return new TargetOwnerDataHolder(</span>
+                    (PublicPKBPerson) tuple[0],
+                    (CoreAccount) tuple[1],
+                    (PublicViewConsent) tuple[2]);
+        }
+
+        @Override
+        public java.util.List transformList(java.util.List collection) {
+<span class="fc" id="L228">            return collection;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

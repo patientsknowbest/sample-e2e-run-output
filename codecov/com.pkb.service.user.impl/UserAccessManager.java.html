@@ -1,0 +1,379 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UserAccessManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.user.impl</a> &gt; <span class="el_source">UserAccessManager.java</span></div><h1>UserAccessManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.user.impl;
+
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.crypto.dto.AccountPrivateKeyDTO;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.AccountService;
+import com.pkb.domain.CryptoModelSynchronisationService;
+import com.pkb.domain.duplicate.person.PersonService;
+import com.pkb.domain.messages.workflow.TrustedConversationWorkflowService;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.InstituteUser;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.kms.shared.representation.AccountKeyAvailability;
+import com.pkb.kms.shared.representation.KmsError;
+import com.pkb.repository.legacy.LegacyOrgRepository;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.instituteuser.InstituteUserManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.PKBPersonRemote;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PasswordAccess;
+import com.pkb.util.CorrelationIdUtil;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.collection.Stream;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.util.EnumSet;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.SponsorshipStatus.ACTIVE;
+import static com.pkb.entities.enums.SponsorshipStatus.INACTIVE;
+import static com.pkb.entities.enums.UserType.ORG_COORD;
+import static com.pkb.entities.enums.UserType.PRIVACY_OFFICER;
+import static io.vavr.API.Stream;
+import static java.lang.String.format;
+
+public class UserAccessManager extends TransactionManager {
+
+<span class="fc" id="L64">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L65">    private static final EnumSet&lt;UserType&gt; ORG_LEVEL_USER_TYPES = EnumSet.of(ORG_COORD, PRIVACY_OFFICER);</span>
+
+    private final PKBEmailMessageManager emailMessageManager;
+    private final TrustedConversationWorkflowService trustedConversationWorkflowService;
+    private final UserManager userManager;
+    private final TeamUserManager teamUserManager;
+
+    private final CryptoModelSynchronisationService cryptoModelSynchronisationService;
+    private final InstituteUserManager instituteUserManager;
+    private final DocumentManager documentManager;
+    private final Kms kms;
+    private final AccountService accountService;
+
+    private final CorrelationIdUtil correlationIdUtil;
+
+    private final LegacyOrgRepository orgRepository;
+
+    private final PersonService personService;
+
+    public UserAccessManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService,
+                             UUIDProvider uuidProvider, TrustedConversationWorkflowService trustedConversationWorkflowService,
+                             UserManager userManager, TeamUserManager teamUserManager,
+                             CryptoModelSynchronisationService cryptoModelSynchronisationService,
+                             InstituteUserManager instituteUserManager,
+                             DocumentManager documentManager,
+                             Kms kms, AccountService accountService,
+                             PKBEmailMessageManager emailMessageManager,
+                             CorrelationIdUtil correlationIdUtil,
+                             LegacyOrgRepository orgRepository, PersonService personService) {
+<span class="fc" id="L94">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L95">        this.trustedConversationWorkflowService = trustedConversationWorkflowService;</span>
+<span class="fc" id="L96">        this.userManager = userManager;</span>
+<span class="fc" id="L97">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L98">        this.cryptoModelSynchronisationService = cryptoModelSynchronisationService;</span>
+<span class="fc" id="L99">        this.instituteUserManager = instituteUserManager;</span>
+<span class="fc" id="L100">        this.documentManager = documentManager;</span>
+<span class="fc" id="L101">        this.kms = kms;</span>
+<span class="fc" id="L102">        this.accountService = accountService;</span>
+<span class="fc" id="L103">        this.emailMessageManager = emailMessageManager;</span>
+<span class="fc" id="L104">        this.correlationIdUtil = correlationIdUtil;</span>
+<span class="fc" id="L105">        this.orgRepository = orgRepository;</span>
+<span class="fc" id="L106">        this.personService = personService;</span>
+<span class="fc" id="L107">    }</span>
+
+
+
+
+    /**
+     * Remove the person from patient's account
+     *
+     * @param revokedPersonId
+     * @param patientId       user id of the patient
+     * @throws {@link MailException}
+     */
+    public void sendAccessRevocationNotification(LoggedInEHRRequestContext requestContext, long revokedPersonId, long patientId) throws MailException {
+
+<span class="fc" id="L121">        PKBPersonRemote personRemote = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L122">        PKBPerson patient = personRemote.getPKBPerson(patientId);</span>
+<span class="fc" id="L123">        PKBPerson revokedPerson = personRemote.getPKBPerson(revokedPersonId);</span>
+
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        if (requestContext.getMaybeAccessingUserId().map(id -&gt; id.equals(patient.getId())).orElse(false)) {</span>
+<span class="fc" id="L126">            emailMessageManager.sendRevokeAccessNotificationToPatient(patient, revokedPerson);</span>
+<span class="fc" id="L127">            emailMessageManager.sendRevokeAccessNotificationToRevokedPerson(patient, revokedPerson);</span>
+        } else {
+<span class="fc" id="L129">            PKBPerson accessingUser = requestContext.getMaybeAccessingUserId().map(au -&gt; personRemote.findPKBPerson(au).getOrNull()).orElse(null);</span>
+<span class="fc" id="L130">            Long teamId = requestContext.getTeamId().orElse(null);</span>
+<span class="fc" id="L131">            Org org = requestContext.getOrg().orElse(null);</span>
+<span class="fc" id="L132">            emailMessageManager.sendRevokeIndivAccessNotificationToPatient(</span>
+                    patient,
+                    accessingUser,
+                    revokedPerson,
+                    accessingUser,
+                    org,
+                    teamId);
+<span class="fc" id="L139">            emailMessageManager.sendRevokeAccessNotificationToRevokedPerson(</span>
+                    patient,
+                    revokedPerson,
+                    accessingUser);
+        }
+<span class="fc" id="L144">    }</span>
+
+
+    public PasswordResetWarningInfo getPasswordResetWarningInfo(PKBPerson person) {
+<span class="fc" id="L148">        return Either.sequenceRight(getAllPersonasFor(person).map(this::getAccessibleAccountsFor))</span>
+<span class="fc" id="L149">                .map(seq -&gt; seq.reduce(PasswordResetWarningInfo::merge))</span>
+<span class="pc" id="L150">                .getOrElseThrow(err -&gt; new RuntimeException(&quot;Error getting password reset account availability info from kms: &quot; + err));</span>
+    }
+
+
+    private Either&lt;KmsError, PasswordResetWarningInfo&gt; getAccessibleAccountsFor(PKBPerson person) {
+<span class="fc" id="L155">        return kms.checkAccountKeyAvailabilityForUser(correlationIdUtil.getAsString(), person.getPublicId())</span>
+<span class="fc" id="L156">                .map(AccountKeyAvailability::getUnavailable)</span>
+<span class="fc" id="L157">                .map(personService::findPersonsForDefaultAccountPublicIds)</span>
+<span class="fc" id="L158">                .map(Map::values)</span>
+<span class="fc" id="L159">                .map(unavailableAccountOwners -&gt; ImmutablePasswordResetWarningInfo.builder()</span>
+<span class="fc" id="L160">                        .defaultAccountAvailable(unavailableAccountOwners.stream().map(Person::getPublicId).noneMatch(person.getPublicId()::equals))</span>
+<span class="fc" id="L161">                        .addAllUnavailableAccountOwners(unavailableAccountOwners)</span>
+<span class="fc" id="L162">                        .build());</span>
+    }
+
+    private Stream&lt;PKBPerson&gt; getAllPersonasFor(PKBPerson person) {
+<span class="fc bfc" id="L166" title="All 2 branches covered.">        return person.getHumanUUID() == null ? Stream(person) : Stream.ofAll(beanFactory.getPKBPersonBean().getPKBPersonListByHumanUUID(person.getHumanUUID()));</span>
+    }
+
+    public boolean shouldHavePermissionToResetPassword(LoggedInEHRRequestContext context, long userId) {
+<span class="pc bpc" id="L170" title="1 of 3 branches missed.">        switch(context.getAccessingUser().getUserType()) {</span>
+            case SUPER_ADMIN:
+<span class="fc" id="L172">                return checkSuperAdminPasswordResetPermissions(userId);</span>
+            case REG_CLINICIAN:
+            case INSTITUTE_ADMIN:
+<span class="fc" id="L175">                return checkProfessionalCoordinatorPermissions(context, userId);</span>
+            default:
+<span class="nc" id="L177">                throw new IllegalStateException(&quot;User with type &quot; + context.getAccessingUser().getUserType() + &quot; managed to get access to reset password form somehow&quot;);</span>
+        }
+    }
+
+
+    private boolean checkProfessionalCoordinatorPermissions(LoggedInEHRRequestContext context, long userId) {
+<span class="fc" id="L183">        return context.getOrgId().map(orgId -&gt; orgHasAccessToPerson(orgId, userId)).orElse(false);</span>
+    }
+
+    private boolean checkSuperAdminPasswordResetPermissions(long userId) {
+<span class="fc" id="L187">        var person = userManager.getPKBPerson(userId);</span>
+<span class="fc bfc" id="L188" title="All 4 branches covered.">        switch(person.getUserType()) {</span>
+            case EMPLOYEE:
+            case PRIVACY_OFFICER:
+            case TECH_SUPPORT:
+            case SUPER_ADMIN:
+<span class="fc" id="L193">                return true;</span>
+            case REG_CLINICIAN:
+<span class="fc bfc" id="L195" title="All 2 branches covered.">                return !teamUserManager.isActiveTeamUser(userId);</span>
+            case INSTITUTE_ADMIN:
+<span class="pc bpc" id="L197" title="1 of 2 branches missed.">                return person.getStatus() != UserStatus.EMAIL_CONFIRMED;</span>
+            default:
+<span class="fc" id="L199">                return false;</span>
+        }
+    }
+
+    @Value.Immutable
+    public interface PasswordResetWarningInfo {
+        boolean defaultAccountAvailable();
+        Set&lt;Person&gt; getUnavailableAccountOwners();
+
+        @Value.Derived
+        default String getUnavailableAccountString() {
+<span class="fc" id="L210">            return getUnavailableAccountOwners()</span>
+<span class="fc" id="L211">                    .stream()</span>
+<span class="fc" id="L212">                    .map(UserAccessManager::getUnsharedPersonDetailsString)</span>
+<span class="fc" id="L213">                    .collect(Collectors.joining(&quot;; &quot;));</span>
+        }
+
+        default PasswordResetWarningInfo merge(PasswordResetWarningInfo other) {
+<span class="fc" id="L217">            return ImmutablePasswordResetWarningInfo.builder()</span>
+<span class="pc bpc" id="L218" title="1 of 4 branches missed.">                    .defaultAccountAvailable(other.defaultAccountAvailable() &amp;&amp; this.defaultAccountAvailable())</span>
+<span class="fc" id="L219">                    .addAllUnavailableAccountOwners(getUnavailableAccountOwners())</span>
+<span class="fc" id="L220">                    .addAllUnavailableAccountOwners(other.getUnavailableAccountOwners())</span>
+<span class="fc" id="L221">                    .build();</span>
+        }
+    }
+
+    private static String getUnsharedPersonDetailsString(Person unshared) {
+<span class="fc" id="L226">        return String.format(&quot;%s:%s %s &lt;%s&gt;&quot;,</span>
+<span class="fc" id="L227">                unshared.getUserType(),</span>
+<span class="fc" id="L228">                unshared.demographics().getFirstName().getOrElse(&quot;&quot;),</span>
+<span class="fc" id="L229">                unshared.demographics().getLastName().getOrElse(&quot;&quot;),</span>
+<span class="fc" id="L230">                unshared.demographics().getPrimaryEmailValue().getOrElse(unshared.getId().toString()));</span>
+    }
+
+    public boolean orgHasAccessToPerson(long orgId, long personId) {
+<span class="fc" id="L234">        return orgRepository.findById(orgId)</span>
+<span class="fc" id="L235">                .map(Org::getPublicId)</span>
+<span class="fc" id="L236">                .map(orgPublicId -&gt; orgHasAccessToAccount(orgPublicId, accountService.findPersonAccountPublicId(personId)))</span>
+<span class="fc" id="L237">                .orElse(false);</span>
+    }
+
+
+    public boolean orgHasAccessToPerson(UUID orgPublicId, long personId) {
+<span class="fc" id="L242">        return orgHasAccessToAccount(orgPublicId, accountService.findPersonAccountPublicId(personId));</span>
+    }
+
+
+
+    private boolean orgHasAccessToAccount(UUID orgPublicId, UUID accountPublicId) {
+<span class="fc" id="L248">        return kms.getAccountKeysForSingleAccountAsOrg(correlationIdUtil.getAsString(), accountPublicId, orgPublicId, false).isRight();</span>
+    }
+
+    /**
+     * Get the details(password , creation time, creator id) for sending it to no contact user
+     */
+    @Nullable
+    public PasswordAccess getPasswordAccess(long userId, @NotNull LoggedInEHRRequestContext context) {
+        try {
+<span class="fc" id="L257">            LOGGER.info(&quot;getPasswordAccess-start&quot;);</span>
+<span class="fc" id="L258">            var person = beanFactory.getPKBPersonBean().getPKBPerson(userId);</span>
+<span class="fc" id="L259">            var docId = person.getPwdAccessDocumentMetadataId();</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">            if (docId == null) {</span>
+<span class="fc" id="L261">                return null;</span>
+            }
+<span class="fc" id="L263">            var doc = documentManager.retrieveOrThrow(docId);</span>
+            // decryption will fail unless we use the accountId of the document and the logged-in user id
+            // user must also have access to that account
+<span class="fc" id="L266">            byte[] content = beanFactory.getEhrRemote().decryptDoc(doc, context.fillMissingContextUser(userId)).plainText();</span>
+<span class="fc" id="L267">            var passwordAccess = new PasswordAccess();</span>
+<span class="fc" id="L268">            passwordAccess.setPassword(new String(content));</span>
+<span class="fc" id="L269">            passwordAccess.setMetadataId(docId);</span>
+<span class="fc" id="L270">            LOGGER.info(&quot;getPasswordAccess-end&quot;);</span>
+<span class="fc" id="L271">            return passwordAccess;</span>
+<span class="fc" id="L272">        } catch (Exception e) {</span>
+<span class="fc" id="L273">            throw new PKBException(&quot;Error while getting password access for user-&quot; + userId, e);</span>
+        }
+    }
+
+    /**
+     * Deactivate user account for the institute
+     */
+    public void deactivateUserAccount(LoggedInEHRRequestContext requestContext, long personIdToDeactivate) {
+        try {
+
+<span class="fc" id="L283">            long userTeamId = teamUserManager.findPrimaryTeam(requestContext, personIdToDeactivate).map(Team::getId)</span>
+<span class="pc" id="L284">                    .orElseThrow(() -&gt; new IllegalStateException(format(&quot;Attempting to deactivate user %d with no team connection&quot;, personIdToDeactivate)));</span>
+
+<span class="fc" id="L286">            Consumer&lt;Long&gt; checkSameTeam = (requesterTeamId) -&gt; {</span>
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">                if (!requesterTeamId.equals(userTeamId)) {</span>
+<span class="nc" id="L288">                    throw new IllegalStateException(format(&quot;User %s trying to deactivate user %s in different team&quot;, requestContext.getAccessingUserId(), personIdToDeactivate));</span>
+                }
+<span class="fc" id="L290">            };</span>
+
+<span class="fc" id="L292">            Runnable checkSuperAdmin = () -&gt; {</span>
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">                if (!requestContext.isSuperAdmin()) {</span>
+<span class="nc" id="L294">                    throw new IllegalStateException(format(&quot;User without a team %s usertype %s trying to deactivate user %s&quot;, requestContext.getAccessingUserId(), requestContext.getAccessingUser().getUserType(), personIdToDeactivate));</span>
+                }
+<span class="fc" id="L296">            };</span>
+
+<span class="fc" id="L298">            requestContext.getTeamId().ifPresentOrElse(checkSameTeam, checkSuperAdmin);</span>
+
+
+<span class="fc" id="L301">            transactional(() -&gt; {</span>
+<span class="fc" id="L302">                deactivateUserAccount(personIdToDeactivate, userTeamId);</span>
+<span class="fc" id="L303">                trustedConversationWorkflowService.forceUnassignAllConversationsFromPersonId(personIdToDeactivate, requestContext.getAccessingUserId());</span>
+<span class="fc" id="L304">                userManager.expireUserSessionAndWebappOTP(personIdToDeactivate);</span>
+<span class="fc" id="L305">            });</span>
+<span class="nc" id="L306">        } catch (Exception e) {</span>
+<span class="nc" id="L307">            throw new RuntimeException(&quot;Error while deactivating user-&quot; + personIdToDeactivate, e);</span>
+<span class="fc" id="L308">        }</span>
+<span class="fc" id="L309">    }</span>
+
+
+    public void reactivateProAccount(long proId, Long instituteId) {
+<span class="fc" id="L313">        instituteUserManager.updateStatus(instituteId, proId, ACTIVE);</span>
+<span class="fc" id="L314">        cryptoModelSynchronisationService.syncCryptoAccessForPerson(proId);</span>
+<span class="fc" id="L315">    }</span>
+
+
+
+
+    public AccountPrivateKeyDTO getOrgAccountPrivateKey(LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L321">        return Option.ofOptional(requestContext.getOrgAccountId()</span>
+<span class="fc" id="L322">                .flatMap(accountService::findAccountPublicId))</span>
+<span class="fc" id="L323">                .toEither(format(&quot;Account for org %s not found&quot;, requestContext.getOrgId()))</span>
+<span class="fc" id="L324">                .flatMap(orgAccountPublicId -&gt;</span>
+<span class="fc" id="L325">                      kms.getAccountKeysForSingleAccount(requestContext.getCorrelationId().toString(), orgAccountPublicId, requestContext.getAccessingUserPublicId(), false)</span>
+<span class="fc" id="L326">                              .mapLeft(KmsError::toString)</span>
+                )
+<span class="fc" id="L328">                .map(AccountKeysDTO::getPrivateKey)</span>
+<span class="pc" id="L329">                .getOrElseThrow(err -&gt; new RuntimeException(err));</span>
+    }
+
+    void deactivateUserAccount(long userId, long instituteId) {
+<span class="fc" id="L333">        InstituteUser instituteUser = instituteUserManager.getInstituteUser(instituteId, userId);</span>
+<span class="fc" id="L334">        PKBPerson person = instituteUser.getPerson();</span>
+
+<span class="fc bfc" id="L336" title="All 4 branches covered.">        if (person.isTeamCoordinator() || ORG_LEVEL_USER_TYPES.contains(person.getUserType())) {</span>
+<span class="fc" id="L337">            person.setStatus(UserStatus.INACTIVE, dateTimeService.now());</span>
+<span class="fc" id="L338">            beanFactory.getPKBPersonBean().mergePkbPerson(person);</span>
+        }
+
+        // Set the user status as inactive
+<span class="fc" id="L342">        instituteUserManager.updateStatus(instituteId, userId, INACTIVE);</span>
+<span class="fc" id="L343">        cryptoModelSynchronisationService.syncCryptoAccessForPerson(userId);</span>
+<span class="fc" id="L344">    }</span>
+
+    public void removeUnusedPasswordAccess(long personId) {
+<span class="fc" id="L347">        var personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L348">        var person = personBean.findPKBPerson(personId).getOrNull();</span>
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">        if (person != null) {</span>
+<span class="fc" id="L350">            var pwdAccessDocId = Optional.ofNullable(person.getPwdAccessDocumentMetadataId());</span>
+<span class="fc bfc" id="L351" title="All 2 branches covered.">            if (pwdAccessDocId.isPresent()) {</span>
+<span class="fc" id="L352">                personBean.clearPwdAccessDocumentMetadataId(person);</span>
+<span class="fc" id="L353">                documentManager.delete(pwdAccessDocId.get());</span>
+            }
+        }
+<span class="fc" id="L356">    }</span>
+
+    /**
+     * These two methods are only here as a last-resort check to make sure crypto access is available before
+     * displaying a patient record. They should almost never return false now and can be removed when we finally
+     * get rid of the old crypto model
+     * @deprecated DO NOT USE for new code. You should be querying the consent model rather than crypto keys.
+     */
+    @Deprecated
+    public boolean hasAccessToAccount(EHRRequestContext requestContext, long accountId) {
+<span class="nc" id="L366">        return Option.ofOptional(requestContext.getMaybeAccessingUser())</span>
+<span class="nc" id="L367">                .map(PersonAuthInfo::getPublicId)</span>
+<span class="nc" id="L368">                .map(loggedInUserPublicId -&gt; hasAccessToAccount(loggedInUserPublicId, accountId))</span>
+<span class="nc" id="L369">                .getOrElse(false);</span>
+    }
+
+    @Deprecated
+    public boolean hasAccessToAccount(UUID loggedInUserPublicId, long accountId) {
+<span class="fc" id="L374">        return beanFactory.getAccountDaoBean().findAccountPublicId(accountId).flatMap(accountPublicId -&gt;</span>
+<span class="fc" id="L375">                        kms.getAccountKeysForSingleAccount(correlationIdUtil.getAsString(), accountPublicId, loggedInUserPublicId, false).toOption())</span>
+<span class="fc" id="L376">                .isDefined();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

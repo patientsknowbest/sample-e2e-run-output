@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Encounter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.datamodel</a> &gt; <span class="el_source">Encounter.java</span></div><h1>Encounter.java</h1><pre class="source lang-java linenums">package com.pkb.datamodel;
+
+import com.google.common.base.Preconditions;
+import com.pkb.datamodel.confidential.SensitiveString;
+import com.pkb.entities.enums.EncounterClass;
+import io.vavr.Function1;
+import io.vavr.Function2;
+import io.vavr.Function3;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.collection.List;
+import io.vavr.control.Option;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+
+import java.time.ZonedDateTime;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.function.Predicate;
+
+import static com.google.common.base.Preconditions.checkState;
+import static io.vavr.API.List;
+import static java.util.Comparator.comparing;
+
+@Value.Immutable
+@Value.Style(builder = &quot;encounter&quot;)
+@DataModelStyle
+<span class="fc" id="L28">public abstract class Encounter implements Identifiable&lt;UUID&gt; {</span>
+
+    public abstract List&lt;EncounterEvent&gt; events();
+
+    @Value.Check
+    public void someEvents() {
+<span class="pc bpc" id="L34" title="1 of 2 branches missed.">        Preconditions.checkState(!events().isEmpty(), &quot;Can't make an encounter with no events!&quot;);</span>
+<span class="fc" id="L35">    }</span>
+
+    @Value.Derived
+    public EncounterEvent first() {
+<span class="fc" id="L39">        return EncounterEvent.earliest(io.vavr.collection.List.ofAll(events()));</span>
+    }
+
+    @Value.Derived
+    public EncounterEvent last() {
+<span class="fc" id="L44">        return EncounterEvent.latest(io.vavr.collection.List.ofAll(events()));</span>
+    }
+
+    @Value.Derived
+    public ZonedDateTime getStart() {
+<span class="fc" id="L49">        return first().timestamp();</span>
+    }
+
+    @Value.Derived
+    public ZonedDateTime getEnd() {
+<span class="fc" id="L54">        return last().timestamp();</span>
+    }
+
+    @Value.Derived
+    public EncounterClass getEncounterClass() {
+<span class="fc" id="L59">        return last().encounterClass();</span>
+    }
+
+    @Value.Derived
+    public List&lt;EncounterEvent&gt; getEventsChronologically() {
+<span class="fc" id="L64">        return events()</span>
+<span class="fc" id="L65">                .sorted(comparing(EncounterEvent::timestamp));</span>
+    }
+
+    @Value.Derived
+    public List&lt;LocationBlock&gt; getLocationBlocks() {
+
+<span class="fc" id="L71">        BlockProcessor&lt;LocationBlock, SensitiveString&gt; proc = new BlockProcessor&lt;&gt;(</span>
+<span class="fc" id="L72">                (ev) -&gt; ev.getLocation().map(Location::getDescription),</span>
+                Objects::equals,
+                LocationBlock::fromEvents);
+
+<span class="fc" id="L76">        return finaliseBlocks(startProcessing(getEventsChronologically(), proc), LocationBlock::fromEvent);</span>
+    }
+
+    @Value.Derived
+    public List&lt;ParticipantBlock&gt; getParticipantBlocks() {
+<span class="fc" id="L81">        List&lt;EncounterEvent&gt; eventSeq = getEventsChronologically();</span>
+<span class="fc" id="L82">        List&lt;ExternalParticipant&gt; participants = eventSeq.flatMap(EncounterEvent::getExternalParticipants).distinct();</span>
+<span class="fc" id="L83">        return participants.flatMap(currentParticipant -&gt; {</span>
+<span class="fc" id="L84">            BlockProcessor&lt;ParticipantBlock, ExternalParticipant&gt; proc = new BlockProcessor&lt;&gt;(</span>
+<span class="fc" id="L85">                    (ev) -&gt; ev.findParticipantByName(currentParticipant.getName()),</span>
+                    ExternalParticipant::equalByName,
+<span class="fc" id="L87">                    Function3.of(ParticipantBlock::fromEvents).apply(currentParticipant.getName()));</span>
+<span class="fc" id="L88">            return finaliseBlocks(</span>
+<span class="fc" id="L89">                    startProcessing(eventSeq, proc),</span>
+<span class="fc" id="L90">                    Function2.of(ParticipantBlock::fromEvent).apply(currentParticipant));</span>
+        });
+    }
+
+    @Value.Derived
+    public List&lt;SpecialtyBlock&gt; getSpecialtyBlocks() {
+
+<span class="fc" id="L97">        BlockProcessor&lt;SpecialtyBlock, ClinicalCoding&gt; proc = new BlockProcessor&lt;&gt;(</span>
+                EncounterEvent::specialty,
+                Objects::equals,
+                SpecialtyBlock::fromEvents);
+
+<span class="fc" id="L102">        return finaliseBlocks(startProcessing(getEventsChronologically(), proc), SpecialtyBlock::fromEvent);</span>
+    }
+
+    public List&lt;EncounterClassBlock&gt; getClassBlocks(Function2&lt;EncounterClass, EncounterClass, Boolean&gt; comparisonFn,
+                                                    Predicate&lt;EncounterEvent&gt; eventFilterFn) {
+
+<span class="fc" id="L108">        BlockProcessor&lt;EncounterClassBlock, EncounterClass&gt; proc = new BlockProcessor&lt;&gt;(</span>
+<span class="fc" id="L109">                (e) -&gt; Option.of(e.encounterClass()),</span>
+                comparisonFn,
+                EncounterClassBlock::fromEvents);
+
+<span class="fc" id="L113">        List&lt;EncounterEvent&gt; eventSeq = getEventsChronologically().filter(eventFilterFn);</span>
+<span class="fc" id="L114">        return finaliseBlocks(startProcessing(eventSeq, proc), EncounterClassBlock::fromEvent);</span>
+    }
+
+    private &lt;T, V&gt; Tuple2&lt;Option&lt;EncounterEvent&gt;, List&lt;T&gt;&gt; startProcessing(List&lt;EncounterEvent&gt; events, 
+                                                                           BlockProcessor&lt;T, V&gt; proc) {
+<span class="fc" id="L119">        return events.foldLeft(Tuple.of(Option.none(), List()), proc::collapse);</span>
+    }
+
+    private static &lt;T&gt; List&lt;T&gt; finaliseBlocks(Tuple2&lt;Option&lt;EncounterEvent&gt;, List&lt;T&gt;&gt; blocks,
+                                              Function1&lt;EncounterEvent, T&gt; factory) {
+        // Deconstruct
+<span class="fc" id="L125">        Option&lt;EncounterEvent&gt; finalEvent = blocks._1;</span>
+<span class="fc" id="L126">        List&lt;T&gt; list = blocks._2;</span>
+
+        // Invoke factory if the last event has a value
+<span class="fc" id="L129">        return finalEvent.map(ev -&gt; list.append(factory.apply(ev))).getOrElse(list);</span>
+    }
+
+    private static class BlockProcessor&lt;T, V&gt; {
+
+        // TODO: javadoc for usage of this class
+
+        /**
+         * valueFn is a user-defined function that extracts an optional value from an EncounterEvent to use when
+         * building a block - examples might be location or participant name
+         */
+        private final Function1&lt;EncounterEvent, Option&lt;V&gt;&gt; valueFn;
+
+        /**
+         * comparisonFn is a user-defined function that compares an extracted value (see {@link BlockProcessor#valueFn})
+         * for two consecutive events. If comparisonFn returns true, the current block is extended. If it returns false,
+         * the current block is terminated and a new block is started
+         */
+        private final Function2&lt;V, V, Boolean&gt; comparisonFn;
+
+        /**
+         * builderFn is a user-defined function that defines how to build a block when the block is terminated
+         */
+        private final Function2&lt;EncounterEvent, EncounterEvent, T&gt; builderFn;
+
+        private BlockProcessor(@NotNull Function1&lt;EncounterEvent, Option&lt;V&gt;&gt; valueFn,
+                               @NotNull Function2&lt;V, V, Boolean&gt; comparisonFn,
+<span class="fc" id="L156">                               @NotNull Function2&lt;EncounterEvent, EncounterEvent, T&gt; builderFn) {</span>
+
+<span class="fc" id="L158">            this.valueFn = valueFn;</span>
+<span class="fc" id="L159">            this.comparisonFn = comparisonFn;</span>
+<span class="fc" id="L160">            this.builderFn = builderFn;</span>
+<span class="fc" id="L161">        }</span>
+
+        public Tuple2&lt;Option&lt;EncounterEvent&gt;, List&lt;T&gt;&gt; collapse(
+                @NotNull Tuple2&lt;Option&lt;EncounterEvent&gt;, List&lt;T&gt;&gt; accumulator,
+                @NotNull EncounterEvent nextEvent) {
+
+            // Deconstruct
+<span class="fc" id="L168">            Option&lt;EncounterEvent&gt; currentEvent = accumulator._1;</span>
+<span class="fc" id="L169">            List&lt;T&gt; list = accumulator._2;</span>
+
+<span class="fc" id="L171">            return currentEvent</span>
+<span class="fc" id="L172">                    .map(ev -&gt; handleCurrent(ev, nextEvent, list))</span>
+<span class="fc" id="L173">                    .getOrElse(() -&gt; Tuple.of(valueFn.apply(nextEvent).flatMap($ -&gt; Option.of(nextEvent)), list));</span>
+        }
+
+        private Tuple2&lt;Option&lt;EncounterEvent&gt;, List&lt;T&gt;&gt; handleCurrent(
+                EncounterEvent currentEvent,
+                EncounterEvent nextEvent,
+                List&lt;T&gt; list) {
+
+<span class="fc" id="L181">            checkState(valueFn.apply(currentEvent).isDefined(), &quot;Expected currentEvent to have value&quot;);</span>
+
+<span class="fc" id="L183">            return valueFn.apply(nextEvent)</span>
+<span class="fc" id="L184">                    .map($ -&gt; handleCurrentWithNext(currentEvent, nextEvent, list)) // Next event has a value set</span>
+<span class="fc" id="L185">                    .getOrElse(() -&gt; {</span>
+                        // End of block. Continue processing with no current value
+<span class="fc" id="L187">                        return Tuple.of(Option.none(), list.append(builderFn.apply(currentEvent, nextEvent)));</span>
+                    });
+        }
+
+        private Tuple2&lt;Option&lt;EncounterEvent&gt;, List&lt;T&gt;&gt; handleCurrentWithNext(
+                @NotNull EncounterEvent currentEvent,
+                @NotNull EncounterEvent nextEvent,
+                @NotNull List&lt;T&gt; list) {
+
+<span class="pc" id="L196">            V currentEventValue = valueFn.apply(currentEvent).getOrElseThrow(() -&gt; new IllegalStateException(&quot;Expected currentEvent to have value&quot;));</span>
+<span class="pc" id="L197">            V nextEventValue = valueFn.apply(nextEvent).getOrElseThrow(() -&gt; new IllegalStateException(&quot;Expected nextEvent to have value&quot;));</span>
+
+<span class="fc bfc" id="L199" title="All 2 branches covered.">            if (comparisonFn.apply(currentEventValue, nextEventValue)) {</span>
+                // Next event is same as this one - continue processing with no change
+<span class="fc" id="L201">                return Tuple.of(Option.of(currentEvent), list);</span>
+            } else {
+                // Next event has different value - save the block and proceed with a new one
+<span class="fc" id="L204">                return Tuple.of(Option.of(nextEvent), list.append(builderFn.apply(currentEvent, nextEvent)));</span>
+            }
+        }
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

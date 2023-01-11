@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GcsDocumentDeletionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.file</a> &gt; <span class="el_source">GcsDocumentDeletionManager.java</span></div><h1>GcsDocumentDeletionManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.file;
+
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.entities.doc.DocGcsDeleteQueue;
+import com.pkb.repository.legacy.LegacyDocGcsDeleteQueueRepository;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Either;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.domain.Pageable;
+
+import java.lang.invoke.MethodHandles;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+public class GcsDocumentDeletionManager extends TransactionManager {
+<span class="fc" id="L33">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L34">    private static final AtomicBoolean DELETION_RUNNING = new AtomicBoolean(false);</span>
+    private static final String DELETE_SUCCESS_COUNTER_NAME = &quot;phr_gcs_deletion_success_counter&quot;;
+    private static final String DELETE_ERROR_COUNTER_NAME = &quot;phr_gcs_deletion_error_counter&quot;;
+
+    private final DocumentManager documentManager;
+    private final LegacyDocGcsDeleteQueueRepository docGcsDeleteQueueRepository;
+
+    public GcsDocumentDeletionManager(TolvenBeanFactory beanFactory,
+                                      DateTimeService dateTimeService,
+                                      UUIDProvider uuidProvider,
+                                      PhrConfig config,
+                                      DocumentManager documentManager,
+                                      LegacyDocGcsDeleteQueueRepository docGcsDeleteQueueRepository) {
+<span class="fc" id="L47">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L48">        this.documentManager = documentManager;</span>
+<span class="fc" id="L49">        this.docGcsDeleteQueueRepository = docGcsDeleteQueueRepository;</span>
+<span class="fc" id="L50">    }</span>
+
+    public void deleteGcsDocuments() {
+<span class="pc bpc" id="L53" title="1 of 2 branches missed.">        if (DELETION_RUNNING.compareAndSet(false, true)) {</span>
+            try {
+<span class="fc" id="L55">                Instant endDate = dateTimeService.now().minus(config.getDocumentGcsDeleteKeepForDays(), ChronoUnit.DAYS);</span>
+<span class="fc" id="L56">                int pageSize = config.getDocumentGcsDeleteBatchSize();</span>
+<span class="fc" id="L57">                int lastMaxId = 0;</span>
+
+<span class="fc" id="L59">                List&lt;DocGcsDeleteQueue&gt; queue = docGcsDeleteQueueRepository.getDeleteQueueBatch(endDate, lastMaxId, Pageable.ofSize(pageSize));</span>
+
+<span class="fc bfc" id="L61" title="All 2 branches covered.">                while (!queue.isEmpty()) {</span>
+<span class="fc" id="L62">                    Map&lt;String, DocGcsDeleteQueue&gt; idMap = queue.stream().collect(Collectors.toMap(DocGcsDeleteQueue::getIdInStore, Function.identity()));</span>
+<span class="fc" id="L63">                    Set&lt;String&gt; internalIds = new HashSet&lt;&gt;(idMap.keySet());</span>
+<span class="fc" id="L64">                    LOGGER.info(&quot;Deleting documents from GCS: {}&quot;, internalIds);</span>
+
+                    List&lt;Long&gt; successfulQueueIds;
+                    Map&lt;String, String&gt; failures;
+                    try {
+<span class="fc" id="L69">                        Map&lt;String, Either&lt;String, Boolean&gt;&gt; results = documentManager.deleteBlobsFromGcs(internalIds);</span>
+
+<span class="fc" id="L71">                        successfulQueueIds = results.entrySet().stream()</span>
+                                // we only care that we got a Boolean result
+                                // false value means the document didn't exist, which we'll handle as a success
+<span class="fc" id="L74">                                .filter(e -&gt; e.getValue().isRight())</span>
+<span class="fc" id="L75">                                .map(e -&gt; idMap.get(e.getKey()).getId())</span>
+<span class="fc" id="L76">                                .collect(Collectors.toList());</span>
+
+<span class="fc" id="L78">                        failures = results.entrySet().stream()</span>
+<span class="fc" id="L79">                                .filter(e -&gt; e.getValue().isLeft())</span>
+<span class="pc" id="L80">                                .collect(Collectors.toMap(Map.Entry::getKey, e -&gt; e.getValue().getLeft()));</span>
+<span class="fc" id="L81">                    } catch (Exception e) {</span>
+<span class="fc" id="L82">                        LOGGER.error(&quot;Error when calling GCS to delete documents&quot;, e);</span>
+<span class="fc" id="L83">                        successfulQueueIds = Collections.emptyList();</span>
+<span class="fc" id="L84">                        failures = queue.stream()</span>
+<span class="fc" id="L85">                                .map(entry -&gt; Tuple.of(entry.getIdInStore(), &quot;&quot;))</span>
+<span class="fc" id="L86">                                .collect(Collectors.toMap(Tuple2::_1, Tuple2::_2));</span>
+<span class="fc" id="L87">                    }</span>
+
+<span class="fc" id="L89">                    Metrics.counter(DELETE_SUCCESS_COUNTER_NAME).increment(successfulQueueIds.size());</span>
+<span class="fc" id="L90">                    Metrics.counter(DELETE_ERROR_COUNTER_NAME).increment(failures.size());</span>
+
+<span class="fc bfc" id="L92" title="All 2 branches covered.">                    if (!failures.isEmpty()) {</span>
+<span class="fc" id="L93">                        LOGGER.error(&quot;Failed to delete documents from GCS. Errors: {}&quot;,</span>
+<span class="fc" id="L94">                                failures.entrySet().stream().map(e -&gt; e.getKey() + &quot;: &quot; + e.getValue()).collect(Collectors.toList()));</span>
+                    }
+
+<span class="fc bfc" id="L97" title="All 2 branches covered.">                    if (!successfulQueueIds.isEmpty()) {</span>
+<span class="fc" id="L98">                        List&lt;Long&gt; finalSuccessfulQueueIds = successfulQueueIds;</span>
+<span class="fc" id="L99">                        transactional(() -&gt; {</span>
+                            try {
+<span class="fc" id="L101">                                docGcsDeleteQueueRepository.deleteAllById(finalSuccessfulQueueIds);</span>
+<span class="nc" id="L102">                            } catch (Exception e) {</span>
+<span class="nc" id="L103">                                LOGGER.error(&quot;Error deleting items from GCS deletion queue: {}. Details: &quot;, finalSuccessfulQueueIds, e);</span>
+<span class="fc" id="L104">                            }</span>
+<span class="fc" id="L105">                        });</span>
+                    }
+<span class="fc" id="L107">                    queue = docGcsDeleteQueueRepository.getDeleteQueueBatch(endDate, queue.get(queue.size() - 1).getId(), Pageable.ofSize(pageSize));</span>
+<span class="fc" id="L108">                }</span>
+            } finally {
+<span class="fc" id="L110">                DELETION_RUNNING.set(false);</span>
+<span class="fc" id="L111">            }</span>
+        } else {
+<span class="nc" id="L113">            LOGGER.info(&quot;GCS deletion already running, quit flow.&quot;);</span>
+        }
+<span class="fc" id="L115">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

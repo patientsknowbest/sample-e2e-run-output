@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConditionEhrDataTransformer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.common.transform</a> &gt; <span class="el_source">ConditionEhrDataTransformer.java</span></div><h1>ConditionEhrDataTransformer.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.common.transform;
+
+import ca.uhn.fhir.context.FhirContext;
+import ca.uhn.fhir.parser.IParser;
+import com.pkb.common.ehrdata.serialization.EHRDataDeserializer;
+import com.pkb.entities.enums.ConditionCategory;
+import com.pkb.entities.enums.DiagnosisClinicalStatus;
+import com.pkb.fhir.common.configuration.EhrmigratorConfig;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.retrieve.ConditionEhrDataDto;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.r4.model.Annotation;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.Condition;
+import org.hl7.fhir.r4.model.DomainResource;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Reference;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.util.Optional;
+
+public class ConditionEhrDataTransformer extends BaseEhrDataTransformer {
+
+    private static final String DIAGNOSIS_CODING_RECEIVED_IDENTIFIER_EXTENSION_URL
+            = &quot;http://fhir.patientsknowbest.com/structuredefinition/diagnosis-coding-received-identifier&quot;;
+
+    private static final String CONDITION_CLINICAL_STATUS_CODESYSTEM_URL = &quot;http://terminology.hl7.org/CodeSystem/condition-clinical&quot;;
+    private static final String CONDITION_CATEGORY_CODESYSTEM_URL = &quot;http://terminology.hl7.org/CodeSystem/condition-category&quot;;
+
+    private FhirContext fhirContext;
+
+    public ConditionEhrDataTransformer(EhrmigratorConfig config,
+                                       PersonService personService, TeamService teamService, OrgService orgService,
+                                       FhirContext fhirContext, Hl7PartnerService hl7PartnerService, EHRDataDeserializer ehrDataDeserializer) {
+<span class="fc" id="L41">        super(config, personService, teamService, orgService, hl7PartnerService, ehrDataDeserializer);</span>
+<span class="fc" id="L42">        this.fhirContext = fhirContext;</span>
+<span class="fc" id="L43">    }</span>
+
+    @Override
+    public String transformToFhirJson(@NotNull TransformableDto item) {
+<span class="fc" id="L47">        IParser parser = fhirContext.newJsonParser();</span>
+<span class="fc" id="L48">        ConditionEhrDataDto dto = Optional.ofNullable(item.getTransformationObjects().get(&quot;dto&quot;))</span>
+<span class="fc" id="L49">                .map(object -&gt; (ConditionEhrDataDto) object)</span>
+<span class="pc" id="L50">                .orElseThrow(() -&gt; new IllegalArgumentException(&quot;Missing dto from TransformableDto&quot;));</span>
+
+<span class="fc" id="L52">        Condition condition = new Condition();</span>
+
+<span class="fc" id="L54">        setId(dto.getUniqueId(), condition);</span>
+<span class="fc" id="L55">        setLegacyPrimaryKeyIdentifier(String.valueOf(item.getId()), condition);</span>
+
+        //This is a vestigial concept to indicate that a patient does NOT have the condition.
+        // Fail these; they'll hold up the migration, and we'll have to purge them.
+        // Don't want to &quot;just handle them&quot; because the app doesn't take any notice of this field right now so it's
+        // dangerous to leave them in this state
+<span class="pc bpc" id="L61" title="2 of 4 branches missed.">        if (dto.getPatientHasCondition() != null &amp;&amp; !dto.getPatientHasCondition()) {</span>
+<span class="nc" id="L62">            throw new MigrationException(String.format(&quot;Got a diagnosis where patientHasCondition = false. Id %s&quot;, dto.getId()));</span>
+        }
+
+<span class="fc" id="L65">        Optional.ofNullable(dto.getPatientId())</span>
+<span class="fc" id="L66">                .map(String::valueOf)</span>
+<span class="fc" id="L67">                .ifPresent(patientId -&gt; condition.setSubject(new Reference(new Patient().setId(patientId))));</span>
+
+<span class="fc" id="L69">        getDateWithZone(dto.getStart())</span>
+<span class="fc" id="L70">                .map(this::mapToDateTimeTypeUTC)</span>
+<span class="fc" id="L71">                .ifPresent(condition::setOnset);</span>
+
+<span class="fc" id="L73">        getDateWithZone(dto.getEnd())</span>
+<span class="fc" id="L74">                .map(this::mapToDateTimeTypeUTC)</span>
+<span class="fc" id="L75">                .ifPresent(condition::setAbatement);</span>
+
+<span class="fc" id="L77">        getDateWithZone(dto.getAsserted())</span>
+<span class="fc" id="L78">                .map(this::mapToDateTimeTypeUTC)</span>
+<span class="fc" id="L79">                .ifPresent(condition::setRecordedDateElement);</span>
+
+<span class="fc" id="L81">        Optional.ofNullable(dto.getCategory()).ifPresent(category -&gt; setCategory(category, condition));</span>
+
+<span class="fc" id="L83">        createMeta(condition, dto.getPrivacyFlagsDto(), dto.getMenuDataSourceInfo());</span>
+
+<span class="fc" id="L85">        Optional.ofNullable(dto.getDiagnosisCodingReceivedId())</span>
+<span class="fc" id="L86">                .ifPresent(diagnosisCodingReceivedId -&gt; addExtension(String.valueOf(diagnosisCodingReceivedId),</span>
+                        DIAGNOSIS_CODING_RECEIVED_IDENTIFIER_EXTENSION_URL, condition));
+
+<span class="fc" id="L89">        processEncryptedFields(item, condition);</span>
+<span class="fc" id="L90">        return parser.encodeResourceToString(condition);</span>
+    }
+
+    @Override
+    Optional&lt;String&gt; processDeserializedEhrDataMap(@NotNull String dataType, @Nullable Object data, @NotNull DomainResource resource) {
+<span class="fc" id="L95">        Condition condition = (Condition)resource;</span>
+<span class="fc" id="L96">        Optional&lt;String&gt; unknownDatatype = Optional.empty();</span>
+<span class="pc bpc" id="L97" title="1 of 8 branches missed.">        switch (dataType) {</span>
+            case &quot;diagnosis&quot;:
+<span class="fc" id="L99">                createCodeableConceptFromEhrDataMap(data, condition)</span>
+<span class="fc" id="L100">                        .ifPresent(condition::setCode);</span>
+<span class="fc" id="L101">                break;</span>
+            case &quot;details&quot;:
+<span class="fc" id="L103">                Optional.ofNullable(data)</span>
+<span class="fc" id="L104">                        .ifPresent(details -&gt; addNote((String)details, condition));</span>
+<span class="fc" id="L105">                break;</span>
+            case &quot;clinicalStatus&quot;:
+<span class="fc" id="L107">                Optional.ofNullable(data)</span>
+<span class="pc" id="L108">                        .ifPresent(clinicalStatus -&gt; setClinicalStatus(DiagnosisClinicalStatus.valueOf((String)clinicalStatus), condition));</span>
+<span class="fc" id="L109">                break;</span>
+            case &quot;authorLdapUID&quot;: //This field has been removed from Diagnosis, but the migrator to populate it into sourcepersonid remains.
+<span class="fc" id="L111">                Optional.ofNullable(data)</span>
+<span class="fc" id="L112">                        .ifPresent(authorLdapUid -&gt; setSourcePersonIfUnset(condition, (String)authorLdapUid));</span>
+<span class="fc" id="L113">                break;</span>
+            case &quot;episodicity&quot;:
+            case &quot;severity&quot;:
+            case &quot;course&quot;:
+            case &quot;onset&quot;:
+            case &quot;episodicityCodeId&quot;:
+            case &quot;asserter&quot;:
+            case &quot;anatomicalLocations&quot;:
+            case &quot;status&quot;:
+            case &quot;stage&quot;:
+            case &quot;bodySite&quot;:
+            case &quot;severityCodeId&quot;:
+            case &quot;abatement&quot;:
+            case &quot;patientLdapUID&quot;:
+            case &quot;patientAccountId&quot;: //Yes, this is in the encrypted menu_data sometimes as well as plaintext on the row
+            case &quot;diagnosisCodeId&quot;:
+            case &quot;bodySiteCodeId&quot;:
+            case &quot;locationCodeId&quot;:
+            case &quot;location&quot;:
+            case &quot;category&quot;: // Another relic which is now held in string05
+            case &quot;endDate&quot;: //More encrypted duplication. Never read
+            case &quot;specialty&quot;: //Never read, so ignored
+            case &quot;diagnosisCodingReceivedId&quot;: //More encrypted duplication. Never read
+                //These are all fields which have not been accessible to the UI, for setting or getting, for many years.
+                // As the data is essentially invisible, we are declaring that it is not interesting to migrate it.
+<span class="fc" id="L138">                break;</span>
+            case &quot;hospitalServiceCode&quot;:
+                //This is never set in the app for diagnoses. Alert us if this changes.
+                // This would be interesting because you can e.g. apply privacy labels of the back of these specialty mappings.
+<span class="pc bpc" id="L142" title="3 of 4 branches missed.">                if (data != null &amp;&amp; StringUtils.isNotEmpty((String)data)) {</span>
+<span class="nc" id="L143">                    throw new MigrationException(String.format(&quot;Unexpected hospitalServiceCode on condition %s&quot;, data));</span>
+                }
+                break;
+            case &quot;sourceText&quot;:
+<span class="fc" id="L147">                Optional.ofNullable(data)</span>
+<span class="fc" id="L148">                    .ifPresent(sourceText -&gt; addExtension((String)sourceText, SOURCE_TEXT_EXTENSION_URL, resource));</span>
+<span class="fc" id="L149">                break;</span>
+            default:
+<span class="nc" id="L151">                unknownDatatype = Optional.of(dataType);</span>
+        }
+<span class="fc" id="L153">        return unknownDatatype;</span>
+    }
+
+    private void setLegacyPrimaryKeyIdentifier(String id, Condition condition) {
+<span class="fc" id="L157">        Optional.ofNullable(id)</span>
+<span class="fc" id="L158">                .map(legacyId -&gt; getIdentifier(legacyId, BaseEhrDataTransformer.MENUDATA_LEGACY_PRIMARY_KEY_SYSTEM_URL))</span>
+<span class="fc" id="L159">                .ifPresent(condition::addIdentifier);</span>
+<span class="fc" id="L160">    }</span>
+
+    private void addNote(String annotationText, Condition condition) {
+<span class="fc" id="L163">        Annotation annotation = new Annotation();</span>
+<span class="fc" id="L164">        annotation.setText(annotationText);</span>
+<span class="fc" id="L165">        condition.addNote(annotation);</span>
+<span class="fc" id="L166">    }</span>
+
+    private void setClinicalStatus(DiagnosisClinicalStatus clinicalStatus, Condition condition) {
+<span class="nc" id="L169">        Coding clinicalStatusCoding = new Coding();</span>
+<span class="nc" id="L170">        clinicalStatusCoding.setSystem(CONDITION_CLINICAL_STATUS_CODESYSTEM_URL);</span>
+
+<span class="nc bnc" id="L172" title="All 2 branches missed.">        switch (clinicalStatus) {</span>
+            case ACTIVE:
+            case INACTIVE:
+<span class="nc" id="L175">                clinicalStatusCoding.setCode(clinicalStatus.name().toLowerCase());</span>
+<span class="nc" id="L176">                break;</span>
+            default:
+<span class="nc" id="L178">                throw new IllegalArgumentException(String.format(&quot;Invalid clinical status %s&quot;, clinicalStatus));</span>
+        }
+
+<span class="nc" id="L181">        CodeableConcept codeableConcept = new CodeableConcept();</span>
+<span class="nc" id="L182">        codeableConcept.addCoding(clinicalStatusCoding);</span>
+<span class="nc" id="L183">        condition.setClinicalStatus(codeableConcept);</span>
+<span class="nc" id="L184">    }</span>
+
+    private void setCategory(ConditionCategory category, Condition condition) {
+<span class="fc" id="L187">        Coding categoryCoding = new Coding();</span>
+<span class="fc" id="L188">        categoryCoding.setSystem(CONDITION_CATEGORY_CODESYSTEM_URL);</span>
+
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">        switch (category) {</span>
+            case PROBLEM_LIST_ITEM:
+<span class="fc" id="L192">                categoryCoding.setCode(category.getCode());</span>
+<span class="fc" id="L193">                break;</span>
+            default:
+<span class="nc" id="L195">                throw new IllegalArgumentException(String.format(&quot;Invalid condition category %s&quot;, category));</span>
+        }
+
+<span class="fc" id="L198">        CodeableConcept codeableConcept = new CodeableConcept();</span>
+<span class="fc" id="L199">        codeableConcept.addCoding(categoryCoding);</span>
+<span class="fc" id="L200">        condition.addCategory(codeableConcept);</span>
+<span class="fc" id="L201">    }</span>
+
+    /**
+     * Prefer the sourcepersonid on menu_data to the authorLdapUid in the encrypted data.
+     * The two should be the same, or the former unset.
+     */
+    private void setSourcePersonIfUnset(Condition condition, String authorLdapUid) {
+<span class="fc" id="L208">        Optional.ofNullable(condition.getMeta().getExtensionByUrl(SOURCE_PERSON_EXTENSION_URL))</span>
+<span class="fc" id="L209">                .ifPresentOrElse(x -&gt; {}, //do nothing; already set</span>
+<span class="nc" id="L210">                () -&gt; getSourcePersonExtension(Long.valueOf(authorLdapUid), SOURCE_PERSON_EXTENSION_URL)</span>
+<span class="nc" id="L211">                        .ifPresent(condition.getMeta()::addExtension));</span>
+<span class="fc" id="L212">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

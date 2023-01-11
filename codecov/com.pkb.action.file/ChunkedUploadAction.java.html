@@ -1,0 +1,439 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ChunkedUploadAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.file</a> &gt; <span class="el_source">ChunkedUploadAction.java</span></div><h1>ChunkedUploadAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: ChunkedUploadAction.java May 15, 2009 1:14:43 AM pravina$
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action.file;
+
+import com.pkb.action.ConsentCategoryBaseAction;
+import com.pkb.bean.impl.MessageWebBean;
+import com.pkb.document.entity.Attachment;
+import com.pkb.document.entity.ChunkedDocDTO;
+import com.pkb.document.entity.DocumentMetadata;
+import com.pkb.exception.PKBException;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.security.FileSecurityHandler;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+<span class="fc" id="L44">public abstract class ChunkedUploadAction extends ConsentCategoryBaseAction implements FileSanitizerActionMixin {</span>
+
+    private static final long serialVersionUID = -6338006964925286293L;
+<span class="fc" id="L47">    private static final Pattern CONTENT_RANGE_PATTERN = Pattern.compile(&quot;.* ([0-9]+)-([0-9]+)/.*&quot;);</span>
+<span class="fc" id="L48">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    protected static final String ACCOUNT_ID = &quot;ACCOUNT_ID&quot;;
+    private static final String PART = &quot;.part&quot;;
+    protected static final String BASE_FILE_ID = &quot;basefileId&quot;;
+
+    protected String baseDocId;
+
+    protected UUID docIdToRemove;
+
+    protected InputStream result;
+
+    /**
+     * for attachments uploaded by user
+     */
+<span class="fc" id="L63">    protected List&lt;Attachment&gt; attachments = new ArrayList&lt;&gt;();</span>
+
+    protected String uploadContentType;
+
+    protected File upload;
+
+    protected String uploadFileName;
+
+    protected MessageWebBean messageWebBean;
+
+    protected ChunkedDocManager chunkedDocManager;
+
+    private FileSecurityHandler fileSecurityHandler;
+
+<span class="fc" id="L77">    protected List&lt;String&gt; attachmentDocIds = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L79">    protected List&lt;String&gt; attachmentFileNames = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L81">    protected boolean disableFileUpload = false;// by default it needs to be enabled</span>
+
+    /** Override this in the child class if you would like to have different button text for &quot;Addi file&quot; */
+<span class="fc" id="L84">    protected String fileUploadButtonTextProperty = &quot;fileUploader.txt.add_file&quot;;</span>
+
+    /** Override this in the child class if you would like to have different button text for &quot;Add another file&quot; */
+<span class="fc" id="L87">    protected String multipleFileUploadButtonTextProperty = &quot;fileUploader.txt.add_another_file&quot;;</span>
+
+    /**
+     * Specify the Struts namespace the extending action class is in. The namespace will be used for generating
+     * the remove attachment button links in _file-uploader.jsp and in _file-uploader-updated.jsp which is needed
+     * for routing to the correct action method when adding and removing attachments.
+     *
+     * @return the namespace of the Action class extending this {@link ChunkedUploadAction}
+     */
+    public abstract String getNamespace();
+
+    public String addAttachmentInChunk() throws IOException {
+<span class="fc" id="L99">        LOGGER.info(&quot;Entering addAttachmentInChunk &quot;);</span>
+<span class="fc" id="L100">        boolean success = false;</span>
+        try {
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">            if (upload != null) {</span>
+                // check whether file is too large
+<span class="fc bfc" id="L104" title="All 2 branches covered.">                if (upload.length() &gt; getUploadMaxFileSize()) {</span>
+<span class="nc" id="L105">                    throwFileSizeBreachedException(getUploadFileName(), getUploadMaxFileTextGB());</span>
+                }
+
+                // the following is to reset the baseDocId to null when there is a new upload
+                // otherwise the new doc is added to the end of the previous one
+                // two cases here:
+                // 1) Content-Range is empty (indicating that everything will fit in one chunk)
+                // 2) the Content-Range exists and has a 0 start
+                // Content-Range may be null
+<span class="fc bfc" id="L114" title="All 2 branches covered.">                if (getBaseDocId() != null) {</span>
+<span class="fc" id="L115">                    String contentRange = request.getHeader(&quot;Content-Range&quot;);</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">                    if (StringUtils.isBlank(contentRange)) {</span>
+<span class="fc" id="L117">                        setBaseDocId(null);</span>
+                    } else {
+<span class="fc" id="L119">                        Matcher matcher = CONTENT_RANGE_PATTERN.matcher(contentRange);</span>
+<span class="pc bpc" id="L120" title="1 of 2 branches missed.">                        if (matcher.find(1)) {</span>
+<span class="fc" id="L121">                            String startString = matcher.group(1);</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">                            if (&quot;0&quot;.equals(startString)) {</span>
+<span class="fc" id="L123">                                setBaseDocId(null);</span>
+                            }
+                        }
+                    }
+                }
+
+<span class="fc" id="L129">                long patientId = contextUserUtil.getContextOrLoggedInUserId();</span>
+
+<span class="fc" id="L131">                byte[] content = getContents(upload);</span>
+<span class="fc" id="L132">                LOGGER.warn(&quot;bytes in memory: {}&quot;, content.length);</span>
+
+<span class="fc" id="L134">                Long accountId = userManager.getDefaultAccountWithActiveAccountUser(patientId).getId();</span>
+<span class="fc" id="L135">                session.put(ACCOUNT_ID, accountId);</span>
+
+<span class="fc" id="L137">                UUID parentId = null;</span>
+<span class="fc bfc" id="L138" title="All 2 branches covered.">                if (!StringUtils.isEmpty(baseDocId)) {</span>
+<span class="fc" id="L139">                    parentId = UUID.fromString(baseDocId);</span>
+                }
+<span class="fc" id="L141">                UUID docId = processFilePart(uploadFileName, accountId, getContents(upload), parentId);</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">                if (parentId == null) {</span>
+<span class="fc" id="L143">                    baseDocId = docId.toString();</span>
+<span class="fc" id="L144">                    setDocumentIdInSession(docId);</span>
+                }
+<span class="fc" id="L146">                upload = null;</span>
+<span class="fc" id="L147">                byte[] resultArray = baseDocId.toString().getBytes(UTF_8);</span>
+<span class="fc" id="L148">                result = new ByteArrayInputStream(resultArray);</span>
+<span class="fc" id="L149">                success = true;</span>
+            }
+<span class="fc" id="L151">        } catch (Exception e) {</span>
+<span class="fc" id="L152">            LOGGER.error(&quot;&quot;, e);</span>
+<span class="fc" id="L153">            baseDocId = null;</span>
+<span class="fc" id="L154">            session.remove(BASE_FILE_ID);</span>
+        } finally {
+<span class="fc bfc" id="L156" title="All 2 branches covered.">            if (success) {</span>
+<span class="fc" id="L157">                clearSession();</span>
+            } else {
+<span class="pc bpc" id="L159" title="3 of 4 branches missed.">                if (session.get(BASE_FILE_ID) != null &amp;&amp; StringUtils.isNotBlank(session.get(BASE_FILE_ID).toString())) {</span>
+<span class="nc" id="L160">                    removeAttachmentFromSession(UUID.fromString(session.get(BASE_FILE_ID).toString()));</span>
+                }
+            }
+        }
+
+<span class="fc" id="L165">        LOGGER.info(&quot;Exiting addAttachmentInChunk &quot;);</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">        if (result == null) {</span>
+<span class="fc" id="L167">            result = new ByteArrayInputStream(&quot;error&quot;.getBytes(UTF_8));</span>
+        }
+
+<span class="fc" id="L170">        return SUCCESS;</span>
+    }
+
+    private void setDocumentIdInSession(UUID docId) {
+<span class="fc" id="L174">        session.put(BASE_FILE_ID, docId.toString());</span>
+<span class="fc" id="L175">        updateAttachmentsInSession(docId);</span>
+<span class="fc" id="L176">    }</span>
+
+    private void updateAttachmentsInSession(UUID docId) {
+<span class="fc" id="L179">        attachments = messageWebBean.getAttachmentsFromSession(session);</span>
+
+<span class="fc bfc" id="L181" title="All 2 branches covered.">        if (attachments == null) {</span>
+<span class="fc" id="L182">            attachments = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L183">            messageWebBean.setAttachmentsInSession(attachments, session);</span>
+        }
+
+<span class="fc" id="L186">        Attachment att = new Attachment();</span>
+<span class="fc" id="L187">        att.setDocMetadataId(docId);</span>
+<span class="fc" id="L188">        att.setUserId(loggedInUserUtil.getLoggedInUserId());</span>
+<span class="fc" id="L189">        att.setFilename(uploadFileName);</span>
+<span class="fc" id="L190">        att.setMediaType(uploadContentType);</span>
+<span class="fc" id="L191">        att.setUploadTime(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L192">        attachments.add(att);</span>
+<span class="fc" id="L193">    }</span>
+
+    private void removeAttachmentFromSession(UUID docId) {
+<span class="fc" id="L196">        attachments = messageWebBean.getAttachmentsFromSession(session);</span>
+<span class="pc bpc" id="L197" title="2 of 4 branches missed.">        if (docId != null &amp;&amp; attachments != null) {</span>
+<span class="fc" id="L198">            attachments.removeIf(attachment -&gt; attachment.getDocMetadataId().equals(docId));</span>
+        }
+<span class="fc" id="L200">        messageWebBean.setAttachmentsInSession(attachments, session);</span>
+<span class="fc" id="L201">    }</span>
+
+    public String removeAttachment() throws IOException {
+<span class="fc" id="L204">        removeAttachmentFromSession(docIdToRemove);</span>
+<span class="fc" id="L205">        result = new ByteArrayInputStream(docIdToRemove.toString().getBytes(UTF_8));</span>
+<span class="fc" id="L206">        return SUCCESS;</span>
+    }
+
+    protected void uploadInChunks(File ifile) {
+<span class="nc" id="L210">        FileInputStream fis = null;</span>
+        String fileName;
+        // file size can be more than 2 GB so int won't work
+<span class="nc" id="L213">        long bytesRemaining = ifile.length();</span>
+<span class="nc" id="L214">        int nChunks = 0, read, total = 0;</span>
+        // Chunk size will always fit into int (less than 2 GB)
+<span class="nc" id="L216">        long chunkSize = getFileChunkSizeInBytes();</span>
+        int readLength;
+        byte[] byteChunk;
+
+        try {
+<span class="nc" id="L221">            fis = new FileInputStream(ifile);</span>
+<span class="nc" id="L222">            UUID parentId = null;</span>
+            UUID docId;
+<span class="nc" id="L224">            Long accountId = (Long) session.get(ACCOUNT_ID);</span>
+<span class="nc bnc" id="L225" title="All 2 branches missed.">            while (bytesRemaining &gt; 0) {</span>
+<span class="nc" id="L226">                readLength = (int) Math.min(chunkSize, bytesRemaining);</span>
+<span class="nc" id="L227">                byteChunk = new byte[readLength];</span>
+<span class="nc" id="L228">                read = fis.read(byteChunk, 0, readLength);</span>
+<span class="nc" id="L229">                total = total + read;</span>
+<span class="nc" id="L230">                bytesRemaining -= read;</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">                assert (read == byteChunk.length);</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">                if (nChunks == 0) {</span>
+<span class="nc" id="L233">                    fileName = uploadFileName;</span>
+                } else {
+<span class="nc" id="L235">                    fileName = buildFilePartName(uploadFileName, nChunks);</span>
+                }
+<span class="nc" id="L237">                docId = processFilePart(fileName, accountId, byteChunk, parentId);</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">                if (nChunks == 0) {</span>
+                    // first chunk will be the parent ; rest of them will be attachments to it
+<span class="nc" id="L240">                    parentId = docId;</span>
+<span class="nc" id="L241">                    setDocumentIdInSession(docId);</span>
+                }
+<span class="nc" id="L243">                nChunks++;</span>
+            }
+<span class="nc" id="L245">            LOGGER.info(&quot;file size-{} read-{}&quot;, ifile.length(), total);</span>
+<span class="nc" id="L246">        } catch (Exception e) {</span>
+<span class="nc" id="L247">            LOGGER.error(&quot;&quot;, e);</span>
+        } finally {
+<span class="nc" id="L249">            IOUtils.closeQuietly(fis);</span>
+        }
+<span class="nc" id="L251">    }</span>
+
+    private String buildFilePartName(String fileName, int part) {
+<span class="nc" id="L254">        return fileName + PART + Integer.toString(part);</span>
+    }
+
+    UUID processFilePart(String fileName, Long accountId, byte[] data, UUID parentId) throws IOException {
+<span class="fc" id="L258">        UUID docId = null;</span>
+<span class="fc" id="L259">        LOGGER.info(&quot;processFilePart: start&quot;);</span>
+<span class="fc" id="L260">        ChunkedDocDTO chunkedDocDTO = new ChunkedDocDTO();</span>
+<span class="fc" id="L261">        LOGGER.warn(&quot;(AddFileAction) bytes in memory: {}&quot;, data.length);</span>
+<span class="fc" id="L262">        chunkedDocDTO.setContent(data);</span>
+<span class="fc" id="L263">        String uploadContentType = getUploadContentType();</span>
+<span class="fc" id="L264">        chunkedDocDTO.setMediaType(sanitizeFile(fileName, data, uploadContentType));</span>
+
+<span class="fc" id="L266">        LOGGER.info(&quot;Using {} as content-type&quot;, uploadContentType);</span>
+<span class="fc" id="L267">        setUploadContentType(chunkedDocDTO.getMediaType());</span>
+<span class="fc" id="L268">        chunkedDocDTO.setParentMetadataId(parentId);</span>
+<span class="fc" id="L269">        chunkedDocDTO.setName(fileName);</span>
+        try {
+<span class="fc" id="L271">            docId = chunkedDocManager.addChunk(getLoggedInEHRRequestContext(), chunkedDocDTO, accountId);</span>
+<span class="nc" id="L272">        } catch (PKBException e) {</span>
+<span class="nc" id="L273">            LOGGER.error(&quot;&quot;, e);</span>
+<span class="nc" id="L274">            undoFileUpload();</span>
+<span class="fc" id="L275">        }</span>
+
+<span class="fc" id="L277">        LOGGER.info(&quot;processFilePart: end&quot;);</span>
+<span class="fc" id="L278">        return docId;</span>
+    }
+
+    protected List&lt;Attachment&gt; generateAttachmentsFromInputs() {
+
+<span class="pc bpc" id="L283" title="1 of 4 branches missed.">        if (!attachmentDocIds.isEmpty() &amp;&amp; attachmentFileNames.isEmpty()) {</span>
+            // Hack 24/11/2021 for PHR-7601. We are not allowed to pass attachmentFileNames through a redirect because
+            // they will show up in the URL, and they will not yet have been persisted if eg we were redirected here
+            // after an error in saving a reply. But in that case the attachments will still be in the session
+            // (which we want to get rid of, but is still used elsewhere in this class).
+<span class="nc" id="L288">            return messageWebBean.getAttachmentsFromSession(session);</span>
+        }
+
+<span class="fc" id="L291">        Map&lt;UUID, DocumentMetadata&gt; metadataMap = chunkedDocManager.getMetadata(attachmentDocIds.stream().map(UUID::fromString).collect(Collectors.toList()));</span>
+<span class="fc" id="L292">        return io.vavr.collection.List.ofAll(attachmentDocIds).iterator().zipWithIndex().map(</span>
+                a -&gt; {
+<span class="fc" id="L294">                    Attachment att = new Attachment();</span>
+<span class="fc" id="L295">                    UUID docId = UUID.fromString(a._1);</span>
+<span class="fc" id="L296">                    att.setDocMetadataId(docId);</span>
+<span class="fc" id="L297">                    att.setUserId(loggedInUserUtil.getLoggedInUserId());</span>
+<span class="fc" id="L298">                    att.setFilename(attachmentFileNames.get(a._2));</span>
+<span class="fc" id="L299">                    att.setMediaType(metadataMap.get(att.getDocMetadataId()).getMediaType());</span>
+<span class="fc" id="L300">                    att.setUploadTime(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L301">                    return att;</span>
+<span class="fc" id="L302">                }).toJavaList();</span>
+    }
+
+    public ChunkedDocManager getChunkedDocManager() {
+<span class="fc" id="L306">        return chunkedDocManager;</span>
+    }
+
+    public void setChunkedDocManager(ChunkedDocManager chunkedDocManager) {
+<span class="fc" id="L310">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L311">    }</span>
+
+    public String getUploadContentType() {
+<span class="fc" id="L314">        return uploadContentType;</span>
+    }
+
+    public void setUploadContentType(String uploadContentType) {
+<span class="fc" id="L318">        this.uploadContentType = uploadContentType;</span>
+<span class="fc" id="L319">    }</span>
+
+    protected void undoFileUpload() {
+<span class="nc" id="L322">        PKBPerson patient = contextUserUtil.getContextUser();</span>
+        try {
+<span class="nc bnc" id="L324" title="All 2 branches missed.">            if (patient == null) {</span>
+<span class="nc" id="L325">                patient = userManager.getPKBPerson(loggedInUserUtil.getLoggedInUserId());</span>
+            }
+
+<span class="nc bnc" id="L328" title="All 4 branches missed.">            if (session.get(BASE_FILE_ID) != null &amp;&amp; StringUtils.isNotBlank(session.get(BASE_FILE_ID).toString())) {</span>
+<span class="nc" id="L329">                UUID fileId = UUID.fromString(session.get(BASE_FILE_ID).toString());</span>
+<span class="nc" id="L330">                chunkedDocManager.deleteDoc(fileId);</span>
+            }
+
+<span class="nc" id="L333">        } catch (PKBException e) {</span>
+<span class="nc" id="L334">            LOGGER.error(&quot;&quot;, e);</span>
+<span class="nc" id="L335">            addActionError(getText(&quot;addFileActionValidation.err.uploading.file&quot;));</span>
+<span class="nc" id="L336">        }</span>
+<span class="nc" id="L337">    }</span>
+
+    protected void clearSession() {
+<span class="fc" id="L340">        session.remove(BASE_FILE_ID);</span>
+<span class="fc" id="L341">        session.remove(ACCOUNT_ID);</span>
+<span class="fc" id="L342">    }</span>
+
+    public File getUpload() {
+<span class="fc" id="L345">        return upload;</span>
+    }
+
+    public void setUpload(File upload) {
+<span class="fc" id="L349">        this.upload = upload;</span>
+<span class="fc" id="L350">    }</span>
+
+    public String getUploadFileName() {
+<span class="fc" id="L353">        return uploadFileName;</span>
+    }
+
+    public void setUploadFileName(String uploadFileName) {
+<span class="fc" id="L357">        this.uploadFileName = uploadFileName;</span>
+<span class="fc" id="L358">    }</span>
+
+    public boolean isDisableFileUpload() {
+<span class="fc" id="L361">        return disableFileUpload;</span>
+    }
+
+    public void setDisableFileUpload(boolean disableFileUpload) {
+<span class="fc" id="L365">        this.disableFileUpload = disableFileUpload;</span>
+<span class="fc" id="L366">    }</span>
+
+    @Override
+    public @NotNull FileSecurityHandler getFileSecurityHandler() {
+<span class="fc" id="L370">        return fileSecurityHandler;</span>
+    }
+
+    public void setFileSecurityHandler(FileSecurityHandler fileSecurityHandler) {
+<span class="fc" id="L374">        this.fileSecurityHandler = fileSecurityHandler;</span>
+<span class="fc" id="L375">    }</span>
+
+    public String getBaseDocId() {
+<span class="fc" id="L378">        return baseDocId;</span>
+    }
+
+    public void setBaseDocId(String baseDocId) {
+<span class="fc" id="L382">        this.baseDocId = baseDocId;</span>
+<span class="fc" id="L383">    }</span>
+
+    public UUID getDocIdToRemove() {
+<span class="fc" id="L386">        return docIdToRemove;</span>
+    }
+
+    public void setDocIdToRemove(UUID docIdToRemove) {
+<span class="fc" id="L390">        this.docIdToRemove = docIdToRemove;</span>
+<span class="fc" id="L391">    }</span>
+
+    public InputStream getResult() {
+<span class="fc" id="L394">        return result;</span>
+    }
+
+    public void setResult(InputStream result) {
+<span class="fc" id="L398">        this.result = result;</span>
+<span class="fc" id="L399">    }</span>
+
+    public List&lt;Attachment&gt; getAttachments() {
+<span class="fc" id="L402">        return attachments;</span>
+    }
+
+    public void setAttachments(List&lt;Attachment&gt; attachments) {
+<span class="fc" id="L406">        this.attachments = attachments;</span>
+<span class="fc" id="L407">    }</span>
+
+    public MessageWebBean getMessageWebBean() {
+<span class="fc" id="L410">        return messageWebBean;</span>
+    }
+
+    public void setMessageWebBean(MessageWebBean messageWebBean) {
+<span class="fc" id="L414">        this.messageWebBean = messageWebBean;</span>
+<span class="fc" id="L415">    }</span>
+
+    public List&lt;String&gt; getAttachmentDocIds() {
+<span class="fc" id="L418">        return attachmentDocIds;</span>
+    }
+
+    public void setAttachmentDocIds(List&lt;String&gt; attachmentDocIds) {
+<span class="fc" id="L422">        this.attachmentDocIds = attachmentDocIds;</span>
+<span class="fc" id="L423">    }</span>
+
+    public List&lt;String&gt; getAttachmentFileNames() {
+<span class="fc" id="L426">        return attachmentFileNames;</span>
+    }
+
+    public void setAttachmentFileNames(List&lt;String&gt; attachmentFileNames) {
+<span class="fc" id="L430">        this.attachmentFileNames = attachmentFileNames;</span>
+<span class="fc" id="L431">    }</span>
+
+    public String getFileUploadButtonText() {
+<span class="fc bfc" id="L434" title="All 2 branches covered.">        return isEmpty(attachments)</span>
+<span class="fc" id="L435">                ? getText(fileUploadButtonTextProperty)</span>
+<span class="fc" id="L436">                : getText(multipleFileUploadButtonTextProperty);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

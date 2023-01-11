@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CommunicationMapper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.datamodel.entity.mapper</a> &gt; <span class="el_source">CommunicationMapper.java</span></div><h1>CommunicationMapper.java</h1><pre class="source lang-java linenums">package com.pkb.datamodel.entity.mapper;
+
+import com.pkb.datamodel.AccountKeys;
+import com.pkb.datamodel.AppMenuDataWithSourceObjects;
+import com.pkb.datamodel.AttachmentMetadata;
+import com.pkb.datamodel.ClinicalData;
+import com.pkb.datamodel.Communication;
+import com.pkb.datamodel.ExternalParticipant;
+import com.pkb.datamodel.Identifiable;
+import com.pkb.datamodel.ImmutableCommunication;
+import com.pkb.datamodel.PrivacyFlagsBase;
+import com.pkb.datamodel.Source;
+import com.pkb.datamodel.crypto.CryptoService;
+import com.pkb.datamodel.entity.ClinicalDataDeserializer;
+import com.pkb.datamodel.entity.mapper.migrator.NonPersistentCommunicationMigrator;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.datamodel.user.Person;
+import com.pkb.entities.app.AppMenuData;
+import io.prometheus.client.Histogram;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.mapstruct.Mapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.inject.Inject;
+import java.lang.invoke.MethodHandles;
+import java.time.ZonedDateTime;
+import java.util.Collections;
+import java.util.Optional;
+import java.util.UUID;
+
+import static io.vavr.collection.List.collector;
+import static java.util.Collections.emptyList;
+import static org.apache.commons.lang3.BooleanUtils.isTrue;
+
+/**
+ * Maps PKB database -&gt; PKB datamodel.
+ */
+@Mapper
+<span class="fc" id="L43">public class CommunicationMapper implements TimedMapper {</span>
+
+<span class="fc" id="L45">    private static Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    @Inject
+    private PrivacyFlagsMapper privacyFlagsMapper;
+
+    @Inject
+    private SourceDetailsMapper sourceDetailsMapper;
+
+    @Inject
+    private CryptoService cryptoService;
+
+    @Inject
+    private ClinicalDataDeserializer dataDeserializer;
+
+    @Inject
+    private ParticipantMapper participantMapper;
+
+    @Inject
+    private AttachmentMetadataMapper attachmentMetadataMapper;
+
+    @Inject
+    private NonPersistentCommunicationMigrator nonPersistentCommunicationMigrator;
+
+    @Inject
+    private InstantMapper instantMapper;
+
+    public List&lt;RawCommunication&gt; mapToRawCommunications(List&lt;AppMenuDataWithSourceObjects&gt; communicationsMenuData,
+                                                         AccountKeys accountKeys) {
+<span class="fc" id="L73">        Map&lt;Long, byte[]&gt; decryptedData = cryptoService.decrypt(accountKeys, communicationsMenuData.map(AppMenuDataWithSourceObjects::getAppMenuData));</span>
+<span class="fc" id="L74">        return communicationsMenuData</span>
+<span class="fc" id="L75">                .map(c -&gt; buildRawCommunication(c, decryptedData.get(c.getAppMenuData().getId()).get()))</span>
+<span class="fc" id="L76">                .collect(collector());</span>
+    }
+
+    public List&lt;Communication&gt; mapToCommunications(List&lt;RawCommunication&gt; rawCommunications,
+            Patient patient,
+            Map&lt;String, Person&gt; participants) {
+
+<span class="fc" id="L83">        return rawCommunications.map(pc -&gt; buildCommunication(pc, patient, participants));</span>
+    }
+
+    private RawCommunication buildRawCommunication(AppMenuDataWithSourceObjects menuDataWrapper, byte[] plaintext) {
+
+<span class="fc" id="L88">        try (Histogram.Timer ignored = MAP_TIMER.labels(&quot;communication&quot;, &quot;raw_communication&quot;).startTimer()) {</span>
+<span class="fc" id="L89">            return dataDeserializer.deserialize(plaintext, fields -&gt; {</span>
+
+<span class="fc" id="L91">                AppMenuData menuData = menuDataWrapper.getAppMenuData();</span>
+
+<span class="fc" id="L93">                nonPersistentCommunicationMigrator.migrate(menuData, fields);</span>
+
+<span class="fc" id="L95">                List&lt;ExternalParticipant&gt; nonPKBParticipants = participantMapper</span>
+<span class="fc" id="L96">                        .mapExternalParticipantDTOs((java.util.List&lt;java.util.Map&lt;String, Object&gt;&gt;) fields</span>
+<span class="fc" id="L97">                                .getOrDefault(&quot;participantsNonPKB&quot;, Collections.emptyList()));</span>
+
+<span class="fc" id="L99">                RawCommunication comm = new RawCommunication();</span>
+<span class="fc" id="L100">                comm.setId(menuData.getId());</span>
+<span class="fc" id="L101">                comm.setUniqueId(menuData.getBaseFields().getUniqueId());</span>
+<span class="fc" id="L102">                comm.setAccountId(menuData.getAccountId());</span>
+<span class="fc" id="L103">                comm.setSource(sourceDetailsMapper.entityToDataModel(menuData.getSourceDetails(), menuDataWrapper.getSourcePerson().getOrNull()));</span>
+<span class="fc" id="L104">                comm.setPrivacyFlags(privacyFlagsMapper.entityToDataModel(menuData.getBaseFields()));</span>
+<span class="fc" id="L105">                comm.setPrivateMessage(isTrue(menuData.getBoolean01()));</span>
+<span class="fc" id="L106">                comm.setPersisted(instantMapper.mapToZonedDateTimeOption(menuData.getBaseFields().getPersistedDate()));</span>
+<span class="fc" id="L107">                comm.setTimestamp(instantMapper.mapToZonedDateTime(menuData.getDate01()));</span>
+<span class="fc" id="L108">                comm.setParticipantIds(List.ofAll((java.util.List&lt;String&gt;) fields.getOrDefault(&quot;participants&quot;, emptyList())));</span>
+<span class="fc" id="L109">                comm.setNonPKBParticipants(nonPKBParticipants);</span>
+<span class="fc" id="L110">                comm.setSenderId(menuData.getString02());</span>
+<span class="fc" id="L111">                comm.setConversationId(menuData.getUuid01());</span>
+
+                // GDE-1506
+                // We require that conversations have a subject, however some data doesn't have one
+                // Recovering the data is probably impossible in some cases. The best we can do is
+                // fill in with an empty string.
+                // https://pkbdev.atlassian.net/wiki/spaces/TECHNOLOGY/pages/1111752804/Bad+Data
+<span class="fc" id="L118">                comm.setConversationSubject(Optional.ofNullable((String) fields.get(&quot;subject&quot;)).orElse(&quot;&quot;));</span>
+
+<span class="fc" id="L120">                comm.setStatus(menuData.getString04());</span>
+<span class="fc" id="L121">                comm.setAttachmentMetadata(attachmentMetadataMapper.documentsToAttachmentMetadata(List.ofAll(menuData.getAttachments())));</span>
+<span class="fc" id="L122">                return comm;</span>
+            });
+        }
+    }
+
+    Communication buildCommunication(RawCommunication rawCommunication,
+            Patient patient,
+            Map&lt;String, Person&gt; participantsByIds) {
+
+<span class="fc" id="L131">        try (Histogram.Timer ignored = MAP_TIMER.labels(&quot;communication&quot;, &quot;communication&quot;).startTimer()) {</span>
+<span class="fc" id="L132">            return ImmutableCommunication.communication()</span>
+<span class="fc" id="L133">                    .id(rawCommunication.getUniqueId())</span>
+<span class="fc" id="L134">                    .accountId(rawCommunication.getAccountId())</span>
+<span class="fc" id="L135">                    .source(rawCommunication.getSource())</span>
+<span class="fc" id="L136">                    .privacyFlags(rawCommunication.getPrivacyFlags())</span>
+<span class="fc" id="L137">                    .isPrivateMessage(rawCommunication.isPrivateMessage())</span>
+<span class="fc" id="L138">                    .persisted(rawCommunication.getPersisted())</span>
+<span class="fc" id="L139">                    .timestamp(rawCommunication.getTimestamp())</span>
+<span class="fc" id="L140">                    .participants(rawCommunication.getParticipantIds()</span>
+<span class="fc bfc" id="L141" title="All 2 branches covered.">                            .filter(p -&gt; !p.equals(rawCommunication.getSenderId()))</span>
+<span class="fc" id="L142">                            .map(pid -&gt; participantsByIds.get(pid).get()).collect(collector()))</span>
+<span class="fc" id="L143">                    .nonPKBParticipants(rawCommunication.getNonPKBParticipants())</span>
+<span class="fc" id="L144">                    .sender(participantsByIds.get(rawCommunication.getSenderId()).get())</span>
+<span class="fc" id="L145">                    .patient(patient)</span>
+<span class="fc" id="L146">                    .conversationId(rawCommunication.getConversationId())</span>
+<span class="fc" id="L147">                    .conversationSubject(rawCommunication.getConversationSubject())</span>
+<span class="fc" id="L148">                    .status(rawCommunication.getStatus())</span>
+<span class="fc" id="L149">                    .attachmentMetadata(rawCommunication.getAttachmentMetadata())</span>
+<span class="fc" id="L150">                    .build();</span>
+        }
+    }
+
+    // A Communication as it is read from menudata.
+    // Ie with personIds as Strings instead of Persons.
+<span class="fc" id="L156">    public static class RawCommunication implements Identifiable&lt;Long&gt;, ClinicalData {</span>
+
+        private Long id;
+
+        private long accountId;
+        private PrivacyFlagsBase privacyFlags;
+        private Source source;
+
+        private UUID uniqueId;
+        private Option&lt;ZonedDateTime&gt; persisted;
+        private ZonedDateTime timestamp;
+        private UUID conversationId;
+        private String conversationSubject;
+        private List&lt;String&gt; participantIds;
+        private List&lt;ExternalParticipant&gt; nonPKBParticipants;
+        private String senderId;
+        private List&lt;AttachmentMetadata&gt; attachmentMetadata;
+        private boolean privateMessage;
+        private String status;
+
+        @NotNull
+        @Override
+        public Long getId() {
+<span class="nc" id="L179">            return id;</span>
+        }
+
+        public void setId(Long id) {
+<span class="fc" id="L183">            this.id = id;</span>
+<span class="fc" id="L184">        }</span>
+
+        @Override
+        public long getAccountId() {
+<span class="fc" id="L188">            return accountId;</span>
+        }
+
+        public void setAccountId(long accountId) {
+<span class="fc" id="L192">            this.accountId = accountId;</span>
+<span class="fc" id="L193">        }</span>
+
+        @Override
+        public PrivacyFlagsBase getPrivacyFlags() {
+<span class="fc" id="L197">            return privacyFlags;</span>
+        }
+
+        public void setPrivacyFlags(PrivacyFlagsBase privacyFlags) {
+<span class="fc" id="L201">            this.privacyFlags = privacyFlags;</span>
+<span class="fc" id="L202">        }</span>
+
+        @Override
+        public Source getSource() {
+<span class="fc" id="L206">            return source;</span>
+        }
+
+        public void setSource(Source source) {
+<span class="fc" id="L210">            this.source = source;</span>
+<span class="fc" id="L211">        }</span>
+
+        public UUID getUniqueId() {
+<span class="fc" id="L214">            return uniqueId;</span>
+        }
+
+        public void setUniqueId(UUID uniqueId) {
+<span class="fc" id="L218">            this.uniqueId = uniqueId;</span>
+<span class="fc" id="L219">        }</span>
+
+        public Option&lt;ZonedDateTime&gt; getPersisted() {
+<span class="fc" id="L222">            return persisted;</span>
+        }
+
+        public void setPersisted(Option&lt;ZonedDateTime&gt; persisted) {
+<span class="fc" id="L226">            this.persisted = persisted;</span>
+<span class="fc" id="L227">        }</span>
+
+        public ZonedDateTime getTimestamp() {
+<span class="fc" id="L230">            return timestamp;</span>
+        }
+
+        public void setTimestamp(ZonedDateTime timestamp) {
+<span class="fc" id="L234">            this.timestamp = timestamp;</span>
+<span class="fc" id="L235">        }</span>
+
+        public UUID getConversationId() {
+<span class="fc" id="L238">            return conversationId;</span>
+        }
+
+        public void setConversationId(UUID conversationId) {
+<span class="fc" id="L242">            this.conversationId = conversationId;</span>
+<span class="fc" id="L243">        }</span>
+
+        public String getConversationSubject() {
+<span class="fc" id="L246">            return conversationSubject;</span>
+        }
+
+        public void setConversationSubject(String conversationSubject) {
+<span class="fc" id="L250">            this.conversationSubject = conversationSubject;</span>
+<span class="fc" id="L251">        }</span>
+
+        public List&lt;String&gt; getParticipantIds() {
+<span class="fc" id="L254">            return participantIds;</span>
+        }
+
+        public void setParticipantIds(List&lt;String&gt; participantIds) {
+<span class="fc" id="L258">            this.participantIds = participantIds;</span>
+<span class="fc" id="L259">        }</span>
+
+        public List&lt;ExternalParticipant&gt; getNonPKBParticipants() {
+<span class="fc" id="L262">            return nonPKBParticipants;</span>
+        }
+
+        public void setNonPKBParticipants(List&lt;ExternalParticipant&gt; nonPKBParticipants) {
+<span class="fc" id="L266">            this.nonPKBParticipants = nonPKBParticipants;</span>
+<span class="fc" id="L267">        }</span>
+
+        public String getSenderId() {
+<span class="fc" id="L270">            return senderId;</span>
+        }
+
+        public void setSenderId(String senderId) {
+<span class="fc" id="L274">            this.senderId = senderId;</span>
+<span class="fc" id="L275">        }</span>
+
+        public List&lt;AttachmentMetadata&gt; getAttachmentMetadata() {
+<span class="fc" id="L278">            return attachmentMetadata;</span>
+        }
+
+        public void setAttachmentMetadata(List&lt;AttachmentMetadata&gt; attachmentMetadata) {
+<span class="fc" id="L282">            this.attachmentMetadata = attachmentMetadata;</span>
+<span class="fc" id="L283">        }</span>
+
+        public boolean isPrivateMessage() {
+<span class="fc" id="L286">            return privateMessage;</span>
+        }
+
+        public void setPrivateMessage(boolean privateMessage) {
+<span class="fc" id="L290">            this.privateMessage = privateMessage;</span>
+<span class="fc" id="L291">        }</span>
+
+        public String getStatus() {
+<span class="fc" id="L294">            return status;</span>
+        }
+
+        public void setStatus(String status) {
+<span class="fc" id="L298">            this.status = status;</span>
+<span class="fc" id="L299">        }</span>
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

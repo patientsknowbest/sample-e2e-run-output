@@ -1,0 +1,733 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ClinicianRegistrationAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.registration</a> &gt; <span class="el_source">ClinicianRegistrationAction.java</span></div><h1>ClinicianRegistrationAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id:  ClinicianRegisterationAction.java March 31, 2009 3:05:05 PM anamikac$
+//
+//------------------------------------------------------------------------------
+package com.pkb.action.registration;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
+import com.opensymphony.xwork2.Action;
+import com.pkb.VersionDetails;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.common.base.Error;
+import com.pkb.datamodel.Email;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.entities.enums.Gender;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.exception.InvalidEmailAddressException;
+import com.pkb.exception.PKBException;
+import com.pkb.exception.SetContextNotAuthorisedException;
+import com.pkb.exception.UserAlreadyExistsException;
+import com.pkb.institute.entity.InstituteUser;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.institute.entity.TeamWithPKBPerson;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.util.FormValidationErrors;
+import com.pkb.util.PKBConstants;
+import com.pkb.util.tolven.ConvertUtil;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.struts2.interceptor.I18nInterceptor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextImpl;
+
+import java.lang.invoke.MethodHandles;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.UserType.INSTITUTE_ADMIN;
+import static com.pkb.entities.enums.UserType.ORG_COORD;
+import static com.pkb.entities.enums.UserType.PRIVACY_OFFICER;
+import static com.pkb.entities.enums.UserType.REG_CLINICIAN;
+import static com.pkb.util.PKBConstants.VALID_MULTI_TEAM_USERTYPES;
+import static com.pkb.util.PKBWebUtil.SPRING_SECURITY_CONTEXT;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * Class is used to load the registration form for clinician (AND COORDINATOR!)
+ */
+<span class="fc" id="L67">public class ClinicianRegistrationAction extends BaseRegisterAction {</span>
+
+    private static final long serialVersionUID = 1L;
+<span class="fc" id="L70">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L71">    private static final ImmutableSet&lt;UserType&gt; ORG_LEVEL_USER_TYPES = Sets.immutableEnumSet(</span>
+            UserType.ORG_COORD,
+            UserType.PRIVACY_OFFICER);
+
+    @Autowired
+    private ConvertUtil convertUtil;
+
+    private PKBPersonDTO user;
+    private Org org;
+    private Team team;
+    private String teamCountry;
+
+    /**
+     * this holds the temporary password for a new clinician; required so that
+     * they can immediately accept a patient invitation when they register
+     */
+    private String temp;
+
+    private boolean userAgreement;
+    private Long specialtyId;
+    private String invitationId;
+    private String invitationKey;
+    private List&lt;Map.Entry&lt;String, String&gt;&gt; countries;
+    private Map&lt;Long, String&gt; specialties;
+
+    // securityQuestion, answer are defined in the superclass
+    // use this (in this class only!) for multiple-team clinicians and coords -- we'll overwrite the PasswordRecovery with a clone
+    //   of the logged-in user's active record after calling backupPassword().  Ask RussG or RobW.
+    private static final String SECURITY_QA_CLONE_PLACEHOLDER = &quot;to replace with clone!&quot;;
+    private static final String PASSWORD_MULTIUSER_PLACEHOLDER = &quot;MultiUserPH1!&quot;; // this is for triggering read-only pw-related fields
+
+    private void checkLoggedInUser() {
+        // check if any user is currently logged in
+<span class="pc bpc" id="L104" title="1 of 4 branches missed.">        if (loggedInUserUtil.isUserLoggedIn() &amp;&amp; !VALID_MULTI_TEAM_USERTYPES.contains(loggedInUserUtil.getLoggedInUserType())) {</span>
+<span class="nc" id="L105">            throw new SetContextNotAuthorisedException(</span>
+<span class="nc" id="L106">                    &quot;Current user &quot; + loggedInUserUtil.getLoggedInUserId() + &quot; has type &quot; + loggedInUserUtil.getLoggedInUserType() + &quot; which is not eligible for multi-team use&quot;);</span>
+        }
+<span class="fc" id="L108">    }</span>
+
+    /**
+     * If the link contains uid, get the PKBPerson from database, then the form
+     * should be prefilled with the email. If the link contains institute code,
+     * get the institute object via institute code, form should be prefilled
+     * with the institute name and institute id and institute specialtyId
+     */
+    @Override
+    public String input() {
+
+<span class="fc" id="L119">        checkLoggedInUser();</span>
+
+        try {
+<span class="fc" id="L122">            user = new PKBPersonDTO();</span>
+<span class="fc" id="L123">            PKBInvitation invitation = getInvitationFromString(invitationId);</span>
+
+            // If we have a logged-in user, we're going to reuse the password. Set a dummy value
+            // in the user object so the JSP knows to disable the password input
+<span class="fc bfc" id="L127" title="All 2 branches covered.">            if (loggedInUserUtil.isUserLoggedIn()) {</span>
+<span class="fc" id="L128">                user.setPassword(PASSWORD_MULTIUSER_PLACEHOLDER); // flags the JSP to make relevant fields read-only</span>
+            }
+
+            // grab the user (if there is one because the user was invited)
+<span class="fc" id="L132">            PKBPerson person = null;</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">            if (uid != null) {</span>
+<span class="fc" id="L134">                person = userManager.getPKBPerson(uid, PKBPerson.Lazy.CONTACTS);</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">                if (person == null) {</span>
+<span class="nc" id="L136">                    addActionError(getText(&quot;clinicianRegistrationAction.err.link_invalid_or_expired&quot;));</span>
+<span class="nc" id="L137">                    return ERROR;</span>
+                }
+<span class="fc" id="L139">                user.setEmailId(person.getEmail());</span>
+<span class="fc" id="L140">                user.setTimeZoneId(person.getTimeZoneId());</span>
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">            } else if (invitation != null) {</span>
+                // Get uid from invitation
+<span class="fc bfc" id="L143" title="All 2 branches covered.">                if (!invitationManager.validateInvitationKey(invitation.getPublicId(),invitationKey)) {</span>
+<span class="fc" id="L144">                    addActionError(getText(&quot;clinicianRegistrationAction.err.link_invalid_or_expired&quot;));</span>
+<span class="fc" id="L145">                    return ERROR;</span>
+                }
+<span class="fc" id="L147">                person = invitation.getTargetUser();</span>
+<span class="fc" id="L148">                user.setEmailId(person.getEmail());</span>
+<span class="fc" id="L149">                user.setTimeZoneId(person.getTimeZoneId());</span>
+            } else {
+<span class="nc" id="L151">                addActionError(getText(&quot;err.registration.pro.self.reg&quot;));</span>
+<span class="nc" id="L152">                return ERROR;</span>
+            }
+
+            // person is not null by this point!
+<span class="fc bfc" id="L156" title="All 2 branches covered.">            if (person.getStatus() == UserStatus.EMAIL_CONFIRMED) {</span>
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">                if (invitation != null) {</span>
+                    //This is the scenario where an individual professional received two invites before registering,
+                    //has completed registration from one of the links, and now clicks on the other one. We should just validate
+                    //the invitation and accept it rather than triggering a registration path.
+<span class="nc" id="L161">                    boolean validCode = userWebBean.acceptNonInstInvitation(getEHRRequestContext(), invitation, invitationKey);</span>
+<span class="nc bnc" id="L162" title="All 2 branches missed.">                    if (!validCode) {</span>
+<span class="nc" id="L163">                        addActionError(getText(&quot;clinicianRegistrationAction.err.link_invalid_or_expired&quot;));</span>
+<span class="nc" id="L164">                        return ERROR;</span>
+                    }
+<span class="nc" id="L166">                    PKBPerson author = userManager.getPKBPerson(invitation.getAuthorUserId());</span>
+<span class="nc" id="L167">                    addActionMessage(getText(&quot;clinicianRegistrationAction.msg.accepted_invitation&quot;, new String[]{author.getFullName()}));</span>
+<span class="nc" id="L168">                } else {</span>
+<span class="fc" id="L169">                    addActionMessage(getText(&quot;baseRegisterAction.err.already_completed_registration&quot;,new String[]{ config.getSupportNewTicketUrl() }));</span>
+                }
+                //.. but login to accept invitation
+<span class="fc" id="L172">                return LOGIN;</span>
+            }
+
+            // pre-populate whatever fields we have
+<span class="fc bfc" id="L176" title="All 2 branches covered.">            if (loggedInUserUtil.isUserLoggedIn()) {</span>
+<span class="fc" id="L177">                PKBPerson loggedInPerson = loggedInUserUtil.getLoggedInPerson();</span>
+<span class="fc" id="L178">                person.setJobTitle(loggedInPerson.getJobTitle());</span>
+<span class="fc" id="L179">                person.setSkypeId(loggedInPerson.getSkypeId());</span>
+<span class="fc" id="L180">                person.setAddress1(loggedInPerson.getAddress1());</span>
+<span class="fc" id="L181">                person.setAddress2(loggedInPerson.getAddress2());</span>
+<span class="fc" id="L182">                person.setCity(loggedInPerson.getCity());</span>
+<span class="fc" id="L183">                person.setState(loggedInPerson.getState());</span>
+<span class="fc" id="L184">                person.setCountry(loggedInPerson.getCountry());</span>
+<span class="fc" id="L185">                person.setPostalCode(loggedInPerson.getPostalCode());</span>
+<span class="fc" id="L186">                person.setGender(loggedInPerson.getGender());</span>
+<span class="fc" id="L187">                person.setPhone(loggedInPerson.getPhone());</span>
+<span class="fc" id="L188">                person.setDateOfBirthString(loggedInPerson.getDateOfBirthString());</span>
+            }
+<span class="fc" id="L190">            populateDTOFromPerson(user, person, team);</span>
+
+<span class="fc" id="L192">            Gender genderConst = Gender.getById(person.getGender());</span>
+<span class="fc" id="L193">            gender = StringUtils.capitalize(genderConst.name().toLowerCase());</span>
+
+<span class="fc" id="L195">            Optional&lt;LocalDate&gt; maybeDoB = person.findDateOfBirth();</span>
+<span class="fc" id="L196">            setDay(pkbWebUtil.getWebDate(maybeDoB.orElse(null)));</span>
+<span class="fc" id="L197">            setMonth(pkbWebUtil.getWebMonth(maybeDoB.orElse(null)));</span>
+<span class="fc" id="L198">            setYear(pkbWebUtil.getWebYear(maybeDoB.orElse(null)));</span>
+
+<span class="fc bfc" id="L200" title="All 2 branches covered.">            if (isNotBlank(temp)) {</span>
+                //verify the temp password
+<span class="fc" id="L202">                    PersonAuthInfo loggedUser = verifyCredentials(person.getId(), temp);</span>
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">                    if (loggedUser == null) {</span>
+<span class="nc" id="L204">                        LOGGER.warn(&quot;temp password doesn't auth for attempted reg of user {}&quot;, person.getId());</span>
+<span class="nc" id="L205">                        addActionError(getText(&quot;clinicianRegistrationAction.err.link_invalid_or_expired&quot;));</span>
+<span class="nc" id="L206">                        return ERROR;</span>
+                    }
+            }
+
+<span class="fc bfc" id="L210" title="All 2 branches covered.">            if (isBlank(icode)) {</span>
+<span class="fc" id="L211">                teamCountry = person.getCountry();</span>
+<span class="fc" id="L212">                user.setUserType(person.getUserType());</span>
+            } else {
+                // icode not blank =&gt; team or org user
+
+<span class="fc bfc" id="L216" title="All 2 branches covered.">                if (ORG_LEVEL_USER_TYPES.contains(person.getUserType())) {</span>
+<span class="fc" id="L217">                    org = teamManager.getOrgByCode(icode, Org.Lazy.TEAMS).orElse(null);</span>
+<span class="pc bpc" id="L218" title="1 of 2 branches missed.">                    if (org != null) {</span>
+<span class="fc" id="L219">                        user.setOrganizationName(org.getName());</span>
+<span class="fc" id="L220">                        user.setOrganizationUnit(null);</span>
+<span class="fc" id="L221">                        specialtyId = null;</span>
+<span class="fc" id="L222">                        user.setUserType(person.getUserType());</span>
+                        // Orgs don't have a time zone. Best guess is to use the time zone of the first
+                        // team, although this won't necessarily be correct
+<span class="fc" id="L225">                        user.setTimeZoneId(org.getTeams().iterator().next().getTimeZoneId());</span>
+                    } else {
+<span class="nc" id="L227">                        addActionError(getText(&quot;clinicianRegistrationAction.err.invalid_org_code&quot;));</span>
+<span class="nc" id="L228">                        return ERROR;</span>
+                    }
+                } else {
+<span class="fc" id="L231">                    team = teamManager.getTeamByCode(icode);</span>
+
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">                    if (team != null) {</span>
+                        // MULTIPLE TEAMS If we're logged in, make sure we aren't already in this team, with this role, via any linked account
+                        // i.e. a clinician can also register as a coord, but they can't register a 2nd time as a clinician
+<span class="fc bfc" id="L236" title="All 2 branches covered.">                        if (loggedInUserUtil.isUserLoggedIn()) {</span>
+
+<span class="fc" id="L238">                            UserType newUserType = person.getUserType();</span>
+<span class="fc" id="L239">                            long newTeamId = team.getId();</span>
+
+<span class="fc" id="L241">                            List&lt;TeamWithPKBPerson&gt; allTeams = loggedInUserUtil.getLoggedInUserTeams();</span>
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">                            for (TeamWithPKBPerson linkedTeam : allTeams) {</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">                                if (linkedTeam.getTeam().getId().equals(newTeamId)</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">                                        &amp;&amp; linkedTeam.getPerson().getUserType() == newUserType) {</span>
+<span class="nc" id="L245">                                    addActionError(getText(&quot;clinicianRegistrationAction.err.already_a_member&quot;));</span>
+<span class="nc" id="L246">                                    return ERROR;</span>
+                                }
+<span class="nc" id="L248">                            }</span>
+
+                        }
+
+<span class="fc" id="L252">                        user.setOrganizationName(team.getOrg().getName());</span>
+<span class="fc" id="L253">                        user.setOrganizationUnit(team.getName());</span>
+<span class="fc" id="L254">                        specialtyId = team.getSpecialtyId();</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">                        if (person.isTeamCoordinator()) {</span>
+<span class="fc" id="L256">                            user.setUserType(UserType.INSTITUTE_ADMIN);</span>
+                        } else {
+<span class="fc" id="L258">                            user.setUserType(REG_CLINICIAN);</span>
+<span class="fc" id="L259">                            user.setTimeZoneId(team.getTimeZoneId());</span>
+                        }
+                    } else {
+<span class="nc" id="L262">                        addActionError(getText(&quot;clinicianRegistrationAction.err.invalid_institute_code&quot;));</span>
+<span class="nc" id="L263">                        return ERROR;</span>
+                    }
+                }
+            }
+
+<span class="fc" id="L268">            countries = pkbServiceUtil.getCountries(getLocale());</span>
+<span class="fc" id="L269">            specialties = pkbWebUtil.getSpecialties(getLocale());</span>
+
+<span class="nc" id="L271">        } catch (PKBException e) {</span>
+<span class="nc" id="L272">            throw new PKBException(&quot;uid: &quot; + uid + &quot;, icode: &quot; + icode, e);</span>
+<span class="fc" id="L273">        }</span>
+<span class="fc" id="L274">        return SUCCESS;</span>
+    }
+
+    /**
+     * API is used to register a clinician in database based on the way the clinician registers himself
+     * There can be a few paths
+     * 1) Clinician can be a part of an team
+     * 2) Clinician can register himself as an individual (part of team)
+     * 3) Clinician can be invited by a patient (no team link)
+     */
+    @Override
+    public String execute() {
+<span class="fc" id="L286">        String result = Action.SUCCESS;</span>
+        try {
+<span class="fc" id="L288">            LOGGER.info(&quot;Entering-&gt;execute&quot;);</span>
+
+<span class="fc" id="L290">            user.setUserName(user.getEmailId());</span>
+<span class="fc" id="L291">            Locale sessionLocale = (Locale) session.get(I18nInterceptor.DEFAULT_SESSION_ATTRIBUTE); // WW_TRANS_I18N_LOCALE</span>
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">            user.setLanguageCode(sessionLocale != null ? sessionLocale.getLanguage() : &quot;en&quot;);</span>
+
+<span class="fc" id="L294">            var persons = userManager.getPKBPersonByConfirmedOrPrimaryEmail(user.getUserName(), PersonContact.Lazy.PERSON,PersonContact.Lazy.PROPERTIES);</span>
+
+<span class="fc" id="L296">            PKBInvitation invitation = getInvitationFromString(invitationId);</span>
+            
+<span class="fc" id="L298">            PKBPerson preEditUser = Optional.ofNullable(uid)</span>
+<span class="fc" id="L299">                    .or(() -&gt; Optional.ofNullable(invitation).map(PKBInvitation::getTargetUser).map(PKBPerson::getId))</span>
+<span class="fc" id="L300">                    .map(existingUid -&gt; userManager.getPKBPerson(existingUid, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.PROPERTIES))</span>
+<span class="fc" id="L301">                    .or(() -&gt; {</span>
+<span class="nc" id="L302">                        Set&lt;UserStatus&gt; statuses = Sets.newHashSet(UserStatus.INVITED, UserStatus.CREATED, UserStatus.NEW,</span>
+                                UserStatus.NOCONTACT);
+                       
+                        
+<span class="nc" id="L306">                        return persons.stream()</span>
+<span class="nc" id="L307">                                .filter(p -&gt; statuses.contains(p.getStatus()))</span>
+<span class="nc" id="L308">                                .findFirst()</span>
+<span class="nc" id="L309">                                .or(persons.stream()::findFirst);</span>
+<span class="fc" id="L310">                    }).orElse(null);</span>
+
+
+<span class="pc bpc" id="L313" title="1 of 4 branches missed.">            if ((preEditUser != null) &amp;&amp; !(preEditUser.getStatus() == UserStatus.INVITED</span>
+<span class="pc bpc" id="L314" title="3 of 4 branches missed.">                    || preEditUser.getStatus() == UserStatus.CREATED || preEditUser.getStatus() == UserStatus.NEW</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">                    || preEditUser.getStatus() == UserStatus.NOCONTACT)) {</span>
+<span class="nc" id="L316">                throw new UserAlreadyExistsException(user);</span>
+            }
+
+<span class="fc" id="L319">            addUserProperties(user, preEditUser);</span>
+
+<span class="fc" id="L321">            result = registerUser(preEditUser, persons, invitation); // throws InvalidEmailAddressException</span>
+
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">            if (result.equals(SUCCESS)) {</span>
+<span class="fc" id="L324">                addActionMessage(getText(&quot;clinicianRegistrationAction.msg.successfully_registered&quot;));</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">                if (invitation != null) {</span>
+<span class="fc" id="L326">                    boolean validCode = userWebBean.acceptNonInstInvitation(getEHRRequestContext(), invitation, invitationKey);</span>
+<span class="pc bpc" id="L327" title="1 of 2 branches missed.">                    if (!validCode) {</span>
+<span class="nc" id="L328">                        addActionError(getText(&quot;err.registration.invite.open.fail&quot;));</span>
+<span class="nc" id="L329">                        return INPUT;</span>
+                    }
+<span class="fc" id="L331">                    PKBPerson author = userManager.getPKBPerson(invitation.getAuthorUserId());</span>
+<span class="fc" id="L332">                    addActionMessage(getText(&quot;clinicianRegistrationAction.msg.accepted_invitation&quot;, new String[]{author.getFullName()}));</span>
+                }
+            }
+
+<span class="fc" id="L336">            session.put(PKBConstants.NEW_USER_EMAIL_ID, user.getEmailId());</span>
+<span class="fc" id="L337">            session.put(PKBConstants.NEW_USER_TYPE, user.getUserType().name());</span>
+<span class="nc" id="L338">        } catch (UserAlreadyExistsException uex) {</span>
+<span class="nc" id="L339">            LOGGER.error(&quot;User{} already exists; {}&quot;, user.getId(), uex.getMessage());</span>
+<span class="nc" id="L340">            addFieldError(&quot;user.emailId&quot;, getText(&quot;clinicianRegistrationAction.err.another_user_registered&quot;));</span>
+<span class="nc" id="L341">            result = Action.INPUT;</span>
+<span class="nc" id="L342">        } catch (InvalidEmailAddressException iea) {</span>
+<span class="nc" id="L343">            LOGGER.error(&quot;Invalid email-{}{}&quot;, user.getEmailId(), iea.getMessage());</span>
+<span class="nc" id="L344">            addFieldError(&quot;user.emailId&quot;, getText(&quot;clinicianRegistrationAction.err.invalid_email&quot;));</span>
+<span class="nc" id="L345">            result = Action.INPUT;</span>
+<span class="nc" id="L346">        } catch (SetContextNotAuthorisedException snae) {</span>
+<span class="nc" id="L347">            throw snae;</span>
+<span class="nc" id="L348">        } catch (Exception e) {</span>
+<span class="nc" id="L349">            result = Action.INPUT;</span>
+<span class="nc" id="L350">            LOGGER.error(e.getMessage(), e);</span>
+<span class="nc" id="L351">            addActionError(getText(&quot;clinicianRegistrationAction.err.unable_register_user&quot;));</span>
+<span class="pc" id="L352">        }</span>
+<span class="fc" id="L353">        LOGGER.info(&quot;Exiting-&gt;execute&quot;);</span>
+<span class="fc" id="L354">        return result;</span>
+    }
+
+    /**
+     * To check if the user is already invited If the user exists in the
+     * database with in 'INVITED' status update the same row with the given
+     * details and the user should be able to activate his account from the
+     * success page which contains an activation link else add this user as new
+     * user and the success page should tell user to check his inbox in order to
+     * activate the account If the user registered using institute code make an
+     * entry in InstituteUser table
+     */
+    private String registerUser(PKBPerson preEditUser, List&lt;PKBPerson&gt; persons, PKBInvitation invitation) {
+<span class="fc" id="L367">        String result = SUCCESS;</span>
+
+<span class="fc" id="L369">        PKBPerson loggedInUser = null;</span>
+
+<span class="fc bfc" id="L371" title="All 2 branches covered.">        if (loggedInUserUtil.isUserLoggedIn()) {</span>
+<span class="fc" id="L372">            checkLoggedInUser();</span>
+<span class="fc" id="L373">            loggedInUser = loggedInUserUtil.getLoggedInUser(PKBPerson.Lazy.CONTACTS);</span>
+        }
+
+        // If there's already an email-confirmed account with this email address,
+        // we must be logged in as the person who owns that account
+<span class="pc bpc" id="L378" title="1 of 4 branches missed.">        if (isAtLeastOneActiveAccount(persons) &amp;&amp; (loggedInUser == null)) {</span>
+<span class="nc" id="L379">            throw new UserAlreadyExistsException(user);</span>
+        }
+
+        // If we're registering another account while logged in, make sure they're linked
+<span class="pc bpc" id="L383" title="1 of 4 branches missed.">        if (preEditUser != null &amp;&amp; loggedInUser != null) {</span>
+
+            // Ensure logged-in user has a UUID
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">            if (isBlank(loggedInUser.getHumanUUID())) {</span>
+<span class="fc" id="L387">                loggedInUser.setHumanUUID(UUID.randomUUID().toString());</span>
+<span class="fc" id="L388">                userManager.updateUser(getEHRRequestContext(), loggedInUser);</span>
+            }
+
+            // Check logged-in user isn't already in the target team
+<span class="fc" id="L392">            Team inviteeTeam = teamUserManager.getPrimaryTeam(getEHRRequestContext(), preEditUser.getId(), true);</span>
+<span class="fc" id="L393">            List&lt;PKBPerson&gt; personas = teamUserManager.getAllPersonasForHuman(getEHRRequestContext(), loggedInUser.getHumanUUID());</span>
+<span class="fc" id="L394">            Set&lt;Email&gt; emailAddresses = Sets.newHashSet();</span>
+<span class="fc" id="L395">            emailAddresses.addAll(personas.stream().flatMap(person -&gt; person.findEmail().toJavaStream()).collect(Collectors.toList()));</span>
+<span class="fc" id="L396">            List&lt;InstituteUser&gt; teamClinicians = teamUserManager.getTeamCliniciansByEmailAddress(</span>
+<span class="fc" id="L397">                    inviteeTeam.getId(), emailAddresses);</span>
+<span class="pc bpc" id="L398" title="1 of 4 branches missed.">            if ((teamClinicians != null) &amp;&amp; !teamClinicians.isEmpty()) {</span>
+<span class="fc" id="L399">                LOGGER.warn(&quot;clinician {} accepting invite for {} on team {} is already a member via {}&quot;,</span>
+<span class="fc" id="L400">                        loggedInUser.toString(), preEditUser.toString(), inviteeTeam.getCode(),</span>
+<span class="fc" id="L401">                        teamClinicians.get(0).getPerson().getEmail());</span>
+            }
+
+            // Check logged-in user owns the email address. There can be multiple PKBPerson records using
+            // the address, but they must *all* belong to the same human. So loop through all PKBPersons
+            // using the email and verify each one is a persona of the logged in user
+<span class="fc bfc" id="L407" title="All 2 branches covered.">            for (PKBPerson emailOwner : persons /* persons contains all PKBPersons using the invitee email */) {</span>
+
+                // Don't check the account we're trying to claim
+<span class="fc bfc" id="L410" title="All 2 branches covered.">                if (emailOwner.getId().equals(preEditUser.getId())) {</span>
+<span class="fc" id="L411">                    continue;</span>
+                }
+
+                // Don't check accounts that aren't registered yet
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">                if (UserStatus.EMAIL_CONFIRMED != emailOwner.getStatus()) {</span>
+<span class="nc" id="L416">                    continue;</span>
+                }
+
+<span class="fc" id="L419">                boolean found = false;</span>
+<span class="pc bpc" id="L420" title="1 of 2 branches missed.">                for (PKBPerson persona : personas /* personas contains all linked accounts for logged-in user */) {</span>
+<span class="fc" id="L421">                    found = emailOwner.getId().equals(persona.getId());</span>
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">                    if (found) {</span>
+<span class="fc" id="L423">                        break;</span>
+                    }
+<span class="nc" id="L425">                }</span>
+<span class="pc bpc" id="L426" title="1 of 2 branches missed.">                if (!found) {</span>
+<span class="nc" id="L427">                    LOGGER.warn(&quot;clinician {} accepting invite for {} on team {} does not own persona {}&quot;,</span>
+<span class="nc" id="L428">                            loggedInUser.getId(), preEditUser.getId(), inviteeTeam.getCode(), emailOwner.getId());</span>
+<span class="nc" id="L429">                    addActionError(getText(&quot;clinicianRegistrationAction.err.another_user_registered&quot;));</span>
+<span class="nc" id="L430">                    return INPUT;</span>
+                }
+<span class="fc" id="L432">            }</span>
+
+            // Copy UUID into new user
+<span class="fc" id="L435">            user.setHumanUUID(loggedInUser.getHumanUUID());</span>
+<span class="fc" id="L436">            userManager.updateUser(getEHRRequestContext(), preEditUser);</span>
+
+            // Enforce same password
+<span class="fc" id="L439">            SecurityContextImpl userSession = (SecurityContextImpl) session.get(SPRING_SECURITY_CONTEXT);</span>
+<span class="fc" id="L440">            Authentication auth = userSession.getAuthentication();</span>
+<span class="fc" id="L441">            String password = (String) auth.getCredentials();</span>
+<span class="fc" id="L442">            user.setPassword(password);</span>
+<span class="fc" id="L443">            confirmPassword = password;</span>
+
+            // also override the securityQuestion and answer!
+            // overwrite these (with a clone of the current user's PasswordRecovery record) after reg.
+<span class="fc" id="L447">            securityQuestion = SECURITY_QA_CLONE_PLACEHOLDER;</span>
+<span class="fc" id="L448">            answer = SECURITY_QA_CLONE_PLACEHOLDER;</span>
+        }
+
+<span class="pc bpc" id="L451" title="1 of 4 branches missed.">        if ((preEditUser != null) &amp;&amp; UserStatus.INVITED == preEditUser.getStatus()) {</span>
+<span class="fc" id="L452">            registerInvitedUser(preEditUser,invitation);</span>
+<span class="pc bpc" id="L453" title="2 of 4 branches missed.">        } else if ((preEditUser != null) &amp;&amp; (UserStatus.CREATED == preEditUser.getStatus()</span>
+<span class="nc bnc" id="L454" title="All 2 branches missed.">                || UserStatus.NOCONTACT == preEditUser.getStatus())) {</span>
+            // Either created or institute admin
+<span class="fc" id="L456">            registerCreatedUser(preEditUser);</span>
+        } else {
+<span class="nc" id="L458">            throw new PKBException(&quot;unexpected use of obsolete self-registration path&quot;);</span>
+        }
+
+<span class="fc bfc" id="L461" title="All 2 branches covered.">        if (specialtyId != null) {</span>
+<span class="fc" id="L462">            userManager.saveClinicianSpecialty(preEditUser.getId(), specialtyId);</span>
+        }
+
+<span class="pc bpc" id="L465" title="1 of 2 branches missed.">        if (!getActionErrors().isEmpty()) {</span>
+<span class="nc" id="L466">            result = INPUT;</span>
+        }
+<span class="fc" id="L468">        return result;</span>
+    }
+
+    private void registerCreatedUser(PKBPerson preEditUser) {
+
+<span class="fc" id="L473">        PKBPerson modPerson = null;</span>
+
+        try {
+<span class="fc" id="L476">            userManager.beginTransaction();</span>
+
+<span class="fc" id="L478">            Instant registrationDate = dateTimeService.now();</span>
+<span class="fc" id="L479">            modPerson = convertUtil.getPKBPerson(VersionDetails.of(getEHRRequestContext(), registrationDate), user);</span>
+
+<span class="fc" id="L481">            modPerson.setId(preEditUser.getId());</span>
+<span class="fc" id="L482">            modPerson.setUserType(preEditUser.getUserType());</span>
+<span class="fc" id="L483">            modPerson.setStatus(UserStatus.CREATED, registrationDate);</span>
+<span class="fc" id="L484">            modPerson.setContacts(preEditUser.getContacts());</span>
+<span class="fc" id="L485">            modPerson.setHumanUUID(user.getHumanUUID());</span>
+<span class="fc" id="L486">            modPerson.setDefaultAccountId(preEditUser.getDefaultAccountId());</span>
+<span class="fc" id="L487">            modPerson.setPublicId(preEditUser.getPublicId());</span>
+
+            // this includes changing the password from temp to modPerson.password
+            // IMPORTANT: the registration link won't work again after this point
+<span class="fc" id="L491">            userManager.updateRegistrationDetails(getEHRRequestContext().withRegisteringUser(preEditUser.getId()), modPerson, temp);</span>
+
+            // back up the password (AND DO LOTS OF OTHER THINGS)
+<span class="fc bfc" id="L494" title="All 2 branches covered.">            if (modPerson.isOrgCoordinator()) {</span>
+<span class="fc" id="L495">                backupPassword(preEditUser.getId(), null, Optional.empty(), Optional.empty()); // no icode for org coord</span>
+            } else {
+<span class="fc" id="L497">                backupPassword(preEditUser.getId(), icode, Optional.empty(), Optional.empty());</span>
+            }
+
+<span class="fc bfc" id="L500" title="All 2 branches covered.">            if (SECURITY_QA_CLONE_PLACEHOLDER.equals(answer)) {</span>
+                // Clone the security answer. Problem - we still need the plaintext answer for backupPassword!
+<span class="fc" id="L502">                userManager.replacePasswordBackupWithClone(loggedInUserUtil.getLoggedInUserId(), preEditUser.getId());</span>
+            }
+
+<span class="fc" id="L505">            userManager.commitTransaction();</span>
+        } finally {
+<span class="fc" id="L507">            userManager.rollbackIfNotCommitted();</span>
+        }
+
+<span class="fc" id="L510">    }</span>
+
+    private void registerInvitedUser(PKBPerson preEditUser,PKBInvitation invitation) {
+<span class="fc" id="L513">        Instant registrationDate = dateTimeService.now();</span>
+
+<span class="fc" id="L515">        PKBPerson modPerson = convertUtil.getPKBPerson(VersionDetails.of(getEHRRequestContext(), registrationDate), user);</span>
+
+<span class="fc" id="L517">        modPerson.setStatus(UserStatus.INVITED, registrationDate);</span>
+<span class="fc" id="L518">        modPerson.setContacts(preEditUser.getContacts());</span>
+<span class="fc" id="L519">        modPerson.setPassword(confirmPassword);</span>
+<span class="fc" id="L520">        modPerson.setHumanUUID(preEditUser.getHumanUUID());</span>
+<span class="fc" id="L521">        modPerson.setDefaultAccountId(preEditUser.getDefaultAccountId());</span>
+<span class="fc" id="L522">        modPerson.setPublicId(preEditUser.getPublicId());</span>
+
+        // why not just modPerson.setUserType(preEditUser.getUserType())?
+        // the value might be something else, or null?
+<span class="pc bpc" id="L526" title="1 of 2 branches missed.">        if (UserType.INSTITUTE_ADMIN == preEditUser.getUserType()) {</span>
+<span class="nc" id="L527">            modPerson.setUserType(UserType.INSTITUTE_ADMIN);</span>
+        } else {
+<span class="fc" id="L529">            modPerson.setUserType(REG_CLINICIAN);</span>
+        }
+
+        try {
+<span class="fc" id="L533">            userManager.beginTransaction();</span>
+
+            // MULTIPLE-TEAMS don't want to do this for team clinicians.
+<span class="pc bpc" id="L536" title="2 of 4 branches missed.">            if (REG_CLINICIAN == preEditUser.getUserType() &amp;&amp; isNotBlank(icode)) {</span>
+                // setup a new user
+<span class="nc" id="L538">                modPerson = userManager.beginNonInstRegistration(modPerson);</span>
+            } else {
+                // use the existing user
+<span class="fc" id="L541">                modPerson.setId(preEditUser.getId());</span>
+            }
+
+            // then create LDAP record and account
+            // this includes changing the password from temp to modPerson.password IFF tempPassword is provided
+            // IMPORTANT: the registration link won't work again after this point
+<span class="fc" id="L547">            userManager.completeNonInstRegistration(getEHRRequestContext().withRegisteringUser(modPerson.getId()), modPerson, temp);</span>
+
+<span class="fc" id="L549">            uid = preEditUser.getId();</span>
+
+<span class="pc bpc" id="L551" title="1 of 2 branches missed.">            if (isNotBlank(icode)) {</span>
+<span class="nc" id="L552">                Team team = teamManager.getTeamByCode(icode);</span>
+<span class="nc" id="L553">                session.put(&quot;instituteId&quot;, team.getId());</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">                if (!teamUserManager.isTeamUser(preEditUser.getId())) {</span>
+<span class="nc" id="L555">                    teamUserManager.createInstituteUser(preEditUser.getId(), team.getId());</span>
+                }
+            }
+
+            // back up the password (AND DO LOTS OF OTHER THINGS)
+<span class="fc" id="L560">            backupPassword(preEditUser.getId(), icode, Optional.ofNullable(invitation).map(PKBInvitation::getPublicId),Optional.ofNullable(invitation).map(PKBInvitation::getId) );</span>
+
+<span class="pc bpc" id="L562" title="1 of 2 branches missed.">            if (SECURITY_QA_CLONE_PLACEHOLDER.equals(answer)) {</span>
+                // Clone the security answer. Problem - we still need the plaintext answer for backupPassword!
+<span class="nc" id="L564">                userManager.replacePasswordBackupWithClone(loggedInUserUtil.getLoggedInUserId(), preEditUser.getId());</span>
+            }
+
+<span class="fc" id="L567">            userManager.commitTransaction();</span>
+        } finally {
+<span class="fc" id="L569">            userManager.rollbackIfNotCommitted();</span>
+        }
+<span class="fc" id="L571">    }</span>
+
+    /**
+     * Validate the clinician registration form fields SIDE-EFFECTS: sets fields
+     * in user -- userType (sometimes), gender, dob
+     */
+    @Override
+    public void validate() {
+        //At this point the person can't be null or we wouldn't have got through input
+<span class="fc" id="L580">        UserType userType = getPersonFromDb().getUserType();</span>
+<span class="pc bpc" id="L581" title="1 of 8 branches missed.">        if (userType != REG_CLINICIAN &amp;&amp; userType != INSTITUTE_ADMIN &amp;&amp; userType != PRIVACY_OFFICER &amp;&amp; userType != ORG_COORD) {</span>
+<span class="nc" id="L582">            throw new RuntimeException(&quot;Unexpected UserType for clinician registration. Type &quot; + userType + &quot;; email &quot; + getUser().findEmailId().map(Email::address).getOrNull());</span>
+        }
+
+<span class="fc" id="L585">        getUser().setUserType(userType);</span>
+
+<span class="fc" id="L587">        FormValidationErrors errors = performRegistrationValidationSetDobAndGender(getUser())</span>
+<span class="fc bfc" id="L588" title="All 2 branches covered.">                .plus(isUserAgreement() ? FormValidationErrors.EMPTY</span>
+<span class="fc" id="L589">                        : new FormValidationErrors().addFieldError(&quot;userAgreement&quot;,</span>
+                        new Error(&quot;user.agreement.required&quot;, &quot;user agreement not selected&quot;)));
+
+<span class="fc bfc" id="L592" title="All 2 branches covered.">        if (!errors.isEmpty()) {</span>
+<span class="fc" id="L593">            applyErrors(errors);</span>
+<span class="fc" id="L594">            countries = pkbServiceUtil.getCountries(getLocale());</span>
+<span class="fc" id="L595">            specialties = pkbWebUtil.getSpecialties(getLocale());</span>
+        }
+<span class="fc" id="L597">    }</span>
+
+    private boolean isAtLeastOneActiveAccount(List&lt;PKBPerson&gt; persons) {
+        // Look for any person *without* one of these statuses
+<span class="fc" id="L601">        Set&lt;UserStatus&gt; statuses = Sets.newHashSet(UserStatus.INVITED, UserStatus.CREATED, UserStatus.NEW, UserStatus.NOCONTACT);</span>
+<span class="fc bfc" id="L602" title="All 2 branches covered.">        for (PKBPerson candidate : persons) {</span>
+<span class="fc bfc" id="L603" title="All 2 branches covered.">            if (!statuses.contains(candidate.getStatus())) {</span>
+<span class="fc" id="L604">                return true;</span>
+            }
+<span class="fc" id="L606">        }</span>
+
+<span class="fc" id="L608">        return false;</span>
+    }
+
+    public boolean showSpecialtyField() {
+<span class="fc" id="L612">        UserType userType = getUser().getUserType();</span>
+<span class="fc bfc" id="L613" title="All 4 branches covered.">        return userType != UserType.PRIVACY_OFFICER &amp;&amp; userType != UserType.ORG_COORD;</span>
+    }
+
+    @VisibleForTesting
+    PKBPerson getPersonFromDb() {
+<span class="fc" id="L618">        PKBPerson person = null;</span>
+<span class="fc bfc" id="L619" title="All 2 branches covered.">        if (uid != null) {</span>
+<span class="fc" id="L620">            person = userManager.getPKBPerson(uid, PKBPerson.Lazy.CONTACTS);</span>
+<span class="pc bpc" id="L621" title="1 of 2 branches missed.">        } else if (invitationId != null) {</span>
+<span class="fc" id="L622">            person = getInvitationFromString(invitationId).getTargetUser();</span>
+        }
+<span class="fc" id="L624">        return person;</span>
+    }
+
+    @Deprecated
+    private PKBInvitation getInvitationFromString(String invitationId) {
+<span class="fc bfc" id="L629" title="All 2 branches covered.">        if (isBlank(invitationId)) {</span>
+<span class="fc" id="L630">            return null;</span>
+        }
+<span class="fc" id="L632">        UUID invitationPublicId = invitationManager.getInvitationIdByString(invitationId);</span>
+<span class="fc" id="L633">        return invitationManager.getInvitation(getEHRRequestContext(), invitationPublicId);</span>
+    }
+    // &lt;editor-fold desc=&quot;Properties&quot; defaultstate=&quot;collapsed&quot;&gt;
+
+    public String getTeamCountry() {
+<span class="nc" id="L638">        return teamCountry;</span>
+    }
+
+    public void setTeamCountry(String teamCountry) {
+<span class="nc" id="L642">        this.teamCountry = teamCountry;</span>
+<span class="nc" id="L643">    }</span>
+
+    public void setTeam(Team team) {
+<span class="nc" id="L646">        this.team = team;</span>
+<span class="nc" id="L647">    }</span>
+
+    public PKBPersonDTO getUser() {
+<span class="fc" id="L650">        return user;</span>
+    }
+
+    public void setUser(PKBPersonDTO user) {
+<span class="fc" id="L654">        this.user = user;</span>
+<span class="fc" id="L655">    }</span>
+
+    public String getTemp() {
+<span class="fc" id="L658">        return temp;</span>
+    }
+
+    public void setTemp(String temp) {
+<span class="fc" id="L662">        this.temp = temp;</span>
+<span class="fc" id="L663">    }</span>
+
+    public boolean isUserAgreement() {
+<span class="fc" id="L666">        return userAgreement;</span>
+    }
+
+    public void setUserAgreement(boolean userAgreement) {
+<span class="fc" id="L670">        this.userAgreement = userAgreement;</span>
+<span class="fc" id="L671">    }</span>
+
+    public Team getTeam() {
+<span class="fc" id="L674">        return team;</span>
+    }
+
+    public Map&lt;Long, String&gt; getSpecialties() {
+<span class="pc bpc" id="L678" title="1 of 2 branches missed.">        if (specialties == null) {</span>
+<span class="nc" id="L679">            specialties = pkbWebUtil.getSpecialties(getLocale());</span>
+        }
+<span class="fc" id="L681">        return specialties;</span>
+    }
+
+    public void setSpecialties(Map&lt;Long, String&gt; specialties) {
+<span class="nc" id="L685">        this.specialties = specialties;</span>
+<span class="nc" id="L686">    }</span>
+
+    public List&lt;Map.Entry&lt;String, String&gt;&gt; getCountries() {
+<span class="pc bpc" id="L689" title="1 of 2 branches missed.">        if (countries == null) {</span>
+<span class="nc" id="L690">            countries = pkbServiceUtil.getCountries(getLocale());</span>
+        }
+<span class="fc" id="L692">        return countries;</span>
+    }
+
+    public void setCountries(List&lt;Map.Entry&lt;String, String&gt;&gt; countries) {
+<span class="nc" id="L696">        this.countries = countries;</span>
+<span class="nc" id="L697">    }</span>
+
+    public Org getOrg() {
+<span class="fc" id="L700">        return org;</span>
+    }
+
+    public void setOrg(Org org) {
+<span class="nc" id="L704">        this.org = org;</span>
+<span class="nc" id="L705">    }</span>
+
+    public String getInvitationKey() {
+<span class="fc" id="L708">        return invitationKey;</span>
+    }
+
+    public void setInvitationKey(String invitationKey) {
+<span class="fc" id="L712">        this.invitationKey = invitationKey;</span>
+<span class="fc" id="L713">    }</span>
+
+    public Long getSpecialtyId() {
+<span class="fc" id="L716">        return specialtyId;</span>
+    }
+
+    public void setSpecialtyId(Long specialtyId) {
+<span class="fc" id="L720">        this.specialtyId = specialtyId;</span>
+<span class="fc" id="L721">    }</span>
+
+    public String getInvitationId() {
+<span class="fc" id="L724">        return invitationId;</span>
+    }
+
+    public void setInvitationId(String invitationId) {
+<span class="fc" id="L728">        this.invitationId = invitationId;</span>
+<span class="fc" id="L729">    }</span>
+
+    // &lt;/editor-fold&gt;
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

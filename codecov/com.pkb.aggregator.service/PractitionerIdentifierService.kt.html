@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PractitionerIdentifierService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.service</a> &gt; <span class="el_source">PractitionerIdentifierService.kt</span></div><h1>PractitionerIdentifierService.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.service
+
+import com.pkb.aggregator.R4Identifier
+import com.pkb.aggregator.R4Practitioner
+import com.pkb.aggregator.extension.simpleResourceId
+import com.pkb.aggregator.persistence.entity.PractitionerIdentifierMapEntry
+import com.pkb.aggregator.persistence.entity.embeddable.MapEntryKey
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamIdentifier
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamResource
+import com.pkb.aggregator.persistence.repository.DatabaseStateClearer
+import com.pkb.aggregator.persistence.repository.PractitionerIdentifierMapRepository
+import com.pkb.aggregator.service.aggregation.toMapEntryKeys
+import org.hl7.fhir.instance.model.api.IDomainResource
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+import java.util.UUID
+import javax.transaction.Transactional
+
+const val DDS_IDENTIFIER_SYSTEM = &quot;https://fhir.hl7.org.uk/Id/dds&quot;
+const val HUMANUUID_IDENTIFIER_SYSTEM = &quot;http://fhir.patientsknowbest.com/id/human-uuid&quot;
+
+@Service
+<span class="fc" id="L25">class PractitionerIdentifierService(</span>
+<span class="fc" id="L26">    private val practitionerIdentifierMapRepository: PractitionerIdentifierMapRepository,</span>
+<span class="fc" id="L27">    private val stateClearer: DatabaseStateClearer,</span>
+<span class="fc" id="L28">) : AbstractIdentifierService&lt;R4Practitioner, PractitionerIdentifierMapEntry&gt;() {</span>
+
+<span class="fc" id="L30">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    override fun deriveDownstreamResourceId(baseResources: List&lt;IDomainResource&gt;): String {
+
+<span class="fc" id="L34">        val resources = baseResources.filterIsInstance&lt;R4Practitioner&gt;()</span>
+<span class="pc bpc" id="L35" title="2 of 6 branches missed.">        return deriveDownstreamIdFromIdentifierWithSystem(resources, DDS_IDENTIFIER_SYSTEM)</span>
+<span class="fc" id="L36">            ?: deriveDownstreamIdFromIdentifierWithSystem(resources, HUMANUUID_IDENTIFIER_SYSTEM)</span>
+<span class="fc" id="L37">            ?: deriveDownstreamIdFromUpstreamSource(resources)</span>
+<span class="nc" id="L38">            ?: throw RuntimeException(&quot;No usable identifier or source tag in $resources&quot;)</span>
+    }
+
+    fun findByUpstreamResourceIdIn(upstreamResourceIds: Collection&lt;UpstreamResource&gt;) =
+<span class="fc" id="L42">        practitionerIdentifierMapRepository.findByMapEntryKeyUpstreamResourceIn(</span>
+<span class="fc" id="L43">            upstreamResourceIds.toSet(),</span>
+<span class="fc" id="L44">            PractitionerIdentifierMapEntry::class.java)</span>
+
+    override fun findMapEntryKeysDownstreamResourceId(downstreamResourceId: String) =
+<span class="fc" id="L47">        practitionerIdentifierMapRepository.findByDownstreamResourceId(</span>
+<span class="fc" id="L48">            downstreamResourceId,</span>
+            PractitionerIdentifierMapEntry::class.java
+<span class="fc" id="L50">        ).map { it.mapEntryKey }</span>
+
+<span class="fc" id="L52">    override fun clearState() = stateClearer.invoke {</span>
+<span class="nc" id="L53">        practitionerIdentifierMapRepository.deleteAll()</span>
+<span class="pc" id="L54">    }</span>
+
+    @Transactional
+    override fun mergeIdentifiers(resource: R4Practitioner): Int {
+<span class="fc" id="L58">        val downstreamResourceId = resource.simpleResourceId()</span>
+<span class="fc" id="L59">        val newIdentifiers = findNewIdentifiers(downstreamResourceId, resource)</span>
+<span class="fc" id="L60">        return newIdentifiers.map { PractitionerIdentifierMapEntry(it, downstreamResourceId) }</span>
+<span class="fc bfc" id="L61" title="All 2 branches covered.">            .sumOf {</span>
+<span class="fc" id="L62">                val changed = practitionerIdentifierMapRepository.safeInsertIdentifier(</span>
+<span class="fc" id="L63">                    it.mapEntryKey.identifier.upstreamIdentifierSystem,</span>
+<span class="fc" id="L64">                    it.mapEntryKey.identifier.upstreamIdentifierValue,</span>
+<span class="fc" id="L65">                    it.mapEntryKey.upstreamResource.upstreamSource,</span>
+<span class="fc" id="L66">                    it.mapEntryKey.upstreamResource.upstreamResourceId,</span>
+<span class="fc" id="L67">                    it.downstreamResourceId,</span>
+                )
+<span class="pc bpc" id="L69" title="1 of 2 branches missed.">                if (changed == 0) {</span>
+<span class="nc" id="L70">                    log.info(&quot;Skipped inserting identifier of system {} for downstream resource {}&quot;,</span>
+<span class="nc" id="L71">                        it.mapEntryKey.identifier.upstreamIdentifierSystem, it.downstreamResourceId)</span>
+                }
+<span class="fc" id="L73">                changed</span>
+            }
+    }
+
+    override fun findMapEntryKeys(resource: R4Practitioner): List&lt;MapEntryKey&gt; {
+<span class="fc" id="L78">        return resource.identifier.flatMap { it.toMapEntryKeys() }</span>
+    }
+
+    /**
+     * Given a list of resources, tries to identify which ones represent the same user across different upstreams (or
+     * even, for sources like DDS, the _same_ upstream) and groups them together keyed by their downstream id
+     */
+    fun groupResourcesByPractitioner(resources: List&lt;IDomainResource&gt;): Map&lt;String, List&lt;IDomainResource&gt;&gt; {
+
+<span class="nc" id="L87">        val practitioners = resources.filterIsInstance&lt;R4Practitioner&gt;()</span>
+
+        // Grab all identifiers from all resources
+<span class="nc" id="L90">        val identifiers = practitioners</span>
+<span class="nc" id="L91">            .flatMap { it.identifier }</span>
+<span class="nc" id="L92">            .map { UpstreamIdentifier(it.system, it.value) }</span>
+
+        // Look up all the identifiers from above
+<span class="nc" id="L95">        val knownPractitioners = practitionerIdentifierMapRepository.findAllByUpstreamIdentifiers(</span>
+<span class="nc" id="L96">            identifiers,</span>
+            PractitionerIdentifierMapEntry::class.java)
+
+        // Group by existing downstream if possible, otherwise generate new ones
+<span class="nc" id="L100">        return practitioners.groupBy { getOrCreateDownstreamId(it, knownPractitioners) }</span>
+    }
+
+    fun findByUpstreamIdentifierIn(identifiers: List&lt;R4Identifier&gt;) =
+<span class="fc" id="L104">        practitionerIdentifierMapRepository.findByMapEntryKeyIdentifierIn(</span>
+<span class="fc" id="L105">            identifiers.map { UpstreamIdentifier(it.system, it.value) },</span>
+            PractitionerIdentifierMapEntry::class.java
+<span class="fc" id="L107">        )</span>
+
+    fun findSearchIdentifiers(upstreamSystem: String, upstreamValue: String): List&lt;PractitionerIdentifierMapEntry&gt; {
+<span class="nc" id="L110">        return practitionerIdentifierMapRepository.findAllByUpstreamIdentifiers(</span>
+<span class="nc" id="L111">            listOf(UpstreamIdentifier(upstreamSystem, upstreamValue)), PractitionerIdentifierMapEntry::class.java)</span>
+    }
+
+    private fun getOrCreateDownstreamId(
+        practitioner: R4Practitioner,
+        knownPractitioners: List&lt;PractitionerIdentifierMapEntry&gt;
+    ): String {
+
+        // Look to see if the given practitioner matches any known identifiers
+<span class="nc bnc" id="L120" title="All 4 branches missed.">        val downstreamPractitioner = knownPractitioners.find {</span>
+<span class="nc" id="L121">            practitioner.identifier.any { identifier -&gt; identifierMatch(identifier, it) }</span>
+        }
+
+        // PHR-9768: Look for duplicates in new resources (e.g. if we get two resources for a new practitioner)
+
+<span class="nc bnc" id="L126" title="All 4 branches missed.">        return downstreamPractitioner?.downstreamResourceId ?: deriveDownstreamResourceId(listOf(practitioner))</span>
+    }
+
+    private fun identifierMatch(identifier: R4Identifier, knownPractitioner: PractitionerIdentifierMapEntry) =
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        identifier.system == knownPractitioner.mapEntryKey.identifier.upstreamIdentifierSystem</span>
+<span class="nc bnc" id="L131" title="All 2 branches missed.">                &amp;&amp; identifier.value == knownPractitioner.mapEntryKey.identifier.upstreamIdentifierValue</span>
+
+    private fun deriveDownstreamIdFromIdentifierWithSystem(baseResources: List&lt;R4Practitioner&gt;, system: String) =
+<span class="fc" id="L134">        baseResources</span>
+<span class="fc" id="L135">            .flatMap { it.identifier }</span>
+<span class="fc bfc" id="L136" title="All 4 branches covered.">            .find { it.system == system }</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">            ?.let { UUID.nameUUIDFromBytes(&quot;pkb-internal-${it.system}/${it.value}&quot;.toByteArray()) }</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">            ?.let { &quot;$FHIR_TYPE_PRACTITIONER/$it&quot; }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

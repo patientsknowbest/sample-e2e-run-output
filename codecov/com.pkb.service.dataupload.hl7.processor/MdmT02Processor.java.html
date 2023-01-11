@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MdmT02Processor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.hl7.processor</a> &gt; <span class="el_source">MdmT02Processor.java</span></div><h1>MdmT02Processor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.hl7.processor;
+
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.dataupload.entity.FieldMismatch;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.document.entity.Attachment;
+import com.pkb.encounter.entity.EncounterEvent;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.notification.entity.Activity;
+import com.pkb.phplan.entity.PHPlan;
+import com.pkb.service.dataupload.hl7.HL7ApiHelper;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.dataupload.hl7.HL7SoftMatchService;
+import com.pkb.service.dataupload.hl7.HL7XmlDoc;
+import com.pkb.service.dataupload.hl7.value.HL7String;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import com.pkb.service.dataupload.processor.ImmutableLoggedOutUploadedDataProcessingContext;
+import com.pkb.service.dataupload.processor.UploadedDataService;
+import com.pkb.service.dataupload.processor.domain.UploadedDataPersistentState.UploadedDataPersistentStateEnum;
+import com.pkb.service.dataupload.processor.domain.UploadedDataProcessingResult;
+import com.pkb.service.encounter.impl.tolven.EncounterManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.dataupload.entity.UploadedData.Destination.DOCUMENT;
+import static com.pkb.dataupload.entity.UploadedData.Destination.PHPLAN;
+import static com.pkb.dataupload.entity.UploadedData.Status.IN_PROGRESS;
+import static com.pkb.dataupload.entity.UploadedData.Status.NEW;
+import static com.pkb.dataupload.entity.UploadedData.Status.PATIENT_INFO_MISMATCH;
+import static com.pkb.dataupload.entity.UploadedData.Status.REJECTED;
+import static com.pkb.service.dataupload.hl7.HL7SoftMatchService.ProcessingDecision;
+
+public class MdmT02Processor {
+
+<span class="fc" id="L44">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private DataUploadManager dataUploadManager;
+    private EncounterManager encounterManager;
+    private UserManager userManager;
+    private UploadedDataService uploadedDataService;
+    private HL7SoftMatchService hl7SoftMatchService;
+
+    public MdmT02Processor(DataUploadManager dataUploadManager, EncounterManager encounterManager, UserManager userManager,
+<span class="fc" id="L53">                           UploadedDataService uploadedDataService, HL7SoftMatchService hl7SoftMatchService) {</span>
+<span class="fc" id="L54">        this.dataUploadManager = dataUploadManager;</span>
+<span class="fc" id="L55">        this.encounterManager = encounterManager;</span>
+<span class="fc" id="L56">        this.userManager = userManager;</span>
+<span class="fc" id="L57">        this.uploadedDataService = uploadedDataService;</span>
+<span class="fc" id="L58">        this.hl7SoftMatchService = hl7SoftMatchService;</span>
+<span class="fc" id="L59">    }</span>
+
+    public ProcessingDecision process(@NotNull HL7XmlDoc hl7, @NotNull HL7ConnContext hl7ConnContext, @NotNull PKBPerson patient,
+                        @NotNull List&lt;FieldMismatch&gt; pidMismatches, @NotNull HL7ApiHelper apiHelper) {
+<span class="fc bfc" id="L63" title="All 2 branches covered.">        if (&quot;CP&quot;.equals(hl7.getMdmDocumentType().getString())) {</span>
+<span class="fc" id="L64">            return processMdmT02CarePlan(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+<span class="pc bpc" id="L65" title="1 of 2 branches missed.">        } else if (HL7XmlDoc.ALLOWED_MDM_DOCUMENT_TYPES.contains(hl7.getMdmDocumentType().getString())) {</span>
+<span class="fc" id="L66">            return processMdmT02Document(hl7, hl7ConnContext, patient, pidMismatches, apiHelper);</span>
+        } else {
+<span class="nc" id="L68">            throw new ApiCallMalformedException(&quot;Unrecognized MDM document type in TXA-2: &quot; + hl7.getMdmDocumentType().getString());</span>
+        }
+    }
+
+    private ProcessingDecision processMdmT02CarePlan(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches, HL7ApiHelper apiHelper) {
+
+<span class="fc" id="L74">        LOGGER.info(&quot;Processing a care plan&quot;);</span>
+
+        // Parse the data to ensure it is valid; it is the responsibility of
+        // the parse method to throw an error if the input is not valid.
+<span class="fc" id="L78">        PHPlan carePlan = hl7.parseMdmCarePlan(hl7ConnContext);</span>
+
+<span class="fc" id="L80">        HL7String documentId = hl7.getMdmDocumentId();</span>
+
+<span class="fc" id="L82">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(PHPLAN,</span>
+<span class="fc" id="L83">                hl7ConnContext.getSourceOrgId(), documentId.getString(), patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L84" title="3 of 5 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE: {
+<span class="fc" id="L86">                UploadedDataDTO dto = dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, documentId.getString(), PHPLAN,</span>
+                        IN_PROGRESS, pidMismatches, patient, null/*subsetOf*/);
+
+<span class="fc" id="L89">                Long accountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="fc" id="L90">                UploadedDataProcessingResult&lt;?&gt; uploadedDataProcessingResult = uploadedDataService.processUploadedData(</span>
+                        ImmutableLoggedOutUploadedDataProcessingContext
+<span class="fc" id="L92">                                .loggedOutUploadedDataProcessingContext()</span>
+<span class="fc" id="L93">                                .requestContext(hl7ConnContext.getEHRRequestContext().withPiggyback(true))</span>
+<span class="fc" id="L94">                                .patientId(patient.getId())</span>
+<span class="fc" id="L95">                                .destination(PHPLAN)</span>
+<span class="fc" id="L96">                                .patientAccountId(accountId)</span>
+<span class="fc" id="L97">                                .patient(patient)</span>
+<span class="fc" id="L98">                                .build(),</span>
+                        dto);
+
+<span class="fc" id="L101">                LOGGER.info(&quot;received a care plan for {} from {}&quot;, patient.getId(), hl7ConnContext);</span>
+<span class="fc bfc" id="L102" title="All 2 branches covered.">                Activity.Action action = uploadedDataProcessingResult.getPersistentState() == UploadedDataPersistentStateEnum.UPDATED ?</span>
+<span class="fc" id="L103">                        Activity.Action.UPDATED_PLAN : Activity.Action.UPLOADED_PHPLAN;</span>
+<span class="fc" id="L104">                uploadedDataProcessingResult.getSingleResult()</span>
+<span class="fc" id="L105">                        .ifPresent(result -&gt; apiHelper.logActivityAndNotifyPatient(hl7ConnContext, action,</span>
+<span class="fc" id="L106">                                patient, (PHPlan) result, ((PHPlan) result).getCreationDate().toInstant(), hl7.getMessageType()));</span>
+            }
+<span class="fc" id="L108">            break;</span>
+            case FORCE_NEW: {
+<span class="nc" id="L110">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, documentId.getString(), PHPLAN,</span>
+                        NEW, pidMismatches, patient, null/*subsetOf*/);
+<span class="nc" id="L112">                apiHelper.logActivityAndNotifyPatient(hl7ConnContext, Activity.Action.UPLOADED_PHPLAN,</span>
+<span class="nc" id="L113">                        patient, carePlan, carePlan.getCreationDate().toInstant(), hl7.getMessageType());</span>
+            }
+<span class="nc" id="L115">            break;</span>
+            case QUARANTINE: {
+<span class="fc" id="L117">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, documentId.getString(), PHPLAN,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L120">            break;</span>
+            case REJECT: {
+<span class="nc" id="L122">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, documentId.getString(), PHPLAN,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="nc" id="L125">            break;</span>
+            default: {
+<span class="nc" id="L127">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L130">        return processingDecision;</span>
+    }
+
+    private ProcessingDecision processMdmT02Document(HL7XmlDoc hl7, HL7ConnContext hl7ConnContext, PKBPerson patient, List&lt;FieldMismatch&gt; pidMismatches, HL7ApiHelper apiHelper) {
+<span class="fc" id="L134">        LOGGER.info(&quot;Processing a document&quot;);</span>
+
+        // Parse the data to ensure it is valid; it is the responsibility of
+        // the parse method to throw an error if the input is not valid.
+<span class="fc" id="L138">        EncounterEvent encounterEvent = hl7.parseMdmT02DocumentMessage(new SourceDetails(hl7ConnContext.getEHRRequestContext()));</span>
+<span class="fc" id="L139">        Attachment attachment = hl7.parseMdmDocumentAttachment(encounterEvent, hl7ConnContext);</span>
+
+        // PHR-7708: Documents should have content
+<span class="pc bpc" id="L142" title="2 of 4 branches missed.">        if (attachment.getContent() != null &amp;&amp; attachment.getContent().length == 0) {</span>
+            // PHR-7815: Before rejecting, log an error to see if this happens
+<span class="nc" id="L144">            LOGGER.error(&quot;PHR-7815: Document had no content. Message {} from {}&quot;, hl7.getMessageIdString(), hl7ConnContext);</span>
+        }
+
+<span class="fc" id="L147">        HL7String documentId = hl7.getMdmDocumentId();</span>
+<span class="fc" id="L148">        ProcessingDecision processingDecision = hl7SoftMatchService.getProcessingDecision(DOCUMENT,</span>
+<span class="fc" id="L149">                hl7ConnContext.getSourceOrgId(), documentId.getString(), patient.getId(), pidMismatches);</span>
+<span class="pc bpc" id="L150" title="3 of 5 branches missed.">        switch(processingDecision) {</span>
+            case CONTINUE: {
+<span class="fc" id="L152">                UploadedDataDTO uploadedDataDTO = dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, documentId.getString(), DOCUMENT,</span>
+                        NEW, pidMismatches, patient, null/*subsetOf*/);
+
+<span class="fc" id="L155">                Optional&lt;UUID&gt; maybeEncounterUniqueId = encounterManager</span>
+<span class="fc" id="L156">                        .saveUploadedMessage(hl7ConnContext.getEHRRequestContext().withConsentNotRequired(), patient, uploadedDataDTO)._2;</span>
+
+<span class="fc" id="L158">                maybeEncounterUniqueId.ifPresent(encounterUniqueId -&gt; apiHelper.logDocumentReceivedAndNotifyPatient(hl7ConnContext,</span>
+                        patient,
+                        encounterUniqueId,
+                        new NoConsentsRequired(),
+<span class="fc" id="L162">                        encounterEvent.getBaseFields().getEnteredDate().toInstant(),</span>
+<span class="fc" id="L163">                        hl7.getMessageType()));</span>
+            }
+<span class="fc" id="L165">            break;</span>
+            case FORCE_NEW: {
+<span class="nc" id="L167">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, documentId.getString(), DOCUMENT,</span>
+                        NEW, pidMismatches, patient, null/*subsetOf*/);
+<span class="nc" id="L169">                apiHelper.logDocumentReceivedAndNotifyPatient(hl7ConnContext, patient, encounterEvent.getEncounterUniqueId(),</span>
+<span class="nc" id="L170">                        new NoConsentsRequired(), encounterEvent.getBaseFields().getEnteredDate().toInstant(), hl7.getMessageType());</span>
+            }
+<span class="nc" id="L172">            break;</span>
+            case QUARANTINE: {
+<span class="fc" id="L174">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, documentId.getString(), DOCUMENT,</span>
+                        PATIENT_INFO_MISMATCH, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="fc" id="L177">            break;</span>
+            case REJECT: {
+<span class="nc" id="L179">                dataUploadManager.recordHL7DataUpload(hl7ConnContext, hl7, documentId.getString(), DOCUMENT,</span>
+                        REJECTED, pidMismatches, patient, null/*subsetOf*/);
+            }
+<span class="nc" id="L182">            break;</span>
+            default: {
+<span class="nc" id="L184">                throw new RuntimeException(String.format(&quot;Unexpected processing decision: %s&quot;, processingDecision));</span>
+            }
+        }
+<span class="fc" id="L187">        return processingDecision;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ServiceConfig.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.phoenix.api.wiring</a> &gt; <span class="el_source">ServiceConfig.java</span></div><h1>ServiceConfig.java</h1><pre class="source lang-java linenums">package com.pkb.phoenix.api.wiring;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.phoenix.api.service.freshdesk.ApiKeyFinder;
+import com.pkb.phoenix.api.service.freshdesk.FreshDeskService;
+import com.pkb.phoenix.api.service.freshdesk.RedisBackedApiKeyStore;
+import com.pkb.phoenix.api.service.task.TaskMapper;
+import com.pkb.phoenix.api.service.task.TaskService;
+import com.pkb.phoenix.api.service.task.template.TaskTemplate;
+import com.pkb.phoenix.api.service.task.template.TaskTemplateLocator;
+import com.pkb.phoenix.api.service.tasktype.ImmutableTaskTypeDescription;
+import com.pkb.phoenix.api.service.tasktype.TaskTypeService;
+import com.pkb.phoenix.api.service.user.UserMapper;
+import com.pkb.phoenix.api.service.user.UserService;
+import com.pkb.phoenix.repository.task.TaskJooqRepository;
+import com.pkb.phoenix.repository.taskeventlog.TaskEventLogRepository;
+import com.pkb.phoenix.tables.daos.PUserDao;
+import com.pkb.phoenix.wiring.RepositoryConfig;
+import org.apache.velocity.app.VelocityEngine;
+import org.apache.velocity.runtime.RuntimeConstants;
+import org.apache.velocity.runtime.resource.loader.ClasspathResourceLoader;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
+import org.springframework.core.env.Environment;
+import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
+
+import java.util.List;
+
+import static com.pkb.phoenix.api.service.tasktype.ImmutableTaskTypeDescription.taskTypeBuilder;
+import static java.lang.String.format;
+import static java.util.Comparator.comparing;
+import static java.util.concurrent.Executors.newFixedThreadPool;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toUnmodifiableList;
+import static org.mapstruct.factory.Mappers.getMapper;
+
+@Configuration
+@Import({RepositoryConfig.class})
+<span class="fc" id="L46">public class ServiceConfig {</span>
+    @Bean
+    TaskTypeService taskTypeService(List&lt;TaskTemplate&lt;?, ?&gt;&gt; templates, Environment env) {
+<span class="fc" id="L49">        return new TaskTypeService(templates.stream()</span>
+<span class="fc" id="L50">                .map(template -&gt; taskTypeBuilder()</span>
+<span class="fc" id="L51">                        .code(template.code())</span>
+<span class="fc" id="L52">                        .name(env.getRequiredProperty(format(&quot;phoenix.task.template.%s.name&quot;, template.code())))</span>
+<span class="fc" id="L53">                        .description(env.getRequiredProperty(format(&quot;phoenix.task.template.%s.description&quot;, template.code())))</span>
+<span class="fc" id="L54">                        .build())</span>
+<span class="fc" id="L55">                .sorted(comparing(ImmutableTaskTypeDescription::code))</span>
+<span class="fc" id="L56">                .collect(toUnmodifiableList()));</span>
+    }
+
+    @Bean
+    Scheduler scheduler() {
+<span class="fc" id="L61">        return Schedulers.fromExecutor(newFixedThreadPool(10));</span>
+    }
+
+    @Bean
+    TaskService taskService(
+            TaskJooqRepository taskRepository,
+            TaskTemplateLocator taskTemplateLocator,
+            TaskEventLogRepository taskEventLogRepository,
+            DateTimeService dateTimeService,
+            Scheduler scheduler,
+            ObjectMapper json) {
+<span class="fc" id="L72">        return new TaskService(taskRepository, taskEventLogRepository, taskTemplateLocator, dateTimeService, getMapper(TaskMapper.class), scheduler, json);</span>
+    }
+
+    @Bean
+    UserService userService(PUserDao dao, ApiKeyFinder finder) {
+<span class="fc" id="L77">        return new UserService(dao, getMapper(UserMapper.class), finder);</span>
+    }
+
+    @Bean
+    TaskTemplateLocator taskTemplateLocator(List&lt;TaskTemplate&lt;?, ?&gt;&gt; templates) {
+<span class="fc" id="L82">        return new TaskTemplateLocator(templates.stream().collect(toMap(TaskTemplate::code, identity())));</span>
+    }
+
+    @Bean
+    VelocityEngine templateEngine() {
+<span class="fc" id="L87">        VelocityEngine engine = new VelocityEngine();</span>
+<span class="fc" id="L88">        engine.setProperty(RuntimeConstants.RESOURCE_LOADER, &quot;classpath&quot;);</span>
+<span class="fc" id="L89">        engine.setProperty(&quot;classpath.resource.loader.class&quot;, ClasspathResourceLoader.class.getName());</span>
+<span class="fc" id="L90">        engine.setProperty(RuntimeConstants.FILE_RESOURCE_LOADER_CACHE, &quot;true&quot;);</span>
+<span class="fc" id="L91">        engine.init();</span>
+<span class="fc" id="L92">        return engine;</span>
+    }
+
+    @Bean
+    FreshDeskService freshDeskService(WebClient.Builder builder, @Value(&quot;${phoenix.api.freshdesk.url}&quot;) String fdUrl) {
+<span class="fc" id="L97">        return new FreshDeskService(builder.baseUrl(fdUrl).build());</span>
+    }
+
+    @Bean
+    RedisBackedApiKeyStore fdApiKeyService(
+            ReactiveRedisTemplate&lt;String, String&gt; redisTemplate,
+            FreshDeskService freshDeskService,
+            @Value(&quot;${phoenix.api.redis.key.prefix}&quot;) String pattern) {
+<span class="fc" id="L105">        return new RedisBackedApiKeyStore(redisTemplate.opsForValue(), freshDeskService, pattern);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

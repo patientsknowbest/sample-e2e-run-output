@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QuestionnaireCachingIdResolver.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.questionnaireservice.modelv2</a> &gt; <span class="el_source">QuestionnaireCachingIdResolver.kt</span></div><h1>QuestionnaireCachingIdResolver.kt</h1><pre class="source lang-java linenums">package com.pkb.questionnaireservice.modelv2
+
+import com.fasterxml.jackson.annotation.ObjectIdGenerator
+import com.fasterxml.jackson.annotation.ObjectIdResolver
+import com.fasterxml.jackson.annotation.SimpleObjectIdResolver
+import java.util.HashMap
+
+/**
+ * This class is a workaround for a problem with Jackson's id resolution
+ * when deserializing from a  stream. Where a particular object instance
+ * appears many times in the object graph being serialized, Jackson can
+ * serialize every reference after the first it encounters as an id string,
+ * and then automatically reconstruct the object graph on deserialization.
+ * In order to do this, it maintains a map of id -&gt; object inside on &quot;ObjectIdResolver&quot;.
+ *
+ * However, Jackson _also_ provides a streaming API, which is what Spring uses
+ * to efficiently deserialize objects in their Reactive Streams WebClient. This
+ * tokenizes the data from an HTTP response in chunks of individual JSON objects,
+ * and them maps these to individual objects. Since Jackson ( by design) provides no
+ * way to maintain state across calls to its databinding layer, the map of objects
+ * gets lost after the first JSON object is bound to a POJO. The Jackson maintainer
+ * has acknowledged that this is a limitation that could do with fixing, and I will
+ * try and get a PR accepted to this end, but it's probably going to take some time.
+ * Additionally, it will almost certainly require changes to Spring's use of Jackson
+ * in WebClient - although Spring is much more configurable so we can probably code up
+ * our own interim solution once the Jackson fix is in place.
+ *
+ * In the meantime, this class works around the problem for our specific use-case, which
+ * is deserializing a stream of QuestionnaireResponse or QuestionnaireRequest objects
+ * and being able to resolve references to the Questionnaires + their components. It does
+ * this by storing the last Questionnaire it sees in a ThreadLocal. Naturally, this
+ * imposes a couple of important limitations. First, this will only work effectively
+ * for requests pertaining to a single Questionnaire - which is fine for the moment
+ * because we only need to rely on this behaviour for streaming all the responses/
+ * non-responders for a single Questionnaire. Second, it precludes parallelising
+ * the processing of the Flux returned by the WebClient; but again, we have no requirement
+ * for this at the moment.
+ *
+ * Given the immutability of Questionnaires, in principle both of these limitations
+ * could be removed by having this class use a thread-safe cache instead of a ThreadLocal,
+ * but this would (1) add more state to our application at a time where we're trying to
+ * remove it and (2) require us to add management and monitoring to the cache in order
+ * to ensure it doesn't grow without limit. I'm hoping that by the time the limitations
+ * of the current approach become acceptable I will have a fix accepted in Jackson.
+ */
+<span class="fc" id="L46">class QuestionnaireCachingIdResolver : SimpleObjectIdResolver() {</span>
+
+    //This overide of the base class method removes the check that prevents two distinct objects
+    //sharing the same id. Since our objects are immutable it doesn't matter and it helps us be able
+    //to deal with our streaming use case more effectively (we sometimes have to send the same object multiple
+    //times to ensure its available even when context has been lost in the middle of a stream
+    override fun bindItem(id: ObjectIdGenerator.IdKey, ob: Any) {
+<span class="fc bfc" id="L53" title="All 2 branches covered.">        if (_items == null) {</span>
+<span class="fc" id="L54">            _items = HashMap()</span>
+        }
+
+<span class="fc bfc" id="L57" title="All 2 branches covered.">        if (_items[id] == null) {</span>
+<span class="fc" id="L58">            _items[id] = ob</span>
+        }
+
+<span class="fc bfc" id="L61" title="All 2 branches covered.">        if (ob is Questionnaire) {</span>
+<span class="fc" id="L62">            questionnaire.set(ob)</span>
+        }
+<span class="fc" id="L64">    }</span>
+
+<span class="fc bfc" id="L66" title="All 2 branches covered.">    override fun resolveId(id: ObjectIdGenerator.IdKey): Any? = super.resolveId(id) ?: attemptResolveFromCachedQuestionnaire(id)</span>
+
+    private fun attemptResolveFromCachedQuestionnaire(id: ObjectIdGenerator.IdKey): Any? {
+<span class="fc" id="L69">        val currentQuestionnaire = questionnaire.get()</span>
+<span class="pc bpc" id="L70" title="1 of 2 branches missed.">        if (currentQuestionnaire != null) {</span>
+<span class="fc" id="L71">            return when (id.scope) {</span>
+<span class="pc bpc" id="L72" title="2 of 4 branches missed.">                QuestionnaireImpl::class.java -&gt; if (currentQuestionnaire.id == id.key) currentQuestionnaire else null</span>
+<span class="nc bnc" id="L73" title="All 6 branches missed.">                QuestionnaireComponent::class.java -&gt; currentQuestionnaire.components.find { it.id == id.key }</span>
+<span class="nc" id="L74">                else -&gt; null</span>
+            }
+        }
+<span class="nc" id="L77">        return null</span>
+    }
+
+<span class="fc" id="L80">    override fun newForDeserialization(context: Any): ObjectIdResolver = QuestionnaireCachingIdResolver()</span>
+
+    companion object {
+<span class="fc" id="L83">        private val questionnaire: ThreadLocal&lt;Questionnaire&gt; = ThreadLocal()</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

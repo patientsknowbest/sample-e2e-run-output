@@ -1,0 +1,2075 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TeamUserManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.team</a> &gt; <span class="el_source">TeamUserManager.java</span></div><h1>TeamUserManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.team;
+
+import com.google.common.base.Predicates;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.pkb.VersionDetails;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PKBFilter;
+import com.pkb.app.entity.PatientAuditLog;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.app.interfaces.IBaseDTO;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.common.util.FrameFilter;
+import com.pkb.consent.entity.BreakTheGlassLog;
+import com.pkb.consent.entity.PatientConsentReason;
+import com.pkb.crypto.util.RandomUtil;
+import com.pkb.data.EHRRemote;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.ImmutableIdentityVerification;
+import com.pkb.datamodel.consent.PatientAdditionalConsent;
+import com.pkb.datamodel.consent.PatientAdditionalConsentExisting;
+import com.pkb.datamodel.consent.TeamAdditionalConsent;
+import com.pkb.datamodel.consent.TeamExport;
+import com.pkb.domain.ApiAuthService;
+import com.pkb.domain.CryptoModelSynchronisationService;
+import com.pkb.domain.IdentityVerificationService;
+import com.pkb.domain.TeamExportService;
+import com.pkb.domain.UserCredentialsService;
+import com.pkb.domain.consent.ConsentService;
+import com.pkb.domain.duplicate.person.PersonService;
+import com.pkb.dto.InviteeDTO;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.encounter.entity.PKBInvitationDetail;
+import com.pkb.entities.enums.AdditionalConsentId;
+import com.pkb.entities.enums.InvitationType;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.PhotoIdType;
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.entities.enums.VerificationStatus;
+import com.pkb.entities.pub.PublicUserCredentials;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PKBException;
+import com.pkb.exception.PKBPluginException;
+import com.pkb.institute.entity.InstituteUser;
+import com.pkb.institute.entity.InstituteUserEntity.ContactOptions;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.OrgPatientSearchOptionsDto;
+import com.pkb.institute.entity.Team;
+import com.pkb.institute.entity.TeamWithPKBPerson;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.kms.shared.representation.AccountIds;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.repository.legacy.CustomizedLegacyInstituteUserRepository;
+import com.pkb.repository.legacy.LegacyBreakTheGlassLogRepository;
+import com.pkb.repository.legacy.LegacyPKBPersonRepository;
+import com.pkb.repository.legacy.LegacyTeamRepository;
+import com.pkb.service.dataupload.hl7.CreationTeamsResponse;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.instituteuser.InstituteUserManager;
+import com.pkb.service.invitation.impl.InvitationOperationManager;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.PKBPersonRemote;
+import com.pkb.user.entity.IdPair;
+import com.pkb.user.entity.IdentityVerification;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.OrgLevelIdType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.util.CSVTableBuilder;
+import com.pkb.util.EmailUtil;
+import com.pkb.util.OutputStreamCSVTableBuilder;
+import com.pkb.util.PKBConstants;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.springframework.context.annotation.Lazy;
+import org.tolven.core.entity.Account;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.entities.enums.SponsorshipStatus.ACTIVE;
+import static com.pkb.util.EmailUtil.Quantity.BULK;
+import static com.pkb.util.EmailUtil.Quantity.SINGULAR;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static java.lang.String.format;
+import static java.util.Collections.emptyList;
+import static java.util.Optional.ofNullable;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class TeamUserManager extends TransactionManager {
+
+    public static final String RESET_CREDENTIALS_SECURITY_QUESTION = &quot;ResetCredentialsSecurityQuestion&quot;;
+<span class="fc" id="L142">    private static final Tuple2&lt;List&lt;Team&gt;, List&lt;Team&gt;&gt; EMPTY_LISTS = Tuple.of(emptyList(), emptyList());</span>
+<span class="fc" id="L143">    private static final Logger LOGGER = getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private PKBEmailMessageManager pkbEmailMessageManager;
+    private final UserManager userManager;
+    private final TeamManager teamManager;
+    private final PersonContactManager personContactManager;
+    private final InvitationOperationManager invitationOperationManager;
+    private final UserCredentialsService userCredentialsService;
+    private final CryptoModelSynchronisationService cryptoModelSynchronisationService;
+    private final IdentityVerificationService identityVerificationService;
+    private final TeamExportService teamExportService;
+    private final ConsentService consentService;
+    private final ApiAuthService apiAuthService;
+    private final PersonService personService;
+    private final LegacyTeamRepository teamRepository;
+    private final LegacyBreakTheGlassLogRepository breakTheGlassLogRepository;
+    private final LegacyPKBPersonRepository pkbPersonRepository;
+    private final DocumentManager documentManager;
+    private final Kms kms;
+    private final InstituteUserManager instituteUserManager;
+    private final OrgManager orgManager;
+
+    public TeamUserManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider,
+                           UserManager userManager, TeamManager teamManager, PersonContactManager personContactManager,
+                           InvitationOperationManager invitationOperationManager, UserCredentialsService userCredentialsService,
+                           IdentityVerificationService identityVerificationService, TeamExportService teamExportService,
+                           ConsentService consentService,
+                           CryptoModelSynchronisationService cryptoModelSynchronisationService,
+                           ApiAuthService apiAuthService,
+                           PersonService personService,
+                           LegacyTeamRepository teamRepository, LegacyBreakTheGlassLogRepository breakTheGlassLogRepository,
+                           LegacyPKBPersonRepository pkbPersonRepository, DocumentManager documentManager, Kms kms,
+                           InstituteUserManager instituteUserManager, @Lazy OrgManager orgManager) {
+<span class="fc" id="L175">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L176">        this.userManager = userManager;</span>
+<span class="fc" id="L177">        this.teamManager = teamManager;</span>
+<span class="fc" id="L178">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L179">        this.invitationOperationManager = invitationOperationManager;</span>
+<span class="fc" id="L180">        this.userCredentialsService = userCredentialsService;</span>
+<span class="fc" id="L181">        this.identityVerificationService = identityVerificationService;</span>
+<span class="fc" id="L182">        this.teamExportService = teamExportService;</span>
+<span class="fc" id="L183">        this.consentService = consentService;</span>
+<span class="fc" id="L184">        this.cryptoModelSynchronisationService = cryptoModelSynchronisationService;</span>
+<span class="fc" id="L185">        this.apiAuthService = apiAuthService;</span>
+<span class="fc" id="L186">        this.personService = personService;</span>
+<span class="fc" id="L187">        this.teamRepository = teamRepository;</span>
+<span class="fc" id="L188">        this.breakTheGlassLogRepository = breakTheGlassLogRepository;</span>
+<span class="fc" id="L189">        this.pkbPersonRepository = pkbPersonRepository;</span>
+<span class="fc" id="L190">        this.documentManager = documentManager;</span>
+<span class="fc" id="L191">        this.kms = kms;</span>
+<span class="fc" id="L192">        this.instituteUserManager = instituteUserManager;</span>
+<span class="fc" id="L193">        this.orgManager = orgManager;</span>
+<span class="fc" id="L194">    }</span>
+
+    //FIXME Circular dependency...
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L198">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L199">    }</span>
+
+    /**
+     * Activate the user for an team
+     *
+     * @param userId       id of the user to be activated
+     * @param teamId       id of the team for which user will be activated
+     * @param verification {@link IdentityVerification}
+     * @throws MailException
+     */
+    public void activateUserAccount(long userId, Long teamId,
+                                    IdentityVerification verification) {
+        try {
+<span class="fc" id="L212">            instituteUserManager.activateUserAccount(userId, teamId, verification);</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">            if (teamId != null) {</span>
+<span class="fc" id="L214">                cryptoModelSynchronisationService.syncCryptoAccessForPerson(userId);</span>
+            }
+<span class="nc" id="L216">        } catch (Exception e) {</span>
+<span class="nc" id="L217">            throw new PKBException(&quot;Error while activating the user-&quot; + userId + &quot; for institute-&quot;</span>
+                    + teamId, e);
+<span class="fc" id="L219">        }</span>
+<span class="fc" id="L220">    }</span>
+
+    /**
+     * Searches for any accounts which match any identifiers provided in the DTO.
+     *
+     * @param inviteeDTO
+     * @return
+     */
+    @Nullable
+    public PKBPerson searchForUser(InviteeDTO inviteeDTO) {
+
+        // TODO: See UserManager.lookupSinglePatient
+
+<span class="fc" id="L233">        Set&lt;PKBPerson&gt; persons = new HashSet&lt;&gt;();</span>
+
+        //find user by Id
+<span class="fc" id="L236">        persons.add(findPersonById(inviteeDTO));</span>
+
+        //find user by national id if one was specified
+<span class="fc" id="L239">        persons.addAll(findPersonByNationalId(inviteeDTO));</span>
+
+        //if one or more email addresses were provided, then search using those. this relies onthe old style search where the email is
+        //recorded directly on the person object
+<span class="fc" id="L243">        List&lt;PKBPerson&gt; userByEmail = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">        if (inviteeDTO.getEmailId() != null) {</span>
+<span class="fc" id="L245">            userByEmail.addAll(userManager.getPKBPersonByConfirmedOrPrimaryEmail(inviteeDTO.getEmailId(), PersonContact.Lazy.PERSON));</span>
+        }
+<span class="fc" id="L247">        persons.addAll(userByEmail);</span>
+
+<span class="fc bfc" id="L249" title="All 2 branches covered.">        if (inviteeDTO.getEmailId() != null) {</span>
+<span class="fc" id="L250">            persons.add(personContactManager.getPersonForConfirmedOrPrimaryPatientContact(inviteeDTO.getEmailId()).getOrNull());</span>
+        }
+
+<span class="fc" id="L253">        persons.addAll(findPersonByContacts(inviteeDTO));</span>
+
+        //do org-level-id search
+<span class="fc" id="L256">        persons.addAll(findPersonByOrgLevelId(inviteeDTO));</span>
+
+        //do team-level-id search
+<span class="fc" id="L259">        persons.addAll(findPersonByTeamLevelId(inviteeDTO));</span>
+
+        //remove all nulls
+<span class="fc" id="L262">        Iterables.removeIf(persons, Predicates.isNull());</span>
+
+<span class="fc bfc" id="L264" title="All 2 branches covered.">        if (persons.isEmpty()) {</span>
+<span class="fc" id="L265">            return null;</span>
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">        } else if (persons.size() &gt; 1) {</span>
+<span class="nc" id="L267">            throw new PKBException(&quot;Ambiguous user information. More than one user found.&quot;);</span>
+        } else {
+<span class="fc" id="L269">            PKBPerson person = persons.iterator().next();</span>
+
+            // Finally, check that if a PKB Id was provided then it must be correct
+<span class="fc bfc" id="L272" title="All 2 branches covered.">            if (inviteeDTO.getId() != null) {</span>
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">                if (!person.getId().equals(inviteeDTO.getId())) {</span>
+<span class="nc" id="L274">                    throw new PKBException(&quot;Ambiguous user information. More than one user found.&quot;);</span>
+                }
+            }
+
+<span class="fc" id="L278">            return person;</span>
+
+        }
+    }
+
+    private List&lt;PKBPerson&gt; findPersonByTeamLevelId(InviteeDTO inviteeDTO) {
+
+<span class="fc" id="L285">        List&lt;PKBPerson&gt; persons = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">        if (inviteeDTO.getTeamLevelIds() != null) {</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">            for (TeamLevelId tlid : inviteeDTO.getTeamLevelIds()) {</span>
+<span class="nc" id="L288">                var personByTeamLevelId = userManager.getPKBPersonByTeamLevelId(tlid, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="nc" id="L289">                personByTeamLevelId.peekLeft(maybePerson -&gt; maybePerson.peek(persons::add))</span>
+<span class="nc" id="L290">                        .peek(persons::addAll);</span>
+<span class="nc" id="L291">            }</span>
+        }
+<span class="fc" id="L293">        return persons;</span>
+    }
+
+    private List&lt;PKBPerson&gt; findPersonByOrgLevelId(InviteeDTO inviteeDTO) {
+
+<span class="fc" id="L298">        List&lt;PKBPerson&gt; persons = new ArrayList&lt;&gt;();</span>
+<span class="pc bpc" id="L299" title="1 of 2 branches missed.">        if (inviteeDTO.getOrgLevelIds() != null) {</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">            for (OrgLevelId olid : inviteeDTO.getOrgLevelIds()) {</span>
+<span class="nc" id="L301">                var personByOrgLevelId = userManager.getPKBPersonByOrgLevelId(olid, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="nc" id="L302">                personByOrgLevelId.peekLeft(maybePerson -&gt; maybePerson.peek(persons::add))</span>
+<span class="nc" id="L303">                        .peek(persons::addAll);</span>
+<span class="nc" id="L304">            }</span>
+        }
+<span class="fc" id="L306">        return persons;</span>
+    }
+
+    private List&lt;PKBPerson&gt; findPersonByContacts(InviteeDTO inviteeDTO) {
+
+        //if dto has contact elements
+<span class="pc bpc" id="L312" title="1 of 4 branches missed.">        if (inviteeDTO.getContacts() != null &amp;&amp; !inviteeDTO.getContacts().isEmpty()) {</span>
+<span class="fc" id="L313">            return inviteeDTO.getContacts().stream()</span>
+<span class="fc" id="L314">                    .filter(c -&gt; c.getContactIfEmail().isDefined())</span>
+<span class="fc" id="L315">                    .flatMap(c -&gt; personContactManager.getPersonForConfirmedOrPrimaryPatientContact(c.getContactIfEmail().getOrNull()).toJavaStream())</span>
+<span class="fc" id="L316">                    .collect(toList());</span>
+
+        } else {
+<span class="fc" id="L319">            return new ArrayList&lt;&gt;();</span>
+        }
+    }
+
+    private List&lt;PKBPerson&gt; findPersonByNationalId(InviteeDTO inviteeDTO) {
+<span class="fc bfc" id="L324" title="All 2 branches covered.">        if (isEmpty(inviteeDTO.getNationalIds())) {</span>
+<span class="fc" id="L325">            return Collections.emptyList();</span>
+        }
+
+<span class="fc" id="L328">        List&lt;PKBPerson&gt; persons = new ArrayList&lt;&gt;();</span>
+
+        // If one or more national Ids were provided, then search using those
+<span class="fc" id="L331">        List&lt;NationalId&gt; natIds = inviteeDTO.getNationalIds();</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">        if (natIds != null) {</span>
+<span class="fc bfc" id="L333" title="All 2 branches covered.">            for (NationalId natId : natIds) {</span>
+<span class="fc" id="L334">                var personByNationalId = userManager.getPKBPersonByNationalId(natId, PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L335">                personByNationalId.peekLeft(maybePerson -&gt; maybePerson.peek(persons::add))</span>
+<span class="fc" id="L336">                        .peek(persons::addAll);</span>
+<span class="fc" id="L337">            }</span>
+        }
+<span class="fc" id="L339">        return persons;</span>
+    }
+
+    private PKBPerson findPersonById(InviteeDTO inviteeDTO) {
+        // If a PKB Id was provided, search using that
+<span class="fc bfc" id="L344" title="All 2 branches covered.">        if (inviteeDTO.getId() != null) {</span>
+<span class="fc" id="L345">            return userManager.getPKBPerson(inviteeDTO.getId(),</span>
+                    PKBPerson.Lazy.CONTACTS);
+        }
+<span class="fc" id="L348">        return null;</span>
+    }
+
+
+    /**
+     * Is this used by BulkInvitationAction?
+     * It is also used by the REST API workflow.
+     *
+     * @param patientDTO
+     * @param team
+     * @param validNationalId
+     * @param olids
+     * @param tlids
+     * @param admin
+     * @throws MailException
+     */
+    public PKBPerson createPatientForCoord(LoggedInEHRRequestContext requestContext, PKBPersonDTO patientDTO, Team team,
+                                           Collection&lt;ValidNationalId&gt; validNationalIds, SortedSet&lt;OrgLevelId&gt; olids, SortedSet&lt;TeamLevelId&gt; tlids,
+                                           PKBPerson admin, EmailUtil.Quantity quantity) throws MailException {
+<span class="fc" id="L367">        PKBPerson newPatient = null;</span>
+<span class="fc" id="L368">        Email email = patientDTO.getEmailId();</span>
+<span class="fc" id="L369">        patientDTO.setStatus(UserStatus.CREATED);</span>
+<span class="fc bfc" id="L370" title="All 2 branches covered.">        if (email == null) {</span>
+<span class="fc" id="L371">            patientDTO.setStatus(UserStatus.NOCONTACT);</span>
+        }
+
+        try {
+<span class="fc" id="L375">            userManager.registerUserFull(requestContext, patientDTO, team.getId());</span>
+
+<span class="fc" id="L377">            newPatient = userManager.getPKBPerson(patientDTO.getId(), PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+
+<span class="fc" id="L379">            boolean updatedIds = false;</span>
+<span class="fc" id="L380">            Instant now = dateTimeService.now();</span>
+<span class="fc bfc" id="L381" title="All 2 branches covered.">            if (isNotEmpty(validNationalIds)) {</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">                for (ValidNationalId vnid : validNationalIds) {</span>
+<span class="fc" id="L383">                    NationalId setId = new NationalId(vnid, VersionDetails.of(requestContext, now));</span>
+<span class="fc" id="L384">                    setId.setPerson(newPatient);</span>
+<span class="fc" id="L385">                    setId.setEditDate(Date.from(now));</span>
+<span class="fc" id="L386">                    newPatient.addOrUpdateNationalId(requestContext, setId, now);</span>
+<span class="fc" id="L387">                }</span>
+
+<span class="fc" id="L389">                updatedIds = true;</span>
+            }
+
+<span class="fc bfc" id="L392" title="All 2 branches covered.">            if (olids != null) {</span>
+<span class="fc" id="L393">                newPatient.addOrgLevelIds(requestContext, olids, now);</span>
+<span class="fc" id="L394">                updatedIds = true;</span>
+            }
+
+<span class="fc bfc" id="L397" title="All 2 branches covered.">            if (tlids != null) {</span>
+<span class="fc" id="L398">                newPatient.addTeamLevelIds(requestContext, tlids, now);</span>
+<span class="fc" id="L399">                updatedIds = true;</span>
+            }
+
+<span class="pc bpc" id="L402" title="1 of 2 branches missed.">            if (updatedIds) {</span>
+<span class="fc" id="L403">                userManager.updateUser(requestContext, newPatient);</span>
+            }
+
+<span class="fc" id="L406">            PKBPerson currentCoord = userManager.getPKBPerson(admin.getId());</span>
+
+            // auto-identify the patient; the clinician is vouching for them:
+<span class="fc" id="L409">            IdentityVerification verification = new IdentityVerification();</span>
+<span class="fc" id="L410">            verification.setPersonId(newPatient.getId());</span>
+<span class="fc" id="L411">            verification.setVerifierId(currentCoord.getId());</span>
+<span class="fc" id="L412">            verification.setVerificationDate(Date.from(now));</span>
+<span class="fc" id="L413">            verification.setStatus(VerificationStatus.VERIFIED);</span>
+<span class="fc" id="L414">            verification.setSignedConsentForm(false);</span>
+<span class="fc" id="L415">            verification.setPhotoIdType(PhotoIdType.VOUCHED_FOR_BY_COORDINATOR);</span>
+<span class="fc" id="L416">            verification.setPhotoIdNumber(&quot;Vouched for by &quot; + currentCoord.getTitle() + &quot; &quot;</span>
+<span class="fc" id="L417">                    + currentCoord.getFirstName() + &quot; &quot; + currentCoord.getLastName()</span>
+<span class="fc" id="L418">                    + &quot; of &quot; + team.getName());</span>
+<span class="fc" id="L419">            verification.setVerifyingTeam(team);</span>
+
+<span class="fc" id="L421">            activateUserAccount(newPatient.getId(), team.getId(), verification);</span>
+
+<span class="fc bfc" id="L423" title="All 2 branches covered.">            if (email != null) {</span>
+                // email notification - if this fails, rollback, because the patient needs the email
+<span class="fc" id="L425">                PKBPerson creator = Match(quantity).of(</span>
+<span class="fc" id="L426">                        Case($(SINGULAR), currentCoord),</span>
+<span class="fc" id="L427">                        Case($(BULK), (PKBPerson) null));</span>
+<span class="fc" id="L428">                pkbEmailMessageManager.notifyPatientOfCreatedAccount(creator, newPatient, team, null);</span>
+            }
+<span class="fc" id="L430">            return newPatient;</span>
+
+<span class="nc" id="L432">        } catch (PKBPluginException exception) {</span>
+<span class="nc" id="L433">            throw new PKBException(&quot;Exception while creating patient-&quot; + patientDTO.getEmailId()</span>
+<span class="nc" id="L434">                    + &quot;by user&quot; + admin.getId(), exception);</span>
+        }
+    }
+
+    public PKBPerson createPatientForEmisEsAPI(EHRRequestContext requestContext, PKBPersonDTO patientDTO,
+                                               Team connectingTeam, String authBy) {
+        PKBPerson newPatient;
+<span class="pc bpc" id="L441" title="1 of 2 branches missed.">        if (StringUtils.isBlank(patientDTO.getTimeZoneId())) {</span>
+<span class="fc" id="L442">            patientDTO.setTimeZoneId(PKBConstants.DEFAULT_TIMEZONE_ID);</span>
+        }
+        try {
+            // part 1
+<span class="fc" id="L446">            Instant registrationDate = dateTimeService.now();</span>
+<span class="fc" id="L447">            long newPatientId = userManager.registerUserFullSetupPerson(VersionDetails.of(requestContext, registrationDate), patientDTO, /*testUser*/</span>
+                    registrationDate);
+
+            // part 2
+<span class="fc" id="L451">            AccountIds accountIds = userManager.registerUserFullSetupAccounts(requestContext, newPatientId, patientDTO.getPassword(), connectingTeam.getId());</span>
+
+            // part 3
+<span class="fc" id="L454">            newPatient = userManager.registerUserFullPasswordAccessThenReturnThatUser(</span>
+                    requestContext, newPatientId,
+<span class="fc" id="L456">                    accountIds.getId(),</span>
+<span class="fc" id="L457">                    patientDTO.getPassword());</span>
+
+<span class="fc" id="L459">            newPatient.setDefaultAccountId(accountIds.getId());</span>
+
+<span class="fc bfc" id="L461" title="All 2 branches covered.">            for (NationalId nid : patientDTO.getNationalIds()) {</span>
+<span class="fc" id="L462">                newPatient.addOrUpdateNationalId(requestContext, nid, registrationDate);</span>
+<span class="fc" id="L463">            }</span>
+<span class="fc bfc" id="L464" title="All 2 branches covered.">            for (OrgLevelId olid : patientDTO.getOrgLevelIds()) {</span>
+<span class="fc" id="L465">                newPatient.addOrgLevelId(requestContext, olid, registrationDate);</span>
+<span class="fc" id="L466">            }</span>
+
+<span class="fc" id="L468">            userManager.updateUser(requestContext, newPatient);</span>
+
+            // auto-identify the patient; the interface is vouching for them:
+<span class="fc" id="L471">            IdentityVerification verification = new IdentityVerification();</span>
+<span class="fc" id="L472">            verification.setPersonId(newPatient.getId());</span>
+<span class="fc" id="L473">            verification.setVerifierId(null);</span>
+<span class="fc" id="L474">            verification.setVerificationDate(Date.from(registrationDate));</span>
+<span class="fc" id="L475">            verification.setStatus(VerificationStatus.VERIFIED);</span>
+<span class="fc" id="L476">            verification.setSignedConsentForm(false);</span>
+<span class="fc" id="L477">            verification.setPhotoIdType(PhotoIdType.VOUCHED_FOR_BY_COORDINATOR);</span>
+<span class="fc" id="L478">            verification.setPhotoIdNumber(&quot;Created via EMIS ES API; connection authenticated by &quot; + authBy);</span>
+<span class="fc" id="L479">            verification.setVerifyingTeam(connectingTeam);</span>
+
+<span class="fc" id="L481">            activateUserAccount(newPatientId, connectingTeam.getId(), verification);</span>
+<span class="nc" id="L482">        } catch (Exception exception) {</span>
+<span class="nc" id="L483">            throw new PKBException(&quot;Exception while creating patient-&quot; + patientDTO.getEmailId()</span>
+                    + &quot; via EMIS ES API&quot;, exception);
+<span class="fc" id="L485">        }</span>
+<span class="fc" id="L486">        return newPatient;</span>
+    }
+
+    public PKBPerson createPatientForHL7API(EHRRequestContext requestContext, PKBPersonDTO patientDto,
+                                            CreationTeamsResponse creationTeamsResponse, List&lt;NationalId&gt; nationalIds,
+                                            SortedSet&lt;OrgLevelId&gt; olids, SortedSet&lt;TeamLevelId&gt; tlids, String authBy,
+                                            Instant dateRegistered, HL7ConnContext hl7ConnContext) {
+<span class="fc" id="L493">        PKBPerson newPatient = null;</span>
+<span class="fc" id="L494">        Email email = patientDto.getEmailId();</span>
+<span class="fc" id="L495">        List&lt;Email&gt; additionalEmails = patientDto.getAdditionalEmails();</span>
+<span class="fc" id="L496">        List&lt;PersonContact&gt; additionalEmailContacts = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L497">        patientDto.setStatus(UserStatus.CREATED);</span>
+<span class="fc bfc" id="L498" title="All 2 branches covered.">        if (email == null) {</span>
+<span class="fc" id="L499">            patientDto.setStatus(UserStatus.NOCONTACT);</span>
+        }
+<span class="pc bpc" id="L501" title="1 of 2 branches missed.">        if (StringUtils.isBlank(patientDto.getTimeZoneId())) {</span>
+<span class="fc" id="L502">            patientDto.setTimeZoneId(PKBConstants.DEFAULT_TIMEZONE_ID);</span>
+        }
+<span class="fc" id="L504">        Team creatingTeam = creationTeamsResponse.getCreatingTeam();</span>
+<span class="fc bfc" id="L505" title="All 2 branches covered.">        if (creatingTeam == null) {</span>
+<span class="fc" id="L506">            throw new ApiCallMalformedException(&quot;Contact support: could not determine the Creating Team&quot;);</span>
+        }
+<span class="fc" id="L508">        List&lt;Team&gt; creationTeams = List.copyOf(creationTeamsResponse.getCreationTeams());</span>
+
+        try {
+            // registerUserFull() handles pkbperson, LDAP, account and account_user links,
+            // InstituteUser (invited), password access etc.
+
+            // part 1
+<span class="fc" id="L515">            long newPatientId = userManager.registerUserFullSetupPerson(VersionDetails.of(requestContext, dateRegistered),</span>
+                    patientDto, dateRegistered);
+
+            // part 2
+
+<span class="fc" id="L520">            AccountIds accountIds = userManager.registerUserFullSetupAccounts(requestContext, newPatientId, patientDto.getPassword(), creatingTeam.getId());</span>
+
+            // part 3
+<span class="fc" id="L523">            newPatient = userManager.registerUserFullPasswordAccessThenReturnThatUser(</span>
+                    requestContext, newPatientId,
+<span class="fc" id="L525">                    accountIds.getId(),</span>
+<span class="fc" id="L526">                    patientDto.getPassword());</span>
+
+<span class="fc" id="L528">            newPatient.setDefaultAccountId(accountIds.getId());</span>
+
+<span class="fc bfc" id="L530" title="All 2 branches covered.">            for (NationalId nid : nationalIds) {</span>
+<span class="fc" id="L531">                newPatient.addOrUpdateNationalId(requestContext, nid, dateRegistered);</span>
+<span class="fc" id="L532">            }</span>
+<span class="fc bfc" id="L533" title="All 2 branches covered.">            for (OrgLevelId olid : olids) {</span>
+<span class="fc" id="L534">                newPatient.addOrgLevelId(requestContext, olid, dateRegistered);</span>
+<span class="fc" id="L535">            }</span>
+<span class="fc bfc" id="L536" title="All 2 branches covered.">            for (TeamLevelId tlid : tlids) {</span>
+<span class="fc" id="L537">                newPatient.addTeamLevelId(requestContext, tlid, dateRegistered);</span>
+<span class="fc" id="L538">            }</span>
+
+<span class="fc" id="L540">            VersionDetails versionDetails = VersionDetails.of(requestContext, dateRegistered);</span>
+<span class="fc" id="L541">            userManager.updateUser(newPatient, versionDetails);</span>
+
+
+
+<span class="fc bfc" id="L545" title="All 2 branches covered.">            if (additionalEmails != null) {</span>
+<span class="pc bpc" id="L546" title="1 of 2 branches missed.">                for (Email additionalEmail : additionalEmails) {</span>
+<span class="nc" id="L547">                    PersonContact contact = new PersonContact();</span>
+<span class="nc" id="L548">                    contact.setPublicId(UUID.randomUUID());</span>
+<span class="nc" id="L549">                    contact.setPerson(newPatient);</span>
+<span class="nc" id="L550">                    contact.setContactAsEmail(additionalEmail);</span>
+<span class="nc" id="L551">                    contact.setConfirmed(false);</span>
+<span class="nc" id="L552">                    contact.setPrimary(false);</span>
+
+<span class="nc" id="L554">                    contact = personContactManager.save(contact, versionDetails);</span>
+
+<span class="nc" id="L556">                    additionalEmailContacts.add(contact);</span>
+<span class="nc" id="L557">                }</span>
+            }
+
+            // If we have additional teams (from ZTM segment)...
+<span class="fc bfc" id="L561" title="All 2 branches covered.">            for (Team creationTeam : creationTeams) {</span>
+                // ... mark as ACTIVE for that team ...
+<span class="fc" id="L563">                InstituteUser instituteUser = instituteUserManager.getInstituteUser(</span>
+<span class="fc" id="L564">                        creationTeam.getId(), newPatient.getId());</span>
+<span class="fc bfc" id="L565" title="All 2 branches covered.">                if (instituteUser == null) {</span>
+<span class="fc" id="L566">                    instituteUserManager.createInstituteUser(newPatient.getId(),</span>
+<span class="fc" id="L567">                            creationTeam.getId(), SponsorshipStatus.ACTIVE);</span>
+                } else {
+<span class="pc bpc" id="L569" title="1 of 2 branches missed.">                    if (instituteUser.getSponsorshipStatus() == SponsorshipStatus.ACTIVE) {</span>
+<span class="nc" id="L570">                        throw new PKBException(&quot;User-&quot; + newPatient.getId() + &quot; is already active&quot;);</span>
+                    }
+                }
+<span class="fc" id="L573">            }</span>
+
+            // auto-identify the patient; the interface is vouching for them:
+<span class="fc" id="L576">            IdentityVerification verification = new IdentityVerification();</span>
+<span class="fc" id="L577">            verification.setPersonId(newPatient.getId());</span>
+<span class="fc" id="L578">            verification.setVerifierId(null);</span>
+<span class="fc" id="L579">            verification.setVerificationDate(Date.from(dateRegistered));</span>
+<span class="fc" id="L580">            verification.setStatus(VerificationStatus.VERIFIED);</span>
+<span class="fc" id="L581">            verification.setSignedConsentForm(false);</span>
+<span class="fc" id="L582">            verification.setPhotoIdType(PhotoIdType.VOUCHED_FOR_BY_COORDINATOR);</span>
+<span class="fc" id="L583">            verification.setPhotoIdNumber(&quot;Created via HL7 API; connection authenticated by &quot; + authBy);</span>
+<span class="fc" id="L584">            verification.setVerifyingTeam(creatingTeam);</span>
+
+<span class="fc" id="L586">            activateUserAccount(newPatientId, creatingTeam.getId(), verification);</span>
+
+<span class="fc bfc" id="L588" title="All 2 branches covered.">            if (email != null) {</span>
+                // email notification - if this fails, rollback, because the patient needs the email
+<span class="fc" id="L590">                pkbEmailMessageManager.notifyPatientOfCreatedAccount(null, newPatient, creatingTeam, null);</span>
+            }
+
+<span class="pc bpc" id="L593" title="1 of 2 branches missed.">            for (PersonContact additionalEmailContact : additionalEmailContacts) {</span>
+                try {
+<span class="nc" id="L595">                    pkbEmailMessageManager.sendEmailToConfirmNewContact(additionalEmailContact);</span>
+<span class="nc" id="L596">                } catch (MailException me) {</span>
+                    // just log &amp; continue... this shouldn't derail the whole update
+<span class="nc" id="L598">                    LOGGER.error(&quot;failed notifying patient of newly-added email address&quot;, me);</span>
+<span class="nc" id="L599">                }</span>
+<span class="nc" id="L600">            }</span>
+<span class="nc" id="L601">        } catch (Exception exception) {</span>
+<span class="nc" id="L602">            throw new PKBException(&quot;Exception while creating patient-&quot; + patientDto.getEmailId()</span>
+                    + &quot; via HL7 API&quot;, exception);
+<span class="fc" id="L604">        }</span>
+<span class="fc" id="L605">        return newPatient;</span>
+    }
+
+    /**
+     * Get the list of team users by role sorted by ascending last name
+     *
+     * @param teamId
+     * @param userType {@link UserType}
+     * @param pageSize No of items in a page
+     * @param offset   Page size * Page No + 1
+     * @return List of {@link InstituteUser} objects
+     */
+    public List&lt;InstituteUser&gt; getInstituteUsersByType(Long teamId, @NotNull UserType userType,
+                                                       int pageSize, int offset) {
+        try {
+<span class="fc" id="L620">            return instituteUserManager.getInstituteUsersByType(teamId, userType, pageSize, offset);</span>
+<span class="nc" id="L621">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L622">            throw new PKBException(&quot;Error while getting the user list for team -&quot;</span>
+<span class="nc" id="L623">                    + teamId + &quot; for user type-&quot; + userType.toString(), e);</span>
+<span class="nc" id="L624">        } catch (Exception e) {</span>
+<span class="nc" id="L625">            throw new PKBException(&quot;Error while getting institute users by type&quot;, e);</span>
+        }
+    }
+
+    public List&lt;InstituteUser&gt; getInstituteUsersByType(Collection&lt;Long&gt; teamIds, @NotNull UserType userType, EnumSet&lt;SponsorshipStatus&gt; sponsorshipStatuses, int pageSize,
+                                                       int offset) {
+<span class="fc" id="L631">        return instituteUserManager.getInstituteUsersByType(teamIds, userType, sponsorshipStatuses, pageSize, offset);</span>
+    }
+
+    /**
+     * Get all InstituteUser records for a team coordinator
+     *
+     * @param userId
+     * @param fields
+     * @return
+     */
+    public List&lt;InstituteUser&gt; getTeamCoordRecords(long userId) {
+        try {
+<span class="fc" id="L643">            return instituteUserManager.getInstituteAdminRecords(userId);</span>
+<span class="nc" id="L644">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L645">            throw new PKBException(&quot;Error while getting the inst admin records for uid-&quot; + userId, e);</span>
+<span class="nc" id="L646">        } catch (Exception e) {</span>
+<span class="nc" id="L647">            throw new PKBException(&quot;Error while getting institute users by type&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Get the list of team patients by sorted by ascending last name, first name
+     *
+     * @param teamId
+     * @param userStatus
+     * @param sponsorshipStatus
+     * @param pageSize          No of items in a page
+     * @param offset            Page size * Page No + 1
+     * @return List of {@link InstituteUser} objects
+     */
+    public List&lt;InstituteUser&gt; getTeamPatientsByStatus(Long teamId,
+                                                       EnumSet&lt;UserStatus&gt; userStatus, EnumSet&lt;SponsorshipStatus&gt; sponsorshipStatus,
+                                                       int pageSize, int offset) {
+<span class="fc" id="L664">        return instituteUserManager.getInstitutePatientsByStatus(teamId, userStatus, sponsorshipStatus, pageSize, offset);</span>
+    }
+
+    /**
+     * Get the list of non registered users by type sorted by ascending last name, first name
+     *
+     * @param teamId
+     * @param userType
+     * @param pageSize
+     * @param offset
+     * @return List of {@link InstituteUser} objects
+     */
+    public List&lt;InstituteUser&gt; getNonRegInstituteUsersByType(Long teamId,
+                                                             UserType userType, int pageSize, int offset) {
+        try {
+<span class="fc" id="L679">            return instituteUserManager.getNonRegInstituteUsersByType(teamId, userType,</span>
+                    pageSize, offset);
+<span class="nc" id="L681">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L682">            throw new PKBException(&quot;Error while getting the patient list for institute -&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Invite the team clinician
+     *
+     * @param team         {@link Team}
+     * @param clinicianDTO DTO to carry the email and name for the patient
+     * @param coord        team coordinator
+     * @throws MailException
+     */
+    public void inviteClinician(LoggedInEHRRequestContext requestContext, Team team, PKBPersonDTO clinicianDTO,
+                                PKBPerson coord,
+                                PKBPerson clinician)
+            throws MailException {
+        try {
+<span class="fc" id="L699">            boolean isMultiTeamUser = false;</span>
+
+            // Create a PKBInvitation that can be persisted in the database
+
+<span class="fc" id="L703">            beginTransaction();</span>
+
+<span class="fc bfc" id="L705" title="All 2 branches covered.">            if (clinician != null) {</span>
+<span class="fc" id="L706">                boolean isInstituteUser = isTeamUser(clinician.getId());</span>
+<span class="fc bfc" id="L707" title="All 2 branches covered.">                boolean hasAccount = userManager.getDefaultAccountId(clinician.getId()) != null;</span>
+<span class="fc" id="L708">                PKBInvitation invitation = createInvitationObjectForClinicianInvite(team, clinician, coord, requestContext);</span>
+
+                SponsorshipStatus status;
+<span class="fc bfc" id="L711" title="All 2 branches covered.">                if (hasAccount) {</span>
+<span class="fc bfc" id="L712" title="All 2 branches covered.">                    if (isInstituteUser) {</span>
+<span class="fc" id="L713">                        isMultiTeamUser = true;</span>
+                    } else {
+<span class="fc" id="L715">                        status = SponsorshipStatus.INVITED_TO_UPGRADE;</span>
+<span class="fc" id="L716">                        invitation.setInvitationType(InvitationType.CLINICIAN_INVITATION_TO_UPGRADE_ACCOUNT);</span>
+<span class="fc" id="L717">                        PKBInvitation createdInvite = invitationOperationManager.createInvitation(requestContext, invitation);</span>
+<span class="fc" id="L718">                        invitation.setId(createdInvite.getId());</span>
+
+<span class="fc" id="L720">                        InstituteUser instituteUser = getInstituteUser(team.getId(), clinician.getId());</span>
+<span class="fc bfc" id="L721" title="All 2 branches covered.">                        if (instituteUser == null) {</span>
+                            // Create institute user with appropriate sponsorship status
+<span class="fc" id="L723">                            instituteUserManager.createInstituteUser(clinician.getId(), team.getId(),</span>
+                                    status);
+                        } else {
+                            // this takes care of the case if the team is re-invited for switching account
+<span class="fc" id="L727">                            updateStatus(team.getId(), clinician.getId(), status);</span>
+                        }
+
+<span class="fc" id="L730">                        cryptoModelSynchronisationService.syncCryptoAccessForPerson(clinician.getId());</span>
+
+<span class="fc bfc" id="L732" title="All 2 branches covered.">                        if (!isUserIdentified(clinician.getId())) {</span>
+
+<span class="fc" id="L734">                            com.pkb.datamodel.IdentityVerification verification = ImmutableIdentityVerification.builder()</span>
+<span class="fc" id="L735">                                    .signedConsentForm(false)</span>
+<span class="fc" id="L736">                                    .verificationDate(dateTimeService.now())</span>
+<span class="fc" id="L737">                                    .personId(clinician.getId())</span>
+<span class="fc" id="L738">                                    .verifierId(coord.getId())</span>
+<span class="fc" id="L739">                                    .status(com.pkb.entities.enums.VerificationStatus.VERIFIED)</span>
+<span class="fc" id="L740">                                    .photoIdType(com.pkb.entities.enums.PhotoIdType.VOUCHED_FOR_BY_COORDINATOR)</span>
+<span class="fc" id="L741">                                    .photoIdNumber(&quot;Vouched for by &quot; + coord.getTitle() + &quot; &quot;</span>
+<span class="fc" id="L742">                                            + coord.getFirstName() + &quot; &quot; + coord.getLastName()</span>
+<span class="fc" id="L743">                                            + &quot; of &quot; + team.getName())</span>
+<span class="fc" id="L744">                                    .verifyingTeamId(team.getId())</span>
+<span class="fc" id="L745">                                    .build();</span>
+
+<span class="fc" id="L747">                            identityVerificationService.save(verification);</span>
+                        }
+
+                        // Invite clinician to upgrade to become institution clinician
+<span class="fc" id="L751">                        pkbEmailMessageManager.inviteClinicianToUpgrade(team, coord, clinician, invitation.getPublicId());</span>
+<span class="fc" id="L752">                    }</span>
+                } else {
+                    // He must be invited nonInst - so do the same as before but with the existing PKBPerson record
+<span class="fc" id="L755">                    upgradeInvitedClinicianForCoord(requestContext, clinician, team, coord);</span>
+                }
+            }
+
+<span class="fc bfc" id="L759" title="All 4 branches covered.">            if ((clinician == null) || isMultiTeamUser) {</span>
+                // create clinician account
+<span class="fc" id="L761">                clinicianDTO.setUserType(UserType.REG_CLINICIAN);</span>
+<span class="fc" id="L762">                clinicianDTO.setUserName(clinicianDTO.getEmailId());</span>
+<span class="fc" id="L763">                clinicianDTO.setPassword(RandomUtil.randomPassword(10));</span>
+
+                // Fields that mustn't be null on creation
+<span class="pc bpc" id="L766" title="1 of 2 branches missed.">                if (clinicianDTO.getCountry() == null) {</span>
+<span class="fc" id="L767">                    clinicianDTO.setCountry(team.getCountry());</span>
+                }
+<span class="pc bpc" id="L769" title="1 of 2 branches missed.">                if (clinicianDTO.getTimeZoneId() == null) {</span>
+<span class="fc" id="L770">                    clinicianDTO.setTimeZoneId(PKBConstants.DEFAULT_TIMEZONE_ID);</span>
+                }
+
+<span class="fc" id="L773">                createClinicianForCoord(requestContext, clinicianDTO, team, coord);</span>
+            }
+<span class="fc" id="L775">            commitTransaction();</span>
+
+<span class="nc" id="L777">        } catch (Exception e) {</span>
+<span class="nc" id="L778">            throw new PKBException(&quot;Error while inviting clinician -&quot; + clinicianDTO.getEmailId(), e);</span>
+        } finally {
+<span class="fc" id="L780">            rollbackIfNotCommitted();</span>
+        }
+<span class="fc" id="L782">    }</span>
+
+    private void createClinicianForCoord(LoggedInEHRRequestContext requestContext, PKBPersonDTO clinicianDTO, Team team,
+                                         PKBPerson currentCoord)
+            throws MailException {
+        PKBPerson newClinician;
+<span class="fc" id="L788">        Email email = clinicianDTO.getEmailId();</span>
+<span class="fc" id="L789">        clinicianDTO.setStatus(UserStatus.CREATED);</span>
+<span class="pc bpc" id="L790" title="1 of 2 branches missed.">        if (email == null) {</span>
+<span class="nc" id="L791">            clinicianDTO.setStatus(UserStatus.NOCONTACT);</span>
+        }
+
+        try {
+            // registerUserFull() handles pkbperson, LDAP, account and account_user links,
+            // InstituteUser (invited), password access etc.
+
+<span class="fc" id="L798">            userManager.registerUserFull(requestContext, clinicianDTO, team.getId());</span>
+
+<span class="fc" id="L800">            newClinician = userManager.getPKBPerson(clinicianDTO.getId());</span>
+
+            // auto-identify the clinician;  coordinator is vouching for them:
+<span class="fc" id="L803">            IdentityVerification verification = new IdentityVerification();</span>
+<span class="fc" id="L804">            verification.setPersonId(newClinician.getId());</span>
+<span class="fc" id="L805">            verification.setVerifierId(currentCoord.getId());</span>
+<span class="fc" id="L806">            verification.setVerificationDate(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L807">            verification.setStatus(VerificationStatus.VERIFIED);</span>
+<span class="fc" id="L808">            verification.setSignedConsentForm(false);</span>
+<span class="fc" id="L809">            verification.setPhotoIdType(PhotoIdType.VOUCHED_FOR_BY_COORDINATOR);</span>
+<span class="fc" id="L810">            verification.setPhotoIdNumber(&quot;Vouched for by &quot; + currentCoord.getTitle() + &quot; &quot;</span>
+<span class="fc" id="L811">                    + currentCoord.getFirstName() + &quot; &quot; + currentCoord.getLastName()</span>
+<span class="fc" id="L812">                    + &quot; of &quot; + team.getName());</span>
+<span class="fc" id="L813">            verification.setVerifyingTeam(team);</span>
+
+<span class="fc" id="L815">            activateUserAccount(newClinician.getId(), team.getId(), verification);</span>
+
+<span class="fc bfc" id="L817" title="All 2 branches covered.">            if (!team.isDefaultNewProsContactable()) {</span>
+<span class="fc" id="L818">                updateContactOptions(requestContext, team.getId(), newClinician.getId(), ContactOptions.None);</span>
+            }
+
+<span class="pc bpc" id="L821" title="1 of 2 branches missed.">            if (email != null) {</span>
+                // email notification - if this fails, rollback, because the patient needs the email
+<span class="fc" id="L823">                pkbEmailMessageManager.notifyClinicianOfCreatedAccount(currentCoord, newClinician,</span>
+                        team, null);
+            }
+
+            //            // we're creating a pre-activated account -- don't make invitation object (not needed)
+            //            PKBInvitation invitation = createInvitationObject(team, newPatient, coordAccountUser);
+            //            invitation.setPKBInvitationType(InvitationType.PATIENT_INVITATION);
+            //            Long invitationId = invitationRemote.saveInvitation(invitation);
+            //            invitation.setId(invitationId);
+
+<span class="nc" id="L833">        } catch (Exception e) {</span>
+<span class="nc" id="L834">            throw new PKBException(&quot;Error while getting user access bean&quot;, e);</span>
+<span class="fc" id="L835">        }</span>
+<span class="fc" id="L836">    }</span>
+
+    // Made by cutting a little out of the above - but not worth consolidating as this will all change with mylti-account clinicians
+    private void upgradeInvitedClinicianForCoord(EHRRequestContext requestContext, PKBPerson clinician, Team team,
+                                                 PKBPerson currentCoord) {
+
+
+        try {
+<span class="fc" id="L844">            clinician.setPassword(RandomUtil.randomPassword(10));</span>
+<span class="fc" id="L845">            userCredentialsService.saveCredential(userCredentialsService.createCredentials(clinician.getId(), clinician.getPassword().toCharArray()));</span>
+<span class="fc" id="L846">            AccountIds accountIds = userManager.registerUserFullSetupAccounts(requestContext, clinician.getId(), clinician.getPassword(), team.getId());</span>
+<span class="fc" id="L847">            PKBPerson newClinician = userManager.registerUserFullPasswordAccessThenReturnThatUser(</span>
+<span class="fc" id="L848">                    requestContext, clinician.getId(),</span>
+<span class="fc" id="L849">                    accountIds.getId(),</span>
+<span class="fc" id="L850">                    clinician.getPassword());</span>
+
+<span class="fc" id="L852">            newClinician.setDefaultAccountId(accountIds.getId());</span>
+<span class="fc" id="L853">            newClinician.setPassword(clinician.getPassword());</span>
+
+<span class="pc" id="L855">            UserStatus status = newClinician.findEmail().fold(() -&gt; UserStatus.NOCONTACT, ignored -&gt; UserStatus.CREATED);</span>
+<span class="fc" id="L856">            newClinician.setStatus(status, dateTimeService.now());</span>
+<span class="fc" id="L857">            userManager.updateUser(requestContext, newClinician);</span>
+
+
+            // auto-identify the clinician;  coordinator is vouching for them:
+<span class="fc" id="L861">            IdentityVerification verification = new IdentityVerification();</span>
+<span class="fc" id="L862">            verification.setPersonId(newClinician.getId());</span>
+<span class="fc" id="L863">            verification.setVerifierId(currentCoord.getId());</span>
+<span class="fc" id="L864">            verification.setVerificationDate(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L865">            verification.setStatus(VerificationStatus.VERIFIED);</span>
+<span class="fc" id="L866">            verification.setSignedConsentForm(false);</span>
+<span class="fc" id="L867">            verification.setPhotoIdType(PhotoIdType.VOUCHED_FOR_BY_COORDINATOR);</span>
+<span class="fc" id="L868">            verification.setPhotoIdNumber(&quot;Vouched for by &quot; + currentCoord.getTitle() + &quot; &quot;</span>
+<span class="fc" id="L869">                    + currentCoord.getFirstName() + &quot; &quot; + currentCoord.getLastName()</span>
+<span class="fc" id="L870">                    + &quot; of &quot; + team.getName());</span>
+<span class="fc" id="L871">            verification.setVerifyingTeam(team);</span>
+
+<span class="fc" id="L873">            activateUserAccount(newClinician.getId(), team.getId(), verification);</span>
+
+<span class="pc bpc" id="L875" title="1 of 2 branches missed.">            if (clinician.findEmail().isDefined()) {</span>
+                // email notification - if this fails, rollback, because the patient needs the email
+<span class="fc" id="L877">                pkbEmailMessageManager.notifyClinicianOfCreatedAccount(currentCoord, newClinician,</span>
+                        team, null);
+            }
+
+<span class="nc" id="L881">        } catch (Exception exception) {</span>
+<span class="nc" id="L882">            throw new RuntimeException(&quot;Error while upgrading invited noninst clinician&quot;, exception);</span>
+<span class="fc" id="L883">        }</span>
+<span class="fc" id="L884">    }</span>
+
+
+    private PKBInvitation createInvitationObjectForClinicianInvite(Team team, PKBPerson targetUser,
+                                                                   PKBPerson admin,
+                                                                   LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L890">        Long targetUserAccountId = userManager.getDefaultAccountId(targetUser.getId());</span>
+<span class="fc" id="L891">        PKBInvitationDetail pkbid = new PKBInvitationDetail(new SourceDetails(requestContext));</span>
+<span class="fc" id="L892">        pkbid.setInstituteCode(team.getCode());</span>
+<span class="fc" id="L893">        PKBInvitation invitation = new PKBInvitation();</span>
+<span class="fc" id="L894">        invitation.setAccountId(targetUserAccountId);</span>
+<span class="fc" id="L895">        invitation.setCreated(dateTimeService.now());</span>
+<span class="fc" id="L896">        invitation.setTargetUser(targetUser);</span>
+<span class="fc" id="L897">        invitation.setAuthorUserId(admin.getId());</span>
+<span class="fc" id="L898">        invitation.setInvitationDetail(pkbid);</span>
+<span class="fc" id="L899">        invitation.setGrantedConsents(null);</span>
+<span class="fc" id="L900">        return invitation;</span>
+    }
+
+    /**
+     * Get all the InstituteUser links for the given person
+     *
+     * @param requestContext
+     * @param personId
+     * @return
+     */
+    public List&lt;InstituteUser&gt; getInstituteUsersForPerson(EHRRequestContext requestContext, Long personId) {
+        try {
+<span class="fc" id="L912">            return instituteUserManager.getInstituteUsersForPerson(requestContext, personId);</span>
+<span class="nc" id="L913">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L914">            throw new PKBException(&quot;Error getting InstituteUsers for person-&quot; + personId, e);</span>
+        }
+    }
+
+    /**
+     * Get the team user by id
+     *
+     * @param teamId Id of the team
+     * @param userId
+     * @return {@link InstituteUser}
+     */
+    public InstituteUser getInstituteUser(Long teamId, long userId) {
+        try {
+<span class="fc" id="L927">            return instituteUserManager.getInstituteUser(teamId, userId);</span>
+<span class="nc" id="L928">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L929">            throw new PKBException(&quot;Error getting user-&quot; + userId + &quot; for team-&quot; + teamId, e);</span>
+        }
+    }
+
+    public InstituteUser getInstituteUserWithInstitute(Long teamId, long userId) {
+        try {
+<span class="fc" id="L935">            return instituteUserManager.getInstituteUserWithInstitute(teamId, userId);</span>
+<span class="nc" id="L936">        } catch (Exception e) {</span>
+<span class="nc" id="L937">            throw new RuntimeException(&quot;Error getting user-&quot; + userId + &quot; for team-&quot; + teamId, e);</span>
+        }
+    }
+
+    /**
+     * Check if the user is an team user
+     *
+     * @param userId
+     * @return true if user is a team user else false
+     * @deprecated Impl. does not correctly check {@link SponsorshipStatus}. Use {@link TeamUserManager#isActiveTeamUser(Long)}
+     */
+    @Deprecated
+    public boolean isTeamUser(long userId) {
+        try {
+<span class="fc" id="L951">            return instituteUserManager.isTeamUser(userId);</span>
+<span class="nc" id="L952">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L953">            throw new PKBException(&quot;Error while checking if the user-&quot; + userId</span>
+                    + &quot; is an institute user&quot;, e);
+        }
+    }
+
+    /**
+     * Check if the user is active in a team.
+     *
+     * @param userId
+     * @return true if user is a team user else false
+     */
+    public boolean isActiveTeamUser(long userId) {
+<span class="fc" id="L965">        return instituteUserManager.isActiveTeamUser(userId);</span>
+    }
+
+    /**
+     * Check whether a user is fully registered.
+     *
+     * @param userId Users Id.
+     * @return {@code true} when user sponsorship status is active and her/his email address is confirmed, {@code false} otherwise.
+     */
+    public boolean isUserRegistered(long userId) {
+        try {
+<span class="fc" id="L976">            return instituteUserManager.isUserRegistered(userId);</span>
+<span class="nc" id="L977">        } catch (PKBPluginException cause) {</span>
+<span class="nc" id="L978">            throw new PKBException(format(&quot;Error while checking if user-%s is a registered user&quot;, userId), cause);</span>
+        }
+    }
+
+    /**
+     * Create the team user
+     *
+     * @param userId user id
+     * @param teamId
+     */
+    public void createInstituteUser(long userId, Long teamId) {
+        try {
+<span class="fc" id="L990">            instituteUserManager.createInstituteUser(userId, teamId);</span>
+<span class="fc" id="L991">            cryptoModelSynchronisationService.syncCryptoAccessForPerson(userId);</span>
+<span class="nc" id="L992">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L993">            throw new PKBException(&quot;Error while creating institute user-&quot; + userId, e);</span>
+<span class="fc" id="L994">        }</span>
+<span class="fc" id="L995">    }</span>
+
+    /**
+     * Create the team user with a given status
+     *
+     * @param userId
+     * @param teamId
+     * @param sponsorshipStatus
+     */
+    public void createInstituteUser(long userId, Long teamId, SponsorshipStatus sponsorshipStatus) {
+        try {
+<span class="fc" id="L1006">            instituteUserManager.createInstituteUser(userId, teamId, sponsorshipStatus);</span>
+<span class="fc" id="L1007">            cryptoModelSynchronisationService.syncCryptoAccessForPerson(userId);</span>
+<span class="nc" id="L1008">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1009">            throw new PKBException(&quot;Error while creating institute user-&quot; + userId, e);</span>
+<span class="fc" id="L1010">        }</span>
+<span class="fc" id="L1011">    }</span>
+
+    private List&lt;Team&gt; getUserTeams(List&lt;InstituteUser&gt; instituteUsers, Long userId, boolean activeOnly) {
+        try {
+<span class="fc" id="L1015">            LOGGER.info(&quot;DELPHI: got {} IU records for user-{}&quot;, instituteUsers.size(), userId);</span>
+
+<span class="fc bfc" id="L1017" title="All 2 branches covered.">            if (instituteUsers.isEmpty()) {</span>
+<span class="fc" id="L1018">                return emptyList();</span>
+            }
+<span class="fc" id="L1020">            List&lt;Team&gt; teams = new ArrayList&lt;&gt;(instituteUsers.size());</span>
+            // first search for active records
+<span class="fc bfc" id="L1022" title="All 2 branches covered.">            for (InstituteUser instituteUser : instituteUsers) {</span>
+<span class="fc" id="L1023">                Team team = instituteUser.getInstitute();</span>
+<span class="fc bfc" id="L1024" title="All 2 branches covered.">                if (SponsorshipStatus.ACTIVE == instituteUser.getSponsorshipStatus()) {</span>
+<span class="fc" id="L1025">                    teams.add(team);</span>
+<span class="fc" id="L1026">                    LOGGER.info(&quot;DELPHI: active in team-{}&quot;, team.getId());</span>
+                } else {
+<span class="fc" id="L1028">                    LOGGER.info(&quot;DELPHI: NOT active in team-{}&quot;, team.getId());</span>
+                }
+<span class="fc" id="L1030">            }</span>
+            // next search for invited, if permitted AND if we found NO active records
+<span class="fc bfc" id="L1032" title="All 4 branches covered.">            if (teams.isEmpty() &amp;&amp; !activeOnly) {</span>
+<span class="fc bfc" id="L1033" title="All 2 branches covered.">                for (InstituteUser instituteUser : instituteUsers) {</span>
+<span class="fc" id="L1034">                    SponsorshipStatus sponsorshipStatus = instituteUser.getSponsorshipStatus();</span>
+<span class="pc bpc" id="L1035" title="1 of 2 branches missed.">                    if (SponsorshipStatus.INVITED == sponsorshipStatus) {</span>
+<span class="fc" id="L1036">                        teams.add(instituteUser.getInstitute());</span>
+                    }
+<span class="fc" id="L1038">                }</span>
+            }
+            // don't count other records as a valid link (inactive, invited to switch/upgrade)
+<span class="fc" id="L1041">            return teams;</span>
+<span class="nc" id="L1042">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1043">            throw new PKBException(&quot;Error while getting team list for user-&quot; + userId, e);</span>
+        }
+    }
+
+    public List&lt;Team&gt; getUserTeamsStrictlyFiltered(LoggedInEHRRequestContext requestContext, boolean activeOnly, Team.Lazy... fields) {
+<span class="fc" id="L1048">        List&lt;InstituteUser&gt; instituteUsers = instituteUserManager.getInstituteUsersForPersonStrictlyFiltered(requestContext, fields);</span>
+<span class="fc" id="L1049">        return getUserTeams(instituteUsers, requestContext.getContextOrAccessingUserId(), activeOnly);</span>
+    }
+
+    /**
+     * &lt;p&gt;
+     * Get {@link Team Teams} linked to a user.
+     * &lt;/p&gt;
+     * &lt;p&gt;
+     * When activeOnly is {@code true} ONLY active links are returned.&lt;br /&gt;
+     * When activeOnly is {@code false} then:
+     * &lt;ol&gt;
+     * &lt;li&gt;If links with active status are found, then they shall be returned and no further search needs to be carried out.&lt;/li&gt;
+     * &lt;li&gt;If no links with active status are found, then links with invited status are searched and returned if found any.&lt;/li&gt;
+     * &lt;li&gt;Return empty result (no links with inactive nor invited to switch/upgrade status shall be taken into acount here).&lt;/li&gt;
+     * &lt;/ol&gt;
+     * &lt;/p&gt;
+     *
+     * @param userId user id
+     * @return {@link Team List of Teams}, never {@code null} or throws an exception.
+     */
+    public List&lt;Team&gt; getUserTeams(EHRRequestContext requestContext, long userId, boolean activeOnly, Team.Lazy... fields) {
+<span class="fc" id="L1070">        List&lt;InstituteUser&gt; instituteUsers = instituteUserManager.getInstituteUsersForPerson(requestContext, userId, fields);</span>
+<span class="fc" id="L1071">        return getUserTeams(instituteUsers, userId, activeOnly);</span>
+    }
+
+    public Stream&lt;Team&gt; getTeamsOfUser(long userId) {
+<span class="fc" id="L1075">        return instituteUserManager.getInstituteUsersForPerson(userId).stream().map(InstituteUser::getInstitute);</span>
+    }
+
+    /**
+     * Get a list of ids for teams linked to a user.
+     */
+    public List&lt;Long&gt; getUserTeamIds(long userId) {
+<span class="fc" id="L1082">        return instituteUserManager.getInstituteIdsForPerson(userId);</span>
+    }
+
+    /**
+     * Get a list of ids for teams linked to a user.
+     */
+    public List&lt;UUID&gt; getTeamPublicIdsForPatient(long patientId) {
+<span class="fc" id="L1089">        List&lt;Long&gt; teamIds = getUserTeamIds(patientId);</span>
+<span class="pc bpc" id="L1090" title="1 of 2 branches missed.">        if (teamIds.isEmpty()) {</span>
+<span class="nc" id="L1091">            return Collections.emptyList();</span>
+        }
+<span class="fc" id="L1093">        return teamManager.getTeamPublicIdsByIds(teamIds);</span>
+    }
+
+    /**
+     * Get a list of ids for teams linked to a user.
+     */
+    public List&lt;UUID&gt; getActiveTeamPublicIdsForPatient(long patientId) {
+<span class="fc" id="L1100">        return instituteUserManager.getActiveTeamPublicIdsForPerson(patientId);</span>
+    }
+
+    /**
+     * Checks if the user has &lt;i&gt;any&lt;/i&gt; institute user records. If it does have then it's an affiliated user.
+     *
+     * @param userId the ID of the user we search team realtionship for.
+     * @return true if the user has any relationship to any team false otherwise.
+     */
+    public boolean isAffiliatedUser(Long userId) {
+<span class="fc" id="L1110">        return instituteUserManager.isAffilatedUser(userId);</span>
+    }
+
+    /**
+     * Checks if the user has &lt;i&gt;any&lt;/i&gt; institute user records. If it doesn't have then it's an unaffiliated user.
+     *
+     * @param userId the ID of the user we search team realtionship for.
+     * @return true if the user hasn't got any relationship to any team false otherwise.
+     */
+    public boolean isUnaffiliatedUser(Long userId) {
+<span class="fc bfc" id="L1120" title="All 2 branches covered.">        return !isAffiliatedUser(userId);</span>
+    }
+
+    @NotNull
+    public Optional&lt;Team&gt; findActivePrimaryTeam(@Nullable EHRRequestContext requestContext, @NotNull Long userId) {
+<span class="fc" id="L1125">        return ofNullable(getPrimaryTeam(requestContext, userId, true));</span>
+    }
+
+    public @NotNull Map&lt;Long, Team&gt; findActivePrimaryTeams(@Nullable EHRRequestContext requestContext, @NotNull Collection&lt;Long&gt; userIds) {
+<span class="fc bfc" id="L1129" title="All 2 branches covered.">        if (!userIds.isEmpty()) {</span>
+<span class="fc" id="L1130">            Map&lt;Long, List&lt;InstituteUser&gt;&gt; instituteUsers = instituteUserManager.getInstituteUsersForPersons(userIds);</span>
+
+<span class="fc" id="L1132">            Map&lt;Long, Tuple2&lt;List&lt;Team&gt;, List&lt;Team&gt;&gt;&gt; teams = new HashMap&lt;&gt;();</span>
+
+<span class="fc bfc" id="L1134" title="All 2 branches covered.">            for (Long personId : instituteUsers.keySet()) {</span>
+<span class="fc" id="L1135">                Tuple2&lt;List&lt;Team&gt;, List&lt;Team&gt;&gt; teamList = getActiveAndInvitedInstitutes(instituteUsers.get(personId));</span>
+<span class="fc" id="L1136">                teams.put(personId, teamList);</span>
+<span class="fc" id="L1137">            }</span>
+
+<span class="fc" id="L1139">            Map&lt;Long, com.pkb.datamodel.IdentityVerification&gt; identityVerifications = identityVerificationService.getIdentityVerifications(userIds);</span>
+
+<span class="fc" id="L1141">            return userIds.stream()</span>
+<span class="fc" id="L1142">                    .map(userId -&gt; Tuple.of(userId, teams.getOrDefault(userId, EMPTY_LISTS)))</span>
+<span class="fc" id="L1143">                    .map(userIdTeamLists -&gt; Tuple.of(userIdTeamLists._1,</span>
+<span class="fc" id="L1144">                            getPrimaryTeamHelper(requestContext,</span>
+<span class="fc" id="L1145">                                    userIdTeamLists._1, // userId</span>
+                                    true,
+                                    userIdTeamLists._2._1, // active team list
+                                    userIdTeamLists._2._2, // invited team list
+<span class="fc" id="L1149">                                    () -&gt; identityVerifications.get(userIdTeamLists._1))))</span>
+<span class="fc bfc" id="L1150" title="All 2 branches covered.">                    .filter(userIdTeam -&gt; userIdTeam._2 != null)</span>
+<span class="fc" id="L1151">                    .collect(Collectors.toMap(userIdTeam -&gt; userIdTeam._1, userIdTeam -&gt; userIdTeam._2));</span>
+        }
+
+<span class="fc" id="L1154">        return Collections.emptyMap();</span>
+    }
+
+    @NotNull
+    public Optional&lt;Team&gt; findPrimaryTeam(@Nullable EHRRequestContext requestContext, @NotNull Long userId) {
+<span class="fc" id="L1159">        return ofNullable(getPrimaryTeam(requestContext, userId, false));</span>
+    }
+
+    /**
+     * If there's only one team, return that (IGNORE SponsorshipStatus.INVITED_TO_SWITCH_ACCOUNT, INVITED_TO_UPGRADE, INACTIVE
+     * If only one ACTIVE instituteUser link, return that.
+     * If there are multiple active links, look up the activating user
+     *
+     * @deprecated use {@link #findActivePrimaryTeam} or {@link #findPrimaryTeam} instead.
+     */
+    @Deprecated
+    public @Nullable Team getPrimaryTeam(@Nullable EHRRequestContext requestContext, Long userId, boolean activeOnly) {
+<span class="fc" id="L1171">        List&lt;InstituteUser&gt; instituteLinks = instituteUserManager.getInstituteUsersForPerson(requestContext, userId);</span>
+
+<span class="fc bfc" id="L1173" title="All 2 branches covered.">        if (instituteLinks.isEmpty()) {</span>
+<span class="fc" id="L1174">            return null;</span>
+        }
+
+<span class="fc" id="L1177">        Tuple2&lt;List&lt;Team&gt;, List&lt;Team&gt;&gt; teams = getActiveAndInvitedInstitutes(instituteLinks);</span>
+<span class="fc" id="L1178">        return getPrimaryTeamHelper(requestContext, userId, activeOnly, teams._1, teams._2);</span>
+    }
+
+    private Tuple2&lt;List&lt;Team&gt;, List&lt;Team&gt;&gt; getActiveAndInvitedInstitutes(Collection&lt;InstituteUser&gt; instituteLinks) {
+<span class="fc" id="L1182">        List&lt;Team&gt; activeInstitutes = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L1183">        List&lt;Team&gt; invitedInstitutes = new ArrayList&lt;&gt;();</span>
+
+        // split out active from invitation links
+<span class="fc bfc" id="L1186" title="All 2 branches covered.">        for (InstituteUser iu : instituteLinks) {</span>
+<span class="fc bfc" id="L1187" title="All 2 branches covered.">            if (iu.getSponsorshipStatus() == SponsorshipStatus.ACTIVE) {</span>
+<span class="fc" id="L1188">                activeInstitutes.add(iu.getInstitute());</span>
+<span class="fc bfc" id="L1189" title="All 2 branches covered.">            } else if (iu.getSponsorshipStatus() == SponsorshipStatus.INVITED) {</span>
+<span class="fc" id="L1190">                invitedInstitutes.add(iu.getInstitute());</span>
+            }
+<span class="fc" id="L1192">        }</span>
+
+<span class="fc" id="L1194">        return new Tuple2&lt;&gt;(activeInstitutes, invitedInstitutes);</span>
+    }
+
+    private Team getPrimaryTeamHelper(@Nullable EHRRequestContext requestContext, long userId, boolean activeOnly,
+                                      List&lt;Team&gt; activeInstitutes, List&lt;Team&gt; invitedInstitutes) {
+        try {
+<span class="fc" id="L1200">            return getPrimaryTeamHelper(requestContext, userId, activeOnly, activeInstitutes, invitedInstitutes, () -&gt; identityVerificationService.getIdentityVerification(userId).orElse(null));</span>
+<span class="nc" id="L1201">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1202">            throw new RuntimeException(&quot;Error while getting institute list for user-&quot; + userId, e);</span>
+        }
+    }
+
+    private Team getPrimaryTeamHelper(@Nullable EHRRequestContext requestContext, long userId, boolean activeOnly,
+                                      List&lt;Team&gt; activeInstitutes, List&lt;Team&gt; invitedInstitutes, Supplier&lt;com.pkb.datamodel.IdentityVerification&gt; identityVerificationSupplier) {
+        try {
+            // no active links at all, yet -- unless activeOnly, return first invited link (if any)
+<span class="fc bfc" id="L1210" title="All 2 branches covered.">            if (activeInstitutes.isEmpty()) {</span>
+<span class="fc bfc" id="L1211" title="All 4 branches covered.">                if (activeOnly || invitedInstitutes.isEmpty()) {</span>
+<span class="fc" id="L1212">                    return null;</span>
+                } else {
+<span class="fc" id="L1214">                    return invitedInstitutes.get(0);</span>
+                }
+            }
+            // 1 active link: return it
+<span class="fc bfc" id="L1218" title="All 2 branches covered.">            else if (activeInstitutes.size() == 1) {</span>
+<span class="fc" id="L1219">                return activeInstitutes.get(0);</span>
+            }
+            // multiple active institutes
+            else {
+                // one of these may be null:
+<span class="fc" id="L1224">                Long verifierId = null;</span>
+<span class="fc" id="L1225">                Long verifyingTeam = null;</span>
+
+<span class="fc" id="L1227">                com.pkb.datamodel.IdentityVerification identityVerification = identityVerificationSupplier.get();</span>
+
+<span class="pc bpc" id="L1229" title="1 of 2 branches missed.">                if (identityVerification != null) {</span>
+<span class="fc" id="L1230">                    verifierId = identityVerification.getVerifierId().getOrNull();</span>
+<span class="fc" id="L1231">                    verifyingTeam = identityVerification.getVerifyingTeamId().getOrNull();</span>
+                }
+
+<span class="pc bpc" id="L1234" title="1 of 4 branches missed.">                if ((verifierId != null) &amp;&amp; verifierId.equals(userId)) {</span>
+<span class="nc" id="L1235">                    LOGGER.error(&quot;account is self-verified!  returning first active institute. user {}&quot;, userId);</span>
+<span class="nc" id="L1236">                    return activeInstitutes.get(0);</span>
+                }
+
+<span class="pc bpc" id="L1239" title="3 of 4 branches missed.">                if ((verifyingTeam == null) &amp;&amp; (verifierId != null)) {</span>
+                    // try getting the team of the verifierId
+<span class="nc" id="L1241">                    verifyingTeam = findActivePrimaryTeam(requestContext, verifierId)</span>
+<span class="nc" id="L1242">                            .map(Team::getId)</span>
+<span class="nc" id="L1243">                            .orElse(null);</span>
+                }
+
+<span class="pc bpc" id="L1246" title="1 of 2 branches missed.">                if (verifyingTeam == null) {</span>
+                    // PHR-8436 suppress log message if identify verification is via NHS login
+<span class="nc bnc" id="L1248" title="All 4 branches missed.">                    if (identityVerification != null &amp;&amp; identityVerification.getPhotoIdType().getOrNull() != PhotoIdType.NHS_LOGIN) {</span>
+<span class="nc" id="L1249">                        LOGGER.error(&quot;verifierId institute is null!  returning first active institute. user {}&quot;, userId);</span>
+                    }
+<span class="nc" id="L1251">                    return activeInstitutes.get(0);</span>
+                }
+
+                // find active link to that institute...
+<span class="pc bpc" id="L1255" title="1 of 2 branches missed.">                for (Team active : activeInstitutes) {</span>
+<span class="pc bpc" id="L1256" title="1 of 2 branches missed.">                    if (active.getId().equals(verifyingTeam)) {</span>
+<span class="fc" id="L1257">                        return active;</span>
+                    }
+<span class="nc" id="L1259">                }</span>
+                // ...user is probably inactive in activating institute... return null
+<span class="nc" id="L1261">                return null;</span>
+            }
+<span class="nc" id="L1263">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1264">            throw new RuntimeException(&quot;Error while getting institute list for user-&quot; + userId, e);</span>
+        }
+
+    }
+
+    /**
+     * Lists all other clinicians in the same team
+     *
+     * @param clinicianId
+     * @param requireOptionOrNull null, Messages_Only, or Consultations_Only
+     * @param fields
+     * @return
+     */
+    public List&lt;PKBPerson&gt; getColleagues(EHRRequestContext requestContext, Long clinicianId,
+                                         ContactOptions requireOptionOrNull,
+                                         PKBPerson.Lazy... fields) {
+        try {
+<span class="fc" id="L1281">            Team team = getPrimaryTeam(requestContext, clinicianId, true/*activeOnly*/);</span>
+<span class="fc bfc" id="L1282" title="All 2 branches covered.">            if (team == null) {</span>
+<span class="fc" id="L1283">                return new ArrayList&lt;&gt;(); // no result</span>
+            }
+
+<span class="fc" id="L1286">            return instituteUserManager.getColleagues(clinicianId, team.getId(), requireOptionOrNull, fields);</span>
+<span class="nc" id="L1287">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1288">            throw new PKBException(&quot;Error while getting colleague list for user-&quot; + clinicianId, e);</span>
+        }
+    }
+
+    /**
+     * Update the status for institute user
+     *
+     * @param teamId
+     * @param userId
+     * @param status
+     */
+    public void updateStatus(Long teamId, long userId, SponsorshipStatus status) {
+        try {
+<span class="fc" id="L1301">            instituteUserManager.updateStatus(teamId, userId, status);</span>
+<span class="nc" id="L1302">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1303">            throw new PKBException(&quot;Error while updating status for institute user-&quot; + userId, e);</span>
+<span class="fc" id="L1304">        }</span>
+<span class="fc" id="L1305">    }</span>
+
+    public void updateContactOptions(EHRRequestContext requestContext, Long teamId, long userId,
+                                     ContactOptions contactOptions) {
+        try {
+<span class="fc" id="L1310">            instituteUserManager.updateContactOptions(teamId, userId, contactOptions);</span>
+<span class="nc" id="L1311">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1312">            throw new PKBException(&quot;Error while updating contact options for institute user-&quot; + userId, e);</span>
+<span class="fc" id="L1313">        }</span>
+<span class="fc" id="L1314">    }</span>
+
+    /**
+     * @param team
+     * @param filterStartDate     can be null; filters so returned patients have national IDs set after this timestamp
+     * @param filterEndDate       can be null; filters so returned patients have national IDs set before this timestamp
+     * @param filterPatientId     can be null; filters based on patient's national ID (so returns 1 or 0 results)
+     * @param patientsWithIdsOnly normally true... if false, return active patient demographis even if patient has no org or national ID
+     * @return
+     */
+    public List&lt;PKBPerson&gt; getTeamPatientsForDataUpload(Team team,
+                                                        @Nullable ZonedDateTime filterStartDate, @Nullable ZonedDateTime filterEndDate, String filterPatientId, boolean localIdFlag,
+                                                        boolean patientsWithIdsOnly, EnumSet&lt;CustomizedLegacyInstituteUserRepository.DataUploadOption&gt; options) {
+        try {
+<span class="fc" id="L1328">            return instituteUserManager.getTeamPatientsForDataUpload(team,</span>
+                    filterStartDate, filterEndDate, filterPatientId, localIdFlag, patientsWithIdsOnly, options);
+<span class="nc" id="L1330">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1331">            throw new PKBException(&quot;Error while getting the patient list for team &quot;</span>
+                    + team + &quot;; filters: &quot; + filterStartDate + &quot; to &quot; + filterEndDate + &quot;; ID &quot; + filterPatientId, e);
+        }
+    }
+
+    public List&lt;IdPair&gt; getActivePatientIds(Team team) {
+
+<span class="fc" id="L1338">        return instituteUserManager.getActivePatientIds(team);</span>
+
+    }
+
+    /**
+     * @param org
+     * @param filterStartDate     can be null; filters so returned patients have national IDs set after this timestamp
+     * @param filterEndDate       can be null; filters so returned patients have national IDs set before this timestamp
+     * @param filterPatientId     can be null; filters based on patient's national ID (so returns 1 or 0 results)
+     * @param patientsWithIdsOnly normally true... if false, return active patient demographis even if patient has no org or national ID
+     * @return
+     */
+    public List&lt;PKBPerson&gt; getOrgPatientsForDataUpload(EHRRequestContext requestContext, Org org,
+                                                       ZonedDateTime filterStartDate, ZonedDateTime filterEndDate, String filterPatientId, boolean localIdFlag,
+                                                       boolean patientsWithIdsOnly) {
+        try {
+<span class="fc" id="L1354">            return instituteUserManager.getOrgPatientsForDataUpload(org,</span>
+                    filterStartDate, filterEndDate, filterPatientId, localIdFlag, patientsWithIdsOnly);
+<span class="nc" id="L1356">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1357">            throw new PKBException(&quot;Error while getting the patient list for org &quot;</span>
+                    + org + &quot;; filters: &quot; + filterStartDate + &quot; to &quot; + filterEndDate + &quot;; ID &quot; + filterPatientId, e);
+        }
+    }
+
+    /**
+     * Get all patients for the given org, restricted to the specified sponsorship statuses (use null for all)
+     *
+     * @param orgId
+     * @param statuses
+     * @param fields
+     * @return
+     */
+    public List&lt;PKBPerson&gt; getPatientsForOrg(EHRRequestContext requestContext, Long orgId, SponsorshipStatus[] statuses,
+                                             PKBPerson.Lazy... fields) {
+<span class="nc" id="L1372">        return instituteUserManager.getPatientsForOrg(orgId, statuses, fields);</span>
+    }
+
+
+    private UserType getSafeUserType(PKBPerson person) {
+<span class="nc bnc" id="L1377" title="All 2 branches missed.">        return person != null ? person.getUserType() : null;</span>
+    }
+
+
+    /**
+     * Upgrade the clinician from a non-team clinician to become a team clinician
+     *
+     * @param teamId      id of the team
+     * @param clinicianId user id of the clinician
+     * @throws MailException {@link MailException}
+     */
+    public void upgradeClinician(Team team, long clinicianId,
+                                 PKBPerson pkbAdmin)
+            throws MailException {
+        try {
+
+<span class="fc" id="L1393">            InstituteUser instituteUser = instituteUserManager.getInstituteUserWithInstitute(team.getId(), clinicianId);</span>
+            // Change the status
+<span class="fc" id="L1395">            instituteUserManager.updateStatus(team.getId(), clinicianId, ACTIVE);</span>
+<span class="fc" id="L1396">            cryptoModelSynchronisationService.syncCryptoAccessForPerson(clinicianId);</span>
+
+
+<span class="fc" id="L1399">            Team actualTeam = instituteUser.getInstitute();</span>
+<span class="fc" id="L1400">            List&lt;PKBPerson&gt; instituteAdmins = instituteUserManager.getInstituteAdmin(actualTeam.getCode());</span>
+<span class="fc" id="L1401">            PKBPerson clinician = instituteUser.getPerson();</span>
+            // Notify the actualTeam administrator
+<span class="fc bfc" id="L1403" title="All 2 branches covered.">            for (PKBPerson instituteAdmin : instituteAdmins) {</span>
+<span class="fc" id="L1404">                pkbEmailMessageManager.sendNotificationToInstituteAdmin(clinician, actualTeam,</span>
+                        instituteAdmin, false/*identity not verified*/);
+<span class="fc" id="L1406">            }</span>
+<span class="nc" id="L1407">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1408">            throw new PKBException(&quot;Error while upgrading clinician&quot;, e);</span>
+<span class="fc" id="L1409">        }</span>
+<span class="fc" id="L1410">    }</span>
+
+
+    /**
+     * Get the list of all clinicians assigned
+     *
+     * @param userId Id of the user
+     * @return List of {@link PKBPerson}
+     */
+    public List&lt;PKBPerson&gt; getCliniciansWithIndivAccess(long userId,
+                                                        ContactOptions contactOptions) {
+        try {
+<span class="nc" id="L1422">            return instituteUserManager.getCliniciansWithIndivAccess(userId, contactOptions);</span>
+<span class="nc" id="L1423">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1424">            throw new PKBException(&quot;Error while getting assigned clinicians &quot;, e);</span>
+        }
+    }
+
+    /**
+     * Get the list of all patients assigned
+     *
+     * @param userId Id of the user
+     * @return List of {@link PKBPerson}
+     */
+    public List&lt;PKBPerson&gt; getAssignedPatients(long userId, PKBPerson.Lazy... fields) {
+        try {
+<span class="fc" id="L1436">            return instituteUserManager.getAssignedPatients(userId, fields);</span>
+<span class="nc" id="L1437">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L1438">            throw new RuntimeException(&quot;Error while getting assigned patients &quot;, e);</span>
+        }
+    }
+
+    public Stream&lt;PKBPerson&gt; getTeamPatients(long teamId, boolean registeredOnly) {
+<span class="fc" id="L1443">        List&lt;Long&gt; personIds = instituteUserManager.getPersonIdsForTeam(teamId, registeredOnly);</span>
+<span class="fc" id="L1444">        List&lt;Long&gt; activePersonIds = consentService.getPatientIdsForConsentsInTeam(teamId, personIds);</span>
+<span class="fc" id="L1445">        List&lt;PKBPerson&gt; activePatients = beanFactory.getPKBPersonBean().findPKBPersonList(activePersonIds, PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+
+<span class="fc" id="L1447">        return activePatients.stream()</span>
+<span class="fc" id="L1448">                .sorted(Comparator</span>
+<span class="fc" id="L1449">                        .comparing(PKBPerson::getFirstName)</span>
+<span class="fc" id="L1450">                        .thenComparing(PKBPerson::getLastName)</span>
+<span class="fc" id="L1451">                        .thenComparing(PKBPerson::getId)</span>
+<span class="fc" id="L1452">                        .reversed()</span>
+                );
+    }
+
+    /**
+     * Reset LDAP user's password and security credentials, and restore user access to accounts.
+     * Current user must be admin with access to all of this user's accounts.
+     *
+     * @param resetUserId   id of the user whose password needs to be reset
+     * @param adminUserId   id of currently signed-in team admin user
+     * @param virtualPerson pass in the user license type and id here
+     * @return the security code; needed for test impl
+     * @throws MailException
+     */
+    public String resetUserCredentials(LoggedInEHRRequestContext requestContext, long resetUserId,
+                                       Long adminOrgId) throws MailException {
+
+<span class="fc" id="L1469">        return transactional(() -&gt; {</span>
+            PKBPersonRemote personBean;
+<span class="fc" id="L1471">            long adminUserId = requestContext.getAccessingUserId();</span>
+<span class="fc" id="L1472">            String newSecurityAnswer = UUID.randomUUID().toString();</span>
+
+<span class="fc" id="L1474">            personBean = beanFactory.getPKBPersonBean();</span>
+
+<span class="fc" id="L1476">            PKBPerson resetUser = personBean.getPKBPerson(resetUserId, PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L1477">            PKBPerson adminPerson = personBean.getPKBPerson(adminUserId, PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L1478">            Team adminInstituteOrNull = null;</span>
+<span class="fc bfc" id="L1479" title="All 2 branches covered.">            if (!adminPerson.isSuperAdmin()) {</span>
+<span class="fc" id="L1480">                List&lt;Team&gt; adminInstituteList = getUserTeams(requestContext, adminUserId, true/*activeOnly*/);</span>
+<span class="pc bpc" id="L1481" title="1 of 2 branches missed.">                if (adminInstituteList.isEmpty()) {</span>
+<span class="nc" id="L1482">                    throw new Exception(&quot;admin user has no institutes: &quot; + adminUserId);</span>
+<span class="pc bpc" id="L1483" title="1 of 2 branches missed.">                } else if (adminInstituteList.size() &gt; 1) {</span>
+                    // log (serious) but DON'T fail
+<span class="nc" id="L1485">                    LOGGER.error(&quot;error; ignoring&quot;,</span>
+<span class="nc" id="L1486">                            FrameFilter.filter(new Exception(&quot;Admin user &quot; + adminUserId + &quot; has institute count: &quot; + adminInstituteList.size()).fillInStackTrace()));</span>
+                }
+<span class="fc" id="L1488">                adminInstituteOrNull = adminInstituteList.get(0);</span>
+            }
+
+            // intentionally not saved anywhere... user will use security Q/A to
+            // restore
+<span class="fc" id="L1493">            String newPassword = UUID.randomUUID().toString();</span>
+
+<span class="fc" id="L1495">            Optional.ofNullable(resetUser.getHumanUUID())</span>
+<span class="fc" id="L1496">                    .map(humanUuid -&gt; getAllPersonasForHuman(requestContext, humanUuid))</span>
+<span class="fc" id="L1497">                    .orElse(List.of(resetUser))</span>
+<span class="fc" id="L1498">                    .forEach(person -&gt;</span>
+<span class="fc" id="L1499">                            resetUserCredentialsWithNewPassword(requestContext, person.getId(), adminUserId, adminOrgId, RESET_CREDENTIALS_SECURITY_QUESTION, newSecurityAnswer, newPassword));</span>
+
+
+            // Send email to the user to finish the password reset
+<span class="fc" id="L1503">            pkbEmailMessageManager.sendPasswordResetMail(resetUser, newSecurityAnswer, adminInstituteOrNull, adminPerson);</span>
+
+<span class="fc" id="L1505">            return newSecurityAnswer;</span>
+        });
+    }
+
+
+    /**
+     * Checks to see if the admin has reset this user's credentials BUT the user hasn't
+     * reclaimed their account yet.
+     *
+     * @param userId
+     * @return
+     */
+    public boolean isUserCredentialsResetPending(long userId) {
+        try {
+<span class="fc" id="L1519">            return userManager.getSecurityQuestion(userId).map(</span>
+                    RESET_CREDENTIALS_SECURITY_QUESTION::equals
+<span class="fc" id="L1521">            ).orElse(false);</span>
+<span class="nc" id="L1522">        } catch (Exception e) {</span>
+<span class="nc" id="L1523">            throw new PKBException(&quot;User: &quot; + userId, e);</span>
+        }
+    }
+
+    /**
+     * If the admin has reset this user's credentials, here the user reclaims
+     * their account.
+     *
+     * @param userId
+     * @param resetCode
+     * @param newPassword
+     * @param newSecurityQuestion
+     * @param newSecurityAnswer
+     */
+    public void completeResetUserCredentials(
+            long userId,
+            String resetCode,
+            String newPassword,
+            String newSecurityQuestion, String newSecurityAnswer) {
+        try {
+<span class="fc" id="L1543">            resetPassword(userId, resetCode, newPassword);</span>
+            // and store their new security question info (this also expires the old password recovery record)
+<span class="fc" id="L1545">            userManager.backUpPassword(userId, newPassword, newSecurityQuestion, newSecurityAnswer);</span>
+<span class="nc" id="L1546">        } catch (PKBException e) {</span>
+<span class="nc" id="L1547">            throw e;</span>
+<span class="nc" id="L1548">        } catch (Exception e) {</span>
+<span class="nc" id="L1549">            throw new PKBException(&quot;User &quot; + userId, e);</span>
+<span class="fc" id="L1550">        }</span>
+<span class="fc" id="L1551">    }</span>
+
+    private void resetPassword(long userId, String resetCode, String newPassword) {
+        try {
+<span class="fc" id="L1555">            userManager.resetPassword(userId, RESET_CREDENTIALS_SECURITY_QUESTION, resetCode, newPassword);</span>
+<span class="nc" id="L1556">        } catch (Exception exception) {</span>
+            // Most likely this was thrown by tolven because the supplied reset code does not match the stored one
+<span class="nc" id="L1558">            throw new PKBException(&quot;The reset code is invalid. Did you click on an old reset link?&quot;, exception);</span>
+<span class="fc" id="L1559">        }</span>
+<span class="fc" id="L1560">    }</span>
+
+    public Map&lt;Long, Boolean&gt; areUsersIdentified(Collection&lt;Long&gt; userIds) {
+<span class="fc bfc" id="L1563" title="All 2 branches covered.">        if (isEmpty(userIds)) {</span>
+<span class="fc" id="L1564">            return Collections.emptyMap();</span>
+        }
+<span class="fc" id="L1566">        return identityVerificationService.getIdentityVerifications(userIds)</span>
+<span class="fc" id="L1567">                .entrySet().stream().map(e -&gt; Tuple.of(e.getKey(), isVerified(e.getValue())))</span>
+<span class="pc" id="L1568">                .collect(Collectors.toMap(t -&gt; t._1(), t -&gt; t._2(), (bool, duplicate) -&gt; bool));</span>
+    }
+
+    /**
+     * Check of the user is already verified
+     *
+     * @param userId id of the user
+     * @return boolean true if the identity info of the person is already verified otherwise false
+     */
+    public boolean isUserIdentified(long userId) {
+<span class="fc" id="L1578">        return identityVerificationService.isVerified((userId));</span>
+    }
+
+    private boolean isVerified(com.pkb.datamodel.IdentityVerification identityVerification) {
+<span class="pc bpc" id="L1582" title="2 of 4 branches missed.">        return identityVerification != null &amp;&amp; identityVerification.getStatus().get().compareTo(com.pkb.entities.enums.VerificationStatus.VERIFIED) == 0;</span>
+    }
+
+    /**
+     * get the verification records for the team for a particular type of users
+     *
+     * @param teamId   id of the team the method is searching in
+     * @param userType the type of the User
+     * @return list of {@link IdentityVerification} objects
+     */
+    public List&lt;com.pkb.datamodel.IdentityVerification&gt; getVerificationRecords(Long teamId, UserType userType) {
+        try {
+<span class="fc" id="L1594">            return transactional(() -&gt; {</span>
+<span class="fc" id="L1595">                List&lt;Long&gt; personIds = identityVerificationService.getAllVerifiedInstituteUserPersonIdsForTeam(teamId);</span>
+
+<span class="fc" id="L1597">                List&lt;Long&gt; personIdList = beanFactory.getPKBPersonBean().findPKBPersonIdListByUserTypeAndStatus(personIds, Collections.singletonList(userType),</span>
+<span class="fc" id="L1598">                        Collections.singletonList(UserStatus.CREATED));</span>
+
+<span class="fc bfc" id="L1600" title="All 2 branches covered.">                if (personIdList.isEmpty()) {</span>
+<span class="fc" id="L1601">                    return new ArrayList&lt;&gt;();</span>
+                }
+
+<span class="fc" id="L1604">                return identityVerificationService.getIdentityVerificationRecords(personIdList);</span>
+            });
+<span class="nc" id="L1606">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1607">            throw new PKBException(&quot;Error while getting verification records&quot;, e);</span>
+        }
+    }
+
+    /**
+     * Returns currently active team for the clinician
+     *
+     * @param userId clinician user id
+     * @return Active team for clinician
+     */
+    @Nullable
+    public Team getClinicianTeam(EHRRequestContext requestContext, long userId) {
+<span class="fc" id="L1619">        List&lt;Team&gt; teams = getUserTeams(requestContext, userId, true);</span>
+<span class="pc bpc" id="L1620" title="2 of 4 branches missed.">        if ((teams == null) || teams.isEmpty()) {</span>
+<span class="nc" id="L1621">            return null;</span>
+        }
+<span class="fc" id="L1623">        checkActiveInstitute(teams, userId);</span>
+<span class="fc" id="L1624">        return teams.get(0);</span>
+    }
+
+    public Map&lt;Long, Team&gt; getClinicianTeam(EHRRequestContext requestContext, Collection&lt;Long&gt; personIds) {
+<span class="fc bfc" id="L1628" title="All 2 branches covered.">        if (isEmpty(personIds)) {</span>
+<span class="fc" id="L1629">            return Collections.emptyMap();</span>
+        }
+<span class="fc" id="L1631">        Map&lt;Long, List&lt;InstituteUser&gt;&gt; instituteMap = instituteUserManager.getInstituteUsersForPersonsFiltered(requestContext, personIds);</span>
+<span class="fc" id="L1632">        return instituteMap.entrySet().stream()</span>
+<span class="fc" id="L1633">                .map(e -&gt; convertToTeam(e, requestContext))</span>
+<span class="pc bpc" id="L1634" title="1 of 2 branches missed.">                .filter(t -&gt; t != null)</span>
+<span class="fc" id="L1635">                .collect(Collectors.toMap(t -&gt; t._1(), t -&gt; t._2()));</span>
+    }
+
+    private Tuple2&lt;Long, Team&gt; convertToTeam(Map.Entry&lt;Long, List&lt;InstituteUser&gt;&gt; input, EHRRequestContext requestContext) {
+<span class="fc" id="L1639">        List&lt;Team&gt; userTeams = getUserTeams(input.getValue(), input.getKey(), true);</span>
+<span class="pc bpc" id="L1640" title="1 of 2 branches missed.">        if (isEmpty(userTeams)) {</span>
+<span class="nc" id="L1641">            return null;</span>
+        }
+<span class="fc" id="L1643">        checkActiveInstitute(userTeams, input.getKey());</span>
+<span class="fc" id="L1644">        return Tuple.of(input.getKey(), userTeams.get(0));</span>
+    }
+
+    private &lt;T&gt; void checkActiveInstitute(List&lt;Team&gt; userTeams, T userId) {
+<span class="pc bpc" id="L1648" title="1 of 2 branches missed.">        if (1 &lt; userTeams.size()) {</span>
+<span class="nc" id="L1649">            throw new IllegalStateException(&quot;Multipe active institues found for -&quot; + userId);</span>
+        }
+<span class="fc" id="L1651">    }</span>
+
+    public Map&lt;Long, List&lt;Team&gt;&gt; getUserToTeamMap(List&lt;Long&gt; userIds) {
+<span class="fc" id="L1654">        return instituteUserManager.getUserToTeamMap(userIds);</span>
+    }
+
+    /**
+     * Get the list of team patients by sorted by ascending last name, first name
+     *
+     * @param teamId
+     * @param userStatus
+     * @param pageSize   No of items in a page
+     * @param offset     Page size * Page No + 1
+     * @return List of {@link InstituteUser} objects
+     */
+    public List&lt;InstituteUser&gt; getTeamCliniciansByStatus(Long teamId,
+                                                         UserStatus userStatus, SponsorshipStatus sponsorshipStatus, int pageSize, int offset) {
+        try {
+<span class="fc" id="L1669">            return instituteUserManager.getInstituteCliniciansByStatus(teamId, userStatus,</span>
+                    sponsorshipStatus, pageSize, offset);
+<span class="nc" id="L1671">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1672">            throw new PKBException(&quot;Error while getting the clinician list for team -&quot;</span>
+<span class="nc" id="L1673">                    + teamId + &quot; for user status-&quot; + userStatus.toString(), e);</span>
+        }
+    }
+
+    public List&lt;InstituteUser&gt; getTeamCliniciansByEmailAddress(Long teamId,
+                                                               Set&lt;Email&gt; emailAddresses) {
+        try {
+<span class="fc" id="L1680">            return instituteUserManager.getInstituteCliniciansByEmailAddress(teamId, emailAddresses);</span>
+<span class="nc" id="L1681">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1682">            throw new PKBException(&quot;Error while getting the clinician list for team -&quot; + teamId, e);</span>
+        }
+    }
+
+    /**
+     * Reset user's LDAP credentials;
+     * Preserves user's links to accounts.
+     * REQUIRED: current user must be institute admin with access to all user's accounts.
+     */
+    public void resetAndSaveUserCredentials(LoggedInEHRRequestContext requestContext, long resetUserId, long adminUserId,
+                                            Long adminOrgId) {
+<span class="fc" id="L1693">        String newSecurityAnswer = UUID.randomUUID().toString();</span>
+<span class="fc" id="L1694">        String newPassword = RandomUtil.randomPassword(10);</span>
+        try {
+            // now do the reset
+<span class="fc" id="L1697">            transactional(() -&gt; {</span>
+<span class="fc" id="L1698">                resetUserCredentialsWithNewPassword(requestContext, resetUserId, adminUserId, adminOrgId,</span>
+                        RESET_CREDENTIALS_SECURITY_QUESTION, newSecurityAnswer,
+                        newPassword);
+<span class="fc" id="L1701">                var personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1702">                var userAccountId = Optional.ofNullable(personBean.getActiveDefaultAccountUser(resetUserId))</span>
+<span class="fc" id="L1703">                        .map(org.tolven.core.entity.AccountUser::getAccount)</span>
+<span class="fc" id="L1704">                        .map(Account::getId)</span>
+<span class="pc" id="L1705">                        .orElseThrow(() -&gt; new IllegalStateException(&quot;Unable to get default user account id&quot;));</span>
+<span class="fc" id="L1706">                var passwordDocId = documentManager.saveDocument(requestContext,</span>
+                        resetUserId,
+                        userAccountId,
+                        newPassword);
+<span class="fc" id="L1710">                personBean.saveUserCredentials(resetUserId, passwordDocId);</span>
+<span class="fc" id="L1711">            });</span>
+<span class="nc" id="L1712">        } catch (Exception e) {</span>
+<span class="nc" id="L1713">            throw new PKBException(&quot;Error in resetAndSaveUserCredentials for &quot; + resetUserId + &quot;/&quot; + adminUserId, e);</span>
+<span class="fc" id="L1714">        }</span>
+<span class="fc" id="L1715">    }</span>
+
+
+    public List&lt;InstituteUser&gt; getInactiveTeamClinicians(EHRRequestContext requestContext, Long teamId,
+                                                         int pageSize, int offset) {
+        try {
+<span class="fc" id="L1721">            return instituteUserManager.getInactiveTeamClinicians(teamId, pageSize, offset);</span>
+<span class="nc" id="L1722">        } catch (Exception e) {</span>
+<span class="nc" id="L1723">            throw new PKBException(</span>
+                    &quot;Error in getInactiveInstituteUsers for team-&quot; + teamId, e);
+        }
+    }
+
+    /**
+     * Fetch patients by lastname and dob
+     *
+     * @param org
+     * @param lastName
+     * @param dob
+     * @return
+     */
+    public List&lt;PKBPerson&gt; getOrgPatientsByLastnameAndDob(@NotNull Org org, @NotNull String lastName, @NotNull String dob) {
+        try {
+<span class="fc" id="L1738">            return instituteUserManager.getOrgPatientsByLastnameAndDob(org, lastName, dob);</span>
+<span class="nc" id="L1739">        } catch (Exception e) {</span>
+<span class="nc" id="L1740">            throw new PKBException(</span>
+<span class="nc" id="L1741">                    &quot;Error in getOrgPatientsByLastnameAndDob for org-&quot; + org.getId() + &quot; lastname-&quot; + lastName + &quot; dob-&quot; + dob, e);</span>
+        }
+    }
+
+    public List&lt;PatientConsentReason&gt; getConsentChangeReasons(@NotNull LoggedInEHRRequestContext requestContext, long accountId, @NotNull List&lt;PatientAuditLog&gt; auditLog) {
+<span class="fc bfc" id="L1746" title="All 2 branches covered.">        if (auditLog.isEmpty()) {</span>
+<span class="fc" id="L1747">            return Collections.emptyList();</span>
+        }
+
+<span class="fc" id="L1750">        Set&lt;UUID&gt; uniqueIds = auditLog.stream()</span>
+<span class="fc bfc" id="L1751" title="All 2 branches covered.">                .filter(logEntry -&gt; PatientAuditLog.LogType.CONSENT_CHANGE == logEntry.getId().getLogType())</span>
+<span class="fc" id="L1752">                .map(PatientAuditLog::getUniqueId)</span>
+<span class="fc" id="L1753">                .collect(toSet());</span>
+
+<span class="fc" id="L1755">        return getConsentChangeReasons(requestContext, accountId, uniqueIds);</span>
+    }
+
+    private List&lt;PatientConsentReason&gt; getConsentChangeReasons(@NotNull LoggedInEHRRequestContext requestContext, long accountId,
+                                                               @NotNull Set&lt;UUID&gt; uniqueIds) {
+<span class="fc bfc" id="L1760" title="All 2 branches covered.">        if (uniqueIds.isEmpty()) {</span>
+<span class="fc" id="L1761">            return emptyList();</span>
+        }
+
+<span class="fc" id="L1764">        EHRSearch&lt;PatientConsentReason&gt; search = new EHRSearch&lt;&gt;(</span>
+                accountId,
+                PatientConsentReason.class,
+                PatientConsentReason.MS_PATH);
+<span class="fc" id="L1768">        search.addFilter(new PKBFilter(IBaseDTO.UNIQUE_ID, PKBFilter.Operator.IN, uniqueIds));</span>
+
+<span class="fc" id="L1770">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L1771">        return ehrBean.queryAndDecryptTypedData(search, requestContext);</span>
+    }
+
+    public List&lt;TeamAdditionalConsent&gt; getTeamAdditionalConsents(Long teamId) {
+<span class="fc" id="L1775">        return consentService.findTeamAdditionalConsents(teamId);</span>
+    }
+
+    public Map&lt;AdditionalConsentId, Boolean&gt; getAdditionalConsents(long patientId, Long teamId) {
+<span class="fc" id="L1779">        Map&lt;AdditionalConsentId, Boolean&gt; result = Maps.newEnumMap(AdditionalConsentId.class);</span>
+
+        // Set up map with all consents enabled by the team coordinator (default to false)
+<span class="fc" id="L1782">        List&lt;TeamAdditionalConsent&gt; teamAdditionalConsents = getTeamAdditionalConsents(teamId);</span>
+<span class="fc bfc" id="L1783" title="All 2 branches covered.">        for (TeamAdditionalConsent consent : teamAdditionalConsents) {</span>
+<span class="fc" id="L1784">            result.put(consent.getAdditionalConsent(), Boolean.FALSE);</span>
+<span class="fc" id="L1785">        }</span>
+
+        // If the patient has already consented to anything, update the map
+<span class="fc" id="L1788">        List&lt;PatientAdditionalConsentExisting&gt; patientAdditionalConsents = getPatientAdditionalConsentsForTeam(patientId, teamId);</span>
+<span class="fc bfc" id="L1789" title="All 2 branches covered.">        for (PatientAdditionalConsentExisting consent : patientAdditionalConsents) {</span>
+<span class="fc bfc" id="L1790" title="All 2 branches covered.">            if (result.containsKey(consent.getAdditionalConsent())) {</span>
+<span class="fc" id="L1791">                result.put(consent.getAdditionalConsent(), Boolean.TRUE);</span>
+            }
+<span class="fc" id="L1793">        }</span>
+
+<span class="fc" id="L1795">        return result;</span>
+    }
+
+    public void updateTeamAdditionalConsents(Long teamId,
+                                             List&lt;TeamAdditionalConsent&gt; consents) {
+<span class="fc" id="L1800">        consentService.updateTeamAdditionalConsents(teamId, consents);</span>
+<span class="fc" id="L1801">    }</span>
+
+    public List&lt;TeamAdditionalConsent&gt; getTeamAdditionalConsentDefaults(long teamId) {
+<span class="fc" id="L1804">        return consentService.getTeamAdditionalConsentDefaults(teamId);</span>
+    }
+
+    public List&lt;PatientAdditionalConsentExisting&gt; getPatientAdditionalConsentsForTeam(long userId,
+                                                                                      Long teamId) {
+<span class="fc" id="L1809">        return consentService.findPatientAdditionalConsentForTeam(userId, teamId);</span>
+    }
+
+    public void updatePatientAdditionalConsentsForTeam(long userId, Long teamId,
+                                                       List&lt;PatientAdditionalConsent&gt; consents) {
+<span class="fc" id="L1814">        consentService.updatePatientAdditionalConsentsForTeam(userId, teamId, consents);</span>
+<span class="fc" id="L1815">    }</span>
+
+    public void logBreakTheGlassEvent(long patientId, Long teamId, Long accessingPersonId) {
+        try {
+<span class="fc" id="L1819">            BreakTheGlassLog breakTheGlassLog = new BreakTheGlassLog();</span>
+<span class="fc" id="L1820">            breakTheGlassLog.setPatientPersonId(patientId);</span>
+<span class="fc" id="L1821">            breakTheGlassLog.setTeamId(teamId);</span>
+<span class="fc" id="L1822">            breakTheGlassLog.setAccessingPersonId(accessingPersonId);</span>
+<span class="fc" id="L1823">            breakTheGlassLog.setAccessTime(dateTimeService.now());</span>
+<span class="fc" id="L1824">            breakTheGlassLogRepository.saveAndFlush(breakTheGlassLog);</span>
+<span class="nc" id="L1825">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L1826">            throw new RuntimeException(&quot;Error while logging break-the-glass event for team-&quot; + teamId, e);</span>
+<span class="fc" id="L1827">        }</span>
+<span class="fc" id="L1828">    }</span>
+
+    public List&lt;BreakTheGlassLog&gt; findBreakTheGlassEvent(long patientPersonId, long accessingUserId) {
+        try {
+<span class="fc" id="L1832">            return breakTheGlassLogRepository.findBreakTheGlassEvent(patientPersonId, accessingUserId);</span>
+<span class="nc" id="L1833">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L1834">            throw new RuntimeException(&quot;Error while fetching break-the-glass event for patient-&quot; + patientPersonId, e);</span>
+        }
+    }
+
+    public List&lt;PKBPerson&gt; searchAllPatientsForOrg(@NotNull OrgPatientSearchOptionsDto options) {
+        try {
+<span class="fc" id="L1840">            return pkbPersonRepository.findAllPatientsForOrg(options);</span>
+<span class="nc" id="L1841">        } catch (Exception e) {</span>
+<span class="nc" id="L1842">            throw new RuntimeException(&quot;Error while searching patients for org-&quot; + options.orgId(), e);</span>
+        }
+    }
+
+    public Set&lt;Long&gt; searchAllPatientIdsForOrg(@NotNull OrgPatientSearchOptionsDto options) {
+        try {
+<span class="fc" id="L1848">            return pkbPersonRepository.findAllPatientIdsForOrg(options);</span>
+<span class="nc" id="L1849">        } catch (Exception e) {</span>
+<span class="nc" id="L1850">            throw new RuntimeException(&quot;Error while searching patient ids for org-&quot; + options.orgId(), e);</span>
+        }
+    }
+
+    public List&lt;Team&gt; getTeams(EHRRequestContext requestContext, List&lt;Long&gt; teamIds) {
+        try {
+<span class="pc bpc" id="L1856" title="1 of 4 branches missed.">            if ((teamIds == null) || teamIds.isEmpty()) {</span>
+<span class="fc" id="L1857">                return Lists.newArrayList();</span>
+            }
+<span class="fc" id="L1859">            List&lt;Team&gt; teams = teamRepository.findAllByIdInOrderByIdAsc(teamIds);</span>
+<span class="fc bfc" id="L1860" title="All 2 branches covered.">            return teams.stream().filter(team -&gt; requestContext.getConsentStatus().getConsent().map(consent -&gt; consent.isEntityVisible(team) ||</span>
+<span class="fc bfc" id="L1861" title="All 2 branches covered.">                    team.getId().equals(requestContext.getTeamId().orElse(null))).orElse(true)).collect(ImmutableList.toImmutableList());</span>
+<span class="nc" id="L1862">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L1863">            throw new RuntimeException(&quot;Error while getting all teams in list&quot;, e);</span>
+        }
+    }
+
+    public List&lt;TeamWithPKBPerson&gt; getAllActiveTeamsForClinicianWithHumanUUID(String humanUUID) {
+<span class="pc bpc" id="L1868" title="1 of 2 branches missed.">        if (StringUtils.isBlank(humanUUID)) {</span>
+<span class="nc" id="L1869">            return Lists.newArrayList();</span>
+        }
+
+        try {
+<span class="fc" id="L1873">            return instituteUserManager.getAllActiveTeamsForClinicianWithHumanUUID(humanUUID);</span>
+<span class="nc" id="L1874">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1875">            throw new PKBException(&quot;Error while getting all teams for clinician&quot;, e);</span>
+        }
+    }
+
+    /**
+     * For a given person UUID (which links multiple PKBPerson accounts owned by one real person)
+     * find the correct PKBPerson associated to the given team
+     *
+     * @param humanUUID
+     * @param teamId
+     * @return
+     */
+    @Nullable
+    public PKBPerson getSpecificPersonaForTeam(String humanUUID, long teamId) {
+        try {
+<span class="fc" id="L1890">            return instituteUserManager.getSpecificPersonaForTeam(humanUUID, teamId);</span>
+<span class="nc" id="L1891">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1892">            throw new PKBException(&quot;Error while getting all teams for clinician&quot;, e);</span>
+        }
+    }
+
+    public List&lt;PKBPerson&gt; getAllPersonasForHuman(EHRRequestContext requestContext, String humanUUID) {
+        try {
+<span class="fc" id="L1898">            PKBPersonRemote personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc" id="L1899">            return personBean.getPKBPersonListByHumanUUID(humanUUID, PKBPerson.Lazy.CONTACTS);</span>
+<span class="nc" id="L1900">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1901">            throw new PKBException(&quot;Error while getting all personas&quot;, e);</span>
+        }
+    }
+
+    public void exportPatientAdditionalConsentsForTeam(long teamId, long orgId, Optional&lt;NationalIdType&gt; nationalIdType, OutputStream stream) throws IOException {
+
+<span class="fc" id="L1907">        try (BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(stream))) {</span>
+
+<span class="fc" id="L1909">            beginTransaction();</span>
+
+<span class="fc" id="L1911">            OutputStreamCSVTableBuilder tableBuilder = new OutputStreamCSVTableBuilder(writer);</span>
+
+            List&lt;TeamExport&gt; dtos;
+<span class="fc" id="L1914">            int page = 0;</span>
+            do {
+<span class="fc" id="L1916">                dtos = teamExportService.getPatientAdditionalConsentsForTeam(teamId, orgId, nationalIdType, page++);</span>
+<span class="fc" id="L1917">                addRow(tableBuilder, dtos);</span>
+<span class="fc bfc" id="L1918" title="All 2 branches covered.">            } while (!dtos.isEmpty());</span>
+
+<span class="nc" id="L1920">        } catch (PKBPluginException e) {</span>
+<span class="nc" id="L1921">            throw new PKBException(&quot;Error while exporting additional patient consents for team-&quot; + teamId, e);</span>
+        } finally {
+<span class="fc" id="L1923">            rollbackIfNotCommitted();</span>
+        }
+<span class="fc" id="L1925">    }</span>
+
+    private void addRow(CSVTableBuilder tableBuilder, List&lt;TeamExport&gt; consentBatch) {
+<span class="fc bfc" id="L1928" title="All 2 branches covered.">        for (TeamExport person : consentBatch) {</span>
+
+<span class="fc" id="L1930">            tableBuilder.addCell(&quot;title&quot;, person.title());</span>
+<span class="fc" id="L1931">            tableBuilder.addCell(&quot;first name&quot;, person.firstName());</span>
+<span class="fc" id="L1932">            tableBuilder.addCell(&quot;last name&quot;, person.lastName());</span>
+<span class="fc" id="L1933">            tableBuilder.addCell(&quot;national identifier&quot;, person.nationalIdentifier());</span>
+<span class="fc" id="L1934">            tableBuilder.addCell(&quot;national identifier type&quot;, person.nationalIdentifierType());</span>
+<span class="fc" id="L1935">            tableBuilder.addCell(&quot;organisation level identifier&quot;, String.valueOf(person.olid()));</span>
+<span class="fc" id="L1936">            tableBuilder.addCell(&quot;address1&quot;, person.address1());</span>
+<span class="fc" id="L1937">            tableBuilder.addCell(&quot;address2&quot;, person.address2());</span>
+<span class="fc" id="L1938">            tableBuilder.addCell(&quot;city&quot;, person.city());</span>
+<span class="fc" id="L1939">            tableBuilder.addCell(&quot;postalCode&quot;, person.postalCode());</span>
+<span class="fc" id="L1940">            tableBuilder.addCell(&quot;state&quot;, person.state());</span>
+<span class="fc" id="L1941">            tableBuilder.addCell(&quot;country&quot;, person.country());</span>
+<span class="fc" id="L1942">            tableBuilder.addCell(&quot;primaryEmail&quot;, person.primaryEmail());</span>
+<span class="fc" id="L1943">            tableBuilder.addCell(&quot;phone&quot;, person.phone());</span>
+
+<span class="fc bfc" id="L1945" title="All 2 branches covered.">            for (AdditionalConsentId consentType : AdditionalConsentId.values()) {</span>
+<span class="fc bfc" id="L1946" title="All 2 branches covered.">                String result = person.consents().contains(consentType) ? &quot;Yes&quot; : &quot;No&quot;;</span>
+
+<span class="fc" id="L1948">                tableBuilder.addCell(consentType.toString(), result);</span>
+            }
+
+<span class="fc" id="L1951">            tableBuilder.endRow();</span>
+<span class="fc" id="L1952">        }</span>
+<span class="fc" id="L1953">    }</span>
+
+    public void resetTempPassword(@NotNull LoggedInEHRRequestContext context, long resetUserId, long adminUserId, Long adminOrgId, String newPassword) {
+<span class="fc" id="L1956">        resetUserCredentialsWithNewPassword(context, resetUserId, adminUserId, adminOrgId,</span>
+                null /*newSecurityQuestion*/, null /*newSecurityAnswer*/, newPassword);
+<span class="fc" id="L1958">    }</span>
+
+
+    /**
+     * @param context   EHRRequestContext
+     * @param pkbPerson PKBPerson to check if she is an Individual Pro.
+     * @return true if pkbPerson is patient or indiv. pro
+     */
+    public boolean isIndividualPro(EHRRequestContext context, PKBPerson pkbPerson) {
+<span class="fc bfc" id="L1967" title="All 2 branches covered.">        return pkbPerson.isPro() &amp;&amp;</span>
+<span class="fc" id="L1968">                getInstituteUsersForPerson(context, pkbPerson.getId())</span>
+<span class="pc bpc" id="L1969" title="1 of 4 branches missed.">                        .stream().noneMatch(iu -&gt; iu.getSponsorshipStatus() == ACTIVE);</span>
+    }
+
+    private void resetUserCredentialsWithNewPassword(
+            LoggedInEHRRequestContext context,
+            long resetUserId,
+            long adminUserId,
+            Long adminOrgId,
+            String newSecurityQuestion,
+            String newSecurityAnswer,
+            String newPassword) {
+
+<span class="fc" id="L1981">        transactional(() -&gt; {</span>
+
+            // values that must not be null:
+            // need to expire API sessions for this user (if any)
+<span class="fc" id="L1985">            apiAuthService.expireSessionsForUser(resetUserId);</span>
+
+            // doesn't SAVE credentials, just makes new ones and sets them in
+            // tolvenPerson
+            // methods called: setUserCertificate, setUserPKCS12
+<span class="fc" id="L1990">            PublicUserCredentials newCredentials = userCredentialsService.createCredentials(resetUserId, newPassword.toCharArray());</span>
+
+            // save the updated attributes back to LDAP
+<span class="fc" id="L1993">            userCredentialsService.saveCredential(newCredentials);</span>
+
+            // backup password with given security question/answer
+            // question is a constant used only for reset credentials
+            // answer will be the resetCode (works like a one-time password)
+<span class="fc bfc" id="L1998" title="All 2 branches covered.">            if (newSecurityQuestion != null) {</span>
+<span class="fc" id="L1999">                userManager.backUpPassword(resetUserId, newPassword, newSecurityQuestion, newSecurityAnswer);</span>
+            }
+
+<span class="fc" id="L2002">            cryptoModelSynchronisationService.syncCryptoAccessForNewPerson(resetUserId, newPassword);</span>
+
+<span class="fc" id="L2004">        });</span>
+<span class="fc" id="L2005">    }</span>
+
+
+    public PKBPerson setupCoordinator(@NotNull LoggedInEHRRequestContext requestContext, PKBPersonDTO personDTO, PKBPerson creator, Team team) {
+
+
+<span class="fc" id="L2011">        userManager.registerUserFull(requestContext, personDTO, team.getId());</span>
+
+<span class="fc" id="L2013">        PKBPerson newCoordinator = userManager.getPKBPerson(personDTO.getId());</span>
+<span class="fc" id="L2014">        newCoordinator.setPassword(personDTO.getPassword()); // needed for the invitation</span>
+
+
+        // Vouch for the new coordinator's identity
+
+<span class="fc" id="L2019">        IdentityVerification verification = IdentityVerification.of(newCoordinator, creator, team, dateTimeService.now());</span>
+<span class="fc" id="L2020">        activateUserAccount(newCoordinator.getId(), team.getId(), verification);</span>
+
+<span class="fc" id="L2022">        return newCoordinator;</span>
+
+    }
+
+    public InstituteUser createTeamWithInitialCoordinator(LoggedInEHRRequestContext requestContext, Team team, Org org, PKBPersonDTO coordinator, PKBPerson creator) {
+<span class="pc" id="L2027">        AccountIds teamAccountIds = kms.createAccount(requestContext.getCorrelationId().toString()).getOrElseThrow(err -&gt; new RuntimeException(err.toString()));</span>
+<span class="fc" id="L2028">        return transactional(() -&gt; {</span>
+<span class="fc bfc" id="L2029" title="All 2 branches covered.">            if (org.getId() == null) {</span>
+<span class="fc" id="L2030">                Org existingOrg = teamManager.getOrgByCode(org.getCode()).orElse(null);</span>
+<span class="pc bpc" id="L2031" title="1 of 2 branches missed.">                if (existingOrg != null) {</span>
+<span class="nc" id="L2032">                    throw new PKBException(</span>
+<span class="nc" id="L2033">                            &quot;Organization code '&quot; + org.getCode() + &quot;' is already in use for '&quot; + existingOrg.getName() + &quot;'&quot;);</span>
+                }
+
+                // ensure it has at least one org-level ID type
+<span class="pc bpc" id="L2037" title="1 of 2 branches missed.">                if (org.getOrgLevelIdTypes().isEmpty()) {</span>
+<span class="fc" id="L2038">                    OrgLevelIdType idType = new OrgLevelIdType();</span>
+<span class="fc" id="L2039">                    idType.setName(org.getName() + &quot; ID&quot;);</span>
+<span class="fc" id="L2040">                    idType.setOrg(org);</span>
+<span class="fc" id="L2041">                    idType.setHl7AssigningAuthority(&quot;&quot;);</span>
+<span class="fc" id="L2042">                    idType.setHl7TypeCode(&quot;&quot;);</span>
+<span class="fc" id="L2043">                    org.setOrgLevelIdTypes(new TreeSet&lt;&gt;(List.of(idType)));</span>
+                }
+
+<span class="pc" id="L2046">                var orgAccountIds = kms.createAccount(requestContext.getCorrelationId().toString()).getOrElseThrow(err -&gt; new RuntimeException(err.toString()));</span>
+
+<span class="fc" id="L2048">                org.setOrgAccountId(orgAccountIds.getId());</span>
+<span class="fc" id="L2049">                org.setId(null);</span>
+<span class="fc" id="L2050">                org.setPublicId(UUID.randomUUID());</span>
+<span class="fc" id="L2051">                org.setId(orgManager.save(org));</span>
+<span class="fc" id="L2052">                team.setOrg(org);</span>
+<span class="fc" id="L2053">            } else {</span>
+<span class="fc" id="L2054">                team.setOrg(teamManager.getOrg(org.getId()).orElse(null));</span>
+            }
+
+<span class="fc" id="L2057">            team.setTeamAccountId(teamAccountIds.getId());</span>
+
+<span class="fc" id="L2059">            Long teamId = teamManager.createTeam(team);</span>
+<span class="fc" id="L2060">            team.setId(teamId);</span>
+
+<span class="fc" id="L2062">            PKBPerson newCoordinator = setupCoordinator(requestContext, coordinator, creator, team);</span>
+
+            // email notification - if this fails, rollback, because the coordinator needs the email
+<span class="fc" id="L2065">            pkbEmailMessageManager.inviteInitialTeamCoord(team, newCoordinator, creator);</span>
+
+<span class="fc" id="L2067">            return getInstituteUser(team.getId(), newCoordinator.getId());</span>
+        });
+    }
+
+    public boolean existsUserNotContactableByMessages(Set&lt;Long&gt; personIds) {
+<span class="fc" id="L2072">        return personService.existsUserNotContactableByMessages(personIds);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

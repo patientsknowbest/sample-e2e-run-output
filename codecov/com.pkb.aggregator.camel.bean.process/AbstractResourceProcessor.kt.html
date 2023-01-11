@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractResourceProcessor.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel.bean.process</a> &gt; <span class="el_source">AbstractResourceProcessor.kt</span></div><h1>AbstractResourceProcessor.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel.bean.process
+
+import com.pkb.aggregator.R4Bundle
+import com.pkb.aggregator.R4Extension
+import com.pkb.aggregator.camel.DOWNSTREAM_RESOURCE_ID_PROPERTY
+import com.pkb.aggregator.camel.RELOAD_REQUEST_PROPERTY
+import com.pkb.aggregator.camel.SOURCED_RESOURCE_PROPERTY
+import com.pkb.aggregator.camel.UPSTREAM_IDENTIFIERS_PROPERTY
+import com.pkb.aggregator.camel.UPSTREAM_SOURCE_ID_PROPERTY
+import com.pkb.aggregator.extension.aggregatedResourceId
+import com.pkb.aggregator.extension.isOnlySourceTaggedWith
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamResource
+import com.pkb.aggregator.service.DownstreamClient
+import com.pkb.aggregator.service.dto.ResourceWithSourceId
+import com.pkb.aggregator.service.enrichment.createR4SourceExtension
+import com.pkb.aggregator.service.paginate.ResourcePaginator
+import org.apache.camel.Body
+import org.apache.camel.Exchange
+import org.apache.camel.ExchangeProperty
+import org.hl7.fhir.instance.model.api.IBaseBundle
+import org.hl7.fhir.instance.model.api.IDomainResource
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import java.lang.invoke.MethodHandles
+
+<span class="fc" id="L26">abstract class AbstractResourceProcessor&lt;T : IDomainResource&gt;(</span>
+<span class="fc" id="L27">    private val resourcePaginator: ResourcePaginator,</span>
+<span class="fc" id="L28">    private val downstreamClient: DownstreamClient,</span>
+) {
+<span class="fc" id="L30">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    open fun processNew(
+        @ExchangeProperty(SOURCED_RESOURCE_PROPERTY) resourceWithSourceId: ResourceWithSourceId&lt;T&gt;,
+    ): Any? {
+<span class="fc" id="L35">        resourcePaginator.processResource(resourceWithSourceId.resource, resourceWithSourceId.sourceId)</span>
+<span class="fc" id="L36">        val newResource = createResource(resourceWithSourceId.resource, null)</span>
+<span class="fc" id="L37">        return downstreamClient.create(newResource)</span>
+    }
+
+    open fun processSingle(
+        @Body bundle: IBaseBundle,
+        @ExchangeProperty(SOURCED_RESOURCE_PROPERTY) resourceWithSourceId: ResourceWithSourceId&lt;T&gt;,
+        @ExchangeProperty(DOWNSTREAM_RESOURCE_ID_PROPERTY) downstreamResourceId: String
+    ): Any? {
+<span class="fc" id="L45">        val (sourceId, resource) = resourceWithSourceId</span>
+<span class="fc" id="L46">        resourcePaginator.processResource(resource, sourceId)</span>
+<span class="fc" id="L47">        val downstreamResource = findSingleBundleEntry(bundle)</span>
+
+<span class="fc bfc" id="L49" title="All 2 branches covered.">        return if (downstreamResource != null) {</span>
+<span class="fc" id="L50">            val updatedResource = updateResource(resource, downstreamResource)</span>
+<span class="fc" id="L51">            downstreamClient.update(updatedResource)</span>
+        } else {
+<span class="fc" id="L53">            val newResource = createResource(resource, downstreamResourceId)</span>
+<span class="fc" id="L54">            downstreamClient.create(newResource)</span>
+        }
+    }
+
+    open fun processDelete(
+        @Body bundle: IBaseBundle,
+        @ExchangeProperty(UPSTREAM_SOURCE_ID_PROPERTY) upstreamSourceId: UpstreamResource,
+    ) {
+<span class="nc bnc" id="L62" title="All 2 branches missed.">        val downstreamResource = findSingleBundleEntry(bundle)</span>
+<span class="nc" id="L63">            ?: throw RuntimeException(&quot;Empty bundle&quot;)</span>
+
+<span class="nc" id="L65">        val sourceTag = createR4SourceExtension(upstreamSourceId.upstreamSource, upstreamSourceId.upstreamResourceId)</span>
+<span class="nc bnc" id="L66" title="All 2 branches missed.">        if (downstreamResource.isOnlySourceTaggedWith(sourceTag)) {</span>
+<span class="nc" id="L67">            downstreamClient.softDelete(downstreamResource)</span>
+<span class="nc" id="L68">            log.info(&quot;Deleted resource {} as delete notification received from single source {}&quot;,</span>
+<span class="nc" id="L69">                downstreamResource.aggregatedResourceId(), upstreamSourceId.upstreamSource)</span>
+        } else {
+            // Remove all elements tagged with source, but don't remove the resource itself
+<span class="nc" id="L72">            stripResource(downstreamResource, sourceTag)</span>
+<span class="nc" id="L73">            downstreamClient.update(downstreamResource)</span>
+<span class="nc" id="L74">            log.info(&quot;Stripped info from resource {} due to delete notification from source {}&quot;,</span>
+<span class="nc" id="L75">                downstreamResource.aggregatedResourceId(), upstreamSourceId.upstreamSource)</span>
+        }
+<span class="nc" id="L77">    }</span>
+
+    fun logOutcome(exchange: Exchange) {
+<span class="nc" id="L80">        val stats = exchange.message.getBody(R4Bundle::class.java)</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">            ?.entry</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">            ?.groupBy { it.resource.resourceType }</span>
+<span class="nc" id="L83">            ?.mapValues { it.value.size }</span>
+
+<span class="nc" id="L85">        log.info(&quot;Reload complete: route={}, request={}, bundle-stats={}, identifiers-searched={}&quot;,</span>
+<span class="nc" id="L86">            exchange.fromRouteId,</span>
+<span class="nc" id="L87">            exchange.getProperty(RELOAD_REQUEST_PROPERTY),</span>
+<span class="nc" id="L88">            stats,</span>
+<span class="nc bnc" id="L89" title="All 2 branches missed.">            exchange.getProperty(UPSTREAM_IDENTIFIERS_PROPERTY, List::class.java)?.size,</span>
+        )
+<span class="nc" id="L91">    }</span>
+
+    protected abstract fun createResource(resource: T, downstreamResourceId: String?): T
+    protected abstract fun updateResource(upstreamResource: T, downstreamResource: T): T
+    protected abstract fun findSingleBundleEntry(bundle: IBaseBundle): T?
+    protected abstract fun stripResource(resource: T, sourceTag: R4Extension)
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

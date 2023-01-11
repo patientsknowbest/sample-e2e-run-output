@@ -1,0 +1,268 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PersonService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.person</a> &gt; <span class="el_source">PersonService.java</span></div><h1>PersonService.java</h1><pre class="source lang-java linenums">package com.pkb.domain.person;
+
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pkb.authentication.AuthenticatedIdentity;
+import com.pkb.authz.AuthorizationService;
+import com.pkb.authz.data.AuthorizationData;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.entity.mapper.PersonMapper;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.datamodel.user.Person;
+import com.pkb.datamodel.user.Professional;
+import com.pkb.deletion.model.ActorId;
+import com.pkb.deletion.model.AggregateDeleteOperationResponse;
+import com.pkb.deletion.model.DeleteOperationRequest;
+import com.pkb.deletion.model.DeleteOperationType;
+import com.pkb.deletion.model.DeleteRequestStatus;
+import com.pkb.deletion.model.DeletionType;
+import com.pkb.deletion.model.ImmutableActorId;
+import com.pkb.deletion.model.ImmutableDeleteOperationRequest;
+import com.pkb.domain.criteria.CriteriaResult;
+import com.pkb.domain.criteria.ImmutableCriteriaResult;
+import com.pkb.domain.internal.repository.InstituteUserRepository;
+import com.pkb.domain.repository.DeleteRequestRepository;
+import com.pkb.domain.repository.PersonRepository;
+import com.pkb.entities.pub.PublicDeleteRequest;
+import io.vavr.Tuple;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.List;
+import io.vavr.collection.Set;
+import io.vavr.collection.Stream;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.camel.Consume;
+import org.apache.camel.ProducerTemplate;
+import org.apache.commons.collections4.CollectionUtils;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Instant;
+import java.util.EnumMap;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.function.Function;
+
+import static com.pkb.domain.routing.DeleteRequestRouteBuilder.AGGREGATE_OPERATION_RESPONSE;
+import static com.pkb.domain.routing.DeleteRequestRouteBuilder.OPERATION_REQUEST;
+import static com.pkb.entities.enums.UserType.REG_CLINICIAN;
+import static io.vavr.control.Either.left;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class PersonService {
+
+<span class="fc" id="L60">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+<span class="fc" id="L62">    private static final Map&lt;DeleteOperationType, ResponseHandler&gt; RESPONSE_HANDLERS = new EnumMap&lt;&gt;(Map.of(</span>
+<span class="fc" id="L63">                DeleteOperationType.CREATE, ImmutableResponseHandler.builder()</span>
+<span class="fc" id="L64">                    .jsonSetter(PublicDeleteRequest::setCreateResponseJson)</span>
+<span class="fc" id="L65">                    .dateSetter(PublicDeleteRequest::setCreateResponseReceivedDate)</span>
+<span class="fc" id="L66">                    .successStatus(DeleteRequestStatus.VALID)</span>
+<span class="fc" id="L67">                    .successAction(PersonService::onCreateDeleteOperationSuccess).build(),</span>
+<span class="fc" id="L68">                DeleteOperationType.EXECUTE, ImmutableResponseHandler.builder()</span>
+<span class="fc" id="L69">                    .jsonSetter(PublicDeleteRequest::setExecuteResponseJson)</span>
+<span class="fc" id="L70">                    .dateSetter(PublicDeleteRequest::setExecuteResponseReceivedDate)</span>
+<span class="fc" id="L71">                            .successStatus(DeleteRequestStatus.SUCCEEDED)</span>
+<span class="fc" id="L72">                            .failureAction(PersonService::onExecuteDeleteOperationFailure)</span>
+<span class="fc" id="L73">                    .build(),</span>
+<span class="fc" id="L74">                DeleteOperationType.ROLLBACK, ImmutableResponseHandler.builder()</span>
+<span class="fc" id="L75">                    .jsonSetter(PublicDeleteRequest::setRollbackResponseJson)</span>
+<span class="fc" id="L76">                    .dateSetter(PublicDeleteRequest::setRollbackResponseReceivedDate)</span>
+<span class="fc" id="L77">                    .successStatus(DeleteRequestStatus.ROLLED_BACK)</span>
+<span class="fc" id="L78">                    .build()</span>
+            ));
+    private final PersonRepository personRepository;
+    private final InstituteUserRepository instituteUserRepository;
+    private final AuthorizationService authorizationService;
+    private final PersonMapper personMapper;
+    private ProducerTemplate pubSubProducer;
+
+    private DeleteRequestRepository deleteRequestRepository;
+
+    private ObjectMapper objectMapper;
+
+    private DateTimeService dateTimeService;
+
+    public PersonService(PersonRepository personRepository,
+                         InstituteUserRepository instituteUserRepository,
+                         AuthorizationService authorizationService,
+                         PersonMapper personMapper,
+                         ProducerTemplate pubSubProducer,
+                         DeleteRequestRepository deleteRequestRepository,
+                         ObjectMapper objectMapper,
+<span class="fc" id="L99">                         DateTimeService dateTimeService) {</span>
+<span class="fc" id="L100">        this.personRepository = personRepository;</span>
+<span class="fc" id="L101">        this.instituteUserRepository= instituteUserRepository;</span>
+<span class="fc" id="L102">        this.authorizationService = authorizationService;</span>
+<span class="fc" id="L103">        this.personMapper = personMapper;</span>
+<span class="fc" id="L104">        this.pubSubProducer = pubSubProducer;</span>
+<span class="fc" id="L105">        this.deleteRequestRepository = deleteRequestRepository;</span>
+<span class="fc" id="L106">        this.objectMapper = objectMapper;</span>
+<span class="fc" id="L107">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L108">    }</span>
+
+    public @NotNull Either&lt;RuntimeException, CriteriaResult&lt;Professional&gt;&gt; findAllProfessionalsForProfessional(@NotNull AuthorizationData authorizationData,
+                                                                                                               @NotNull UUID publicId) {
+<span class="fc" id="L112">        return authorizationService.authorize(authorizationData)</span>
+<span class="fc" id="L113">                .checkSingleResult(() -&gt; findSameProfessionalByPublicId(publicId));</span>
+    }
+
+    @NotNull
+    public CriteriaResult&lt;Professional&gt; findSameProfessionalByPublicId(@NotNull UUID publicId) {
+<span class="fc" id="L118">        var professionals = personRepository.findAllPersonsByPublicIdAndUserTypeOrderById(publicId, REG_CLINICIAN)</span>
+<span class="fc" id="L119">                .map(personMapper::entityToProfessional);</span>
+<span class="fc" id="L120">        return ImmutableCriteriaResult.&lt;Professional&gt;builder().addAllPage(professionals).total(professionals.size()).build();</span>
+    }
+    
+    @NotNull
+    public List&lt;Either&lt;RuntimeException, Person&gt;&gt; getRegisteredPatientsByPublicIdAndTeamId(
+            AuthorizationData authorizationData,
+            Set&lt;UUID&gt; ids,
+            UUID teamPublicId) {
+        // Filter the ones we're authorized to see
+<span class="fc" id="L129">        var idsOrErrors = ids.map(id -&gt; authorizationService.authorize(authorizationData)</span>
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">                .checkFilteredSingleResult(tm -&gt; tm.targetType() == Patient.class</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">                        &amp;&amp; id.equals(tm.requireUUID()), () -&gt; id));</span>
+        // Fetch the one's we're authorized to see in a batch
+<span class="fc" id="L133">        var authorizedIds = idsOrErrors.filter(Either::isRight).map(Either::get);</span>
+<span class="fc" id="L134">        var patients = findAllRegisteredPatientsByPublicIdAndTeamId(authorizedIds, teamPublicId)</span>
+<span class="fc" id="L135">                .toMap(Person::getPublicId, Function.identity());</span>
+        // Group it back together, return another exception if the patient couldn't be found
+<span class="fc" id="L137">        return idsOrErrors.toList()</span>
+<span class="fc" id="L138">                .map(i -&gt; i</span>
+<span class="fc" id="L139">                        .flatMap(id -&gt; patients.get(id)</span>
+<span class="fc" id="L140">                                .map(Either::&lt;RuntimeException, Person&gt;right)</span>
+<span class="fc" id="L141">                                .getOrElse(left(new RuntimeException(String.format(&quot;Patient not found for public id %s&quot;, id))))));</span>
+    }
+    
+    @NotNull
+    private List&lt;Person&gt; findAllRegisteredPatientsByPublicIdAndTeamId(@NotNull Set&lt;UUID&gt; publicIds, @NotNull UUID teamPublicId){
+<span class="fc" id="L146">        return personRepository.findRegisteredPatientsByPublicIdsAndTeamId(publicIds, teamPublicId).map(personMapper::entityToDataModel);</span>
+    }
+
+    @Transactional(readOnly = true)
+    public Set&lt;UUID&gt; findAllRegisteredPatientsPublicIdsFromTeamPublicId(@NotNull UUID teamPublicId){
+<span class="fc" id="L151">        return HashSet.ofAll(personRepository.findRegisteredPatientPublicIdsByTeamPublicId(teamPublicId));</span>
+    }
+    
+    public Option&lt;UUID&gt; findClinicianTeamId(long clinicianId) {
+<span class="fc" id="L155">        List&lt;UUID&gt; instituteUsers = instituteUserRepository.findClinicianActiveTeamFromClinicianIdList(List.of(clinicianId))</span>
+<span class="fc" id="L156">                .map(iu -&gt; iu.getTeam().getPublicId());</span>
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">        return instituteUsers.isEmpty() ? Option.none() : Option.of(instituteUsers.get(0));</span>
+    }
+
+    @Transactional
+    public Either&lt;RuntimeException, UUID&gt; requestDeletion(AuthorizationData authorizationData, Set&lt;UUID&gt; personIds, boolean forceDelete) {
+        //TODO: PHR-11078 implement proper authorization for deletion service
+<span class="fc" id="L163">        return authorizationService.authorize(authorizationData)</span>
+<span class="fc" id="L164">                .checkSingleResult(() -&gt; requestDeletion(authorizationData.inputs().authenticatedIdentity(), personIds, forceDelete)) //This is wrong, should be authorizing them individually</span>
+<span class="fc" id="L165">                .flatMap(it -&gt; it);</span>
+    }
+
+    private Either&lt;RuntimeException, UUID&gt; requestDeletion(AuthenticatedIdentity authenticatedIdentity, Set&lt;UUID&gt; personIds, boolean forceDelete) {
+<span class="fc" id="L169">        Map&lt;Long, UUID&gt; personIdMap = personRepository.findEntityIdsByPublicIdIn(personIds).toJavaMap(ids -&gt; Tuple.of(ids.getId(), ids.getPublicId()));</span>
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">        if (personIdMap.size() != personIds.size()) {</span>
+<span class="nc" id="L171">            var missing = CollectionUtils.subtract(personIds, personIdMap.values());</span>
+<span class="nc" id="L172">            return Either.left(new IllegalArgumentException(&quot;Couldn't find all the requested people. Missing ids: &quot; + missing));</span>
+        }
+<span class="fc" id="L174">        UUID requestId = UUID.randomUUID();</span>
+<span class="fc" id="L175">        DeleteOperationRequest request = ImmutableDeleteOperationRequest.builder().requestId(requestId).actor(makeActor(authenticatedIdentity)).targetType(DeletionType.PERSON).operationType(DeleteOperationType.CREATE).isForceDelete(forceDelete).putAllEntityIdMap(personIdMap).build();</span>
+<span class="fc" id="L176">        deleteRequestRepository.save(new PublicDeleteRequest(requestId, dateTimeService.now()));</span>
+<span class="fc" id="L177">        pubSubProducer.sendBody(OPERATION_REQUEST, request);</span>
+<span class="fc" id="L178">        LOGGER.info(&quot;Sent create delete operation request: {} &quot;, request);</span>
+<span class="fc" id="L179">        return Either.right(requestId);</span>
+
+    }
+
+    @Consume(AGGREGATE_OPERATION_RESPONSE)
+    @Transactional
+    public void handleDeleteOperationResponse(AggregateDeleteOperationResponse response) {
+<span class="fc" id="L186">        var requestEntity = getOrCreateRequest(response.getRequestId());</span>
+<span class="fc" id="L187">        Option.of(RESPONSE_HANDLERS.get(response.getOperationType()))</span>
+<span class="fc" id="L188">                .peek(handler -&gt; {</span>
+<span class="fc" id="L189">                  handler.getJsonSetter().accept(requestEntity, serialiseResponseJson(response));</span>
+<span class="fc" id="L190">                  handler.getDateSetter().accept(requestEntity, dateTimeService.now());</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">                  if(response.getDeletionStatus() == handler.getSuccessStatus()) {</span>
+<span class="fc" id="L192">                      LOGGER.info(&quot;Operation {} for delete request {} succeeded&quot;, response.getOperationType(), response.getRequestId());</span>
+<span class="fc" id="L193">                      handler.getSuccessAction().ifPresent(action -&gt; action.accept(this, response));</span>
+                  }
+                  else {
+<span class="fc" id="L196">                      LOGGER.info(&quot;Operation {} for delete request {} failed: {}&quot;, response.getOperationType(), response.getRequestId(), response);</span>
+<span class="fc" id="L197">                      handler.getFailureAction().ifPresent(action -&gt; action.accept(this, response));</span>
+                  }
+<span class="fc" id="L199">                })</span>
+<span class="pc" id="L200">                .getOrElseThrow(() -&gt; new IllegalStateException(&quot;Unknown delete operation type: &quot; + response.getOperationType()));</span>
+<span class="fc" id="L201">    }</span>
+
+
+    private void onCreateDeleteOperationSuccess(AggregateDeleteOperationResponse response) {
+<span class="fc" id="L205">        DeleteOperationRequest request = ImmutableDeleteOperationRequest.builder().requestId(response.getRequestId()).actor(response.getActor()).targetType(DeletionType.PERSON).operationType(DeleteOperationType.EXECUTE).build();</span>
+<span class="fc" id="L206">        pubSubProducer.sendBody(OPERATION_REQUEST, request);</span>
+<span class="fc" id="L207">    }</span>
+
+
+
+    private void onExecuteDeleteOperationFailure(AggregateDeleteOperationResponse response) {
+<span class="fc" id="L212">        DeleteOperationRequest request = ImmutableDeleteOperationRequest.builder().requestId(response.getRequestId()).actor(response.getActor()).targetType(DeletionType.PERSON).operationType(DeleteOperationType.ROLLBACK).build();</span>
+<span class="fc" id="L213">        pubSubProducer.sendBody(OPERATION_REQUEST, request);</span>
+<span class="fc" id="L214">    }</span>
+
+
+    public Option&lt;DeleteRequestStatus&gt; getDeleteRequestStatus(UUID requestId) {
+<span class="fc" id="L218">        return Option.ofOptional(deleteRequestRepository.findById(requestId))</span>
+<span class="fc" id="L219">                .map(requestEntity -&gt;</span>
+<span class="fc" id="L220">                        Stream.of(requestEntity.getRollbackResponseJson(), requestEntity.getExecuteResponseJson(), requestEntity.getCreateResponseJson())</span>
+<span class="fc" id="L221">                                .filter(Objects::nonNull)</span>
+<span class="fc" id="L222">                                .map(this::deserialiseResponseJson)</span>
+<span class="fc" id="L223">                                .map(AggregateDeleteOperationResponse::getDeletionStatus)</span>
+<span class="fc" id="L224">                                .headOption()</span>
+<span class="fc" id="L225">                                .getOrElse(DeleteRequestStatus.CREATING)</span>
+                );
+    }
+
+    private ActorId makeActor(AuthenticatedIdentity authenticatedIdentity) {
+<span class="fc" id="L230">        return ImmutableActorId.builder().id(authenticatedIdentity.authenticatedUser().getPublicId()).type(ActorId.Type.PKBPERSON).build();</span>
+    }
+
+    private PublicDeleteRequest getOrCreateRequest(UUID requestId) {
+<span class="fc" id="L234">        return deleteRequestRepository.findById(requestId).orElseGet(() -&gt; {</span>
+<span class="nc" id="L235">            LOGGER.error(&quot;Missing request entity for id {}&quot;, requestId);</span>
+<span class="nc" id="L236">            return deleteRequestRepository.save(new PublicDeleteRequest(requestId, dateTimeService.now()));</span>
+        });
+    }
+
+    private AggregateDeleteOperationResponse deserialiseResponseJson(String json) {
+        try {
+<span class="fc" id="L242">            return objectMapper.readValue(json, AggregateDeleteOperationResponse.class);</span>
+<span class="nc" id="L243">        } catch (Exception e) {</span>
+<span class="nc" id="L244">            LOGGER.error(&quot;Error attempting to deserialize person delete response from json {}&quot;, json, e);</span>
+<span class="nc" id="L245">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    private String serialiseResponseJson(AggregateDeleteOperationResponse object) {
+        try {
+<span class="fc" id="L251">            return objectMapper.writeValueAsString(object);</span>
+<span class="nc" id="L252">        } catch (Exception e) {</span>
+<span class="nc" id="L253">            LOGGER.error(&quot;Error attempting to serialize person delete response json {}&quot;, object, e);</span>
+<span class="nc" id="L254">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    @Value.Immutable
+    @Value.Style(stagedBuilder = true)
+    interface ResponseHandler {
+        BiConsumer&lt;PublicDeleteRequest, String&gt; getJsonSetter();
+        BiConsumer&lt;PublicDeleteRequest, Instant&gt; getDateSetter();
+        DeleteRequestStatus getSuccessStatus();
+        Optional&lt;BiConsumer&lt;PersonService, AggregateDeleteOperationResponse&gt;&gt; getSuccessAction();
+        Optional&lt;BiConsumer&lt;PersonService, AggregateDeleteOperationResponse&gt;&gt; getFailureAction();
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,430 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AcceptInvitationAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.invitation</a> &gt; <span class="el_source">AcceptInvitationAction.java</span></div><h1>AcceptInvitationAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: AcceptInvitationAction.java Jun 3, 2009 5:15:40 PM mahendera$
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action.invitation;
+
+import com.opensymphony.xwork2.ActionContext;
+import com.pkb.action.BaseAction;
+import com.pkb.bean.IUserWebBean;
+import com.pkb.common.util.FrameFilter;
+import com.pkb.consent.entity.PatientConsent;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.ConsentReason;
+import com.pkb.entities.enums.Route;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.invitation.impl.InvitationManager;
+import com.pkb.service.patientconsent.DeprecatedPatientConsentManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.security.core.context.SecurityContextImpl;
+
+import java.util.Map;
+import java.util.UUID;
+
+import static com.pkb.entities.enums.InvitationStatus.ACCEPTED;
+import static com.pkb.util.PKBWebUtil.SPRING_SECURITY_CONTEXT;
+
+/**
+ * Accepts the clinician invitation
+ *
+ * @author mahendera
+ * @author pravinam Changes for logging the activity and notification
+ * @author robwhelan invitations by code
+ *
+ */
+<span class="fc" id="L48">public class AcceptInvitationAction extends BaseAction {</span>
+
+    private static final String RESULT_BACK_TO_LOGIN = &quot;backToLogin&quot;;
+
+    private static final long serialVersionUID = 1L;
+
+    private String invitationId;
+
+    // for pro invited with a key
+    private String invitationKey;
+    private String accessToken;
+    private String dobDay;
+    private String dobMonth;
+    private String dobYear;
+
+    private String clinicianEmailId;
+
+    private InvitationManager invitationManager;
+
+    private IUserWebBean userWebBean;
+
+    private String firstName;
+
+    private String lastName;
+
+    private boolean showNoValidAuthenticationMessage;
+
+    private boolean showAuthenticationExpiredMessage;
+
+    private TeamUserManager teamUserManager;
+
+<span class="fc" id="L79">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private PKBEmailMessageManager pkbEmailMessageManager;
+
+    private DeprecatedPatientConsentManager deprecatedPatientConsentManager;
+
+    private PatientConsentManager patientConsentManager;
+
+    public String acceptInvitation() {
+<span class="fc" id="L88">        LOGGER.info(&quot;Entering execute&quot;);</span>
+<span class="fc" id="L89">        String result = SUCCESS;</span>
+        try {
+
+<span class="fc" id="L92">            PKBInvitation pkbInvitation = null;</span>
+<span class="pc bpc" id="L93" title="1 of 2 branches missed.">            if (invitationId != null) {</span>
+<span class="fc" id="L94">                UUID invitationPublicId = invitationManager.getInvitationIdByString(invitationId);</span>
+<span class="fc" id="L95">                pkbInvitation = invitationManager.getInvitation(getLoggedInEHRRequestContext(), invitationPublicId);</span>
+            }
+
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">            if (pkbInvitation == null) {</span>
+<span class="nc" id="L99">                addActionError(getText(&quot;acceptInvitationAction.msg.invitation_not_found&quot;));</span>
+<span class="nc" id="L100">                return INPUT;</span>
+            }
+
+<span class="pc bpc" id="L103" title="1 of 2 branches missed.">            if (pkbInvitation.getInvitationStatus() == ACCEPTED) {</span>
+<span class="nc" id="L104">                addActionError(getText(&quot;acceptInvitationAction.msg.invitation_already_accepted&quot;));</span>
+<span class="nc" id="L105">                return INPUT;</span>
+            }
+
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">            if (isValidUser(pkbInvitation)) {</span>
+<span class="fc" id="L109">                long currentUserId = loggedInUserUtil.getLoggedInUserId();</span>
+
+                try {
+
+<span class="fc" id="L113">                    PKBPerson author = userManager.getPKBPerson(pkbInvitation.getAuthorUserId(), PKBPerson.Lazy.CONTACTS);</span>
+<span class="fc" id="L114">                    PKBPerson invitee = pkbInvitation.getTargetUser();</span>
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">                    PKBPerson accountOwner = pkbInvitation.getAccountId() == null ? null</span>
+<span class="fc" id="L116">                            : userManager.getAccountOwner(pkbInvitation.getAccountId(), PKBPerson.Lazy.CONTACTS);</span>
+
+<span class="fc" id="L118">                    invitationManager.beginTransaction();</span>
+<span class="fc" id="L119">                    userWebBean.acceptInvitationAndNotify(getLoggedInEHRRequestContext(), pkbInvitation.getPublicId(), accountOwner, author, invitee,</span>
+<span class="fc" id="L120">                            loggedInUserUtil.getLoggedInUser());</span>
+<span class="fc" id="L121">                    invitationManager.commitTransaction();</span>
+
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">                    if (invitee.getId().equals(currentUserId)) {</span>
+
+                        // If the invitation is being accepted by a team-affiliated clinician,
+                        // update the consent record to be team consent
+<span class="fc bfc" id="L127" title="All 2 branches covered.">                        if (isLoggedInUserProfessional()) {</span>
+
+<span class="fc" id="L129">                            configureConsent(accountOwner, invitee, pkbInvitation.getAccountId(), currentUserId);</span>
+                        }
+
+<span class="fc" id="L132">                        logActivity(com.pkb.notification.entity.Activity.Action.ACCEPTED_INVITATION, dateTimeService.now(), pkbInvitation.getAuthorUserId(),</span>
+                                false/*notify*/, new NoConsentsRequired());
+                        // Nb in some cases accountOwner will be the target
+<span class="pc bpc" id="L135" title="1 of 4 branches missed.">                        if ((accountOwner == null) || accountOwner.getId().equals(author.getId())</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">                                || accountOwner.getId().equals(invitee.getId())) {</span>
+<span class="fc" id="L137">                            addActionMessage(getText(&quot;acceptInvitationAction.msg.accepted_invitation&quot;,</span>
+<span class="fc" id="L138">                                    new String[] { author.getTitle(), author.getFirstName(), author.getLastName() }));</span>
+                        } else {
+<span class="fc" id="L140">                            addActionMessage(getText(&quot;acceptInvitationAction.msg.accepted_invitation_for_access&quot;,</span>
+<span class="fc" id="L141">                                    new String[] { author.getTitle(), author.getFirstName(), author.getLastName(), accountOwner.getTitle(),</span>
+<span class="fc" id="L142">                                            accountOwner.getFirstName(), accountOwner.getLastName() }));</span>
+                        }
+                    } else { // current user != target
+                             // TODO: Consent?
+
+<span class="nc" id="L147">                        logActivityByOthers(com.pkb.notification.entity.Activity.Action.ACCEPTED_INVITATION, dateTimeService.now(), false/*notify*/,</span>
+                                new NoConsentsRequired());
+<span class="nc" id="L149">                        addActionMessage(getText(&quot;acceptInvitationAction.msg.accepted_invitation_on_behalf_of_patient&quot;,</span>
+<span class="nc" id="L150">                                new String[] { author.getTitle(),</span>
+<span class="nc" id="L151">                                        author.getFirstName(), author.getLastName(), invitee.getTitle(), invitee.getFirstName(),</span>
+<span class="nc" id="L152">                                        invitee.getLastName() }));</span>
+<span class="nc" id="L153">                        result = &quot;successOnBehalfOfPatient&quot;;</span>
+                    }
+                } finally {
+<span class="fc" id="L156">                    invitationManager.rollbackIfNotCommitted();</span>
+                }
+<span class="fc" id="L158">            } else { // not valid user</span>
+<span class="nc" id="L159">                explicitLogout();</span>
+
+<span class="nc" id="L161">                addActionError(getText(&quot;acceptInvitationAction.err.wrong_account&quot;));</span>
+<span class="nc" id="L162">                result = RESULT_BACK_TO_LOGIN;</span>
+            }
+<span class="nc" id="L164">        } catch (PKBException exception) {</span>
+<span class="nc" id="L165">            result = ERROR;</span>
+<span class="nc" id="L166">            addActionError(getText(&quot;acceptInvitationAction.err.error_accepting&quot;));</span>
+<span class="nc" id="L167">            LOGGER.error(&quot;Error while accepting invitation&quot;, exception);</span>
+<span class="fc" id="L168">        }</span>
+<span class="fc" id="L169">        LOGGER.info(&quot;Exiting execute result : {}&quot;, result);</span>
+<span class="fc" id="L170">        return result;</span>
+    }
+
+    /**
+     * Creates (or reconciles existing) consent record given the information available
+     * when we're logged in as a clinician, which may not have been available when the
+     * invite was created
+     *
+     * @param patient
+     * @param clinician
+     */
+    private void configureConsent(PKBPerson patient, PKBPerson clinician, Long patientAccountId,
+            long loggedInUserId) {
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">        if (patient == null) {</span>
+<span class="nc" id="L184">            throw new IllegalArgumentException(&quot;patient is null&quot;);</span>
+        }
+
+<span class="fc" id="L187">        Long clinicianId = clinician.getId();</span>
+
+        // If this gets populated, we save it at the end
+<span class="fc" id="L190">        PatientConsent updatedConsent = null;</span>
+
+        // Look for an existing individual consent record for this clinician
+<span class="fc" id="L193">        PatientConsent originalConsent = deprecatedPatientConsentManager.findPatientConsentWithoutReasons(</span>
+<span class="fc" id="L194">                patient.getId(),</span>
+                clinicianId,
+<span class="fc" id="L196">                AccessingEntityType.INDIVIDUAL).orElse(null);</span>
+
+        // FLOW:
+        // Does the clinician belong to a team?
+        // Yes? Look for the team consent record.
+        //      If there is one, destroy the individual record. TODO: Log any differences?
+        //      If there isn't one, convert the individual consent record, or create a new one
+        // No? Create an individual record if one didn't exist (e.g invite is from pre-consent era)
+
+<span class="fc" id="L205">        Team currentUserInstitute = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">        if (currentUserInstitute != null) {</span>
+            // OK, we're a team clinician!
+<span class="fc" id="L208">            Long teamId = currentUserInstitute.getId();</span>
+<span class="fc" id="L209">            Long orgId = currentUserInstitute.getOrg().getId();</span>
+
+            // Does our team already have a consent record for this patient?
+<span class="fc" id="L212">            PatientConsent teamConsent = deprecatedPatientConsentManager.findPatientConsentWithoutReasons(patient.getId(), teamId, AccessingEntityType.TEAM).orElse(null);</span>
+<span class="fc bfc" id="L213" title="All 2 branches covered.">            if (teamConsent != null) {</span>
+                // Yes. Destroy the individual record if it exists (TODO)
+<span class="fc" id="L215">                StringBuilder log = new StringBuilder(</span>
+<span class="fc" id="L216">                        String.format(&quot;clinician %d has consent for patient %s via team %d&quot;,</span>
+<span class="fc" id="L217">                                clinicianId, patient.getId(), teamId));</span>
+
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">                if (originalConsent != null) {</span>
+<span class="fc" id="L220">                    log.append(String.format(&quot;; destroying individual consent record %d&quot;, originalConsent.getId()));</span>
+                }
+
+<span class="fc" id="L223">                LOGGER.info(log.toString());</span>
+
+<span class="pc bpc" id="L225" title="1 of 2 branches missed.">            } else if (originalConsent != null) {</span>
+                // No, but we can convert the individual record
+<span class="fc" id="L227">                LOGGER.error(&quot;team {} has no existing consent for patient {}; converting clinician {}'s individual consent&quot;,</span>
+<span class="fc" id="L228">                        teamId, patient.getId(), clinicianId ,</span>
+<span class="fc" id="L229">                        FrameFilter.filter(new Exception(&quot;Team has no existing consent for patient, converting clinician's consent&quot;).fillInStackTrace()));</span>
+<span class="fc" id="L230">                updatedConsent = originalConsent;</span>
+<span class="fc" id="L231">                updatedConsent.setAccessingEntityType(AccessingEntityType.TEAM);</span>
+<span class="fc" id="L232">                updatedConsent.setAccessingTeamSlashPersonId(teamId);</span>
+<span class="fc" id="L233">                updatedConsent.setSourceDetails(loggedInUserId, teamId, orgId, Route.WEBAPP,null);</span>
+<span class="fc" id="L234">                updatedConsent.setDischarged(false);</span>
+
+            } else {
+                // No, we must create one
+<span class="nc" id="L238">                LOGGER.error(&quot;team {} has no existing consent for patient {}; creating new record&quot;, teamId, patient.getId(),</span>
+<span class="nc" id="L239">                        FrameFilter.filter(new Exception(&quot;Team has no existing consent for patient, creating new record&quot;).fillInStackTrace()));</span>
+<span class="nc" id="L240">                updatedConsent = new PatientConsent.Builder(teamId, patient.getId(), loggedInUserId,</span>
+<span class="nc" id="L241">                        AccessingEntityType.TEAM, dateTimeService.now())</span>
+<span class="nc" id="L242">                                .setAllCategories(true, ConsentReason.EXPLICIT_CONSENT)</span>
+<span class="nc" id="L243">                                .discharged(false)</span>
+<span class="nc" id="L244">                                .route(getEHRRequestContext().getAccessRoute())</span>
+<span class="nc" id="L245">                                .build();</span>
+            }
+
+<span class="fc" id="L248">        } else {</span>
+
+            // Individual clinician. Create a consent record if there isn't one
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">            if (originalConsent == null) {</span>
+<span class="nc" id="L252">                LOGGER.info(&quot;non-team-affiliated clinician {} has no existing consent for patient {}; creating new record&quot;,</span>
+<span class="nc" id="L253">                        clinicianId, patient.getId());</span>
+<span class="nc" id="L254">                updatedConsent = new PatientConsent.Builder(clinicianId, patient.getId(), loggedInUserId,</span>
+<span class="nc" id="L255">                        AccessingEntityType.INDIVIDUAL, dateTimeService.now())</span>
+<span class="nc" id="L256">                                .setAllCategories(true, ConsentReason.EXPLICIT_CONSENT)</span>
+<span class="nc" id="L257">                                .route(getEHRRequestContext().getAccessRoute())</span>
+<span class="nc" id="L258">                                .build();</span>
+
+            }
+        }
+
+        // Done! Save any changes
+<span class="fc bfc" id="L264" title="All 2 branches covered.">        if (updatedConsent != null) {</span>
+<span class="fc" id="L265">            deprecatedPatientConsentManager.ensureTeamLinkAndUpdatePatientConsentLegacy(getEHRRequestContext(), updatedConsent);</span>
+        }
+
+<span class="fc" id="L268">    }</span>
+
+    private boolean isValidUser(PKBInvitation pkbInvitation) {
+<span class="fc" id="L271">        return patientConsentManager.hasIndividualAccessToUser(getEHRRequestContext(), pkbInvitation.getTargetUser().getId());</span>
+    }
+
+    private void explicitLogout() {
+<span class="nc" id="L275">        Map&lt;String, Object&gt; session = ActionContext.getContext().getSession();</span>
+<span class="nc" id="L276">        SecurityContextImpl userSession = (SecurityContextImpl) session</span>
+<span class="nc" id="L277">                .get(SPRING_SECURITY_CONTEXT);</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">        if (loggedInUserUtil.isUserLoggedIn()) {</span>
+<span class="nc" id="L279">            userManager.logoutUser(loggedInUserUtil.getLoggedInUserId());</span>
+        }
+<span class="nc" id="L281">        userSession.getAuthentication().setAuthenticated(false);</span>
+<span class="nc" id="L282">        request.getSession().removeAttribute(SPRING_SECURITY_CONTEXT);</span>
+<span class="nc" id="L283">        request.getSession().invalidate();</span>
+<span class="nc" id="L284">    }</span>
+
+    public String getInvitationId() {
+<span class="fc" id="L287">        return invitationId;</span>
+    }
+
+    public void setInvitationId(String invitationId) {
+<span class="fc" id="L291">        this.invitationId = invitationId;</span>
+<span class="fc" id="L292">    }</span>
+
+    public boolean isShowNoValidAuthenticationMessage() {
+<span class="nc" id="L295">        return showNoValidAuthenticationMessage;</span>
+    }
+
+    public void setShowNoValidAuthenticationMessage(
+            boolean showNoValidAuthenticationMessage) {
+<span class="nc" id="L300">        this.showNoValidAuthenticationMessage = showNoValidAuthenticationMessage;</span>
+<span class="nc" id="L301">    }</span>
+
+    public boolean isShowAuthenticationExpiredMessage() {
+<span class="nc" id="L304">        return showAuthenticationExpiredMessage;</span>
+    }
+
+    public void setShowAuthenticationExpiredMessage(
+            boolean showAuthenticationExpiredMessage) {
+<span class="nc" id="L309">        this.showAuthenticationExpiredMessage = showAuthenticationExpiredMessage;</span>
+<span class="nc" id="L310">    }</span>
+
+    public String getClinicianEmailId() {
+<span class="nc" id="L313">        return clinicianEmailId;</span>
+    }
+
+    public void setClinicianEmailId(String clinicianEmailId) {
+<span class="nc" id="L317">        this.clinicianEmailId = clinicianEmailId;</span>
+<span class="nc" id="L318">    }</span>
+
+    public String getLastName() {
+<span class="nc" id="L321">        return lastName;</span>
+    }
+
+    public void setLastName(String lastName) {
+<span class="nc" id="L325">        this.lastName = lastName;</span>
+<span class="nc" id="L326">    }</span>
+
+    public String getFirstName() {
+<span class="nc" id="L329">        return firstName;</span>
+    }
+
+    public void setFirstName(String firstName) {
+<span class="nc" id="L333">        this.firstName = firstName;</span>
+<span class="nc" id="L334">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L337">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L341">        this.userManager = userManager;</span>
+<span class="fc" id="L342">    }</span>
+
+    public TeamUserManager getTeamUserManager() {
+<span class="nc" id="L345">        return teamUserManager;</span>
+    }
+
+    public void setTeamUserManager(
+            TeamUserManager teamUserManager) {
+<span class="fc" id="L350">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L351">    }</span>
+
+    public void setInvitationManager(InvitationManager invitationManager) {
+<span class="fc" id="L354">        this.invitationManager = invitationManager;</span>
+<span class="fc" id="L355">    }</span>
+
+    public InvitationManager getInvitationManager() {
+<span class="nc" id="L358">        return invitationManager;</span>
+    }
+
+    public IUserWebBean getUserWebBean() {
+<span class="nc" id="L362">        return userWebBean;</span>
+    }
+
+    public void setUserWebBean(IUserWebBean userWebBean) {
+<span class="fc" id="L366">        this.userWebBean = userWebBean;</span>
+<span class="fc" id="L367">    }</span>
+
+    public PKBEmailMessageManager getPkbEmailMessageManager() {
+<span class="nc" id="L370">        return pkbEmailMessageManager;</span>
+    }
+
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L374">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L375">    }</span>
+
+    public PatientConsentManager getPatientConsentManager() {
+<span class="nc" id="L378">        return patientConsentManager;</span>
+    }
+
+    public void setPatientConsentManager(PatientConsentManager patientConsentManager) {
+<span class="fc" id="L382">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L383">    }</span>
+
+    public void setDeprecatedPatientConsentManager(DeprecatedPatientConsentManager deprecatedPatientConsentManager) {
+<span class="fc" id="L386">        this.deprecatedPatientConsentManager = deprecatedPatientConsentManager;</span>
+<span class="fc" id="L387">    }</span>
+
+    public String getInvitationKey() {
+<span class="nc" id="L390">        return invitationKey;</span>
+    }
+
+    public void setInvitationKey(String invitationKey) {
+<span class="nc" id="L394">        this.invitationKey = invitationKey;</span>
+<span class="nc" id="L395">    }</span>
+
+    public String getAccessToken() {
+<span class="nc" id="L398">        return accessToken;</span>
+    }
+
+    public void setAccessToken(String accessToken) {
+<span class="nc" id="L402">        this.accessToken = accessToken;</span>
+<span class="nc" id="L403">    }</span>
+
+    public String getDobDay() {
+<span class="nc" id="L406">        return dobDay;</span>
+    }
+
+    public void setDobDay(String dobDay) {
+<span class="nc" id="L410">        this.dobDay = dobDay;</span>
+<span class="nc" id="L411">    }</span>
+
+    public String getDobMonth() {
+<span class="nc" id="L414">        return dobMonth;</span>
+    }
+
+    public void setDobMonth(String dobMonth) {
+<span class="nc" id="L418">        this.dobMonth = dobMonth;</span>
+<span class="nc" id="L419">    }</span>
+
+    public String getDobYear() {
+<span class="nc" id="L422">        return dobYear;</span>
+    }
+
+    public void setDobYear(String dobYear) {
+<span class="nc" id="L426">        this.dobYear = dobYear;</span>
+<span class="nc" id="L427">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

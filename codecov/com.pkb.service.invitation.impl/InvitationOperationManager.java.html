@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InvitationOperationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.invitation.impl</a> &gt; <span class="el_source">InvitationOperationManager.java</span></div><h1>InvitationOperationManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.invitation.impl;
+
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.util.RandomUtil;
+import com.pkb.datamodel.Email;
+import com.pkb.domain.InvitationService;
+import com.pkb.encounter.entity.PKBInvitation;
+import com.pkb.encounter.entity.PKBInvitationDetail;
+import com.pkb.entities.doc.DocInvitation;
+import com.pkb.entities.enums.InvitationStatus;
+import com.pkb.entities.enums.InvitationType;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.mappers.AccountPrivateKeyMapper;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.tolven.security.key.AccountPrivateKey;
+import org.tolven.security.key.AccountSecretKey;
+
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.util.List;
+import java.util.UUID;
+
+import static java.util.stream.Collectors.toList;
+
+public class InvitationOperationManager extends TransactionManager {
+
+    private final AccountPrivateKeyMapper accountPrivateKeyMapper;
+    private final InvitationService invitationService;
+    private final InvitationManagerHelper invitationManagerHelper;
+
+    public InvitationOperationManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider,
+                                      AccountPrivateKeyMapper accountPrivateKeyMapper, InvitationService invitationService, InvitationManagerHelper invitationManagerHelper) {
+<span class="fc" id="L43">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L44">        this.accountPrivateKeyMapper = accountPrivateKeyMapper;</span>
+<span class="fc" id="L45">        this.invitationService = invitationService;</span>
+<span class="fc" id="L46">        this.invitationManagerHelper = invitationManagerHelper;</span>
+<span class="fc" id="L47">    }</span>
+
+    public PKBInvitation createInvitation(LoggedInEHRRequestContext context, PKBInvitation pkbInvitation) {
+<span class="fc" id="L50">        PKBInvitationDetail invitationDetail = pkbInvitation.getInvitationDetail();</span>
+<span class="pc bpc" id="L51" title="1 of 2 branches missed.">        if (!invitationDetail.getSource().isPopulated()) {</span>
+<span class="nc" id="L52">            invitationDetail.getSource().init(context);</span>
+        }
+
+        try {
+<span class="fc" id="L56">            Option&lt;PKBPerson&gt; targetUser = pkbInvitation.findTargetUser();</span>
+<span class="fc" id="L57">            Option&lt;Email&gt; targetEmail = targetUser</span>
+<span class="fc" id="L58">                    .flatMap(PKBPerson::findPrimaryContact)</span>
+<span class="fc" id="L59">                    .flatMap(PersonContact::getContactIfEmail);</span>
+
+<span class="fc" id="L61">            DocInvitation invitation = new DocInvitation();</span>
+
+<span class="pc bpc" id="L63" title="1 of 2 branches missed.">            if (pkbInvitation.getAccountId() == null) {</span>
+<span class="nc" id="L64">                throw new NullPointerException(&quot;missing account ID for invitation!&quot;);</span>
+            }
+
+<span class="fc" id="L67">            invitation.setAccountId(pkbInvitation.getAccountId());</span>
+
+<span class="fc" id="L69">            invitation.setCreated(pkbInvitation.getCreated());</span>
+<span class="fc" id="L70">            invitation.setStatus(InvitationStatus.NEW.getValue());</span>
+
+<span class="fc" id="L72">            PKBPerson authorPerson = beanFactory.getPKBPersonBean().getPKBPerson(pkbInvitation.getAuthorUserId());</span>
+<span class="fc" id="L73">            invitation.setAuthorPersonId(authorPerson.getId());</span>
+
+<span class="fc" id="L75">            targetEmail.peek(invitation::setTargetEmail);</span>
+<span class="fc" id="L76">            targetUser.peek(u -&gt; invitation.setTargetPersonId(u.getId()));</span>
+
+            // private key (if needed) -- save, and return the access token in the PKBInvitation obj
+<span class="fc bfc" id="L79" title="All 2 branches covered.">            if (pkbInvitation.isAccountKeyRequired()) {</span>
+
+                // Generate random access token -- then feed that into the secret key generation
+<span class="fc" id="L82">                String accessToken = RandomUtil.randomReadableCode(AccountSecretKey.ACCESS_TOKEN_LENGTH);</span>
+
+<span class="fc" id="L84">                AccountPrivateKey accountPrivateKey = beanFactory.getHealthRecordAccessRemote().grant(context, accessToken, pkbInvitation.getAccountId());</span>
+
+                // Store the access token back in the PKBInvitation (NOT persisted)
+<span class="fc" id="L87">                pkbInvitation.setAccountKeyAccessToken(accessToken);</span>
+
+                // persiste acct priv key (plus all details around key deriv)
+<span class="fc" id="L90">                invitation.setAccountPrivateKey(accountPrivateKeyMapper.getEncodedEncryptedPrivateKeyInfoWithSecretDerivFromAccountPrivateKey(accountPrivateKey));</span>
+            }
+
+            // The attributes like temp password doc id , institute code will not be stored
+            // in the type anymore; they are stored in InvitationDetail menu data
+<span class="fc" id="L95">            InvitationType invitationType = pkbInvitation.getInvitationType();</span>
+<span class="fc" id="L96">            invitation.setDocInvitationType(invitationType, invitationDetail.getAddUserId());</span>
+<span class="fc" id="L97">            invitation.setPublicId(UUID.randomUUID());</span>
+<span class="fc" id="L98">            invitation.setGrantedConsents(pkbInvitation.getGrantedConsents().orElse(null));</span>
+<span class="fc" id="L99">            invitationService.save(invitation);</span>
+
+<span class="fc" id="L101">            saveInvitationDetail(context, pkbInvitation.getAuthorUserId(), invitation.getPublicId(), invitation.getId(),invitationDetail);</span>
+<span class="fc" id="L102">            pkbInvitation.setId(invitation.getId());</span>
+<span class="fc" id="L103">            pkbInvitation.setPublicId(invitation.getPublicId());</span>
+<span class="fc" id="L104">            return pkbInvitation;</span>
+<span class="nc" id="L105">        } catch (IOException e) {</span>
+<span class="nc" id="L106">            throw new RuntimeException(&quot;IOException while creating invitation by user-&quot; + pkbInvitation.getAuthorUserId(), e);</span>
+<span class="nc" id="L107">        } catch (GeneralSecurityException e) {</span>
+<span class="nc" id="L108">            throw new RuntimeException(&quot;GSE while creating invitation by user-&quot; + pkbInvitation.getAuthorUserId(), e);</span>
+        }
+    }
+
+    /**
+     * stores InvitationDetail in the account of the author (not necessarily the patient!)
+     */
+    private long saveInvitationDetail(EHRRequestContext requestContext, long authorPersonId, UUID invitationPublicId, Long invitationPrivateId,
+            PKBInvitationDetail invitationDetail) {
+        // If the account is null, the invitation is asking for access
+        // Since this is an old-style invite, the details are stored in the account of the inviter/author
+<span class="fc" id="L119">        Long accountId = beanFactory.getPKBPersonBean().getDefaultAccountId(authorPersonId);</span>
+
+<span class="fc" id="L121">        invitationDetail.setInvitationPublicId(invitationPublicId);</span>
+<span class="fc" id="L122">        invitationDetail.setInvitationPrivateId(invitationPrivateId);</span>
+<span class="fc" id="L123">        invitationDetail.generateNewRandomUniqueId();</span>
+<span class="fc" id="L124">        EHRData ehrData = beanFactory.getEhrRemote().populateEHRData(invitationDetail, accountId, MenuDataType.invitationDetail, requestContext);</span>
+<span class="fc" id="L125">        return beanFactory.getEhrRemote().saveEHRData(requestContext, ehrData);</span>
+    }
+
+    public void updateInvitationStatus(UUID invitationId, InvitationStatus status) {
+<span class="nc" id="L129">        invitationService.updateInvitationStatus(invitationId, status);</span>
+<span class="nc" id="L130">    }</span>
+
+    public List&lt;PKBInvitation&gt; getInvitationsFromInstitute(long teamId, long userId, @NotNull InvitationStatus status) {
+<span class="nc" id="L133">        return invitationService.getInvitationsFromInstitute(teamId, userId, status).stream()</span>
+<span class="nc" id="L134">                .map(i -&gt; invitationManagerHelper.mapToPKBInvitation(i, null))</span>
+<span class="nc" id="L135">                .collect(toList());</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

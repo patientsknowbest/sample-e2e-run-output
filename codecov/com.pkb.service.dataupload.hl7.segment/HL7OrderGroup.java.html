@@ -1,0 +1,405 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HL7OrderGroup.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.hl7.segment</a> &gt; <span class="el_source">HL7OrderGroup.java</span></div><h1>HL7OrderGroup.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.service.dataupload.hl7.segment;
+
+import com.google.common.collect.ImmutableSet;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.service.dataupload.hl7.HL7MessageProperties;
+import com.pkb.service.dataupload.hl7.HL7XmlDoc;
+import com.pkb.service.dataupload.hl7.field.HL7Code;
+import com.pkb.service.dataupload.hl7.field.HL7PersonLocation;
+import com.pkb.service.dataupload.hl7.field.HL7PersonRef;
+import com.pkb.service.dataupload.hl7.segment.parser.HL7ObservationParser;
+import com.pkb.service.dataupload.hl7.validation.HL7ValueExpectation;
+import com.pkb.service.dataupload.hl7.value.HL7Date;
+import com.pkb.service.dataupload.hl7.value.HL7String;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.w3c.dom.Element;
+
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+import static com.pkb.service.dataupload.hl7.validation.HL7ValueChecker.enforceMandatoryValue;
+
+/**
+ * Parses an OBR segment. See HL7 v2.4 Chapter 7.
+ * &lt;p&gt;
+ * Info from the ORC (optional), OBR (required), plus lists of the OrderGroup-level NTEs (optional) and OBXs
+ * (plus each OBX may have its own NTE list).
+ * &lt;p&gt;
+ * YAGNI #1: ORC and OBR fields are NOT stored as separate objects for now, in the interest of simplicity.
+ * We can easily migrate to a deeper object graph when/if needed.
+ *
+ * @author robwhelan
+ */
+public class HL7OrderGroup implements Serializable {
+
+<span class="fc" id="L47">    private static final Logger LOGGER = LoggerFactory.getLogger(HL7OrderGroup.class);</span>
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L51">    private static final ImmutableSet&lt;String&gt; OBX_STATUS_ACCEPT_VALUES = ImmutableSet.of(&quot;F&quot;, &quot;C&quot;);</span>
+<span class="fc" id="L52">    private static final ImmutableSet&lt;String&gt; OBX_STATUS_SKIP_VALUES = ImmutableSet.of(&quot;I&quot;, &quot;O&quot;, &quot;P&quot;, &quot;X&quot;);</span>
+
+<span class="fc" id="L54">    private HL7String orcFillerOrderNumber = new HL7String();</span>
+<span class="fc" id="L55">    private HL7PersonLocation entererLocation = new HL7PersonLocation();</span>
+
+<span class="fc" id="L57">    private HL7String obrSetId = new HL7String();</span>
+<span class="fc" id="L58">    private HL7Date obrTimestamp = new HL7Date();</span>
+<span class="fc" id="L59">    private HL7Date obrSpecimenReceivedTimestamp = new HL7Date();</span>
+<span class="fc" id="L60">    private HL7String obrFillerOrderNumber = new HL7String();</span>
+<span class="fc" id="L61">    private HL7Code obrServiceCode = new HL7Code();</span>
+<span class="fc" id="L62">    private HL7PersonRef reqBy = new HL7PersonRef();</span>
+<span class="fc" id="L63">    private HL7String obrLabDiscipline = new HL7String();</span>
+<span class="fc" id="L64">    private HL7String obrResultStatus = new HL7String();</span>
+
+<span class="fc" id="L66">    private List&lt;HL7String&gt; obrNoteList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L67">    private List&lt;HL7Observation&gt; observationList = new ArrayList&lt;&gt;();</span>
+
+    private HL7MessageProperties messageProperties;
+
+    /**
+     * some ORU^R01 messages may contain a mix of data types and actions (deletion vs. save) - this allows a single parsing run
+     * then different methods can review not-yet-processed groups
+     */
+<span class="fc" id="L75">    private boolean processed = false;</span>
+
+<span class="fc" id="L77">    public HL7OrderGroup(HL7MessageProperties messageProperties) {</span>
+<span class="fc" id="L78">        this.messageProperties = messageProperties;</span>
+<span class="fc" id="L79">    }</span>
+
+    public void parseOrc(Element orc) {
+<span class="fc" id="L82">        this.orcFillerOrderNumber = HL7XmlDoc.getHl7Text(orc, &quot;ORC.3.1&quot;);</span>
+<span class="fc" id="L83">        this.entererLocation.parsePl(orc, &quot;ORC&quot;, 13);</span>
+<span class="fc" id="L84">    }</span>
+
+    public void parseObr(Element obr) throws ApiCallMalformedException {
+<span class="fc" id="L87">        obrSetId = HL7XmlDoc.getHl7Text(obr, &quot;OBR.1.1&quot;);</span>
+
+        // may need to get observation timestamp from OBR record (not always in each OBX...)
+<span class="fc" id="L90">        obrTimestamp = HL7XmlDoc.parseDateOrTimestamp(HL7XmlDoc.getHl7Text(obr, &quot;OBR.7.1&quot;), &quot;OBR[&quot; + obrSetId.getString() + &quot;].7.1&quot;,</span>
+                messageProperties);
+<span class="fc" id="L92">        obrSpecimenReceivedTimestamp = HL7XmlDoc.parseDateOrTimestamp(HL7XmlDoc.getHl7Text(obr, &quot;OBR.14.1&quot;), &quot;OBR.14.1&quot;, messageProperties);</span>
+<span class="fc" id="L93">        obrFillerOrderNumber = HL7XmlDoc.getHl7Text(obr, &quot;OBR.3.1&quot;);</span>
+<span class="fc" id="L94">        obrServiceCode.parseCe(obr, &quot;OBR&quot;, 4);</span>
+<span class="fc" id="L95">        reqBy.parseXcn(obr, &quot;OBR&quot;, 16);</span>
+<span class="fc" id="L96">        obrLabDiscipline = HL7XmlDoc.getHl7Text(obr, &quot;OBR.24.1&quot;);</span>
+<span class="fc" id="L97">        obrResultStatus = HL7XmlDoc.getHl7Text(obr, &quot;OBR.25.1&quot;);</span>
+<span class="fc" id="L98">    }</span>
+
+    public void parseNte(Element nte) {
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">        if (observationList.isEmpty()) {</span>
+<span class="nc" id="L102">            obrNoteList.addAll(HL7XmlDoc.getHl7TextList(nte, &quot;NTE.3.1&quot;, true/*unescape*/, false/*trim*/));</span>
+        } else {
+<span class="fc" id="L104">            HL7Observation latestObservation = observationList.get(observationList.size() - 1);</span>
+<span class="fc" id="L105">            latestObservation.parseNte(nte);</span>
+        }
+<span class="fc" id="L107">    }</span>
+
+    public void parseObx(Element obx) throws ApiCallMalformedException {
+<span class="fc" id="L110">        new HL7ObservationParser().parse(messageProperties, obx, obrSetId.getString())</span>
+<span class="fc" id="L111">                .ifPresent(observation -&gt; {</span>
+<span class="fc bfc" id="L112" title="All 2 branches covered.">                    if (validateObx(observation)) {</span>
+<span class="fc" id="L113">                        observationList.add(observation);</span>
+                    } else {
+                        // Silently skip this OBX segment
+                    }
+<span class="fc" id="L117">                });</span>
+<span class="fc" id="L118">    }</span>
+
+    /**
+     * Returns true if the observation should be accepted, or false if it should be silently ignored.
+     * If the message should be rejected then an exception is thrown.
+     *
+     * @param observation The observation to inspect
+     * @return true - if the observation should be accepted; false - otherwise
+     */
+    public static boolean validateObx(HL7Observation observation) {
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">        return validateObxValueType(observation.getValueType())</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">                &amp;&amp; validateObxStatus(observation.getResultStatus());</span>
+    }
+
+    /**
+     * Returns true if the value type has been provided.
+     * &lt;p&gt;
+     * A blank value will cause an exception to be thrown.
+     *
+     * @param value The OBX value type from the message
+     * @return true - if the value type is not blank. false cannot be returned - an exception will be thrown if the response is not true.
+     */
+    public static boolean validateObxValueType(HL7String value) {
+<span class="fc" id="L141">        enforceMandatoryValue(HL7ValueExpectation.builder()</span>
+<span class="fc" id="L142">                .withId(&quot;OBX-2.1&quot;)</span>
+<span class="fc" id="L143">                .withName(&quot;Value type&quot;)</span>
+<span class="fc" id="L144">                .withProvidedHL7Value(value)</span>
+<span class="fc" id="L145">                .build());</span>
+<span class="fc" id="L146">        return true;</span>
+    }
+
+    /**
+     * This method returns true if the status value provided is one that should be processed, and false otherwise.
+     * &lt;p&gt;
+     * A blank or unsupported status value will cause an exception to be thrown.
+     *
+     * @param value The OBX status value from the message
+     * @return true - if the value matches one that should be processed. false - otherwise.
+     */
+    public static boolean validateObxStatus(HL7String value) {
+        // PHR-7692: Check a value has been provided in OBX-11
+<span class="fc" id="L159">        HL7ValueExpectation expectation_OBX_11_1 = HL7ValueExpectation.builder()</span>
+<span class="fc" id="L160">                .withId(&quot;OBX-11.1&quot;)</span>
+<span class="fc" id="L161">                .withName(&quot;result status&quot;)</span>
+<span class="fc" id="L162">                .withProvidedHL7Value(value)</span>
+<span class="fc" id="L163">                .build();</span>
+<span class="fc" id="L164">        enforceMandatoryValue(expectation_OBX_11_1);</span>
+
+        // If an acceptable value has been provided, return true
+<span class="fc bfc" id="L167" title="All 2 branches covered.">        if (OBX_STATUS_ACCEPT_VALUES.contains(value.getString())) {</span>
+<span class="fc" id="L168">            return true;</span>
+        }
+
+        // If the value is valid but one we ignore, return false
+<span class="fc bfc" id="L172" title="All 2 branches covered.">        if (OBX_STATUS_SKIP_VALUES.contains(value.getString())) {</span>
+<span class="fc" id="L173">            return false;</span>
+        }
+
+        // Else throw an exception explaining the value is not permitted
+<span class="fc" id="L177">        throw new ApiCallMalformedException(String.format(&quot;OBX-11 value of [%s] is not valid. %s will be accepted; %s will be silently ignored; other values will be rejected.&quot;,</span>
+<span class="fc" id="L178">                value.getRawValue(), OBX_STATUS_ACCEPT_VALUES.toString(), OBX_STATUS_SKIP_VALUES.toString()));</span>
+    }
+
+    /**
+     * If the content of this OBR group meets the criteria for a textual report, then:
+     * &lt;ul&gt;
+     *     &lt;li&gt;The combined content will be set into the first OBX note list (not the value)&lt;/li&gt;
+     *     &lt;li&gt;All other OBX segments to be discarded&lt;/li&gt;
+     * &lt;/ul&gt;
+     *
+     * @return true - if this group was parsed as a textual report. false - otherwise.
+     */
+    public boolean collapseTextReports() {
+<span class="fc" id="L191">        List&lt;HL7String&gt; textualReportEntries = getTextualReportEntries(observationList);</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">        if(!textualReportEntries.isEmpty()) {</span>
+<span class="fc" id="L193">            HL7Observation obx1 = observationList.get(0);</span>
+<span class="fc" id="L194">            obx1.setValueText(&quot;&quot;);</span>
+<span class="fc" id="L195">            obx1.setValueNumeric(null);</span>
+<span class="fc" id="L196">            obx1.clearNotes();</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">            for (HL7String textualReportEntry : textualReportEntries) {</span>
+<span class="fc" id="L198">                obx1.addNote(textualReportEntry.getString());</span>
+<span class="fc" id="L199">            }</span>
+<span class="fc" id="L200">            observationList = observationList.subList(0, 1);</span>
+<span class="fc" id="L201">            return true;</span>
+        }
+<span class="fc" id="L203">        return false;</span>
+    }
+
+    /**
+     * An OBR group is considered to be a textual report if and only if the following conditions are true:
+     * &lt;ul&gt;
+     *     &lt;li&gt;Condition #1: There are 1 or more OBX segments, which together contain at least 2 lines of text&lt;/li&gt;
+     *     &lt;li&gt;Condition #2: Each OBX segment declares a textual data type (TX, FT, ST)&lt;/li&gt;
+     *     &lt;li&gt;Condition #3: All the OBX segments have matching test IDs (OBX-3)&lt;/li&gt;
+     * &lt;/ul&gt;
+     * &lt;p&gt;
+     * We publish these criteria online at https://dev.patientsknowbest.com/home/hl7-api/messages/oru-r01/laboratory.
+     *
+     * @return An ordered list of entries for the textual report - if this group was parsed as a textual report. An empty list - otherwise.
+     */
+    private static List&lt;HL7String&gt; getTextualReportEntries(List&lt;HL7Observation&gt; observations) {
+        // Condition #1. Given that...
+        // - Each OBX segment is automatically considered a new line
+        // - The value of a single OBX can contain more than one line, either by repeating the content field or by
+        // including newline escape sequences (\.br\), which is already taken care of by earlier parsing (see
+        // HL7XmlDoc.joinTextContentOfTags)
+        // ...it follows that condition #1 is satisfied unless there are either:
+        // - No OBX segments
+        // - Or a single OBX segment that does not contain a newline character
+        // As such, we check for both those conditions here and return early if either fail.
+<span class="fc bfc" id="L228" title="All 2 branches covered.">        if (observations.isEmpty()) {</span>
+<span class="fc" id="L229">            return Collections.emptyList();</span>
+        }
+<span class="fc bfc" id="L231" title="All 2 branches covered.">        if (observations.size() == 1) {</span>
+<span class="fc" id="L232">            HL7String valueText = observations.get(0).getValueText();</span>
+<span class="pc bpc" id="L233" title="1 of 4 branches missed.">            if (valueText == null || valueText.getString().indexOf('\n') &lt; 0) {</span>
+<span class="fc" id="L234">                return Collections.emptyList();</span>
+            }
+        }
+
+        // Keep track of the report contents at the same time as checking the criteria for a textual report. This avoids
+        // needing to iterate for a second time to extract the contents if the criteria are met.
+<span class="fc" id="L240">        List&lt;HL7String&gt; textualReportEntryList = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L242">        HL7Observation obx1 = observations.get(0);</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">        for (HL7Observation observation : observations) {</span>
+            // Condition #2. This is not a textual report if any OBX declares a non-textual value type.
+<span class="fc bfc" id="L245" title="All 2 branches covered.">            if (!observation.isTextValueType()) {</span>
+<span class="fc" id="L246">                return Collections.emptyList();</span>
+            }
+            // Condition #3. This is not a textual report if any OBX has an ID which differs from the first OBX.
+<span class="fc bfc" id="L249" title="All 2 branches covered.">            if (!observation.isTestIdMatch(obx1)) {</span>
+<span class="fc" id="L250">                return Collections.emptyList();</span>
+            }
+            // Add the content and notes to the report contents.
+<span class="fc" id="L253">            textualReportEntryList.add(observation.getValueText());</span>
+<span class="fc" id="L254">            textualReportEntryList.addAll(observation.getNoteList());</span>
+<span class="fc" id="L255">        }</span>
+
+<span class="fc" id="L257">        return textualReportEntryList;</span>
+    }
+
+    /**
+     * If OBR.25.1 is 'R' this is a deletion
+     */
+    public boolean isDeletionStatus() {
+<span class="fc" id="L264">        return &quot;R&quot;.equals(getObrResultStatus().toString());</span>
+    }
+
+    /**
+     * set IDs aren't always populated, but are important for ordering results and or helping with hibernate impl
+     */
+    public void forceObxSetIds() {
+<span class="fc bfc" id="L271" title="All 2 branches covered.">        if (observationList.isEmpty()) {</span>
+<span class="fc" id="L272">            return;</span>
+        }
+
+<span class="fc" id="L275">        int seqNumber = 1;</span>
+
+<span class="fc bfc" id="L277" title="All 2 branches covered.">        for (HL7Observation obs : observationList) {</span>
+<span class="pc bpc" id="L278" title="3 of 4 branches missed.">            if (StringUtils.isNotBlank(obs.getObxSetId().getString()) &amp;&amp; StringUtils.isNumeric(obs.getObxSetId().getString())) {</span>
+<span class="nc" id="L279">                seqNumber = Integer.parseInt(obs.getObxSetId().getString());</span>
+            } else {
+<span class="fc" id="L281">                seqNumber += 1;</span>
+<span class="fc" id="L282">                obs.setObxSetId(&quot;&quot; + seqNumber);</span>
+            }
+<span class="fc" id="L284">        }</span>
+<span class="fc" id="L285">    }</span>
+
+    /**
+     * Our spec declares that we prioritise OBR-3, but if blank we accept ORC-3.
+     *
+     * @return OBR-3 if not blank, else ORC-3.
+     */
+    public HL7String getMostSignificantFON() {
+<span class="fc bfc" id="L293" title="All 2 branches covered.">        if (obrFillerOrderNumber.isNotBlank()) {</span>
+<span class="fc" id="L294">            return obrFillerOrderNumber;</span>
+        }
+<span class="fc" id="L296">        return orcFillerOrderNumber;</span>
+    }
+
+    // getters/setters
+
+    public HL7String getOrcFillerOrderNumber() {
+<span class="fc" id="L302">        return orcFillerOrderNumber;</span>
+    }
+
+    public void setOrcFillerOrderNumber(String orcLabOrderId) {
+<span class="nc" id="L306">        this.orcFillerOrderNumber = new HL7String(orcLabOrderId);</span>
+<span class="nc" id="L307">    }</span>
+
+    public HL7String getObrSetId() {
+<span class="fc" id="L310">        return obrSetId;</span>
+    }
+
+    public void setObrSetId(String obrSetId) {
+<span class="nc" id="L314">        this.obrSetId = new HL7String(obrSetId);</span>
+<span class="nc" id="L315">    }</span>
+
+    public HL7String getObrFillerOrderNumber() {
+<span class="fc" id="L318">        return obrFillerOrderNumber;</span>
+    }
+
+    public void setObrFillerOrderNumber(String obrLabOrderId) {
+<span class="nc" id="L322">        this.obrFillerOrderNumber = new HL7String(obrLabOrderId);</span>
+<span class="nc" id="L323">    }</span>
+
+    public List&lt;HL7String&gt; getObrNoteList() {
+<span class="fc" id="L326">        return obrNoteList;</span>
+    }
+
+    public void setObrNoteList(List&lt;HL7String&gt; obrNoteList) {
+<span class="nc" id="L330">        this.obrNoteList = obrNoteList;</span>
+<span class="nc" id="L331">    }</span>
+
+    public List&lt;HL7Observation&gt; getObservationList() {
+<span class="fc" id="L334">        return observationList;</span>
+    }
+
+    public void setObservationList(List&lt;HL7Observation&gt; observationList) {
+<span class="nc" id="L338">        this.observationList = observationList;</span>
+<span class="nc" id="L339">    }</span>
+
+    public HL7Date getObrTimestamp() {
+<span class="fc" id="L342">        return obrTimestamp;</span>
+    }
+
+    public void setObrTimestamp(HL7Date obrTimestamp) {
+<span class="nc" id="L346">        this.obrTimestamp = obrTimestamp;</span>
+<span class="nc" id="L347">    }</span>
+
+    public HL7Date getObrSpecimenReceivedTimestamp() {
+<span class="fc" id="L350">        return obrSpecimenReceivedTimestamp;</span>
+    }
+
+    public void setObrSpecimenReceivedTimestamp(HL7Date obrSpecimenReceivedTimestamp) {
+<span class="nc" id="L354">        this.obrSpecimenReceivedTimestamp = obrSpecimenReceivedTimestamp;</span>
+<span class="nc" id="L355">    }</span>
+
+    public HL7Code getObrServiceCode() {
+<span class="fc" id="L358">        return obrServiceCode;</span>
+    }
+
+    public void setObrServiceCode(HL7Code obrServiceCode) {
+<span class="nc" id="L362">        this.obrServiceCode = obrServiceCode;</span>
+<span class="nc" id="L363">    }</span>
+
+    public HL7PersonRef getReqBy() {
+<span class="fc" id="L366">        return reqBy;</span>
+    }
+
+    public void setReqBy(HL7PersonRef reqBy) {
+<span class="nc" id="L370">        this.reqBy = reqBy;</span>
+<span class="nc" id="L371">    }</span>
+
+    public HL7String getObrLabDiscipline() {
+<span class="fc" id="L374">        return obrLabDiscipline;</span>
+    }
+
+    public void setObrLabDiscipline(HL7String obrLabDiscipline) {
+<span class="nc" id="L378">        this.obrLabDiscipline = obrLabDiscipline;</span>
+<span class="nc" id="L379">    }</span>
+
+    public HL7String getObrResultStatus() {
+<span class="fc" id="L382">        return obrResultStatus;</span>
+    }
+
+    public void setObrResultStatus(HL7String obrResultStatus) {
+<span class="nc" id="L386">        this.obrResultStatus = obrResultStatus;</span>
+<span class="nc" id="L387">    }</span>
+
+    public HL7PersonLocation getEntererLocation() {
+<span class="fc" id="L390">        return entererLocation;</span>
+    }
+
+    public void setEntererLocation(HL7PersonLocation entererLocation) {
+<span class="nc" id="L394">        this.entererLocation = entererLocation;</span>
+<span class="nc" id="L395">    }</span>
+
+    public boolean isProcessed() {
+<span class="fc" id="L398">        return processed;</span>
+    }
+
+    public void setProcessed(boolean processed) {
+<span class="fc" id="L402">        this.processed = processed;</span>
+<span class="fc" id="L403">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

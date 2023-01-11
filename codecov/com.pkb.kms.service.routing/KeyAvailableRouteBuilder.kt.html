@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>KeyAvailableRouteBuilder.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.kms.service.routing</a> &gt; <span class="el_source">KeyAvailableRouteBuilder.kt</span></div><h1>KeyAvailableRouteBuilder.kt</h1><pre class="source lang-java linenums">package com.pkb.kms.service.routing
+
+import com.pkb.common.config.KmsConfig
+import com.pkb.common.testcontrol.camel.route.AbstractNamespaceAwareRouteBuilder
+import com.pkb.common.testcontrol.services.PubSubNamespaceService
+import com.pkb.kms.service.routing.KeyAvailableRouteBuilder.Companion.INBOUND_ORG_KEY_AVAILABLE
+import com.pkb.kms.service.routing.KeyAvailableRouteBuilder.Companion.INBOUND_USER_KEY_AVAILABLE
+import com.pkb.kms.service.routing.KeyAvailableRouteBuilder.Companion.OUTBOUND_ACCOUNT_KEY_AVAILABLE
+import com.pkb.kms.service.routing.KeyAvailableRouteBuilder.Companion.OUTBOUND_ORG_KEY_AVAILABLE
+import com.pkb.kms.service.routing.KeyAvailableRouteBuilder.Companion.OUTBOUND_USER_KEY_AVAILABLE
+import com.pkb.kms.shared.structures.pubsub.KeyAvailable
+import com.pkb.kms.shared.structures.pubsub.KeyType
+import org.apache.camel.builder.RouteBuilder
+import org.apache.commons.lang3.StringUtils.isBlank
+import org.springframework.beans.factory.annotation.Value
+import org.springframework.context.annotation.Profile
+import org.springframework.stereotype.Component
+
+/**
+ * Configure Apache Camel to publish / subscribe to user keys becoming available.
+ * Use some internal endpoints (constants *_USER_KEY_AVAILABLE) in the places where
+ * I actually want to send / handle messages. This class hooks up the internal
+ * endpoints to google pub sub. Could swap for something else in future, or even
+ * just wire them internally for integration testing, avoiding the need for pubsub
+ * docker container.
+ *
+ * Use AbstractNamespaceAwareRouteBuilder for automatically handling namespace
+ * changes between e2e tests.
+ */
+@Component
+@Profile(&quot;!integration-test&quot;)
+<span class="fc" id="L32">class KeyAvailableRouteBuilder(private val config: KmsConfig,</span>
+<span class="fc" id="L33">                               private val pubSubNamespaceService: PubSubNamespaceService,</span>
+<span class="fc" id="L34">                               @Value(&quot;#{environment.GOOGLE_APPLICATION_CREDENTIALS}&quot;)</span>
+<span class="fc" id="L35">                               private val serviceAccountKey: String?) : AbstractNamespaceAwareRouteBuilder() {</span>
+    companion object {
+        const val OUTBOUND_USER_KEY_AVAILABLE = &quot;direct:userKeyAvailable&quot;
+        const val OUTBOUND_ACCOUNT_KEY_AVAILABLE = &quot;direct:accountKeyAvailable&quot;
+        const val OUTBOUND_ORG_KEY_AVAILABLE = &quot;direct:orgKeyAvailable&quot;
+        const val OUTBOUND_USER_KEY_AVAILABLE_STARTUP = &quot;direct:userKeyAvailableStartup&quot;
+
+        const val INBOUND_ORG_KEY_AVAILABLE = &quot;direct:handleOrgKeyAvailable&quot;
+        const val INBOUND_USER_KEY_AVAILABLE = &quot;direct:handleUserKeyAvailable&quot;
+
+    }
+
+    /**
+     * Important!
+     * Configure outbound routes _first_ , then inbound routes.
+     * This is required for graceful shutdown and restart. Shutdown will stop the routes in _reverse_ order,
+     * and we want to stop the _inbound_ routes first before the _outbound_ ones.
+     * This is because inbound message process might result in a new outbound message being sent, which will fail
+     * (or deadlock, or block) if the outbound route has already been shut down.
+     */
+    override fun configure() {
+<span class="fc" id="L56">        from(OUTBOUND_USER_KEY_AVAILABLE)</span>
+<span class="fc" id="L57">                .marshal().avro(KeyAvailable.getClassSchema())</span>
+<span class="fc" id="L58">                .convertBodyTo(ByteArray::class.java)</span>
+<span class="fc" id="L59">                .to(uri(config.pubSubProjectName, config.keysAvailableTopicName))</span>
+
+<span class="fc" id="L61">        from(OUTBOUND_USER_KEY_AVAILABLE_STARTUP)</span>
+<span class="fc" id="L62">                .circuitBreaker()</span>
+<span class="fc" id="L63">                .faultToleranceConfiguration()</span>
+<span class="fc" id="L64">                .timeoutEnabled(config.keysAvailableHandlerTimeoutEnabled)</span>
+<span class="fc" id="L65">                .timeoutDuration(config.keysAvailableOnStartupHandlerTimeoutMillis)</span>
+<span class="fc" id="L66">                .delay(config.keysAvailableHandlerDelayMillis) // We don't really want a true circuit breaker, just something that will timeout tasks. These values effectively disable the circuit breaker in all but the most extreme failure scenarios.</span>
+<span class="fc" id="L67">                .requestVolumeThreshold(config.keysAvailableHandlerRequestVolumeThreshold)</span>
+<span class="fc" id="L68">                .failureRatio(config.keysAvailableHandlerFailureRatio) //Percentage</span>
+<span class="fc" id="L69">                .successThreshold(config.keysAvailableHandlerSuccessThreshold)</span>
+<span class="fc" id="L70">                .end()</span>
+<span class="fc" id="L71">                .to(INBOUND_USER_KEY_AVAILABLE)</span>
+
+<span class="fc" id="L73">        from(OUTBOUND_ACCOUNT_KEY_AVAILABLE)</span>
+<span class="fc" id="L74">                .marshal().avro(KeyAvailable.getClassSchema())</span>
+<span class="fc" id="L75">                .convertBodyTo(ByteArray::class.java)</span>
+<span class="fc" id="L76">                .to(uri(config.pubSubProjectName, config.keysAvailableTopicName))</span>
+<span class="fc" id="L77">        from(OUTBOUND_ORG_KEY_AVAILABLE)</span>
+<span class="fc" id="L78">                .marshal().avro(KeyAvailable.getClassSchema())</span>
+<span class="fc" id="L79">                .convertBodyTo(ByteArray::class.java)</span>
+<span class="fc" id="L80">                .to(&quot;google-pubsub:${config.pubSubProjectName}:${config.keysAvailableTopicName}&quot;)</span>
+
+<span class="fc" id="L82">        from(uri(config.pubSubProjectName, config.keysAvailableSubscriptionName))</span>
+<span class="fc" id="L83">                .unmarshal().avro(KeyAvailable.getClassSchema())</span>
+<span class="fc" id="L84">                .circuitBreaker()</span>
+<span class="fc" id="L85">                .faultToleranceConfiguration()</span>
+<span class="fc" id="L86">                .delay(config.keysAvailableHandlerDelayMillis)</span>
+<span class="fc" id="L87">                .successThreshold(config.keysAvailableHandlerSuccessThreshold)</span>
+<span class="fc" id="L88">                .failureRatio(config.keysAvailableHandlerFailureRatio)</span>
+<span class="fc" id="L89">                .requestVolumeThreshold(config.keysAvailableHandlerRequestVolumeThreshold)</span>
+<span class="fc" id="L90">                .timeoutEnabled(config.keysAvailableHandlerTimeoutEnabled)</span>
+<span class="fc" id="L91">                .timeoutDuration(config.keysAvailableHandlerTimeoutMillis)</span>
+<span class="fc" id="L92">                .end()</span>
+<span class="fc" id="L93">                .choice()</span>
+<span class="pc bpc" id="L94" title="2 of 6 branches missed.">                .`when` { (it.message.body as? KeyAvailable)?.keyType == KeyType.USER_KEY }.to(INBOUND_USER_KEY_AVAILABLE)</span>
+<span class="pc bpc" id="L95" title="2 of 6 branches missed.">                .`when` { (it.message.body as? KeyAvailable)?.keyType == KeyType.ORG_ACCOUNT_KEY }.to(INBOUND_ORG_KEY_AVAILABLE)</span>
+<span class="fc" id="L96">                .otherwise().stop()</span>
+<span class="fc" id="L97">    }</span>
+
+<span class="fc" id="L99">    override fun camelNamespaceService(): PubSubNamespaceService = pubSubNamespaceService</span>
+
+<span class="nc" id="L101">    override fun throwExceptionForNamespaceMismatch(): Boolean = true</span>
+
+<span class="pc bpc" id="L103" title="1 of 2 branches missed.">    private fun uri(pubSubProjectName: String, topicName: String) = &quot;google-pubsub:$pubSubProjectName:$topicName${if (isBlank(serviceAccountKey)) &quot;&quot; else &quot;?serviceAccountKey=file://$serviceAccountKey&quot;}&quot;</span>
+}
+
+@Profile(&quot;integration-test&quot;)
+@Component
+<span class="nc" id="L108">class IntTestKeyAvailableRouteBuilder: RouteBuilder() {</span>
+    override fun configure() {
+<span class="nc" id="L110">        from(OUTBOUND_USER_KEY_AVAILABLE).to(INBOUND_USER_KEY_AVAILABLE)</span>
+<span class="nc" id="L111">        from(OUTBOUND_ACCOUNT_KEY_AVAILABLE).to(&quot;direct:trash&quot;)</span>
+<span class="nc" id="L112">        from(OUTBOUND_ORG_KEY_AVAILABLE).to(INBOUND_ORG_KEY_AVAILABLE)</span>
+<span class="nc" id="L113">        from(&quot;direct:trash&quot;).stop()</span>
+<span class="nc" id="L114">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

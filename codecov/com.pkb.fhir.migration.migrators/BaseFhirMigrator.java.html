@@ -1,0 +1,355 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BaseFhirMigrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration.migrators</a> &gt; <span class="el_source">BaseFhirMigrator.java</span></div><h1>BaseFhirMigrator.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration.migrators;
+
+import com.pkb.entities.embeddables.VersionDetails;
+import com.pkb.entities.enums.FhirStoreSyncSourceTable;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.entities.pub.PublicHl7Partner;
+import com.pkb.entities.pub.PublicOrg;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.common.transform.FhirTransformationUtil;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import io.vavr.control.Either;
+import org.hl7.fhir.instance.model.api.IAnyResource;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.BooleanType;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.Consent;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.DomainResource;
+import org.hl7.fhir.r4.model.Element;
+import org.hl7.fhir.r4.model.Extension;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.InstantType;
+import org.hl7.fhir.r4.model.IntegerType;
+import org.hl7.fhir.r4.model.Meta;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Provenance;
+import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.Resource;
+import org.hl7.fhir.r4.model.ResourceType;
+import org.hl7.fhir.r4.model.codesystems.ConsentScope;
+import org.immutables.value.Value;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.Date;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static ca.uhn.fhir.model.api.TemporalPrecisionEnum.SECOND;
+import static com.pkb.entities.enums.UserType.EMPLOYEE;
+import static com.pkb.entities.enums.UserType.INSTITUTE_ADMIN;
+import static com.pkb.entities.enums.UserType.ORG_COORD;
+import static com.pkb.entities.enums.UserType.PATIENT;
+import static com.pkb.entities.enums.UserType.PRIVACY_OFFICER;
+import static com.pkb.entities.enums.UserType.REG_CLINICIAN;
+import static com.pkb.entities.enums.UserType.SUPER_ADMIN;
+import static java.util.TimeZone.getTimeZone;
+
+/**
+ * This class, and its subclasses, represent the transformation of existing data from the PKB datamodel into FHIR
+ * resources conformant with the STU3 standard, and then sending that data to a designated FHIR server for persistance
+ * to a data store. The overall goal is to keep this FHIR data store in sync with the existing PKB data store as we
+ * transform the backend of our application.
+ *
+ * The migrators handle creates, updates and deletes, and are based off a constantly scheduled job launched from
+ * {@link com.pkb.migration.fhir.FhirStoreSyncRunnerService}, the purpose of which is to poll for changes to designated
+ * tables. See that class for more info about how this is done.
+ *
+ * The actual sending to the FHIR server is done within {@link MigrationManager}.
+ */
+@SuppressWarnings({&quot;ClassWithTooManyMethods&quot;})
+public abstract class BaseFhirMigrator implements FhirTransformationUtil {
+
+    static final long POSTGRES_DATE_NEGATIVE_INFINITY_LONG = -9223372036832400000L;
+<span class="fc" id="L76">    static final Instant POSTGRES_DATE_NEGATIVE_INFINITY_INSTANT = Instant.ofEpochMilli(POSTGRES_DATE_NEGATIVE_INFINITY_LONG);</span>
+
+    //See https://dev.patientsknowbest.com/home/fhir-api/identifier-systems
+    static final String URN_UUID_PREFIX = &quot;urn:uuid:&quot;;
+
+    //This is temporary until we move to R4 in PHR-9852
+    static final String CONSENT_CATEGORY_URL = &quot;http://fhir.patientsknowbest.com/codesystem/consent-category&quot;;
+
+    //Source information extensions
+    private static final String ENTERED_DATE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/entered-date&quot;;
+    private static final String CONNECTING_ORG_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/connecting-org&quot;;
+
+    static final String TIME_ZONE_ID_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/time-zone-id&quot;;
+
+    final PersonService personService;
+    final TeamService teamService;
+    final OrgService orgService;
+    private final Hl7PartnerService hl7PartnerService;
+
+    BaseFhirMigrator(PersonService personService, TeamService teamService, OrgService orgService,
+<span class="fc" id="L96">                     Hl7PartnerService hl7PartnerService) {</span>
+<span class="fc" id="L97">        this.personService = personService;</span>
+<span class="fc" id="L98">        this.teamService = teamService;</span>
+<span class="fc" id="L99">        this.orgService = orgService;</span>
+<span class="fc" id="L100">        this.hl7PartnerService = hl7PartnerService;</span>
+<span class="fc" id="L101">    }</span>
+
+    abstract Either&lt;MigrationException, List&lt;ResourceAndOperation&gt;&gt; migrate(@NotNull PublicFhirStoreSync fhirStoreSync);
+
+    @NotNull
+    Identifier getPkbIdentifier(long id, @NotNull String pkbIdentifierSystem) {
+<span class="fc" id="L107">         Identifier identifier = new Identifier();</span>
+<span class="fc" id="L108">         identifier.setSystem(pkbIdentifierSystem);</span>
+<span class="fc" id="L109">         identifier.setValue(String.valueOf(id));</span>
+<span class="fc" id="L110">         return identifier;</span>
+    }
+
+    /**
+     * Centralise dealing with null values in various extensions. Almost always, null for these is completely
+     * legitimate and just mean the data wasn't recorded, so handle it silently.
+     */
+    void addExtension(@Nullable Boolean value, @NotNull String extensionUrl, @NotNull DomainResource resource) {
+<span class="fc" id="L118">        Optional.ofNullable(value)</span>
+<span class="fc" id="L119">                .map(valueNotNull -&gt; resource.addExtension(new Extension(extensionUrl,</span>
+                        new BooleanType(valueNotNull))));
+<span class="fc" id="L121">    }</span>
+
+    void addExtension(@Nullable Boolean value, @NotNull String extensionUrl, @NotNull Element element) {
+<span class="fc" id="L124">        Optional.ofNullable(value)</span>
+<span class="fc" id="L125">                .map(valueNotNull -&gt; element.addExtension(new Extension(extensionUrl,</span>
+                        new BooleanType(valueNotNull))));
+<span class="fc" id="L127">    }</span>
+
+    void addExtension(@Nullable Instant value, @NotNull String extensionUrl, @NotNull DomainResource resource) {
+<span class="fc" id="L130">        Optional.ofNullable(value)</span>
+<span class="fc" id="L131">                .map(valueNotNull -&gt; resource.addExtension(new Extension(extensionUrl,</span>
+<span class="fc" id="L132">                        new DateTimeType(Date.from(valueNotNull.atZone(ZoneOffset.UTC).toInstant()), SECOND, getTimeZone(&quot;UTC&quot;)))));</span>
+<span class="fc" id="L133">    }</span>
+
+    private void addExtension(@Nullable Instant value, @NotNull String extensionUrl, @NotNull Element element) {
+<span class="fc" id="L136">        Optional.ofNullable(value)</span>
+<span class="fc" id="L137">                .map(valueNotNull -&gt; element.addExtension(new Extension(extensionUrl,</span>
+<span class="fc" id="L138">                        new DateTimeType(Date.from(valueNotNull.atZone(ZoneOffset.UTC).toInstant()), SECOND, getTimeZone(&quot;UTC&quot;)))));</span>
+<span class="fc" id="L139">    }</span>
+
+    void addExtension(@Nullable Long value, @NotNull String extensionUrl, @NotNull DomainResource resource) {
+<span class="fc" id="L142">        Optional.ofNullable(value)</span>
+<span class="pc" id="L143">                .map(valueNotNull -&gt; resource.addExtension(new Extension(extensionUrl,</span>
+                        new IntegerType(valueNotNull))));
+<span class="fc" id="L145">    }</span>
+
+    void addExtension(@Nullable Long value, @NotNull String extensionUrl, @NotNull Element element) {
+<span class="fc" id="L148">        Optional.ofNullable(value)</span>
+<span class="fc" id="L149">                .map(valueNotNull -&gt; element.addExtension(new Extension(extensionUrl,</span>
+                        new IntegerType(valueNotNull))));
+<span class="fc" id="L151">    }</span>
+
+    private Reference createReference(@NotNull ResourceType resourceType, @NotNull String id) {
+<span class="fc" id="L154">        return new Reference(resourceType + &quot;/&quot; + id);</span>
+    }
+
+    boolean personBecomesPractitionerResource(UserType userType) {
+<span class="fc bfc" id="L158" title="All 12 branches covered.">        return userType == REG_CLINICIAN || userType == INSTITUTE_ADMIN || userType == ORG_COORD || userType == PRIVACY_OFFICER</span>
+                //Don't want to model these..but they create institute admins etc so you need to satisfy the references.
+                || userType == EMPLOYEE || userType == SUPER_ADMIN;
+    }
+
+    private boolean isModelledPkbPersonUserType(UserType userType) {
+<span class="pc bpc" id="L164" title="1 of 4 branches missed.">        return userType == PATIENT || personBecomesPractitionerResource(userType);</span>
+    }
+
+    /**
+     * Complicated; and mostly ripped off from ProvenanceMapper, with extra bits added in.
+     */
+    Provenance getProvenance(@NotNull VersionDetails versionDetails, @NotNull DomainResource resource) {
+<span class="fc" id="L171">        Provenance provenance = new Provenance();</span>
+        //Including the name of the domain resource to avoid any risk of UUID collision, as Provenance will be applicable
+        // for resources derived from many different PKB tables, where the public_id values could theoretically overlap.
+<span class="fc" id="L174">        provenance.setId(getProvenanceUuidFromResourceTarget(resource.getId(), resource.getResourceType()));</span>
+<span class="fc" id="L175">        provenance.addTarget(createReference(resource.getResourceType(), resource.getId()));</span>
+
+<span class="fc" id="L177">        provenance.setRecordedElement(new InstantType(Date.from(versionDetails.getVersionPersisted().atZone(ZoneOffset.UTC).toInstant()), SECOND, getTimeZone(&quot;UTC&quot;)));</span>
+
+<span class="fc" id="L179">        addHl7SourcedVersionDetailExtensions(versionDetails, provenance);</span>
+
+<span class="fc" id="L181">        addExtension(versionDetails.getSourceText(), SOURCE_TEXT_EXTENSION_URL, provenance);</span>
+<span class="fc" id="L182">        Optional.ofNullable(versionDetails.getAccessRoute()).ifPresent(accessRoute -&gt; addExtension(accessRoute.name(), ACCESS_ROUTE_EXTENSION_URL, provenance));</span>
+<span class="fc" id="L183">        addExtension(versionDetails.getCreated(), CREATED_DATE_EXTENSION_URL, provenance);</span>
+<span class="fc" id="L184">        addExtension(versionDetails.getEnteredDate(), ENTERED_DATE_EXTENSION_URL, provenance);</span>
+
+<span class="fc" id="L186">        Optional&lt;Extension&gt; sourcePersonExtension = getSourcePersonExtension(versionDetails.getSourcePersonId());</span>
+<span class="fc" id="L187">        Optional&lt;Extension&gt; sourceTeamExtension = getSourceTeamExtension(versionDetails.getSourceTeamId());</span>
+<span class="fc" id="L188">        Optional&lt;Extension&gt; sourceOrgExtension = getSourceOrgExtension(versionDetails.getSourceOrgId());</span>
+
+<span class="fc" id="L190">        List&lt;Extension&gt; extensions = Stream.of(sourcePersonExtension, sourceTeamExtension, sourceOrgExtension)</span>
+<span class="fc" id="L191">                .filter(Optional::isPresent)</span>
+<span class="fc" id="L192">                .map(Optional::get)</span>
+<span class="fc" id="L193">                .collect(Collectors.toList());</span>
+
+<span class="fc" id="L195">        Reference mostRelevantReference = extensions</span>
+<span class="fc" id="L196">                .stream().findFirst()</span>
+<span class="fc" id="L197">                .map(Extension::getValue)</span>
+<span class="fc" id="L198">                .map(Reference.class::cast)</span>
+<span class="fc" id="L199">                .orElseGet(() -&gt; new Reference().setDisplay(&quot;No source information available&quot;));</span>
+
+        //Get the most specific reference. This will become the who and behalf of.
+<span class="fc" id="L202">        Provenance.ProvenanceAgentComponent agent = provenance.addAgent();</span>
+<span class="fc" id="L203">        Reference who = mostRelevantReference.copy();</span>
+<span class="fc" id="L204">        who.setResource(mostRelevantReference.getResource());</span>
+<span class="fc" id="L205">        agent.setWho(who);</span>
+
+<span class="fc" id="L207">        Reference onBehalfOf = mostRelevantReference.copy();</span>
+<span class="fc" id="L208">        onBehalfOf.setResource(mostRelevantReference.getResource());</span>
+<span class="fc" id="L209">        Optional.ofNullable(versionDetails.getResponsibleOrganisationIdentifier()).map(onBehalfOf::setDisplay);</span>
+
+<span class="fc" id="L211">        agent.setOnBehalfOf(onBehalfOf);</span>
+<span class="fc" id="L212">        extensions.forEach(onBehalfOf::addExtension);</span>
+<span class="fc" id="L213">        return provenance;</span>
+    }
+
+    /**
+     * Provenances can point at many different resources. Namespace the Provenance resource with the resource it's
+     * pointing at to avoid collision.
+     */
+    String getProvenanceUuidFromResourceTarget(String resourceId, ResourceType provenanceTarget) {
+<span class="fc" id="L221">        return String.valueOf(UUID.nameUUIDFromBytes((provenanceTarget.toString() + resourceId).getBytes(StandardCharsets.UTF_8)));</span>
+    }
+
+    /**
+     * Sometimes different tables route into the same FHIR resource, e.g. Consent is added to by PatientConsent and
+     * PatientOptOut. Namespace the UUID on the source to avoid collision.
+     */
+    String getResourceUuidFromTableSource(String resourceId, FhirStoreSyncSourceTable sourceTable) {
+<span class="fc" id="L229">        return String.valueOf(UUID.nameUUIDFromBytes((sourceTable.toString() + resourceId).getBytes(StandardCharsets.UTF_8)));</span>
+    }
+
+    @NotNull
+    private Optional&lt;Extension&gt; getSourceOrgExtension(@Nullable Long sourceOrgId) {
+<span class="fc" id="L234">        return Optional.ofNullable(sourceOrgId)</span>
+<span class="fc" id="L235">                .flatMap(orgService::findById)</span>
+<span class="fc" id="L236">                .map(sourceOrg -&gt; getExtensionWithReference(SOURCE_ORG_EXTENSION_URL, new Organization().setId(String.valueOf(sourceOrg.getPublicId()))));</span>
+    }
+
+    @NotNull
+    private Optional&lt;Extension&gt; getSourceTeamExtension(@Nullable Long sourceTeamId) {
+<span class="fc" id="L241">        return Optional.ofNullable(sourceTeamId)</span>
+<span class="fc" id="L242">                .flatMap(teamService::findById)</span>
+<span class="fc" id="L243">                .map(sourceTeam -&gt; getExtensionWithReference(SOURCE_TEAM_EXTENSION_URL, new Organization().setId(String.valueOf(sourceTeam.getPublicId()))));</span>
+    }
+
+    @NotNull
+    private Optional&lt;Extension&gt; getSourcePersonExtension(@Nullable Long sourcePersonId) {
+<span class="fc" id="L248">        return Optional.ofNullable(sourcePersonId)</span>
+<span class="fc" id="L249">                .flatMap(sourcePersonIdNotNull -&gt; personService.findPersonOptional(sourcePersonIdNotNull).map(sourcePerson -&gt; {</span>
+<span class="fc" id="L250">                    UserType userType = sourcePerson.getUserType();</span>
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">                    if (!isModelledPkbPersonUserType(sourcePerson.getUserType())) {</span>
+<span class="nc" id="L252">                        throw new MigrationException(&quot;Source person of unmodelled user type [&quot; + userType + &quot;]. Id: &quot; + sourcePerson.getId());</span>
+                    }
+                    //PKBPersons reference other PKBPersons in this field. Before we have all the data in FHIR, we therefore
+                    // can't guarantee that we'll have the referred to person in the FHIR store. Degrade this reference
+                    // to an Identifier as opposed to literal reference. This will be handled in the aggregator.
+<span class="fc" id="L257">                    return getExtensionWithReferenceIdentifier(SOURCE_PERSON_EXTENSION_URL, sourcePerson.getPublicId());</span>
+                }));
+    }
+
+    void addSourceInformationExtensions(@NotNull VersionDetails details, @NotNull Element element) {
+<span class="fc" id="L262">        Optional.ofNullable(details.getAccessRoute()).ifPresent(accessRoute -&gt; addExtension(accessRoute.name(), ACCESS_ROUTE_EXTENSION_URL, element));</span>
+<span class="fc" id="L263">        addExtension(details.getSourceText(), SOURCE_TEXT_EXTENSION_URL, element);</span>
+<span class="fc" id="L264">        addExtension(details.getCreated(), CREATED_DATE_EXTENSION_URL, element);</span>
+<span class="fc" id="L265">        addExtension(details.getEnteredDate(), ENTERED_DATE_EXTENSION_URL, element);</span>
+<span class="fc" id="L266">        addExtension(details.getVersionPersisted(), VERSION_PERSISTED_EXTENSION_URL, element);</span>
+<span class="fc" id="L267">        getSourcePersonExtension(details.getSourcePersonId()).ifPresent(element::addExtension);</span>
+<span class="fc" id="L268">        getSourceTeamExtension(details.getSourceTeamId()).ifPresent(element::addExtension);</span>
+<span class="fc" id="L269">        getSourceOrgExtension(details.getSourceOrgId()).ifPresent(element::addExtension);</span>
+<span class="fc" id="L270">        addExtension(details.getResponsibleOrganisationIdentifier(), RESPONSIBLE_ORGANISATION_EXTENSION_URL, element);</span>
+<span class="fc" id="L271">    }</span>
+
+    void addHl7SourcedVersionDetailExtensions(@NotNull VersionDetails versionDetails, @NotNull Element element) {
+<span class="fc" id="L274">        getConnectingOrgPublicId(versionDetails)</span>
+<span class="fc" id="L275">                .ifPresent(connectingOrgPublicId -&gt; element.addExtension(getExtensionWithReference(CONNECTING_ORG_EXTENSION_URL,</span>
+<span class="fc" id="L276">                        new Organization().setId(String.valueOf(connectingOrgPublicId)))));</span>
+
+<span class="fc" id="L278">        getHl7PartnerPublicId(versionDetails)</span>
+<span class="pc" id="L279">                .ifPresent(hl7PartnerPublicId -&gt; element.addExtension(getExtensionWithReferenceIdentifier(PARTNER_EXTENSION_URL, hl7PartnerPublicId)));</span>
+<span class="fc" id="L280">    }</span>
+
+    private void addHl7SourcedVersionDetailExtensions(@NotNull VersionDetails versionDetails, @NotNull DomainResource resource) {
+<span class="fc" id="L283">        getConnectingOrgPublicId(versionDetails)</span>
+<span class="fc" id="L284">                .ifPresent(connectingOrgPublicId -&gt; resource.addExtension(getExtensionWithReference(CONNECTING_ORG_EXTENSION_URL,</span>
+<span class="fc" id="L285">                        new Organization().setId(String.valueOf(connectingOrgPublicId)))));</span>
+
+<span class="fc" id="L287">        getHl7PartnerPublicId(versionDetails)</span>
+<span class="pc" id="L288">                .ifPresent(hl7PartnerPublicId -&gt; resource.addExtension(getExtensionWithReferenceIdentifier(PARTNER_EXTENSION_URL, hl7PartnerPublicId)));</span>
+<span class="fc" id="L289">    }</span>
+
+    @NotNull
+    private Optional&lt;UUID&gt; getConnectingOrgPublicId(@NotNull VersionDetails versionDetails) {
+<span class="fc" id="L293">        return Optional.ofNullable(versionDetails.getConnectingOrgId())</span>
+<span class="fc" id="L294">                .flatMap(connectingOrgId -&gt; orgService.findById(connectingOrgId)</span>
+<span class="fc" id="L295">                        .map(PublicOrg::getPublicId));</span>
+    }
+
+    @NotNull
+    private Optional&lt;UUID&gt; getHl7PartnerPublicId(@NotNull VersionDetails versionDetails) {
+<span class="fc" id="L300">        return Optional.ofNullable(versionDetails.getPartnerId())</span>
+<span class="pc" id="L301">                .flatMap(hl7PartnerId -&gt; hl7PartnerService.findPartnerById(hl7PartnerId)</span>
+<span class="nc" id="L302">                         .map(PublicHl7Partner::getPublicId));</span>
+    }
+
+    void setMeta(@Nullable Instant updated, @NotNull Resource resource) {
+<span class="fc" id="L306">        Optional.ofNullable(updated)</span>
+<span class="fc" id="L307">                .ifPresent(updatedNotNull -&gt; resource.setMeta(new Meta()</span>
+<span class="fc" id="L308">                        .setLastUpdatedElement(new InstantType(Date.from(updatedNotNull.atZone(ZoneOffset.UTC).toInstant()),</span>
+<span class="fc" id="L309">                                SECOND, getTimeZone(&quot;UTC&quot;)))));</span>
+<span class="fc" id="L310">    }</span>
+
+    Extension getExtensionWithReference(@NotNull String extensionUrl, @NotNull IAnyResource resource) {
+<span class="fc" id="L313">        Extension extension = new Extension().setUrl(extensionUrl);</span>
+<span class="fc" id="L314">        extension.setValue(new Reference(resource));</span>
+<span class="fc" id="L315">        return extension;</span>
+    }
+
+    void addConsentScope(Consent consent) {
+<span class="fc" id="L319">        Coding scope = new Coding();</span>
+<span class="fc" id="L320">        scope.setSystem(&quot;http://terminology.hl7.org/CodeSystem/consentscope&quot;);</span>
+<span class="fc" id="L321">        scope.setCode(ConsentScope.PATIENTPRIVACY.toCode());</span>
+<span class="fc" id="L322">        CodeableConcept consentScope = new CodeableConcept();</span>
+<span class="fc" id="L323">        consentScope.addCoding(scope);</span>
+<span class="fc" id="L324">        consent.setScope(consentScope);</span>
+<span class="fc" id="L325">    }</span>
+
+    /**
+     * Null dates render as -infinity and this becomes &quot;292269055-12-02T23:00:00+00:00&quot;
+     * HAPI blows up with a date like this: we can't migrate it
+     */
+    static boolean isNegativeInfinity(Instant instant) {
+<span class="fc" id="L332">        return POSTGRES_DATE_NEGATIVE_INFINITY_INSTANT.equals(instant);</span>
+    }
+
+    /**
+     * Encapsulates a change to multiple resources that we want to make on the target FHIR server.
+     */
+    @Value.Immutable
+    @Value.Style(allParameters = true, of = &quot;resourcesAndOperation&quot;)
+    interface ResourceAndOperation {
+<span class="fc" id="L341">        enum FhirServerOperation {</span>
+<span class="fc" id="L342">            CREATE_OR_UPDATE, DELETE</span>
+        }
+
+        IBaseResource resource();
+        FhirServerOperation operation();
+
+        static List&lt;ResourceAndOperation&gt; all(List&lt;IBaseResource&gt; resources, FhirServerOperation operation) {
+<span class="fc" id="L349">            return resources.stream()</span>
+<span class="fc" id="L350">                    .map(resource -&gt; ImmutableResourceAndOperation.resourcesAndOperation(resource, operation))</span>
+<span class="fc" id="L351">                    .collect(Collectors.toList());</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

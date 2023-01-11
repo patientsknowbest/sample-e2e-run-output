@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PubSubTriggeredDeletionCoordinator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.deletion.service</a> &gt; <span class="el_source">PubSubTriggeredDeletionCoordinator.java</span></div><h1>PubSubTriggeredDeletionCoordinator.java</h1><pre class="source lang-java linenums">package com.pkb.deletion.service;
+
+import com.pkb.deletion.model.DeleteOperationRequest;
+import com.pkb.deletion.model.DeletionType;
+import com.pkb.deletion.model.ImmutableDeleteOperationResponse;
+import com.pkb.deletion.model.handler.DeletionHandler;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.vavr.control.Option;
+import org.apache.camel.Consume;
+import org.apache.camel.ProducerTemplate;
+import org.slf4j.Logger;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static com.pkb.deletion.routing.DeletionServiceRouting.OPERATION_REQUEST;
+import static com.pkb.deletion.routing.DeletionServiceRouting.OPERATION_RESPONSE;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * Pub-sub/camel adapter for the deletion service. Handles the plumbing of responding to the pub-sub
+ * side of things and then delegates specific deletion requests to registered DeletionHandler objects.
+ */
+@Service
+public class PubSubTriggeredDeletionCoordinator {
+
+<span class="fc" id="L33">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+
+    private final Map&lt;DeletionType, DeletionHandler&gt; deletionHandlers;
+
+
+    private final ProducerTemplate pubSubProducer;
+    private final String serviceName;
+    private final MeterRegistry meterRegistry;
+
+    public PubSubTriggeredDeletionCoordinator(
+            List&lt;DeletionHandler&gt; handlers,
+            @Qualifier(&quot;producerTemplate&quot;) ProducerTemplate pubSubProducer,
+            @Value(&quot;${deletion.service.serviceName}&quot;) String serviceName,
+            MeterRegistry meterRegistry
+<span class="fc" id="L48">    ) {</span>
+<span class="fc" id="L49">        deletionHandlers = handlers.stream().collect(Collectors.toMap(DeletionHandler::getHandledType, Function.identity()));</span>
+<span class="fc" id="L50">        this.pubSubProducer = pubSubProducer;</span>
+<span class="fc" id="L51">        this.serviceName = serviceName;</span>
+<span class="fc" id="L52">        this.meterRegistry = meterRegistry;</span>
+<span class="fc" id="L53">    }</span>
+
+
+    @Consume(OPERATION_REQUEST)
+    public void runOperation(DeleteOperationRequest request) {
+<span class="fc" id="L58">        LOGGER.info(&quot;Request received: {}&quot;, request);</span>
+<span class="fc" id="L59">        getHandler(request).peek(handler -&gt; {</span>
+<span class="fc" id="L60">            var responseBuilder = ImmutableDeleteOperationResponse.builder()</span>
+<span class="fc" id="L61">                    .requestId(request.getRequestId())</span>
+<span class="fc" id="L62">                    .actor(request.getActor())</span>
+<span class="fc" id="L63">                    .targetType(request.getTargetType())</span>
+<span class="fc" id="L64">                    .aggregatableRequestId(request.getAggregatableRequestId())</span>
+<span class="fc" id="L65">                    .respondingService(serviceName)</span>
+<span class="fc" id="L66">                    .operationType(request.getOperationType());</span>
+
+            try {
+<span class="fc" id="L69">                var result = handler.handleRequest(request);</span>
+<span class="fc" id="L70">                var response = responseBuilder.deletionStatus(result.getStatus())</span>
+<span class="fc" id="L71">                        .error(result.getError())</span>
+<span class="fc" id="L72">                        .build();</span>
+
+
+
+<span class="fc" id="L76">                LOGGER.info(&quot;Sending response: {}&quot;, response);</span>
+
+
+<span class="fc" id="L79">                pubSubProducer.sendBody(OPERATION_RESPONSE, response);</span>
+<span class="fc" id="L80">                meterRegistry.counter(&quot;deletion.service.operationResult&quot;, &quot;serviceName&quot;, serviceName, &quot;operationType&quot;, request.getOperationType().name(), &quot;result&quot;, response.getDeletionStatus().name()).increment();</span>
+            }
+<span class="nc" id="L82">            catch(Exception e) {</span>
+<span class="nc" id="L83">                LOGGER.error(&quot;Error during delete operation processing: &quot;, e);</span>
+<span class="nc" id="L84">                meterRegistry.counter(&quot;deletion.service.operationResult&quot;, &quot;serviceName&quot;, serviceName, &quot;operationType&quot;, request.getOperationType().name(), &quot;result&quot;, &quot;EXCEPTION&quot;).increment();</span>
+<span class="nc" id="L85">                throw e;</span>
+<span class="fc" id="L86">            }</span>
+<span class="pc" id="L87">        }).onEmpty(() -&gt; LOGGER.info(&quot;Ignoring deletion request {} because no handler is defined for it&quot;, request.getRequestId()));</span>
+
+
+<span class="fc" id="L90">    }</span>
+
+
+    private Option&lt;DeletionHandler&gt; getHandler(DeleteOperationRequest request) {
+<span class="fc" id="L94">        return Option.of(deletionHandlers.get(request.getTargetType()));</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

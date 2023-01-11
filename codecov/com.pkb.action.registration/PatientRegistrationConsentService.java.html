@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PatientRegistrationConsentService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.registration</a> &gt; <span class="el_source">PatientRegistrationConsentService.java</span></div><h1>PatientRegistrationConsentService.java</h1><pre class="source lang-java linenums">package com.pkb.action.registration;
+
+import com.google.common.base.Functions;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.datamodel.DataModelStyle;
+import com.pkb.datamodel.consent.ImmutablePatientAdditionalConsent;
+import com.pkb.datamodel.consent.ModifiablePatientConsentDTO;
+import com.pkb.datamodel.consent.PatientAdditionalConsent;
+import com.pkb.datamodel.consent.PatientConsentDTO;
+import com.pkb.dto.AdditionalConsentsDto;
+import com.pkb.dto.ImmutableUrlDto;
+import com.pkb.dto.NhsLoginInfo;
+import com.pkb.dto.ProgressItemDto;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.ConsentReason;
+import com.pkb.institute.entity.Team;
+import com.pkb.mappers.ProgressItemMapper;
+import com.pkb.security.NhsLoginAuthenticationDetails;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.util.UrlUtil;
+import org.immutables.value.Value.Default;
+import org.immutables.value.Value.Immutable;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.google.common.collect.Iterables.getLast;
+import static com.opensymphony.xwork2.Action.SUCCESS;
+import static com.pkb.entities.enums.AccessingEntityType.TEAM;
+import static com.pkb.util.WebNamespace.PATIENT;
+import static java.util.Collections.emptyList;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.collections.CollectionUtils.isEmpty;
+import static org.apache.commons.collections.CollectionUtils.isNotEmpty;
+
+/**
+ * Service class containing APIs to be invoked in patient consent related actions/services
+ * It mostly bases its logic for retrieving team association based on patient consent as opposed to institute user membership
+ * which, for example, doesn't take into account if a patient has been or not discharged from a team
+ *
+ * @see PatientRegistrationConsentIntroAction
+ * @see PatientRegistrationConsentTeamAction
+ * @see com.pkb.action.PatientConsentTeamService
+ **/
+public class PatientRegistrationConsentService {
+
+<span class="fc" id="L64">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final ProgressItemMapper progressItemMapper;
+    private final TeamManager teamManager;
+    private final TeamUserManager teamUserManager;
+    private final UserManager userManager;
+    private final PatientConsentManager patientConsentManager;
+
+    interface BaseServiceRequest {
+        EHRRequestContext getEHRRequestContext();
+        long getUserId();
+        @Nullable UUID getTeamPublicId();
+        @Default default List&lt;UUID&gt; getVisitedTeamPublicIds() {
+<span class="fc" id="L77">            return emptyList();</span>
+        }
+    }
+
+    interface ReadRequest extends BaseServiceRequest {
+        boolean isEditMode();
+        Locale getLocale();
+    }
+
+    @Immutable
+    @DataModelStyle
+    interface PatientRegistrationConsentIntroServiceReadRequest extends ReadRequest {}
+
+    @Immutable
+    @DataModelStyle
+    interface PatientRegistrationConsentTeamServiceReadRequest extends ReadRequest {
+        long getContextOrLoggedInUserId();
+        Optional&lt;NhsLoginAuthenticationDetails&gt; getNhsLoginAuthenticationDetails();
+        Optional&lt;String&gt; getHomeResult();
+        String getBackText();
+    }
+
+    @Immutable
+    @DataModelStyle
+    interface PatientRegistrationConsentReviewSaveRequest extends BaseServiceRequest {
+        ModifiablePatientConsentDTO getPatientConsent();
+        AdditionalConsentsDto getAdditionalConsents();
+    }
+
+    public PatientRegistrationConsentService(ProgressItemMapper progressItemMapper,
+                                             TeamManager teamManager,
+                                             TeamUserManager teamUserManager,
+                                             UserManager userManager,
+<span class="fc" id="L110">                                             PatientConsentManager patientConsentManager) {</span>
+<span class="fc" id="L111">        this.progressItemMapper = progressItemMapper;</span>
+<span class="fc" id="L112">        this.teamManager = teamManager;</span>
+<span class="fc" id="L113">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L114">        this.userManager = userManager;</span>
+<span class="fc" id="L115">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L116">    }</span>
+
+    PatientRegistrationConsentIntroDto getPatientRegistrationConsentIntroDto(PatientRegistrationConsentIntroServiceReadRequest serviceRequest) {
+<span class="fc" id="L119">        List&lt;UUID&gt; userTeamPublicIds = getUserTeamsPublicIdsFromConsents(serviceRequest);</span>
+<span class="fc" id="L120">        boolean isTeamless = isEmpty(userTeamPublicIds);</span>
+<span class="fc" id="L121">        return ImmutablePatientRegistrationConsentIntroDto.builder()</span>
+<span class="fc" id="L122">                .userTeamPublicId(userTeamPublicIds.stream().findFirst().orElse(null))</span>
+<span class="fc" id="L123">                .progressBarItems(getProgressItemDtos(serviceRequest, userTeamPublicIds))</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">                .startButtonText(isTeamless ? &quot;patientConsentReviewIntro.txt.continue_to_dashboard&quot; : &quot;patientConsentReviewIntro.txt.start&quot;)</span>
+<span class="fc" id="L125">                .isTeamLess(isTeamless)</span>
+<span class="fc" id="L126">                .build();</span>
+    }
+
+    PatientRegistrationConsentTeamDto getPatientRegistrationConsentTeamDto(PatientRegistrationConsentTeamServiceReadRequest serviceRequest) {
+<span class="fc" id="L130">        List&lt;UUID&gt; userTeamPublicIds = getUserTeamsPublicIdsFromConsents(serviceRequest);</span>
+<span class="fc" id="L131">        ImmutablePatientRegistrationConsentTeamDto.Builder dtoBuilder = ImmutablePatientRegistrationConsentTeamDto.builder()</span>
+<span class="fc" id="L132">                .progressBarItems(getProgressItemDtos(serviceRequest, userTeamPublicIds))</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">                .startButtonText(isLastStep(serviceRequest, userTeamPublicIds) ? &quot;patientConsentReviewForTeam.txt.continue_to_pkb&quot; : &quot;patientConsentReviewForTeam.txt.continue&quot;);</span>
+
+        // If no teams, or the query param idx is beyond the final item, redirect home.
+<span class="fc bfc" id="L136" title="All 4 branches covered.">        if (userTeamPublicIds.isEmpty() || serviceRequest.getVisitedTeamPublicIds().size() &gt;= userTeamPublicIds.size()) {</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">            if (userManager.isUserConsentReviewed(serviceRequest.getUserId())) {</span>
+<span class="fc" id="L138">                return dtoBuilder.contextUserId(serviceRequest.getContextOrLoggedInUserId())</span>
+<span class="fc" id="L139">                        .actionResult(&quot;teamConsent&quot;)</span>
+<span class="fc" id="L140">                        .build();</span>
+            }
+
+<span class="fc" id="L143">            LOGGER.info(&quot;No more consent reviews needed by user {} (team count={}), redirecting home&quot;, serviceRequest.getUserId(), userTeamPublicIds.size());</span>
+
+            // Mark complete so the wizard doesn't get triggered again
+<span class="fc" id="L146">            userManager.setUserConsentReviewed(serviceRequest.getEHRRequestContext(), serviceRequest.getUserId());</span>
+
+<span class="fc" id="L148">            String actionResult = serviceRequest.getHomeResult().orElse(null);</span>
+<span class="fc" id="L149">            return serviceRequest.getNhsLoginAuthenticationDetails()</span>
+<span class="fc" id="L150">                    .flatMap(NhsLoginInfo::getRedirectPath)</span>
+<span class="fc" id="L151">                    .map(path -&gt; dtoBuilder.redirectUrl(path)</span>
+<span class="fc" id="L152">                            .actionResult(&quot;nhsRedirection&quot;)</span>
+<span class="fc" id="L153">                            .build())</span>
+<span class="fc" id="L154">                    .orElse(dtoBuilder.actionResult(actionResult).build());</span>
+        }
+
+<span class="fc" id="L157">        Team team = teamManager.getTeamByPublicId(serviceRequest.getTeamPublicId());</span>
+
+<span class="fc" id="L159">        dtoBuilder.team(team);</span>
+<span class="fc" id="L160">        dtoBuilder.patientConsent(patientConsentManager.findPatientConsent(serviceRequest.getUserId(), team.getId(), AccessingEntityType.TEAM)</span>
+<span class="fc" id="L161">                .map(consent -&gt; ModifiablePatientConsentDTO.create().from(consent))</span>
+<span class="fc" id="L162">                .orElseGet(PatientRegistrationConsentService::createDefaultConsent));</span>
+
+<span class="fc" id="L164">        AdditionalConsentsDto consentsDto = new AdditionalConsentsDto();</span>
+<span class="fc" id="L165">        consentsDto.setSelected(Maps.immutableEnumMap(teamUserManager.getAdditionalConsents(serviceRequest.getUserId(), team.getId())));</span>
+<span class="fc" id="L166">        consentsDto.setTeamName(team.getName());</span>
+<span class="fc" id="L167">        consentsDto.setOrgName(team.getOrg().getName());</span>
+<span class="fc" id="L168">        consentsDto.setPartners(teamManager.getResearchPartners(team.getId()));</span>
+
+<span class="fc" id="L170">        boolean hasPreviousTeam = isNotEmpty(serviceRequest.getVisitedTeamPublicIds());</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">        if (hasPreviousTeam) {</span>
+<span class="fc" id="L172">            dtoBuilder.previousTeamAnchor(ImmutableUrlDto.builder()</span>
+<span class="fc" id="L173">                    .href(UrlUtil.buildHref(PATIENT, &quot;consentReviewForTeam&quot;,</span>
+<span class="fc" id="L174">                            ImmutableMap.of(&quot;teamPublicId&quot;, getLast(serviceRequest.getVisitedTeamPublicIds()).toString(),</span>
+<span class="fc" id="L175">                                    &quot;visitedTeamPublicIds&quot;, getVisitedTeamPublicIdsWithoutLast(serviceRequest))</span>
+                            , null))
+<span class="fc" id="L177">                    .content(serviceRequest.getBackText())</span>
+<span class="fc" id="L178">                    .build());</span>
+        }
+<span class="fc" id="L180">        return dtoBuilder.additionalConsentsDto(consentsDto)</span>
+<span class="fc" id="L181">                .hasPreviousTeam(hasPreviousTeam)</span>
+<span class="fc" id="L182">                .actionResult(SUCCESS)</span>
+<span class="fc" id="L183">                .build();</span>
+    }
+
+    @NotNull
+    private static ModifiablePatientConsentDTO createDefaultConsent() {
+<span class="nc" id="L188">        return ModifiablePatientConsentDTO.create()</span>
+<span class="nc" id="L189">                .setGeneralHealthConsentGranted(true)</span>
+<span class="nc" id="L190">                .setSexualHealthConsentGranted(true)</span>
+<span class="nc" id="L191">                .setMentalHealthConsentGranted(true)</span>
+<span class="nc" id="L192">                .setSocialCareConsentGranted(true)</span>
+<span class="nc" id="L193">                .setDischarged(false)</span>
+<span class="nc" id="L194">                .setProEditOnlyForChild(false)</span>
+<span class="nc" id="L195">                .setAccessingEntityType(TEAM);</span>
+    }
+
+    private String getVisitedTeamPublicIdsWithoutLast(PatientRegistrationConsentTeamServiceReadRequest serviceRequest) {
+<span class="fc" id="L199">        List&lt;UUID&gt; visitedTeamPublicIds = serviceRequest.getVisitedTeamPublicIds();</span>
+<span class="fc" id="L200">        return visitedTeamPublicIds.subList(0, visitedTeamPublicIds.size() - 1).stream().map(UUID::toString).collect(joining(&quot;,&quot;));</span>
+    }
+
+    /**
+     * Saves the patient's consent review for the team whose public id is in the request parameter based on the submitted form
+     * and provides the next team's public id if it exists.
+     *
+     * @param request
+     * @return next team public id associated with a patient wrapped in an Optional object if it exists; empty otherwise
+     */
+    Optional&lt;UUID&gt; saveConsentReviewForTeam(PatientRegistrationConsentReviewSaveRequest request) {
+<span class="fc" id="L211">        long teamId = teamManager.getTeamByPublicId(request.getTeamPublicId()).getId();</span>
+
+<span class="fc" id="L213">        patientConsentManager.updatePatientConsentsForTeam(request.getEHRRequestContext(), request.getUserId(), teamId, request.getPatientConsent(), ConsentReason.EXPLICIT_CONSENT, &quot;accepted on review&quot;);</span>
+
+
+        // Save additional consent
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">        if (request.getAdditionalConsents().getSelected() != null) {</span>
+            try {
+<span class="fc" id="L219">                List&lt;PatientAdditionalConsent&gt; selectedAdditionalConsents = Lists.newArrayList();</span>
+
+<span class="fc bfc" id="L221" title="All 2 branches covered.">                for (var consentId : request.getAdditionalConsents().getSelectedIds()) {</span>
+<span class="fc" id="L222">                    PatientAdditionalConsent pac = ImmutablePatientAdditionalConsent.builder().additionalConsent(consentId)</span>
+<span class="fc" id="L223">                            .patientId(request.getUserId()).teamId(teamId).build();</span>
+<span class="fc" id="L224">                    selectedAdditionalConsents.add(pac);</span>
+<span class="fc" id="L225">                }</span>
+
+<span class="fc" id="L227">                teamUserManager.updatePatientAdditionalConsentsForTeam(request.getUserId(), teamId, selectedAdditionalConsents);</span>
+<span class="nc" id="L228">            } catch (RuntimeException ex) {</span>
+<span class="nc" id="L229">                LOGGER.error(&quot;failed to save additional consent for user {}&quot;, request.getUserId(), ex);</span>
+<span class="fc" id="L230">            }</span>
+        }
+
+<span class="fc" id="L233">        return getUpdatedListOfTeamPublicIds(request).stream().findFirst();</span>
+    }
+
+    private Map&lt;Long, PatientConsentDTO&gt; getPatientConsents(long userId) {
+<span class="fc" id="L237">        return patientConsentManager.findPatientConsents(userId, TEAM, false)</span>
+<span class="fc" id="L238">                .stream()</span>
+<span class="fc" id="L239">                .collect(Collectors.toMap(PatientConsentDTO::getAccessingTeamOrPersonId, Functions.identity()));</span>
+
+    }
+
+    private List&lt;Team&gt; getUserTeamsFromConsents(EHRRequestContext requestContext, Collection&lt;Long&gt; teamIds) {
+<span class="fc" id="L244">        return teamUserManager.getTeams(requestContext, new ArrayList&lt;&gt;(teamIds));</span>
+    }
+
+    private List&lt;UUID&gt; getUserTeamsPublicIdsFromConsents(BaseServiceRequest serviceRequest) {
+<span class="fc" id="L248">        return getUserTeamsFromConsents(serviceRequest.getEHRRequestContext(), getPatientConsents(serviceRequest.getUserId()).keySet()).stream()</span>
+<span class="fc" id="L249">                .map(Team::getPublicId)</span>
+<span class="fc" id="L250">                .collect(toList());</span>
+    }
+
+    private boolean isLastStep(PatientRegistrationConsentTeamServiceReadRequest serviceRequest, List&lt;UUID&gt; userTeams) {
+<span class="fc bfc" id="L254" title="All 4 branches covered.">        return !serviceRequest.isEditMode() &amp;&amp; serviceRequest.getVisitedTeamPublicIds().size() + 1 == userTeams.size();</span>
+    }
+
+
+    private List&lt;ProgressItemDto&gt; getProgressItemDtos(ReadRequest serviceRequest, List&lt;UUID&gt; userTeams) {
+<span class="fc" id="L259">        return progressItemMapper.toProgressItemDtos(userTeams.size(),</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">                !serviceRequest.isEditMode(),</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">                serviceRequest.getTeamPublicId() == null ? -1 : serviceRequest.getVisitedTeamPublicIds().size(),</span>
+<span class="fc" id="L262">                serviceRequest.getLocale());</span>
+    }
+
+
+    private List&lt;UUID&gt; getUpdatedListOfTeamPublicIds(BaseServiceRequest request) {
+<span class="fc" id="L267">        List&lt;UUID&gt; userTeamsPublicIds = getUserTeamsPublicIdsFromConsents(request);</span>
+<span class="fc" id="L268">        userTeamsPublicIds.removeAll(request.getVisitedTeamPublicIds());</span>
+<span class="fc" id="L269">        userTeamsPublicIds.remove(request.getTeamPublicId());</span>
+<span class="fc" id="L270">        return userTeamsPublicIds;</span>
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResourceAggregator.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.service.aggregation</a> &gt; <span class="el_source">ResourceAggregator.kt</span></div><h1>ResourceAggregator.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.service.aggregation
+
+import com.pkb.aggregator.R4Extension
+import com.pkb.aggregator.persistence.entity.embeddable.UpstreamResource
+import com.pkb.aggregator.service.FHIR_TYPE_ORGANIZATION
+import com.pkb.aggregator.service.reference.PhrReferenceHelper
+import com.pkb.aggregator.service.reference.ReferenceExtractor
+import org.hl7.fhir.instance.model.api.IDomainResource
+
+/**
+ * Interface defining the operations required to merge multiple upstream resources representing the same real-world
+ * 'thing' (person, organisation etc) into a single resource for the downstream store.
+ *
+ * The basic process for doing this is:
+ *
+ * 1. Figure out what the downstream resource id is going to be
+ * 2. Construct an empty resource instance and iterate through the upstream resources to copy them over
+ * 3. Store any new identifiers (national IDs, org IDs, etc) for the resource that were detected during processing
+ * 4. Update all fhir references so that it all lines up in the downstream (e.g. downstream patient resource correctly
+ *    refers to downstream org resource, rather than still pointing to the upstream resource id which won't be valid
+ *    in the downstream store)
+ */
+interface ResourceAggregator&lt;T&gt; where T : IDomainResource {
+
+    fun merge(resources: List&lt;IDomainResource&gt;, currentDownstreamId: String?, references: ReferenceExtractor.IdentifierMap): T {
+
+<span class="fc" id="L27">        val downstreamId = deriveDownstreamResourceId(currentDownstreamId, resources)</span>
+<span class="fc" id="L28">        val downstreamResource = createDownstreamInstance(downstreamId)</span>
+
+<span class="fc" id="L30">        resources.forEach {</span>
+<span class="fc" id="L31">            mergeResource(downstreamResource, it, references)</span>
+<span class="fc" id="L32">        }</span>
+
+<span class="fc" id="L34">        mergeIdentifiers(downstreamResource)</span>
+<span class="fc" id="L35">        updateReferences(downstreamResource, references)</span>
+
+<span class="fc" id="L37">        return downstreamResource</span>
+    }
+
+    fun merge(
+        resources: List&lt;IDomainResource&gt;,
+        currentDownstream: T?,
+        currentDownstreamId: String?,
+        references: ReferenceExtractor.IdentifierMap
+    ): T {
+
+<span class="fc bfc" id="L47" title="All 2 branches covered.">        if (currentDownstream == null) {</span>
+<span class="fc" id="L48">            return merge(resources, currentDownstreamId, references)</span>
+        }
+
+<span class="fc" id="L51">        resources.forEach {</span>
+<span class="fc" id="L52">            mergeResource(currentDownstream, it, references)</span>
+<span class="fc" id="L53">        }</span>
+
+<span class="fc" id="L55">        mergeIdentifiers(currentDownstream)</span>
+<span class="fc" id="L56">        updateReferences(currentDownstream, references)</span>
+
+<span class="fc" id="L58">        return currentDownstream</span>
+    }
+
+    fun createTranslatedPhrExtensionReferences(
+        source: UpstreamResource,
+        extensions: List&lt;R4Extension&gt;,
+        references: ReferenceExtractor.IdentifierMap,
+        referenceHelper: PhrReferenceHelper,
+    ): MutableList&lt;R4Extension&gt; {
+
+<span class="fc" id="L68">        return extensions</span>
+<span class="fc" id="L69">            .map { upstreamExtension -&gt;</span>
+<span class="fc" id="L70">                val downstreamExtension = upstreamExtension.copy()</span>
+
+                // If it's not a PHR custom reference, do nothing and return the unmodified copy
+<span class="fc" id="L73">                val phrValueReference = referenceHelper.findPhrValueReference(upstreamExtension)</span>
+<span class="fc bfc" id="L74" title="All 2 branches covered.">                if (phrValueReference != null) {</span>
+<span class="fc" id="L75">                    val needle = UpstreamResource(source.upstreamSource, phrValueReference.toString())</span>
+<span class="fc" id="L76">                    val newReference = when (phrValueReference.resourceType) {</span>
+<span class="pc bpc" id="L77" title="1 of 2 branches missed.">                        FHIR_TYPE_ORGANIZATION -&gt; references.getOrganizationReference(needle)</span>
+<span class="nc" id="L78">                        else -&gt; throw RuntimeException(&quot;Unexpected resource type ${phrValueReference.resourceType}&quot;)</span>
+                    }
+<span class="fc" id="L80">                    downstreamExtension.setValue(newReference)</span>
+                }
+<span class="fc" id="L82">                downstreamExtension</span>
+            }
+<span class="fc" id="L84">            .toMutableList()</span>
+    }
+
+    fun createDownstreamInstance(downstreamId: String): T
+
+    fun mergeResource(
+        downstreamResource: T,
+        upstreamResource: IDomainResource,
+        references: ReferenceExtractor.IdentifierMap
+    )
+
+    fun stripResource(downstreamResource: T, sourceTag: R4Extension)
+
+    fun mergeIdentifiers(downstreamResource: T)
+
+<span class="fc" id="L99">    fun updateReferences(downstreamResource: T, references: ReferenceExtractor.IdentifierMap) {}</span>
+
+    fun deriveDownstreamResourceId(currentDownstreamId: String?, resources: List&lt;IDomainResource&gt;): String
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

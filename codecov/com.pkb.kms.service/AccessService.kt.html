@@ -1,0 +1,325 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AccessService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.kms.service</a> &gt; <span class="el_source">AccessService.kt</span></div><h1>AccessService.kt</h1><pre class="source lang-java linenums">package com.pkb.kms.service
+
+import com.pkb.common.datetime.DateTimeService
+import com.pkb.crypto.AccountPrivateKey.accountPrivateKey
+import com.pkb.crypto.CryptoConstants
+import com.pkb.crypto.EncryptedAccountPrivateKey
+import com.pkb.crypto.SymmetricKey
+import com.pkb.crypto.UserPublicKey
+import com.pkb.crypto.dto.AccountKeysDTO
+import com.pkb.crypto.dto.AccountPrivateKeyDTO
+import com.pkb.entities.core.CoreAccount
+import com.pkb.entities.core.CoreAccountOrg
+import com.pkb.entities.core.CoreAccountUser
+import com.pkb.entities.embeddables.EncodedEncryptedPrivateKeyInfo
+import com.pkb.entities.enums.AccountUserStatus
+import com.pkb.entities.pub.PublicOrg
+import com.pkb.entities.pub.PublicPKBPerson
+import com.pkb.kms.service.cache.AccountCacheService
+import com.pkb.kms.service.cache.OrgAccountKeyCacheService
+import com.pkb.kms.service.cache.UserCacheService
+import com.pkb.kms.service.extension.encryptedAccountPrivateKey
+import com.pkb.kms.service.extension.publicKey
+import com.pkb.kms.service.extension.recoverWith
+import com.pkb.kms.service.projection.PersonIds
+import com.pkb.kms.service.repository.AccountOrgRepository
+import com.pkb.kms.service.repository.AccountUserRepository
+import com.pkb.kms.service.repository.OrgRepository
+import com.pkb.kms.service.repository.PersonRepository
+import com.pkb.kms.shared.representation.AccountPublicId
+import com.pkb.kms.shared.representation.KmsError
+import com.pkb.kms.shared.representation.OrgPublicId
+import com.pkb.kms.shared.representation.PersonPublicId
+import com.pkb.kms.shared.representation.PersonRequester
+import io.micrometer.core.instrument.MeterRegistry
+import io.vavr.Tuple
+import io.vavr.control.Either
+import io.vavr.control.Option
+import io.vavr.control.Try
+import io.vavr.control.Validation
+import io.vavr.kotlin.left
+import io.vavr.kotlin.right
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+import javax.crypto.EncryptedPrivateKeyInfo
+import javax.transaction.Transactional
+
+<span class="fc" id="L49">@Service</span>
+<span class="fc" id="L50">class AccessService(</span>
+<span class="fc" id="L51">    private val userCache: UserCacheService,</span>
+<span class="fc" id="L52">    private val accountCacheService: AccountCacheService,</span>
+<span class="fc" id="L53">    private val accountUserRepository: AccountUserRepository,</span>
+<span class="fc" id="L54">    private val personRepository: PersonRepository,</span>
+<span class="fc" id="L55">    private val accountKeyService: AccountKeyService,</span>
+<span class="fc" id="L56">    private val dateTimeService: DateTimeService,</span>
+<span class="fc" id="L57">    private val orgRepository: OrgRepository,</span>
+<span class="fc" id="L58">    private val accountOrgRepository: AccountOrgRepository,</span>
+<span class="fc" id="L59">    private val migratingAccountKeyService: AccountKeyService,</span>
+<span class="fc" id="L60">    private val meterRegistry: MeterRegistry,</span>
+<span class="fc" id="L61">    private val orgAccountKeyCacheService: OrgAccountKeyCacheService,</span>
+<span class="fc" id="L62">    private val keyBuilder: AccountKeysDTOBuilder,</span>
+<span class="fc" id="L63">    private val accountKeyQueryProvider: AccountKeyQueryProvider</span>
+) {
+
+<span class="fc" id="L66">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    @Transactional
+    fun grantAccountAccessToAccountOwner(accountPublicId: AccountPublicId, personPublicId: PersonPublicId): Either&lt;KmsError, Void&gt; =
+<span class="fc" id="L70">        grantAccountAccess(accountPublicId, personPublicId, this::personIfReallyAccountOwner)</span>
+
+
+    @Transactional
+    fun grantAccountAccessToUser(accountPublicId: AccountPublicId, personPublicId: PersonPublicId): Either&lt;KmsError, Void&gt; =
+<span class="fc" id="L75">        grantAccountAccess(accountPublicId, personPublicId) { _, person -&gt; Either.right(person) }</span>
+
+
+    private fun grantAccountAccess(
+        accountPublicId: AccountPublicId,
+        personPublicId: PersonPublicId,
+        personChecker: (account: CoreAccount, person: PublicPKBPerson) -&gt; Either&lt;KmsError, PublicPKBPerson&gt;
+    ): Either&lt;KmsError, Void&gt; =
+
+<span class="fc" id="L84">                accountCacheService.findAccount(accountPublicId)</span>
+<span class="fc" id="L85">                    .flatMap { account -&gt; findPerson(personPublicId).map { person -&gt; Tuple.of(account, person) } }</span>
+<span class="fc" id="L86">                    .flatMap { params -&gt; personChecker.invoke(params._1, params._2).map(params::update2) }</span>
+<span class="fc" id="L87">                    .flatMap { params -&gt;</span>
+<span class="fc" id="L88">                        checkExistingCopyOfAccountKeyForUser(accountPublicId, personPublicId)</span>
+<span class="fc" id="L89">                            .recoverWith { _ -&gt;</span>
+<span class="fc" id="L90">                                getAccountKeys(accountPublicId).map { params.append(it) }</span>
+<span class="fc" id="L91">                                    .flatMap { params -&gt; params.apply(this::copyKeyToUser) }</span>
+                            }
+<span class="fc" id="L93">                    }</span>
+
+
+
+    private fun checkExistingCopyOfAccountKeyForUser(accountPublicId: AccountPublicId, personPublicId: PersonPublicId): Either&lt;KmsError, Void&gt; =
+<span class="fc" id="L98">           Try.of {</span>
+<span class="fc" id="L99">                accountKeyQueryProvider.query(accountPublicId, PersonRequester(personPublicId), true)</span>
+<span class="fc" id="L100">            }.toEither()</span>
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">                .mapLeft{  e -&gt; KmsError(&quot;bad.upk&quot;, e.message ?: &quot;&quot;, KmsError.Type.UNEXPECTED)   }</span>
+<span class="fc" id="L102">                .flatMap { it }</span>
+<span class="fc" id="L103">                .map{ _ -&gt; null}</span>
+
+    private fun getAccountKeys(accountPublicId: AccountPublicId) =
+<span class="fc" id="L106">        accountKeyService.getAccountKeys(accountPublicId)</span>
+<span class="fc" id="L107">            .recoverWith({ error -&gt;</span>
+<span class="fc" id="L108">                orgRepository.findByOrgAccountPublicId(accountPublicId)</span>
+<span class="fc" id="L109">                    .map {</span>
+<span class="fc" id="L110">                        orgAccountKeyCacheService.getCachedOrgAccountKey(it.id)</span>
+<span class="fc" id="L111">                            .map { keyBuilder.makeAccountKeys(accountPublicId, AccountPrivateKeyDTO.accountPrivateKeyDTO(it.accountPrivateKey)) }</span>
+                    }
+<span class="fc" id="L113">                    .orElseGet { Either.left(error) }</span>
+<span class="fc" id="L114">            })</span>
+
+
+    private fun copyKeyToUser(account: CoreAccount, user: PublicPKBPerson, accountKeysDTO: AccountKeysDTO) : Either&lt;KmsError, Void&gt; =
+<span class="fc" id="L118">        userCache.findCredentials(PersonIds(user.id, user.publicId))</span>
+<span class="fc" id="L119">            .map { Pair(it.userId, UserPublicKey.fromX509CertificateBytes(decodeBase64(it.certificateBase64))) }</span>
+<span class="fc" id="L120">            .map { (userId, userPublicKey) -&gt;</span>
+                // Generate a new 3DES key and encrypt the account private key with it
+<span class="fc" id="L122">                val encryptedAccountPrivateKey = SymmetricKey.newInstance(CryptoConstants.DESEDE_SHORT_NAME)</span>
+<span class="fc" id="L123">                    .encrypt(accountPrivateKey(accountKeysDTO.privateKey), null, userPublicKey)</span>
+<span class="fc" id="L124">                CoreAccountUser().apply {</span>
+<span class="fc" id="L125">                    this.accountId = account.id</span>
+<span class="fc" id="L126">                    this.userPersonId = userId</span>
+<span class="fc" id="L127">                    this.accountPrivateKey = fromEncryptedAccountPrivateKey(encryptedAccountPrivateKey)</span>
+<span class="fc" id="L128">                    this.status = AccountUserStatus.ACTIVE</span>
+<span class="fc" id="L129">                    this.isDefaultAccount = user.defaultAccountId == account.id</span>
+<span class="fc" id="L130">                    this.effectiveDate = dateTimeService.now()</span>
+<span class="fc" id="L131">                }</span>
+            }
+<span class="fc" id="L133">            .map {</span>
+                // Expire any existing account_user entries for this person/account pair, and save the new one
+<span class="fc" id="L135">                expireExistingAccountUserEntries(account.id, user.id)</span>
+<span class="fc" id="L136">                accountUserRepository.save(it)</span>
+<span class="fc" id="L137">                null</span>
+<span class="fc" id="L138">            }</span>
+
+    private fun findPerson(personPublicId: PersonPublicId) =
+<span class="fc" id="L141">        personRepository.findByPublicId(personPublicId, PublicPKBPerson::class.java)</span>
+<span class="fc" id="L142">            .map { right&lt;KmsError, PublicPKBPerson&gt;(it) }</span>
+<span class="pc" id="L143">            .orElseGet { left(KmsError.personNotFound(personPublicId)) }</span>
+
+
+    private fun expireExistingAccountUserEntries(accountId:Long, userId:Long) {
+<span class="fc" id="L147">        val expired = accountUserRepository.expireAccountUserEntries(accountId, userId, dateTimeService.now(), AccountUserStatus.ACTIVE)</span>
+<span class="fc" id="L148">        log.info(&quot;Expired $expired existing account_user records for person=$userId, account=$accountId&quot;)</span>
+<span class="fc" id="L149">    }</span>
+
+    private fun fromEncryptedAccountPrivateKey(encryptedAccountPrivateKey: EncryptedAccountPrivateKey): EncodedEncryptedPrivateKeyInfo {
+
+        // Convert the key to EncryptedPrivateKeyInfo so we can get the ASN.1 encoded bytes
+<span class="fc" id="L154">        val encryptedKeyInfo = EncryptedPrivateKeyInfo(</span>
+<span class="fc" id="L155">            encryptedAccountPrivateKey.algorithm,</span>
+<span class="fc" id="L156">            encryptedAccountPrivateKey.encryptedKeyBytes</span>
+        )
+
+<span class="fc" id="L159">        return EncodedEncryptedPrivateKeyInfo().apply {</span>
+<span class="fc" id="L160">            this.encryptedPrivateKeyInfo = encryptedKeyInfo.encoded</span>
+<span class="fc" id="L161">            this.privateKeyAlgorithm = encryptedKeyInfo.algName</span>
+<span class="fc" id="L162">            this.privateKeySize = CryptoConstants.RSA_KEY_LENGTH</span>
+<span class="fc" id="L163">            this.encryptedSecretKey = encryptedAccountPrivateKey.encryptedSymmetricKey.encryptedKeyBytes</span>
+<span class="fc" id="L164">            this.secretKeyAlgorithm = encryptedAccountPrivateKey.encryptedSymmetricKey.algorithm</span>
+<span class="fc" id="L165">        }</span>
+    }
+
+    private fun personIfReallyAccountOwner(account: CoreAccount, accountOwner: PublicPKBPerson): Either&lt;KmsError, PublicPKBPerson&gt; =
+<span class="pc bpc" id="L169" title="1 of 2 branches missed.">        if (account.id == accountOwner.defaultAccountId) {</span>
+<span class="fc" id="L170">            right(accountOwner)</span>
+        } else {
+<span class="nc" id="L172">            log.warn(&quot;Account $account does not match defaultaccountid ${accountOwner.defaultAccountId} for person ${accountOwner.publicId}&quot;)</span>
+<span class="nc" id="L173">            left(KmsError.accountOwnerMismatch(account.publicId, accountOwner.publicId))</span>
+<span class="fc" id="L174">        }</span>
+
+    private fun KmsError.Companion.accountOwnerMismatch(
+        accountPublicId: AccountPublicId,
+        personPublicId: PersonPublicId
+    ) =
+<span class="nc" id="L180">        KmsError(</span>
+<span class="nc" id="L181">            &quot;account.owner.mismatch&quot;,</span>
+<span class="nc" id="L182">            &quot;Person $personPublicId does not own account $accountPublicId&quot;,</span>
+<span class="nc" id="L183">            KmsError.Type.BAD_REQUEST</span>
+<span class="nc" id="L184">        )</span>
+
+
+    /**
+     * Find all the account keys; org, team, user, whatever, that the person has access to directly
+     * i.e. travel 1 edge away from the current user in the key graph
+     */
+    @Transactional
+    fun getAccessibleAccountKeys(personPublicId: PersonPublicId): Pair&lt;List&lt;EncryptedOrgAccountKey&gt;, List&lt;EncryptedAccountKey&gt;&gt; {
+<span class="fc" id="L193">        val maybePersonId = userCache.findPerson(personPublicId).map { it.id }.getOrElse(null as Long?)</span>
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">        val personId = maybePersonId ?: return Pair(listOf(), listOf())</span>
+
+        // Maximum ~44K results here, dropping quickly to just a few thousand, most active users just have one.
+        // Since this is returning a projection not a full hibernate entity, should be easily within memory limits.
+<span class="fc" id="L198">        val accountUsersWithOrgs = accountUserRepository.findAccountUsersWithOrgsForPerson(personId)</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        val (orgAccountUsers, nonOrgAccountUsers) = accountUsersWithOrgs.partition { it.orgId != null }</span>
+<span class="fc" id="L200">        return Pair(orgAccountUsers.map {</span>
+<span class="fc" id="L201">            EncryptedOrgAccountKey(it.orgId!!, it.accountPrivateKey.encryptedAccountPrivateKey())</span>
+        },
+<span class="fc" id="L203">            nonOrgAccountUsers.map {</span>
+<span class="fc" id="L204">                EncryptedAccountKey(it.accountPublicId, it.accountPrivateKey.encryptedAccountPrivateKey())</span>
+            })
+    }
+    
+    fun getAccessibleAccounts(personPublicId: PersonPublicId): Either&lt;KmsError, Set&lt;AccountPublicId&gt;&gt; =
+<span class="fc" id="L209">        userCache.findPerson(personPublicId)</span>
+<span class="fc" id="L210">            .map(PersonIds::id)</span>
+<span class="fc" id="L211">            .map(accountUserRepository::findDirectlyAccessibleAccountsForPerson)</span>
+
+    /**
+     * Find or create an AccountOrg record
+     */
+    @Transactional
+    fun grantOrgAccess(accountPublicId: AccountPublicId, orgPublicId: OrgPublicId): Either&lt;KmsError, Void&gt; {
+<span class="fc" id="L218">        log.debug(&quot;Granting org {} access to account {}&quot;, orgPublicId, accountPublicId)</span>
+<span class="fc" id="L219">        return Option.ofOptional(orgRepository.findByPublicId(orgPublicId))</span>
+<span class="fc" id="L220">            .toEither(KmsError.orgNotFound(orgPublicId))</span>
+<span class="fc" id="L221">            .flatMap { org -&gt;</span>
+<span class="fc" id="L222">                accountOrgRepository.findByOrgIdAndPublicAccountId(org.id, accountPublicId)</span>
+<span class="fc" id="L223">                    .map { Either.right&lt;KmsError, GrantOrgAccessResult&gt;(GrantOrgAccessResult.NO_OP) }</span>
+<span class="fc" id="L224">                    .orElseGet { createAndSaveAccountOrgRecord(org, accountPublicId) }</span>
+<span class="fc" id="L225">            }.map&lt;Void&gt; { grantResult -&gt;</span>
+<span class="fc" id="L226">                log.debug(&quot;Success granting org {} access to account {}&quot;, orgPublicId, accountPublicId)</span>
+<span class="fc" id="L227">                meterRegistry.counter(&quot;access_service_org_access_grant&quot;, &quot;status&quot;, &quot;$grantResult&quot;).increment()</span>
+<span class="fc" id="L228">                null</span>
+<span class="fc" id="L229">            }.peekLeft { err -&gt;</span>
+<span class="fc" id="L230">                log.debug(&quot;Failed granting org {} access to account {} because {}&quot;, orgPublicId, accountPublicId, err)</span>
+<span class="fc" id="L231">                meterRegistry.counter(&quot;access_service_org_access_grant_error&quot;, &quot;type&quot;, &quot;${err.type}&quot;).increment()</span>
+<span class="fc" id="L232">            }</span>
+    }
+
+    @Transactional
+    fun grantOrgAccess(accountPublicIds: List&lt;AccountPublicId&gt;, orgPublicId: OrgPublicId): Either&lt;KmsError, List&lt;AccountPublicId&gt;&gt; {
+<span class="fc" id="L237">        log.debug(&quot;Granting org {} access to accounts {}&quot;, orgPublicId, accountPublicIds)</span>
+<span class="fc" id="L238">        return Option.ofOptional(orgRepository.findByPublicId(orgPublicId))</span>
+<span class="fc" id="L239">            .toEither(KmsError.orgNotFound(orgPublicId))</span>
+<span class="fc" id="L240">            .map { org -&gt;</span>
+<span class="pc" id="L241">                val existing = accountOrgRepository.findByOrgIdAndPublicAccountIds(org.id, accountPublicIds).map { it.account.publicId }</span>
+<span class="fc" id="L242">                meterRegistry.counter(&quot;access_service_org_access_grant&quot;, &quot;status&quot;, &quot;${GrantOrgAccessResult.NO_OP}&quot;).increment(existing.size.toDouble())</span>
+<span class="fc" id="L243">                val toCreate = accountPublicIds.subtract(existing)</span>
+<span class="fc" id="L244">                val created = createAndSaveAccountOrgRecords(org, toCreate)</span>
+<span class="fc" id="L245">                log.debug(&quot;Success granting org {} access to accounts {}&quot;, orgPublicId, toCreate)</span>
+<span class="fc" id="L246">                meterRegistry.counter(&quot;access_service_org_access_grant&quot;, &quot;status&quot;, &quot;${GrantOrgAccessResult.CREATED}&quot;).increment(created.size.toDouble())</span>
+<span class="fc" id="L247">                existing + created</span>
+            }
+    }
+
+
+    private fun createAndSaveAccountOrgRecords(org: PublicOrg, accountPublicIds: Collection&lt;AccountPublicId&gt;): List&lt;AccountPublicId&gt; {
+<span class="fc" id="L253">        val accountKeys = migratingAccountKeyService.getAccountKeys(accountPublicIds, true).associateBy { it.accountPublicId }</span>
+<span class="fc" id="L254">        return accountCacheService.findAccounts(accountPublicIds)</span>
+<span class="fc" id="L255">            .mapNotNull { account -&gt;</span>
+<span class="fc" id="L256">                val accountOrg = accountKeys[account.publicId]</span>
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">                    ?.let { createAccountOrg(it, org, account) }</span>
+
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">                if (accountOrg == null) {</span>
+<span class="nc" id="L260">                    log.info(&quot;Could not load keys for account {} for batch org access grant for org {}&quot;, account.id, org.id)</span>
+<span class="nc" id="L261">                    null</span>
+                }
+                else {
+<span class="fc" id="L264">                    account.publicId to accountOrg</span>
+                }
+            }
+<span class="fc" id="L267">            .also{ list -&gt; accountOrgRepository.saveAll(list.map{ it.second} )}</span>
+<span class="fc" id="L268">            .let { list -&gt; list.map { it.first } }</span>
+    }
+
+
+    private fun createAndSaveAccountOrgRecord(org: PublicOrg, accountPublicId: AccountPublicId): Either&lt;KmsError, GrantOrgAccessResult&gt; =
+<span class="fc" id="L273">        Validation.combine(</span>
+<span class="fc" id="L274">            accountCacheService.findAccount(accountPublicId).toValidation(),</span>
+<span class="fc" id="L275">            migratingAccountKeyService.getAccountKeys(accountPublicId).toValidation()</span>
+        )
+<span class="fc" id="L277">            .ap { account, accountKeys -&gt; createAndSaveAccountOrgRecord(accountKeys, org, account) }</span>
+<span class="fc" id="L278">            .mapError { errors -&gt; errors.head() }</span>
+<span class="fc" id="L279">            .map {</span>
+<span class="fc" id="L280">                GrantOrgAccessResult.CREATED</span>
+            }
+<span class="fc" id="L282">            .toEither()</span>
+
+    fun createAndSaveAccountOrgRecord(accountKeys: AccountKeysDTO, org: PublicOrg, account: CoreAccount) =
+<span class="fc" id="L285">        createAccountOrg(accountKeys, org, account)</span>
+<span class="fc" id="L286">            .let { accountOrgRepository.save(it) }</span>
+
+    private fun createAccountOrg(accountKeys: AccountKeysDTO, org: PublicOrg, account: CoreAccount): CoreAccountOrg {
+<span class="fc" id="L289">        val accountPrivateKey = accountPrivateKey(accountKeys.privateKey)</span>
+<span class="fc" id="L290">        val secretKey = SymmetricKey.newInstance(CryptoConstants.DESEDE_SHORT_NAME)</span>
+<span class="fc" id="L291">        val orgAccountPublicKey = org.orgAccount.publicKey()</span>
+<span class="fc" id="L292">        val encryptedAccountKey = secretKey.encrypt(accountPrivateKey, null, orgAccountPublicKey)</span>
+<span class="fc" id="L293">        val encryptedPrivateKeyInfo = EncodedEncryptedPrivateKeyInfo(</span>
+<span class="fc" id="L294">            encryptedAccountKey.encryptedKeyBytes,</span>
+<span class="fc" id="L295">            CryptoConstants.RSA_KEY_LENGTH,</span>
+<span class="fc" id="L296">            encryptedAccountKey.algorithm,</span>
+<span class="fc" id="L297">            encryptedAccountKey.encryptedSymmetricKey.encryptedKeyBytes,</span>
+<span class="fc" id="L298">            encryptedAccountKey.encryptedSymmetricKey.algorithm</span>
+        )
+
+<span class="fc" id="L301">        return CoreAccountOrg().apply {</span>
+<span class="fc" id="L302">            this.accountId = account.id</span>
+<span class="fc" id="L303">            this.orgId = org.id</span>
+<span class="fc" id="L304">            this.accountPrivateKey = encryptedPrivateKeyInfo</span>
+<span class="fc" id="L305">            this.created = dateTimeService.now()</span>
+<span class="fc" id="L306">        }</span>
+    }
+
+
+    @Transactional
+    fun revokeAccountAccessForUser(accountPublicId: AccountPublicId, targetPersonPublicId: PersonPublicId): Either&lt;KmsError, Void&gt; =
+<span class="fc" id="L312">        accountCacheService.findAccount(accountPublicId)</span>
+<span class="fc" id="L313">            .flatMap { account -&gt; findPerson(targetPersonPublicId)</span>
+<span class="fc" id="L314">                .map { person -&gt;</span>
+<span class="fc" id="L315">                    accountUserRepository.expireAccountUserEntriesAndWipeKeys(account.id, person.id, dateTimeService.now())</span>
+<span class="fc" id="L316">                    null</span>
+                }
+<span class="fc" id="L318">            }</span>
+
+    enum class GrantOrgAccessResult {
+<span class="fc" id="L321">        NO_OP,</span>
+<span class="fc" id="L322">        CREATED</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

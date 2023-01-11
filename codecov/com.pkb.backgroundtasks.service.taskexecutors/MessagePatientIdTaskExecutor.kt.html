@@ -1,0 +1,145 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MessagePatientIdTaskExecutor.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.backgroundtasks.service.taskexecutors</a> &gt; <span class="el_source">MessagePatientIdTaskExecutor.kt</span></div><h1>MessagePatientIdTaskExecutor.kt</h1><pre class="source lang-java linenums">package com.pkb.backgroundtasks.service.taskexecutors
+
+import com.pkb.backgroundtasks.AccountPublicId
+import com.pkb.backgroundtasks.PersonPrivateId
+import com.pkb.backgroundtasks.entity.AccountTaskDetails
+import com.pkb.backgroundtasks.entity.AccountTaskType
+import com.pkb.backgroundtasks.repository.AppMenuDataRepository
+import com.pkb.backgroundtasks.repository.PKBPersonRepository
+import com.pkb.crypto.decryptionhelper.DecryptionHelperAppMenuData
+import com.pkb.crypto.dto.AccountKeysDTO
+import com.pkb.entities.app.AppMenuData
+import com.pkb.entities.enums.MenuDataType
+import org.springframework.stereotype.Component
+import java.util.UUID
+
+/**
+ * Messages are supposed to have a related patient id. Some early messages don't have this populated.
+ * For this we have to get the first and last messages of the conversation and look at various fields
+ * like sender, recipient and participants that _might_ contain a patient we can use. Otherwise
+ * we set a boolean flag to say we've looked and can't find anything
+ */
+@Component
+<span class="fc" id="L23">class MessagePatientIdTaskExecutor(</span>
+<span class="fc" id="L24">    private val menuDataRepo: AppMenuDataRepository,</span>
+<span class="fc" id="L25">    private val decryptionHelper: DecryptionHelperAppMenuData,</span>
+<span class="fc" id="L26">    private val personRepo: PKBPersonRepository</span>
+<span class="fc" id="L27">) : AccountTaskExecutor&lt;MessagePatientIdTaskExecutor, MessagePatientIdTaskDetails&gt;(MessagePatientIdTaskDetails::class.java) {</span>
+
+
+    override fun performTask(accountPublicId: AccountPublicId, accountKeysDTO: AccountKeysDTO, accountPrivateId: Long, taskDetails: MessagePatientIdTaskDetails): Boolean {
+<span class="fc" id="L31">        menuDataRepo.findByDataTypeInAndAccountIdOrderByDate01(listOf(MenuDataType.encounterEvent, MenuDataType.message), accountPrivateId)</span>
+<span class="fc" id="L32">            .map { it to decryptionHelper.decryptAndDeserializeAppMenuDataWithAccountKeys(it, accountKeysDTO) }</span>
+<span class="pc bpc" id="L33" title="1 of 2 branches missed.">            .groupBy { it.conversationId ?: UUID.randomUUID() }</span>
+<span class="pc bpc" id="L34" title="2 of 4 branches missed.">            .filter { (_, messages) -&gt; messages.any { it.patientId == null &amp;&amp; it.patientNotFound != true } }</span>
+<span class="fc" id="L35">            .entries.fold(mutableMapOf&lt;PersonPrivateId, Boolean&gt;(), { patientIdCache, (_, messages) -&gt; findAndPopulatePatientId(messages, patientIdCache) })</span>
+<span class="fc" id="L36">        return true</span>
+    }
+
+    private fun findAndPopulatePatientId(messages: List&lt;Message&gt;, patientIdCache: PatientIdCache): PatientIdCache {
+<span class="fc" id="L40">        val patientId = messages</span>
+<span class="pc bpc" id="L41" title="1 of 2 branches missed.">                .filter { it.messageType != &quot;ENCOUNTER_DETAILS&quot; }</span>
+<span class="fc" id="L42">                .let(this::getFirstAndLastOrNullIfEmpty)</span>
+<span class="pc bpc" id="L43" title="1 of 2 branches missed.">                ?.let { (first, last) -&gt; findReferencedPatientForConversation(first, last, patientIdCache) }</span>
+
+<span class="fc" id="L45">        messages</span>
+<span class="fc" id="L46">                .map { it.fixPatientIdAndReturnAppMenuData(patientId) }</span>
+<span class="fc" id="L47">                .let(menuDataRepo::saveAll)</span>
+
+        //The map is mutable so this is just to keep the fold method happy
+<span class="fc" id="L50">        return patientIdCache</span>
+    }
+
+    private fun findReferencedPatientForConversation(firstMessage: Message, lastMessage: Message, patientIdCache: PatientIdCache): Long? {
+<span class="pc bpc" id="L54" title="1 of 2 branches missed.">        return lastMessage.patientId ?: getPossiblePatientIdLists(firstMessage, lastMessage)</span>
+<span class="fc" id="L55">                .mapNotNull { findSinglePatientFromGroup(it, patientIdCache) }</span>
+<span class="fc" id="L56">                .firstOrNull()</span>
+    }
+
+
+    private fun getFirstAndLastOrNullIfEmpty(messages: List&lt;Message&gt;): Pair&lt;Message, Message&gt;? {
+<span class="pc bpc" id="L61" title="1 of 2 branches missed.">        return if (messages.isEmpty()) {</span>
+<span class="nc" id="L62">            null</span>
+        } else {
+<span class="fc" id="L64">            messages.first() to messages.last()</span>
+        }
+    }
+
+    /**
+     * Returns a list of lists of ids that should be searched in order to see if we can find a patient
+     * If there's more than one patient in any group of ids, its ambiguous, so we can't use any of them
+     * and should try the next group.
+     */
+    private fun getPossiblePatientIdLists(firstMessage: Message, lastMessage: Message) =
+<span class="fc" id="L74">            sequenceOf(listOfNotNull(firstMessage.senderId), listOfNotNull(firstMessage.recipientId))</span>
+<span class="fc" id="L75">                    .plus(linkedSetOf(firstMessage, lastMessage).map(this::getParticipants))</span>
+
+
+    private fun findSinglePatientFromGroup(personIdList: List&lt;Long&gt;, patientIdCache: PatientIdCache): Long? =
+<span class="fc" id="L79">            filterToPatientIds(personIdList, patientIdCache)</span>
+<span class="fc" id="L80">                    .let { filteredList -&gt;</span>
+<span class="pc bpc" id="L81" title="1 of 2 branches missed.">                        if (filteredList.size &gt; 1) listOf() else filteredList // If more than one patient in group, ignore</span>
+                    }
+<span class="fc" id="L83">                    .firstOrNull()</span>
+
+    private fun filterToPatientIds(personIds: List&lt;PersonPrivateId&gt;, patientIdCache: PatientIdCache): List&lt;PersonPrivateId&gt; {
+<span class="fc" id="L86">        personIds.subtract(patientIdCache.keys)</span>
+<span class="fc" id="L87">                .let { unknownPersonIds -&gt;</span>
+<span class="fc bfc" id="L88" title="All 4 branches covered.">                    val newPatients = if (unknownPersonIds.isNotEmpty()) personRepo.filterToPatientIds(unknownPersonIds) else unknownPersonIds</span>
+<span class="fc" id="L89">                    unknownPersonIds.associate { it to newPatients.contains(it) }</span>
+                }
+<span class="fc" id="L91">                .also { newPersonsMap -&gt; patientIdCache.putAll(newPersonsMap) }</span>
+
+
+<span class="fc" id="L94">        return personIds.filter { patientIdCache[it]!! }</span>
+    }
+
+
+    private fun getParticipants(message: Message): List&lt;Long&gt; =
+<span class="fc" id="L99">            message.participants</span>
+<span class="fc" id="L100">                    .flatMap { participantString -&gt; participantString.split(',') }</span>
+<span class="fc" id="L101">                    .map(String::trim)</span>
+<span class="pc bpc" id="L102" title="1 of 2 branches missed.">                    .filter(String::isNotBlank)</span>
+<span class="fc" id="L103">                    .map(String::toLong)</span>
+}
+
+//Little bit of sugar
+typealias Message = Pair&lt;AppMenuData, MutableMap&lt;String, Any&gt;&gt;
+typealias PatientIdCache = MutableMap&lt;PersonPrivateId, Boolean&gt;
+
+private fun Message.fixPatientIdAndReturnAppMenuData(possiblePatientId: Long?): AppMenuData {
+<span class="pc bpc" id="L111" title="1 of 2 branches missed.">    if (possiblePatientId != null) {</span>
+<span class="fc" id="L112">        patientId = possiblePatientId</span>
+    } else {
+<span class="nc" id="L114">        patientNotFound = true</span>
+    }
+<span class="fc" id="L116">    return this.first</span>
+}
+
+private val Message.messageType: String?
+<span class="fc" id="L120">    get() = first.string05</span>
+private val Message.conversationId: UUID?
+<span class="fc" id="L122">    get() = first.uuid01</span>
+private val Message.recipientId: Long?
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">    get() = first.string01?.toLong()</span>
+private val Message.senderId: Long?
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">    get() = first.string02?.toLong()</span>
+private var Message.patientNotFound: Boolean?
+<span class="fc" id="L128">    get() = first.boolean02</span>
+    set(value) {
+<span class="nc" id="L130">        first.boolean02 = value</span>
+<span class="nc" id="L131">    }</span>
+private var Message.patientId: Long?
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">    get() = first.string03?.toLong()</span>
+    set(value) {
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">        first.string03 = value?.toString()</span>
+<span class="fc" id="L136">    }</span>
+
+@Suppress(&quot;UNCHECKED_CAST&quot;)
+private val Message.participants: List&lt;String&gt;
+<span class="fc" id="L140">    get() = second[&quot;participants&quot;] as List&lt;String&gt;</span>
+
+<span class="fc" id="L142">class MessagePatientIdTaskDetails : AccountTaskDetails&lt;MessagePatientIdTaskDetails&gt;(AccountTaskType.MESSAGE_PATIENT_ID) {</span>
+<span class="fc" id="L143">    override fun getSelf(): MessagePatientIdTaskDetails = this</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

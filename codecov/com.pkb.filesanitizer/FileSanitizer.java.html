@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FileSanitizer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.filesanitizer</a> &gt; <span class="el_source">FileSanitizer.java</span></div><h1>FileSanitizer.java</h1><pre class="source lang-java linenums">package com.pkb.filesanitizer;
+
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Either;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.tika.config.TikaConfig;
+import org.apache.tika.detect.Detector;
+import org.apache.tika.metadata.Metadata;
+import org.apache.tika.mime.MediaType;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Function;
+
+import static com.pkb.filesanitizer.Result.CANNOT_VERIFY;
+import static com.pkb.filesanitizer.Result.FAIL;
+import static com.pkb.filesanitizer.Result.OK;
+
+/***
+ * Utility class that verifies whether a file (e.g. attachment) contains some possible threat
+ */
+public class FileSanitizer {
+
+    private static final String MEDIA_TYPE_SAFE = &quot;application/octet-stream&quot;;
+
+    private static final String MEDIA_TYPE_PDF = &quot;application/pdf&quot;;
+
+    private static final String MEDIA_TYPE_DOCX = &quot;application/vnd.openxmlformats-officedocument.wordprocessingml.document&quot;;
+
+<span class="fc" id="L36">    private final static Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final List&lt;SanitizationRule&gt; rules;
+    private final TikaConfig config;
+
+<span class="fc" id="L41">    private static final SanitizationRule[] DEFAULT_SANITIZATION_RULES = new SanitizationRule[] {</span>
+            new PDFSanitizationRule()
+    };
+
+    public FileSanitizer() {
+<span class="fc" id="L46">        this(DEFAULT_SANITIZATION_RULES);</span>
+<span class="fc" id="L47">    }</span>
+
+<span class="fc" id="L49">    public FileSanitizer(@NotNull SanitizationRule... rules) {</span>
+<span class="fc" id="L50">        this.rules = Arrays.asList(rules);</span>
+<span class="fc" id="L51">        this.config = TikaConfig.getDefaultConfig();</span>
+<span class="fc" id="L52">    }</span>
+
+    /**
+     * Tries to detects media type based on the stream.
+     */
+    public Either&lt;Exception, String&gt; detectMediaType(@NotNull InputStream stream) {
+        try {
+<span class="fc" id="L59">            Metadata metadata = new Metadata();</span>
+<span class="fc" id="L60">            Detector detector = config.getDetector();</span>
+<span class="fc" id="L61">            MediaType mediaType = detector.detect(stream, metadata);</span>
+<span class="fc" id="L62">            return Either.right(mediaType.toString());</span>
+<span class="nc" id="L63">        } catch (Exception e) {</span>
+<span class="nc" id="L64">            return Either.left(e);</span>
+        }
+    }
+
+    /**
+     * Tries to recognize file type and apply sanitization rules
+     * 
+     * @param fileBytes
+     *            the file contents
+     * @return Either an exception during media type detection or the result of the check and the detected media type
+     */
+    public Either&lt;Exception, Tuple2&lt;Result, String&gt;&gt; check(@NotNull byte[] fileBytes) {
+<span class="fc" id="L76">        ByteArrayInputStream stream = new ByteArrayInputStream(fileBytes);</span>
+<span class="fc" id="L77">        Either&lt;Exception, String&gt; mediaType = detectMediaType(stream);</span>
+<span class="fc" id="L78">        return mediaType</span>
+<span class="fc" id="L79">                .map(type -&gt; rules</span>
+<span class="fc" id="L80">                        .stream()</span>
+<span class="fc" id="L81">                        .filter(rule -&gt; rule.handles(type))</span>
+<span class="fc" id="L82">                        .map(rule -&gt; rule.check(fileBytes))</span>
+<span class="fc" id="L83">                        .reduce(CANNOT_VERIFY, this::sanityCheckReducer))</span>
+<span class="fc" id="L84">                .map(result -&gt; Tuple.of(result, mediaType.get()));</span>
+    }
+
+    public @NotNull String fixMediaType(@NotNull byte[] content, String originalMediaType) {
+<span class="fc" id="L88">        Either&lt;Exception, Tuple2&lt;Result, String&gt;&gt; checkResult = check(content);</span>
+<span class="fc" id="L89">        String logMessage = checkResult</span>
+<span class="fc" id="L90">                .map($ -&gt; &quot;Media type: &quot; + $._2 + &quot;, verified: &quot; + $._1)</span>
+<span class="fc" id="L91">                .mapLeft(Throwable::toString)</span>
+<span class="fc" id="L92">                .fold(Function.identity(), Function.identity());</span>
+<span class="fc" id="L93">        LOGGER.info(&quot;Sanitization result: {} &quot;, logMessage);</span>
+
+<span class="pc bpc" id="L95" title="1 of 2 branches missed.">        String defaultReturnValue = StringUtils.isNotBlank(originalMediaType) ? originalMediaType : MEDIA_TYPE_SAFE;</span>
+
+<span class="pc bpc" id="L97" title="1 of 2 branches missed.">        if (checkResult.isRight()) {</span>
+<span class="fc bfc" id="L98" title="All 4 branches covered.">            if (MEDIA_TYPE_PDF.equalsIgnoreCase(originalMediaType) || MEDIA_TYPE_PDF.equalsIgnoreCase(checkResult.get()._2)) {</span>
+<span class="fc" id="L99">                return fixPDFMediaType(checkResult, defaultReturnValue);</span>
+            }
+<span class="fc bfc" id="L101" title="All 4 branches covered.">            if (MEDIA_TYPE_DOCX.equalsIgnoreCase(originalMediaType) || MEDIA_TYPE_SAFE.equalsIgnoreCase(checkResult.get()._2)) {</span>
+<span class="fc" id="L102">                return defaultReturnValue;</span>
+            } else {
+<span class="fc" id="L104">                LOGGER.info(&quot;Media type override to {}&quot;, checkResult.get()._2);</span>
+<span class="fc" id="L105">                return checkResult.get()._2;</span>
+            }
+        }
+<span class="nc" id="L108">        return defaultReturnValue;</span>
+    }
+
+    private String fixPDFMediaType(Either&lt;Exception, Tuple2&lt;Result, String&gt;&gt; checkResult, String defaultReturnValue) {
+<span class="pc bpc" id="L112" title="1 of 3 branches missed.">        switch (checkResult.get()._1) {</span>
+        case FAIL:
+            // PDF-specific override: check sanitization status and set to octet-stream on failure (so that users will just download it, not view)
+<span class="fc" id="L115">            LOGGER.info(&quot;PDF failed sanity check, override to {}&quot;, MEDIA_TYPE_SAFE);</span>
+<span class="fc" id="L116">            return MEDIA_TYPE_SAFE;</span>
+        case CANNOT_VERIFY:
+        case OK:
+<span class="pc bpc" id="L119" title="1 of 2 branches missed.">            if (MEDIA_TYPE_SAFE.equalsIgnoreCase(checkResult.get()._2)) {</span>
+<span class="nc" id="L120">                return defaultReturnValue;</span>
+            } else {
+<span class="fc" id="L122">                LOGGER.info(&quot;PDF media type override to {}&quot;, checkResult.get()._2);</span>
+<span class="fc" id="L123">                return checkResult.get()._2;</span>
+            }
+        default:
+<span class="nc" id="L126">            return defaultReturnValue;</span>
+        }
+    }
+
+    @NotNull
+    private Result sanityCheckReducer(Result l, Result r) {
+        // fail if any rules failed,
+        // pass if none of the rules failed but at least one rule passed
+<span class="pc bpc" id="L134" title="1 of 4 branches missed.">        if (r == FAIL || l == FAIL) {</span>
+<span class="fc" id="L135">            return FAIL;</span>
+<span class="pc bpc" id="L136" title="3 of 4 branches missed.">        } else if (r == OK || l == OK) {</span>
+<span class="fc" id="L137">            return OK;</span>
+        } else {
+<span class="nc" id="L139">            return CANNOT_VERIFY;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,378 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CallAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.message</a> &gt; <span class="el_source">CallAction.java</span></div><h1>CallAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.message;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.file.FileSanitizerActionMixin;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.encounter.entity.Message;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.messaging.MessageStatus;
+import com.pkb.exception.PKBException;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.user.entity.PKBPerson;
+import io.micrometer.core.instrument.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.encounter.entity.InlineContentTypes.MSG_INLINE_CALL;
+import static org.apache.commons.lang3.StringUtils.trimToEmpty;
+
+<span class="fc" id="L29">public class CallAction extends MessageBaseAction implements FileSanitizerActionMixin {</span>
+
+    private static final long serialVersionUID = 1L;
+<span class="fc" id="L32">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private List&lt;PKBPerson&gt; acceptedPatients;
+
+    private Long patientId;
+    private String subjectOfMessage;
+    private String notes;
+    private int columnSize;
+
+    private String patientTitle;
+    private String patientFirstName;
+    private String patientLastName;
+    private String skypeId;
+    private String phoneNumber;
+
+    private String initialCallDocumentation;
+    private String callDocumentation;
+    private UUID conversationId;
+
+    private UserAccessManager userAccessManager;
+    private PKBEmailMessageManager pkbEmailMessageManager;
+    private List&lt;PKBPerson&gt; cliniciansForPatients;
+    private List&lt;PKBPerson&gt; caregiversList;
+
+    private PatientConsentManager patientConsentManager;
+
+
+    @Override
+    public String input() {
+<span class="fc" id="L61">        getPatients();</span>
+<span class="fc" id="L62">        subjectOfMessage = &quot;&quot;;</span>
+<span class="fc" id="L63">        notes = &quot;&quot;;</span>
+<span class="fc" id="L64">        columnSize = getConfig().getRecipientColumnSize();</span>
+
+        // Calls can only be made by clinicians, so any contextUser is the patient
+<span class="pc bpc" id="L67" title="1 of 2 branches missed.">        if (contextUserUtil.getContextUser() != null) {</span>
+<span class="fc" id="L68">            patientId = contextUserUtil.getContextUser().getId();</span>
+<span class="fc" id="L69">            contextUserUtil.clearContextUser();</span>
+        }
+
+<span class="fc" id="L72">        attachments = generateAttachmentsFromInputs();</span>
+
+<span class="fc" id="L74">        setDefaultFlag();</span>
+<span class="fc" id="L75">        return Action.INPUT;</span>
+    }
+
+    @Override
+    public String execute() throws Exception {
+<span class="fc" id="L80">        String result = &quot;sent&quot;;</span>
+<span class="fc" id="L81">        getPatients();</span>
+<span class="fc" id="L82">        columnSize = getConfig().getRecipientColumnSize();</span>
+
+        // Get the actors
+
+<span class="fc" id="L86">        long clinicianId = loggedInUserUtil.getLoggedInUserId();</span>
+
+        // Send callDocumentation as a message
+
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">        if (callDocumentation.equals(initialCallDocumentation)) {</span>
+<span class="nc" id="L91">            addFieldError(&quot;callDocumentation&quot;, getText(&quot;callAction.err.add_notes&quot;));</span>
+<span class="nc" id="L92">            return &quot;notsent&quot;;</span>
+        }
+
+<span class="fc" id="L95">        sendCallDocumentation(clinicianId);</span>
+
+<span class="fc" id="L97">        return result;</span>
+    }
+
+    private void sendCallDocumentation(long clinicianId) {
+<span class="fc" id="L101">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+
+<span class="fc" id="L103">        List&lt;String&gt; participants = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L104">        participants.add(Long.toString(clinicianId));</span>
+<span class="fc" id="L105">        participants.add(Long.toString(patientId));</span>
+
+<span class="fc" id="L107">        Message message = encounterManager.createMessage(Long.toString(patientId),</span>
+                conversationId,
+                false,
+<span class="fc" id="L110">                Long.toString(clinicianId),</span>
+                subjectOfMessage,
+                callDocumentation + &quot;[&quot; + MSG_INLINE_CALL + &quot;=#]&quot;,
+                PrivacyFlag.GENERAL,
+<span class="fc" id="L114">                getEHRRequestContext());</span>
+<span class="fc" id="L115">        message.setMessageStatus(MessageStatus.UNREAD);</span>
+<span class="fc" id="L116">        message.setParticipants(participants);</span>
+<span class="fc" id="L117">        fillPrivacyFlagIfSetIn(message);</span>
+
+<span class="fc" id="L119">        attachments = generateAttachmentsFromInputs();</span>
+<span class="fc" id="L120">        Long messageId = encounterManager.saveMessage(loggedInEHRRequestContext, loggedInUserUtil.getLoggedInUserId(),</span>
+<span class="fc" id="L121">                message, attachments, contextUserUtil.getContextUserId(), false);</span>
+
+<span class="fc" id="L123">    }</span>
+
+    public String start() throws Exception {
+<span class="fc" id="L126">        String result = Action.SUCCESS;</span>
+<span class="fc" id="L127">        getPatients();</span>
+
+        // Validate inputs
+
+<span class="fc" id="L131">        boolean errorFlag = false;</span>
+
+<span class="pc bpc" id="L133" title="2 of 4 branches missed.">        if ((subjectOfMessage == null) || subjectOfMessage.isEmpty()) {</span>
+<span class="nc" id="L134">            addFieldError(&quot;subjectOfMessage&quot;,</span>
+<span class="nc" id="L135">                    getText(&quot;callAction.err.enter_subject&quot;));</span>
+<span class="nc" id="L136">            errorFlag = true;</span>
+        }
+
+<span class="pc bpc" id="L139" title="2 of 4 branches missed.">        if ((notes == null) || notes.isEmpty()) {</span>
+<span class="nc" id="L140">            addFieldError(&quot;notes&quot;,</span>
+<span class="nc" id="L141">                    getText(&quot;callAction.err.enter_notes&quot;));</span>
+<span class="nc" id="L142">            errorFlag = true;</span>
+        }
+
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">        if (errorFlag) {</span>
+<span class="nc" id="L146">            refillPrivacyFlags();</span>
+<span class="nc" id="L147">            return Action.INPUT;</span>
+        }
+
+        // Patient information for callInProgress.jsp
+
+<span class="fc" id="L152">        PKBPerson patient = userManager.getPKBPerson(patientId);</span>
+<span class="fc" id="L153">        patientTitle = patient.getTitle();</span>
+<span class="fc" id="L154">        patientFirstName = patient.getFirstName();</span>
+<span class="fc" id="L155">        patientLastName = patient.getLastName();</span>
+<span class="fc" id="L156">        skypeId = trimToEmpty(patient.getSkypeId());</span>
+<span class="fc" id="L157">        phoneNumber = patient.getPhoneClean();</span>
+
+<span class="fc bfc" id="L159" title="All 2 branches covered.">        if (!skypeId.isEmpty()) {</span>
+            //if patient has skype id only then fetch the list of clinician/carers having skype id
+
+
+<span class="fc" id="L163">            PatientConsentManager.ConsentLinks links = patientConsentManager.getConsentLinks(getEHRRequestContext(), patientId, false, EnumSet.of(AccessingEntityType.INDIVIDUAL, AccessingEntityType.CARER));</span>
+<span class="fc" id="L164">            cliniciansForPatients = links.getIndividuals().stream().filter(this::isValidSkypeUser).collect(Collectors.toUnmodifiableList());</span>
+<span class="fc" id="L165">            caregiversList = links.getCarers().stream().filter(this::isValidSkypeUser).collect(Collectors.toUnmodifiableList());</span>
+        }
+
+        // Clinician information for the call
+
+<span class="fc" id="L170">        PKBPerson clinician = userManager.getPKBPerson(loggedInUserUtil.getLoggedInUserId());</span>
+
+        // Start a conversation with the notes as the first message
+
+<span class="fc" id="L174">        conversationId = UUID.randomUUID();</span>
+
+<span class="fc" id="L176">        startCallDiscussion(clinician, patient);</span>
+        // Send emails
+
+        // Use template for initial documentation
+
+<span class="fc" id="L181">        initialCallDocumentation = encounterManager.getMessageTemplate(&quot;callDocumentation&quot;);</span>
+
+<span class="fc" id="L183">        return result;</span>
+    }
+
+    private boolean isValidSkypeUser(PKBPerson person) {
+<span class="pc bpc" id="L187" title="3 of 6 branches missed.">        return !person.getId().equals(loggedInUserUtil.getLoggedInUserId())  &amp;&amp; StringUtils.isNotEmpty(person.getSkypeId()) &amp;&amp; !person.getSkypeId().contains(&quot;@&quot;);</span>
+    }
+
+    private void startCallDiscussion(PKBPerson clinician, PKBPerson patient) throws NumberFormatException {
+<span class="fc" id="L191">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L192">        Optional&lt;Long&gt; teamId = loggedInEHRRequestContext.getTeamId();</span>
+<span class="fc" id="L193">        Message message = encounterManager.createMessage(Long.toString(patientId),</span>
+                conversationId,
+                true,
+<span class="fc" id="L196">                clinician.getIdString(),</span>
+                subjectOfMessage,
+                notes + &quot;[&quot; + MSG_INLINE_CALL + &quot;=#]&quot;,
+                PrivacyFlag.GENERAL,
+<span class="fc" id="L200">                getEHRRequestContext());</span>
+<span class="fc" id="L201">        message.setMessageStatus(MessageStatus.UNREAD);</span>
+<span class="fc" id="L202">        message.setInlineContentType(MSG_INLINE_CALL);</span>
+<span class="fc" id="L203">        fillPrivacyFlagIfSetIn(message);</span>
+
+<span class="fc" id="L205">        List&lt;String&gt; participants = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L206">        participants.add(clinician.getIdString());</span>
+<span class="fc" id="L207">        participants.add(Long.toString(patientId));</span>
+<span class="fc" id="L208">        message.setParticipants(participants);</span>
+
+<span class="fc" id="L210">        message.setMessageStatus(MessageStatus.SENT);</span>
+<span class="fc" id="L211">        attachments = generateAttachmentsFromInputs();</span>
+<span class="fc" id="L212">        encounterManager.saveMessage(loggedInEHRRequestContext, loggedInUserUtil.getLoggedInUserId(),</span>
+<span class="fc" id="L213">                message, attachments, contextUserUtil.getContextUserId(), false);</span>
+
+<span class="fc" id="L215">        pkbEmailMessageManager.sendDocumentCallReminderToPatient(clinician, patient, conversationId, message, teamId);</span>
+<span class="fc" id="L216">        pkbEmailMessageManager.sendDocumentCallReminderToClinician(clinician, patient, conversationId, message, teamId);</span>
+
+<span class="fc" id="L218">    }</span>
+
+    public String getPatients() {
+<span class="fc" id="L221">        String result = Action.INPUT;</span>
+        try {
+<span class="fc" id="L223">            acceptedPatients = messageWebBean.getPatientsForClinician(getLoggedInEHRRequestContext());</span>
+<span class="nc" id="L224">        } catch (PKBException e) {</span>
+<span class="nc" id="L225">            result = Action.ERROR;</span>
+<span class="nc" id="L226">            LOGGER.error(&quot;unable to load accepted patients&quot;, e);</span>
+<span class="nc" id="L227">            addActionError(getText(&quot;callAction.err.unable_to_load_patients&quot;));</span>
+<span class="fc" id="L228">        }</span>
+<span class="fc" id="L229">        return result;</span>
+    }
+
+
+    public List&lt;PKBPerson&gt; getAcceptedPatients() {
+<span class="fc" id="L234">        return acceptedPatients;</span>
+    }
+
+    public void setAcceptedPatients(List&lt;PKBPerson&gt; acceptedPatients) {
+<span class="nc" id="L238">        this.acceptedPatients = acceptedPatients;</span>
+<span class="nc" id="L239">    }</span>
+
+    public Long getPatientId() {
+<span class="fc" id="L242">        return patientId;</span>
+    }
+
+    public void setPatientId(Long patientId) {
+<span class="fc" id="L246">        this.patientId = patientId;</span>
+<span class="fc" id="L247">    }</span>
+
+    public String getSubjectOfMessage() {
+<span class="fc" id="L250">        return subjectOfMessage;</span>
+    }
+
+    public void setSubjectOfMessage(String subjectOfMessage) {
+<span class="fc" id="L254">        this.subjectOfMessage = subjectOfMessage;</span>
+<span class="fc" id="L255">    }</span>
+
+    public String getNotes() {
+<span class="fc" id="L258">        return notes;</span>
+    }
+
+    public void setNotes(String notes) {
+<span class="fc" id="L262">        this.notes = notes;</span>
+<span class="fc" id="L263">    }</span>
+
+
+    public String getPatientTitle() {
+<span class="fc" id="L267">        return patientTitle;</span>
+    }
+
+    public void setPatientTitle(String patientTitle) {
+<span class="fc" id="L271">        this.patientTitle = patientTitle;</span>
+<span class="fc" id="L272">    }</span>
+
+    public String getPatientFirstName() {
+<span class="fc" id="L275">        return patientFirstName;</span>
+    }
+
+    public void setPatientFirstName(String patientFirstName) {
+<span class="fc" id="L279">        this.patientFirstName = patientFirstName;</span>
+<span class="fc" id="L280">    }</span>
+
+    public String getPatientLastName() {
+<span class="fc" id="L283">        return patientLastName;</span>
+    }
+
+    public void setPatientLastName(String patientLastName) {
+<span class="fc" id="L287">        this.patientLastName = patientLastName;</span>
+<span class="fc" id="L288">    }</span>
+
+    public String getSkypeId() {
+<span class="fc" id="L291">        return skypeId;</span>
+    }
+
+    public void setSkypeId(String skypeId) {
+<span class="fc" id="L295">        this.skypeId = skypeId;</span>
+<span class="fc" id="L296">    }</span>
+
+    public String getPhoneNumber() {
+<span class="fc" id="L299">        return phoneNumber;</span>
+    }
+
+    public void setPhoneNumber(String phoneNumber) {
+<span class="fc" id="L303">        this.phoneNumber = phoneNumber;</span>
+<span class="fc" id="L304">    }</span>
+
+
+    public PKBEmailMessageManager getPkbEmailMessageManager() {
+<span class="nc" id="L308">        return pkbEmailMessageManager;</span>
+    }
+
+    public void setPkbEmailMessageManager(
+            PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L313">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L314">    }</span>
+
+    public String getCallDocumentation() {
+<span class="fc" id="L317">        return callDocumentation;</span>
+    }
+
+    public void setCallDocumentation(String callDocumentation) {
+<span class="fc" id="L321">        this.callDocumentation = callDocumentation;</span>
+<span class="fc" id="L322">    }</span>
+
+    public UUID getConversationId() {
+<span class="fc" id="L325">        return conversationId;</span>
+    }
+
+    public void setConversationId(UUID conversationId) {
+<span class="fc" id="L329">        this.conversationId = conversationId;</span>
+<span class="fc" id="L330">    }</span>
+
+    public String getInitialCallDocumentation() {
+<span class="fc" id="L333">        return initialCallDocumentation;</span>
+    }
+
+    public void setInitialCallDocumentation(String initialCallDocumentation) {
+<span class="fc" id="L337">        this.initialCallDocumentation = initialCallDocumentation;</span>
+<span class="fc" id="L338">    }</span>
+
+    public int getColumnSize() {
+<span class="nc" id="L341">        return columnSize;</span>
+    }
+
+    public void setColumnSize(int columnSize) {
+<span class="nc" id="L345">        this.columnSize = columnSize;</span>
+<span class="nc" id="L346">    }</span>
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L349">        return userAccessManager;</span>
+    }
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L353">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L354">    }</span>
+
+    public void setPatientConsentManager(PatientConsentManager patientConsentManager) {
+<span class="fc" id="L357">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L358">    }</span>
+
+    public List&lt;PKBPerson&gt; getCliniciansForPatients() {
+<span class="fc" id="L361">        return cliniciansForPatients;</span>
+    }
+
+    public void setCliniciansForPatients(List&lt;PKBPerson&gt; cliniciansForPatients) {
+<span class="nc" id="L365">        this.cliniciansForPatients = cliniciansForPatients;</span>
+<span class="nc" id="L366">    }</span>
+
+    public List&lt;PKBPerson&gt; getCaregiversList() {
+<span class="fc" id="L369">        return caregiversList;</span>
+    }
+
+    public void setCaregiversList(List&lt;PKBPerson&gt; caregiversList) {
+<span class="nc" id="L373">        this.caregiversList = caregiversList;</span>
+<span class="nc" id="L374">    }</span>
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

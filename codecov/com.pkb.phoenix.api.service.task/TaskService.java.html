@@ -1,0 +1,252 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TaskService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.phoenix.api.service.task</a> &gt; <span class="el_source">TaskService.java</span></div><h1>TaskService.java</h1><pre class="source lang-java linenums">package com.pkb.phoenix.api.service.task;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.phoenix.api.service.Meta;
+import com.pkb.phoenix.api.service.Parameter;
+import com.pkb.phoenix.api.service.task.action.AssessTask;
+import com.pkb.phoenix.api.service.task.action.InstantiateTask;
+import com.pkb.phoenix.api.service.task.action.SearchTasks;
+import com.pkb.phoenix.api.service.task.template.TaskTemplateCode;
+import com.pkb.phoenix.api.service.task.template.TaskTemplateLocator;
+import com.pkb.phoenix.api.service.tasktype.Approval;
+import com.pkb.phoenix.enums.TaskEvent;
+import com.pkb.phoenix.repository.task.ImmutableTaskSearchCriteria;
+import com.pkb.phoenix.repository.task.TaskRepository;
+import com.pkb.phoenix.repository.task.projection.Task;
+import com.pkb.phoenix.repository.taskeventlog.TaskEventLogRepository;
+import com.pkb.phoenix.tables.pojos.TaskEventLog;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.springframework.transaction.annotation.Transactional;
+import reactor.core.scheduler.Scheduler;
+import reactor.util.context.Context;
+
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+
+import static com.pkb.phoenix.api.service.Role.CUSTOMER_SUPPORT_SPECIALIST;
+import static com.pkb.phoenix.api.service.phoenixexception.PhoenixAuthorizationException.InvalidUserTypeException.invalidUserType;
+import static com.pkb.phoenix.api.service.phoenixexception.PhoenixIllegalStateException.TaskNotFoundException.taskNotFoundException;
+import static com.pkb.phoenix.api.service.phoenixexception.PhoenixIllegalStateException.TaskTypeNotFoundException.taskTypeNotFoundException;
+import static com.pkb.phoenix.api.service.phoenixexception.PhoenixUnexpectedConflictException.ConflictWithCurrentStateException.conflictWithCurrentStateException;
+import static com.pkb.phoenix.api.service.phoenixexception.PhoenixValidationException.InvalidTaskParameters.invalidTaskParameters;
+import static com.pkb.phoenix.api.service.task.Status.APPROVED;
+import static com.pkb.phoenix.api.service.task.Status.DONE;
+import static com.pkb.phoenix.api.service.task.Status.FAILED;
+import static com.pkb.phoenix.api.service.task.Status.INPROGRESS;
+import static com.pkb.phoenix.api.service.task.Status.REJECTED;
+import static com.pkb.phoenix.api.service.task.Status.WAITING;
+import static com.pkb.phoenix.api.service.task.action.AssessTask.Decision.APPROVE;
+import static com.pkb.phoenix.api.service.task.action.AssessTask.Decision.REJECT;
+import static com.pkb.phoenix.api.service.tasktype.Approval.NONE;
+import static com.pkb.phoenix.api.service.tasktype.Approval.SIMPLE;
+import static com.pkb.phoenix.enums.TaskEvent.approved;
+import static com.pkb.phoenix.enums.TaskEvent.cancelled;
+import static com.pkb.phoenix.enums.TaskEvent.executed;
+import static com.pkb.phoenix.enums.TaskEvent.failed;
+import static com.pkb.phoenix.enums.TaskEvent.instantiated;
+import static com.pkb.phoenix.enums.TaskEvent.rejected;
+import static com.pkb.phoenix.enums.TaskEvent.started;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.util.stream.Collectors.toUnmodifiableList;
+import static java.util.stream.Collectors.toUnmodifiableSet;
+import static org.slf4j.LoggerFactory.getLogger;
+import static reactor.core.publisher.Mono.fromCallable;
+
+public class TaskService {
+<span class="fc" id="L66">    private static final Logger LOG = getLogger(lookup().lookupClass());</span>
+<span class="fc" id="L67">    private static final Set&lt;Approval&gt; AUTO_APPROVED_TASK_TYPES = EnumSet.of(NONE, SIMPLE);</span>
+    public static final String REDIS_RESPONSE_KEY = &quot;response&quot;;
+
+    public static final String TASK_ID = &quot;Pkb-Task-Id&quot;;
+    public static final String TASK_INSTANCE = &quot;Pkb-Task-Instance&quot;;
+    public static final String META = &quot;Pkb-Meta&quot;;
+
+    private final TaskEventLogRepository taskEventLogRepository;
+    private final TaskRepository taskRepository;
+    private final TaskTemplateLocator templateLocator;
+    private final DateTimeService dateTimeService;
+    private final TaskMapper mapper;
+    private final Scheduler scheduler;
+    private final ObjectMapper json;
+
+    public TaskService(
+            TaskRepository taskRepository,
+            TaskEventLogRepository taskEventLogRepository,
+            TaskTemplateLocator templateLocator,
+            DateTimeService dateTimeService,
+<span class="fc" id="L87">            TaskMapper mapper, Scheduler scheduler, ObjectMapper json) {</span>
+<span class="fc" id="L88">        this.taskRepository = taskRepository;</span>
+<span class="fc" id="L89">        this.templateLocator = templateLocator;</span>
+<span class="fc" id="L90">        this.taskEventLogRepository = taskEventLogRepository;</span>
+<span class="fc" id="L91">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L92">        this.mapper = mapper;</span>
+<span class="fc" id="L93">        this.scheduler = scheduler;</span>
+<span class="fc" id="L94">        this.json = json;</span>
+<span class="fc" id="L95">    }</span>
+
+    @Transactional
+    public &lt;P&gt; TaskInstance&lt;P&gt; createTask(InstantiateTask&lt;P&gt; task) {
+<span class="pc bpc" id="L99" title="1 of 2 branches missed.">        if (!task.meta().session().user().roles().contains(CUSTOMER_SUPPORT_SPECIALIST)) {</span>
+<span class="nc" id="L100">            throw invalidUserType(&quot;Task can be only instantiated by User with 'Customer Support' role.&quot;);</span>
+        }
+
+<span class="fc" id="L103">        var code = task.code();</span>
+<span class="fc" id="L104">        var template = templateLocator.&lt;P, Object&gt; find(code)</span>
+<span class="pc" id="L105">                .orElseThrow(() -&gt; taskTypeNotFoundException(&quot;Can not find task for code [&quot; + code + &quot;]&quot;));</span>
+
+<span class="fc" id="L107">        var errors = template.validate(task.parameters());</span>
+<span class="fc bfc" id="L108" title="All 2 branches covered.">        if (!errors.isEmpty()) {</span>
+<span class="fc" id="L109">            throw invalidTaskParameters(errors);</span>
+        }
+
+<span class="fc" id="L112">        var taskAdded = taskRepository.addTask(template.code().name(), stringify(task));</span>
+
+<span class="fc" id="L114">        taskEventLogRepository.insert(createEvent(task.meta(), taskAdded.getId(), instantiated));</span>
+
+<span class="fc bfc" id="L116" title="All 2 branches covered.">        if (AUTO_APPROVED_TASK_TYPES.contains(code.approval())) {</span>
+<span class="fc" id="L117">            var note = Match(code.approval()).of(</span>
+<span class="fc" id="L118">                    Case($(NONE), &quot;Task type does not require IG approval, hence, automatically approved.&quot;),</span>
+<span class="fc" id="L119">                    Case($(SIMPLE), format(&quot;Task Type=[%s] is automatically approved.&quot;, code.approval())));</span>
+
+<span class="fc" id="L121">            taskEventLogRepository.insert(createEvent(task.meta(), taskAdded.getId(), approved, note));</span>
+        }
+
+<span class="fc" id="L124">        return mapper.buildModel(getTaskById(taskAdded.getId()));</span>
+    }
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public &lt;P extends Parameter&gt; List&lt;TaskInstance&lt;P&gt;&gt; findTasks(SearchTasks criteria) {
+<span class="fc" id="L129">        var findCriteria = ImmutableTaskSearchCriteria.builder()</span>
+<span class="fc" id="L130">                .addAllEvents(criteria.statuses().map(TaskService::toEvent).collect(toUnmodifiableSet()))</span>
+<span class="fc" id="L131">                .taskTypeCode(criteria.type())</span>
+<span class="fc" id="L132">                .build();</span>
+
+<span class="fc" id="L134">        return taskRepository.fetchTasksByCriteria(findCriteria).stream()</span>
+<span class="fc" id="L135">                .map(task -&gt; (Task&lt;String&gt;) task)</span>
+<span class="fc" id="L136">                .map(task -&gt; mapper.buildModel(templateLocator.&lt;P, Object&gt; get(TaskTemplateCode.valueOf(task.getTypeCode())).adapt(task)))</span>
+<span class="fc" id="L137">                .collect(toUnmodifiableList());</span>
+    }
+
+    public Optional&lt;TaskInstance&lt;?&gt;&gt; findTaskById(int taskId) {
+<span class="fc" id="L141">        return taskRepository.findTaskById(taskId)</span>
+<span class="fc" id="L142">                .map(mapper::buildModel);</span>
+    }
+
+    @Transactional
+    public &lt;P extends Parameter&gt; TaskInstance&lt;P&gt; assess(AssessTask assessTask) {
+<span class="fc" id="L147">        var latestEvent = taskEventLogRepository.findLatestEventFor(assessTask.taskId())</span>
+<span class="pc" id="L148">                .orElseThrow(() -&gt; taskNotFoundException(&quot;Can't find task!&quot;));</span>
+
+<span class="fc" id="L150">        var nextEvent = Match(assessTask.decision()).of(</span>
+<span class="fc" id="L151">                Case($(APPROVE), approved),</span>
+<span class="fc" id="L152">                Case($(REJECT), rejected));</span>
+
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">        if (nextEvent != latestEvent) {</span>
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">            if (latestEvent != instantiated) {</span>
+<span class="nc" id="L156">                throw taskTypeNotFoundException(&quot;Task is not waiting for approval!&quot;);</span>
+            }
+
+<span class="fc" id="L159">            taskEventLogRepository.insert(createEvent(assessTask.meta(), assessTask.taskId(), nextEvent));</span>
+        }
+
+<span class="fc" id="L162">        return mapper.buildModel(getTaskById(assessTask.taskId()));</span>
+    }
+
+    public &lt;P, R&gt; TaskInstance&lt;P&gt; executeTask(int taskId, Meta meta) {
+<span class="fc" id="L166">        var task = this.&lt;P&gt; findApprovedTask(taskId);</span>
+<span class="fc" id="L167">        var template = templateLocator.&lt;P, R&gt; get(TaskTemplateCode.valueOf(task.getTypeCode()));</span>
+
+<span class="fc" id="L169">        taskEventLogRepository.insert(createEvent(meta, task.getId(), started));</span>
+
+<span class="fc" id="L171">        return template.execute(task)</span>
+<span class="fc" id="L172">                .flatMap(execResult -&gt;</span>
+<span class="fc" id="L173">                        fromCallable(() -&gt; {</span>
+<span class="fc" id="L174">                            taskEventLogRepository.insert(createEvent(meta, task.getId(), executed));</span>
+<span class="fc" id="L175">                            return (TaskInstance&lt;P&gt;)mapper.&lt;P, R&gt;buildModel(getTaskById(task.getId()), execResult);</span>
+                        })
+<span class="fc" id="L177">                                .subscribeOn(scheduler))</span>
+<span class="fc" id="L178">                .onErrorResume(cause -&gt;</span>
+<span class="fc" id="L179">                        fromCallable(() -&gt; {</span>
+<span class="fc" id="L180">                            LOG.error(&quot;Failed to execute task=[{}], cause:&quot;, task.getId(), cause);</span>
+<span class="fc" id="L181">                            taskEventLogRepository.insert(createEvent(meta, task.getId(), failed, cause.getMessage()));</span>
+<span class="fc" id="L182">                            return mapper.&lt;P&gt;buildModel(getTaskById(taskId), cause);</span>
+                        })
+<span class="fc" id="L184">                                .subscribeOn(scheduler))</span>
+<span class="fc" id="L185">                .contextWrite(Context.of(</span>
+<span class="fc" id="L186">                        TASK_ID, taskId,</span>
+                        TASK_INSTANCE, task,
+                        META, meta))
+<span class="fc" id="L189">                .blockOptional()</span>
+<span class="pc" id="L190">                .orElseThrow(() -&gt; new RuntimeException(&quot;Execution completed without yielding anything.&quot;));</span>
+    }
+
+    private &lt;P&gt; String stringify(InstantiateTask&lt;P&gt; taskDetails) {
+        try {
+<span class="fc" id="L195">            return json.writeValueAsString(taskDetails.parameters());</span>
+<span class="nc" id="L196">        } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L197">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    private &lt;P, R&gt; Task&lt;P&gt; getTaskById(int taskInstance) {
+        @SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L203">        var task = (Task&lt;String&gt;) taskRepository.getTaskById(taskInstance);</span>
+<span class="fc" id="L204">        var template = templateLocator.&lt;P, R&gt; get(TaskTemplateCode.valueOf(task.getTypeCode()));</span>
+<span class="fc" id="L205">        return template.adapt(task);</span>
+    }
+
+    private &lt;P&gt; @NotNull Task&lt;P&gt; findApprovedTask(int taskId) {
+        @SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L210">        var taskInstance = (Task&lt;String&gt;) taskRepository.findTaskById(taskId)</span>
+<span class="pc" id="L211">                .orElseThrow(() -&gt; taskTypeNotFoundException(&quot;Can not find task for task ID [&quot; + taskId + &quot;]&quot;));</span>
+
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">        if (taskInstance.getLatestEvent().getEvent() != approved) {</span>
+<span class="nc" id="L214">            throw conflictWithCurrentStateException(String.format(&quot;Only approved tasks can be executed (last event was=[%s])&quot;, taskInstance.getLatestEvent()));</span>
+        }
+<span class="fc" id="L216">        return templateLocator.&lt;P, Object&gt; get(TaskTemplateCode.valueOf(taskInstance.getTypeCode())).adapt(taskInstance);</span>
+    }
+
+    private TaskEventLog createEvent(Meta meta, int id, TaskEvent event) {
+<span class="fc" id="L220">        return createEvent(meta.session().user().id(), id, event, null);</span>
+    }
+
+    private TaskEventLog createEvent(Meta meta, int id, TaskEvent event, @Nullable String note) {
+<span class="fc" id="L224">        return createEvent(meta.session().user().id(), id, event, note);</span>
+    }
+
+    private TaskEventLog createEvent(int userId, int id, TaskEvent event, @Nullable String note) {
+<span class="fc" id="L228">        return new TaskEventLog(null, userId, event, id, dateTimeService.nowLocalDateTime(), note);</span>
+    }
+
+    private static TaskEvent toEvent(Status status) {
+<span class="fc" id="L232">        return Match(status).of(</span>
+<span class="fc" id="L233">                Case($(WAITING), instantiated),</span>
+<span class="fc" id="L234">                Case($(APPROVED), approved),</span>
+<span class="fc" id="L235">                Case($(REJECTED), rejected),</span>
+<span class="fc" id="L236">                Case($(INPROGRESS), started),</span>
+<span class="fc" id="L237">                Case($(DONE), executed),</span>
+<span class="fc" id="L238">                Case($(FAILED), failed));</span>
+    }
+
+    static Status toStatus(TaskEvent event) {
+<span class="fc" id="L242">        return Match(event).of(</span>
+<span class="fc" id="L243">                Case($(instantiated), WAITING),</span>
+<span class="fc" id="L244">                Case($(approved), APPROVED),</span>
+<span class="fc" id="L245">                Case($(rejected), REJECTED),</span>
+<span class="fc" id="L246">                Case($(cancelled), DONE),</span>
+<span class="fc" id="L247">                Case($(started), INPROGRESS),</span>
+<span class="fc" id="L248">                Case($(executed), DONE),</span>
+<span class="fc" id="L249">                Case($(failed), FAILED));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

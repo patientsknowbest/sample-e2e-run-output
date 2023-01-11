@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BatchDataProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.batch</a> &gt; <span class="el_source">BatchDataProcessor.java</span></div><h1>BatchDataProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.batch;
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.dataupload.emis.esv2.EmisEsProcessedRow;
+import com.pkb.institute.entity.Org;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.service.dataupload.emis.es.util.EmisEsDateUtil;
+import com.pkb.service.dataupload.emis.esv2.EmisEsManager;
+import com.pkb.service.dataupload.emis.esv2.EmisEsProcessedRowService;
+import com.pkb.service.dataupload.emis.esv2.EmisEsStatusService;
+import com.pkb.service.dataupload.emis.esv2.EmisOrgHelper;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.EmisEsDateTimeProcessor;
+import com.pkb.service.dataupload.emis.esv2.model.BaseEmisEsDomainModel;
+import com.pkb.service.dataupload.emis.esv2.sorting.ResultWithId;
+import com.pkb.service.dataupload.emis.esv2.sorting.RowId;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Function1;
+import io.vavr.Function2;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.collection.HashMap;
+import io.vavr.collection.Map;
+import io.vavr.collection.Seq;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Stream;
+
+import static java.util.Objects.isNull;
+import static java.util.Objects.nonNull;
+import static java.util.stream.Collectors.toMap;
+
+public abstract class BatchDataProcessor&lt;T extends BaseEmisEsDomainModel&gt; implements EmisRequestContextProvider, FileProcessor&lt;T&gt;, EmisEsDateTimeProcessor {
+
+<span class="fc" id="L41">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private static final String PROCESSED_ROWS_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_processed_rows&quot;;
+<span class="fc" id="L44">    private static final Counter PROCESSED_ROWS_COUNTER = Counter.builder(PROCESSED_ROWS_COUNTER_NAME)</span>
+<span class="fc" id="L45">            .tags(TAG_PROCESSOR_TYPE, &quot;&quot;, TAG_EMIS_FILE_TYPE, &quot;&quot;, TAG_STATUS, &quot;&quot;) // see enum ProcessorType, EmisFileType, ProcessedRowStatus</span>
+<span class="fc" id="L46">            .description(&quot;Number of rows processed&quot;)</span>
+<span class="fc" id="L47">            .register(Metrics.globalRegistry);</span>
+
+    private static final String PROCESSED_CODED_DATA_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_processed_coded_data&quot;;
+    private static final String TAG_CODED_DATA_TYPE = &quot;codingDataType&quot;;
+<span class="fc" id="L51">    private static final Counter PROCESSED_CODED_DATA_COUNTER = Counter.builder(PROCESSED_CODED_DATA_COUNTER_NAME)</span>
+<span class="fc" id="L52">            .tags(TAG_PROCESSOR_TYPE, &quot;&quot;, TAG_CODED_DATA_TYPE, &quot;&quot;, TAG_STATUS, &quot;&quot;) // see enum ProcessorType, CodingDataType, ProcessedRowStatus</span>
+<span class="fc" id="L53">            .description(&quot;Number of coded data processed&quot;)</span>
+<span class="fc" id="L54">            .register(Metrics.globalRegistry);</span>
+
+
+    protected final EmisEsProcessedRowService emisEsProcessedRowService;
+
+    protected final EmisEsManager emisEsManager;
+
+    protected final EmisProcessorAborter emisProcessAborter;
+
+    protected final Kms kmsClient;
+
+    protected final PhrConfig config;
+
+    protected final EmisEsStatusService emisEsStatusService;
+
+    protected final EmisOrgHelper emisOrgHelper;
+
+
+<span class="fc" id="L72">    public BatchDataProcessor(EmisEsProcessedRowService emisEsProcessedRowService, EmisEsManager emisEsManager, EmisProcessorAborter emisProcessAborter, Kms kmsClient, PhrConfig config, EmisEsStatusService emisEsStatusService, EmisOrgHelper emisOrgHelper) {</span>
+<span class="fc" id="L73">        this.emisEsProcessedRowService = emisEsProcessedRowService;</span>
+<span class="fc" id="L74">        this.emisEsManager = emisEsManager;</span>
+<span class="fc" id="L75">        this.emisProcessAborter = emisProcessAborter;</span>
+<span class="fc" id="L76">        this.kmsClient = kmsClient;</span>
+<span class="fc" id="L77">        this.config = config;</span>
+<span class="fc" id="L78">        this.emisEsStatusService = emisEsStatusService;</span>
+<span class="fc" id="L79">        this.emisOrgHelper = emisOrgHelper;</span>
+<span class="fc" id="L80">    }</span>
+
+    /**
+     * Process a stream of EMIS entities.
+     * Implementations of this methods must assume that they
+     * have no decryption access to accounts.
+     *
+     * @param rows The typed stream. Note: this can be a huge lazy stream.
+     *             Implementations must assume that the whole stream cannot
+     *             be pulled into memory in one step. Therefore never
+     *             move it into a non-lazy collection or try to naively
+     *             group or partition it.s
+     * @return Whether processing has been successful for all rows.
+     */
+    public abstract Tuple2&lt;Boolean, EmisEsProcessedRow&gt; process(Stream&lt;? extends ResultWithId&lt;T, Long&gt;&gt; rows, EmisEsProcessedRow fileState);
+
+    public abstract boolean isPostProcessingRequired();
+
+    protected abstract boolean doPostProcess(EmisEsProcessedRow rowState);
+
+    /**
+     * This method as the name suggests is to be called after method process() has been called on all processors
+     * &lt;p&gt;
+     * Useful in cases like for E.g:- processing CareRecordProblems which are orphan.
+     * &lt;p&gt;
+     * EMIS sometimes sends in out-of-sync CareRecordProblems which do not have corresponding CareRecordObservations in the same set
+     * Such records can be identified and stored in DB till we later gain the decryption access and apply the changes to original records
+     */
+    public final boolean postProcess(EmisEsProcessedRow rowState) {
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">        if (isPostProcessingRequired()) {</span>
+<span class="fc" id="L110">            return doPostProcess(rowState);</span>
+        }
+<span class="nc" id="L112">        return true;</span>
+    }
+
+    protected EmisEsProcessedRow updateLastProcessedRow(EmisEsProcessedRow actualFileState, RowId&lt;Long&gt; rowId) {
+<span class="fc" id="L116">        actualFileState.setLastProcessedRow(rowId.getId());</span>
+<span class="fc" id="L117">        actualFileState.setFullyProcessed(false);</span>
+<span class="fc" id="L118">        return emisEsProcessedRowService.save(actualFileState);</span>
+    }
+
+    protected Map&lt;Long, AccountKeysDTO&gt; attemptKeyLookup(Seq&lt;Long&gt; accountPrivateIds) {
+<span class="fc" id="L122">        Map&lt;UUID, Long&gt; accountIds = emisEsManager.getAccountPublicIds(accountPrivateIds.distinct().toJavaList());</span>
+
+<span class="fc" id="L124">        Function1&lt;List&lt;AccountKeysDTO&gt;, Map&lt;Long, AccountKeysDTO&gt;&gt; toPkbId = Function2.of(this::mapByPrivateAccountId).apply(accountIds);</span>
+
+<span class="fc bfc" id="L126" title="All 2 branches covered.">        if (accountIds.nonEmpty()) {</span>
+<span class="fc" id="L127">            return recordTime(&quot;getAccountKeys&quot;, () -&gt; kmsClient.getAccountKeysTrustedIgnoreMissing(null, accountIds.keysIterator().toJavaList())</span>
+<span class="fc" id="L128">                    .map(toPkbId)</span>
+<span class="fc" id="L129">                    .getOrElse(HashMap.empty()));</span>
+        }
+
+<span class="fc" id="L132">        return HashMap.empty();</span>
+    }
+
+    private Map&lt;Long, AccountKeysDTO&gt; mapByPrivateAccountId(Map&lt;UUID, Long&gt; accountIds, List&lt;AccountKeysDTO&gt; keys) {
+<span class="fc" id="L136">        return HashMap.ofAll(keys.stream()</span>
+<span class="fc" id="L137">                .map(key -&gt; {</span>
+<span class="fc" id="L138">                    UUID accountPublicId = key.getAccountPublicId();</span>
+<span class="fc" id="L139">                    Long accountId = accountIds.get(accountPublicId).getOrElse((Long) null);</span>
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">                    if (isNull(accountId)) {</span>
+<span class="nc" id="L141">                        LOGGER.warn(&quot;Could not find {} in {}&quot;, accountPublicId, accountIds);</span>
+                    }
+<span class="fc" id="L143">                    return Tuple.of(accountId, key);</span>
+                })
+<span class="fc" id="L145">                .filter(t -&gt; nonNull(t._1))</span>
+<span class="fc" id="L146">                .collect(toMap(Tuple2::_1, Tuple2::_2)));</span>
+    }
+
+    protected ZoneId getTimezoneOfOrg(Org o, Runnable missingZoneIdHandler) {
+<span class="fc" id="L150">        return EmisEsDateUtil.getTimezoneOfOrg(o, missingZoneIdHandler);</span>
+    }
+
+    protected ZoneId getTimezoneOfOrg(Org o) {
+<span class="fc" id="L154">        return EmisEsDateUtil.getTimezoneOfOrg(o);</span>
+    }
+
+    protected void incrementProcessedRowsCounter(ProcessedRowStatus status, double increment) {
+<span class="fc" id="L158">        Metrics.counter(PROCESSED_ROWS_COUNTER_NAME, TAG_PROCESSOR_TYPE, getProcessorType().toString(), TAG_EMIS_FILE_TYPE, getSupportedType().toString(), TAG_STATUS, status.toString()).increment(increment);</span>
+<span class="fc" id="L159">    }</span>
+
+    protected void incrementProcessedCodedDataCounter(ProcessedRowStatus status, String dataTypeDesc, double increment) {
+<span class="fc" id="L162">        Metrics.counter(PROCESSED_CODED_DATA_COUNTER_NAME, TAG_PROCESSOR_TYPE, getProcessorType().toString(), TAG_CODED_DATA_TYPE, dataTypeDesc, TAG_STATUS, status.toString()).increment(increment);</span>
+<span class="fc" id="L163">    }</span>
+
+    @Override
+    public EmisEsManager getEmisEsManager() {
+<span class="fc" id="L167">        return emisEsManager;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

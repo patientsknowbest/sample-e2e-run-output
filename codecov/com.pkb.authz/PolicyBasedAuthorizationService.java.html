@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PolicyBasedAuthorizationService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.authz</a> &gt; <span class="el_source">PolicyBasedAuthorizationService.java</span></div><h1>PolicyBasedAuthorizationService.java</h1><pre class="source lang-java linenums">package com.pkb.authz;
+
+import com.pkb.authz.condition.ConditionFailure;
+import com.pkb.authz.data.AuthorizationData;
+import com.pkb.authz.data.AuthorizationResult;
+import com.pkb.authz.data.AuthorizationResults;
+import com.pkb.authz.permission.Permissions;
+import com.pkb.authz.policy.Facts;
+import com.pkb.authz.policy.Policy;
+import com.pkb.authz.policy.PolicyCheckResult;
+import io.vavr.Tuple2;
+import io.vavr.collection.Map;
+import io.vavr.collection.Set;
+import io.vavr.control.Validation;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.util.function.Function;
+
+import static com.pkb.authz.data.ImmutableAuthorizationResult.authzResult;
+import static com.pkb.authz.data.ImmutableAuthorizationResults.authzResults;
+import static com.pkb.authz.permission.ImmutableAllowed.allowed;
+import static com.pkb.authz.permission.ImmutableDenied.denied;
+import static com.pkb.authz.permission.ImmutablePermissions.permissions;
+import static com.pkb.authz.policy.Effect.GRANT;
+import static com.pkb.authz.policy.Effect.REVOKE;
+import static com.pkb.authz.policy.ImmutableFacts.facts;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.API.Set;
+import static io.vavr.API.Tuple;
+import static io.vavr.control.Validation.valid;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * Tests all the policies against all the targets that you requested access to.
+ * Returns the results of the access control check for each object.
+ *
+ * This should be a purely functional operation, except for logging the result.
+ * It should't be fetching any extra data. Leave that to {@link AuthorizationDataService}.
+ */
+public class PolicyBasedAuthorizationService implements AuthorizationService {
+<span class="fc" id="L45">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+    private final Set&lt;Policy&gt; allPolicies;
+
+<span class="fc" id="L49">    public PolicyBasedAuthorizationService(Set&lt;Policy&gt; allPolicies) {</span>
+<span class="fc" id="L50">        this.allPolicies = allPolicies;</span>
+<span class="fc" id="L51">    }</span>
+
+    @Override
+    public @NotNull AuthorizationResults authorize(@NotNull AuthorizationData data) {
+        // Map the requested targets to corresponding authz result
+<span class="fc" id="L56">        Map&lt;TargetMeta&lt;?&gt;, AuthorizationResult&gt; resultByTarget = data.inputs().targets()</span>
+<span class="fc bfc" id="L57" title="All 2 branches covered.">                .filter(targetMeta -&gt; !targetMeta.ownedByPerson() ||</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">                        !targetMeta.containsAnyIdentifier() ||</span>
+<span class="pc bpc" id="L59" title="1 of 4 branches missed.">                        (targetMeta.containsAnyIdentifier() &amp;&amp; data.targetOwnerData().get(targetMeta).isDefined()))</span>
+<span class="fc" id="L60">                .toMap(targetMeta -&gt; {</span>
+<span class="fc" id="L61">                    Set&lt;Tuple2&lt;Policy, Facts&gt;&gt; matchingPolicies = allPolicies</span>
+<span class="fc" id="L62">                            .map(getPolicyWithFacts(data, targetMeta))</span>
+<span class="fc" id="L63">                            .filter(this::checkPolicyAppliesToFacts);</span>
+                    // apply all the relevant policies.
+<span class="fc" id="L65">                    var policyResults = matchingPolicies.map(this::applyPolicyToFacts);</span>
+                    // Combine the results
+<span class="fc" id="L67">                    var combinedPermissions = policyResults</span>
+                            // Policy result is a Tuple, turn it into a Permissions object
+<span class="fc" id="L69">                            .map(e -&gt; e.map(this::toPermissions))</span>
+<span class="fc" id="L70">                            .reduceOption((v1, v2) -&gt; Validation.combine(v1, v2)</span>
+                                // Combine all the Permissions objects to another Permissions
+<span class="fc" id="L72">                                .ap(this::combine)</span>
+                                // Combine all the sets of ConditionFailures into one big set.
+<span class="fc" id="L74">                                .mapError(l -&gt; l.toSet().flatMap(i -&gt; i)))</span>
+                            // policyResults might be empty, in which case we provide an empty Permissions
+                            // NOTE the Permissions object encodes for 'Deny by default' when there are no matching policies 
+                            // com.pkb.authz.permission.Permissions.collectDiscrepancies
+<span class="fc" id="L78">                            .getOrElse(valid(permissions(Set())))</span>
+<span class="fc" id="L79">                            .toEither();</span>
+<span class="fc" id="L80">                    return Tuple(targetMeta, authzResult()</span>
+<span class="fc" id="L81">                            .result(combinedPermissions)</span>
+<span class="fc" id="L82">                            .build());</span>
+                });
+
+<span class="fc" id="L85">        AuthorizationResults results = authzResults()</span>
+<span class="fc" id="L86">                .results(resultByTarget)</span>
+<span class="fc" id="L87">                .data(data)</span>
+<span class="fc" id="L88">                .build();</span>
+<span class="pc bpc" id="L89" title="1 of 2 branches missed.">        if (results.results().size() &gt; 1000) {</span>
+<span class="nc" id="L90">            LOGGER.info(&quot;Authorization check had more than 1000 results, not logging it&quot;);</span>
+        } else {
+<span class="fc" id="L92">            LOGGER.info(&quot;Authorization check result {}&quot;, results);</span>
+        }
+<span class="fc" id="L94">        return results;</span>
+    }
+
+    /**
+     * Map an individual policy check result into a
+     */
+    private Permissions toPermissions(PolicyCheckResult policyCheckResult) {
+<span class="fc" id="L101">        var effect = policyCheckResult.effect();</span>
+<span class="fc" id="L102">        var actions = policyCheckResult.actions();</span>
+<span class="fc" id="L103">        var justifications = policyCheckResult.justifications();</span>
+<span class="fc" id="L104">        return permissions(actions.map(action -&gt;</span>
+<span class="fc" id="L105">                Match(effect).of(</span>
+<span class="fc" id="L106">                        Case($(GRANT), () -&gt; allowed(action, justifications)),</span>
+<span class="pc" id="L107">                        Case($(REVOKE), () -&gt; denied(action, justifications))</span>
+                )));
+    }
+    
+    private Permissions combine(Permissions p1, Permissions p2) {
+<span class="fc" id="L112">        var allActions = p1.permissionsByActions().keySet().addAll(p2.permissionsByActions().keySet());</span>
+<span class="fc" id="L113">        return permissions(allActions.map(action -&gt; {</span>
+<span class="pc bpc" id="L114" title="2 of 4 branches missed.">            if (p1.allowToPerform(action) &amp;&amp; p2.allowToPerform(action)) {</span>
+                // Both permissions include allow, combine the justifications
+<span class="fc" id="L116">                return allowed(action, p1.justifications(action).appendAll(p2.justifications(action)));</span>
+<span class="nc bnc" id="L117" title="All 2 branches missed.">            } else if (p1.isDeniedToPerformAction(action)) {</span>
+                // Deny overrides permit, take just the denied justifications
+<span class="nc" id="L119">                return denied(action, p1.justifications(action));</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">            } else if (p2.isDeniedToPerformAction(action)) {</span>
+                // Deny overrides permit, take just the denied justifications
+<span class="nc" id="L122">                return denied(action, p2.justifications(action));</span>
+            } else {
+                // Denied by both, combine the justifications
+<span class="nc" id="L125">                return denied(action, p1.justifications(action).appendAll(p2.justifications(action))); </span>
+            }
+        }));
+    }
+
+    private Function&lt;Policy, Tuple2&lt;Policy, Facts&gt;&gt; getPolicyWithFacts(@NotNull AuthorizationData data, TargetMeta targetMeta) {
+<span class="fc" id="L131">        return policy -&gt; Tuple(policy, toFacts(data, targetMeta));</span>
+    }
+
+    private Facts toFacts(AuthorizationData data, TargetMeta&lt;?&gt; targetMeta) {
+<span class="fc" id="L135">        return facts(</span>
+<span class="fc" id="L136">                data.inputs().authenticatedIdentity(),</span>
+<span class="fc" id="L137">                data.inputs().path(),</span>
+<span class="fc" id="L138">                data.inputs().action(),</span>
+                targetMeta,
+<span class="fc" id="L140">                data.targetOwnerData().get(targetMeta));</span>
+    }
+
+    private boolean checkPolicyAppliesToFacts(Tuple2&lt;Policy, Facts&gt; policyAndFacts) {
+<span class="fc" id="L144">        return policyAndFacts._1.isApplicable(policyAndFacts._2);</span>
+    }
+
+    private Validation&lt;Set&lt;ConditionFailure&gt;, PolicyCheckResult&gt; applyPolicyToFacts(Tuple2&lt;Policy, Facts&gt; policyAndFacts) {
+<span class="fc" id="L148">        return policyAndFacts._1.evaluate(policyAndFacts._2);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

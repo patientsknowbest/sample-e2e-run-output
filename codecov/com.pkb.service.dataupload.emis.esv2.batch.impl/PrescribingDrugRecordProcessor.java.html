@@ -1,0 +1,360 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PrescribingDrugRecordProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.batch.impl</a> &gt; <span class="el_source">PrescribingDrugRecordProcessor.java</span></div><h1>PrescribingDrugRecordProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.batch.impl;
+
+import com.google.common.collect.Table;
+import com.pkb.app.dto.DataPointSaveResult;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.coding.entity.CodeableConcept;
+import com.pkb.coding.entity.Coding;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.dataupload.emis.esv2.EmisEsProcessedRow;
+import com.pkb.emis.es.dto.DeduplicationCandidateDto;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.externalid.service.ExternalIdService;
+import com.pkb.institute.OrgMergeHelper;
+import com.pkb.institute.entity.Org;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.medication.entity.Medication;
+import com.pkb.medication.entity.Medication.MedicationStatus;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.dataupload.emis.esv2.EmisEsManager;
+import com.pkb.service.dataupload.emis.esv2.EmisEsProcessedRowService;
+import com.pkb.service.dataupload.emis.esv2.EmisEsStatusService;
+import com.pkb.service.dataupload.emis.esv2.EmisOrgHelper;
+import com.pkb.service.dataupload.emis.esv2.EmisPersonStatHelper;
+import com.pkb.service.dataupload.emis.esv2.batch.EmisProcessorAborter;
+import com.pkb.service.dataupload.emis.esv2.model.AdminPatient;
+import com.pkb.service.dataupload.emis.esv2.model.AdminUserInRole;
+import com.pkb.service.dataupload.emis.esv2.model.CodingDrugCode;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileType;
+import com.pkb.service.dataupload.emis.esv2.model.PKBPersonInfo;
+import com.pkb.service.dataupload.emis.esv2.model.PrescribingDrugRecord;
+import com.pkb.service.dataupload.emis.esv2.sorting.ResultWithId;
+import com.pkb.service.medication.EHRMedicationManager;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.Tuple3;
+import io.vavr.collection.HashMap;
+import io.vavr.collection.HashSet;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.collection.Seq;
+import io.vavr.collection.Set;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Date;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.CodingDataType.MEDICATION;
+import static com.pkb.service.dataupload.emis.esv2.batch.FileProcessor.ProcessorType.NORMAL;
+import static com.pkb.service.dataupload.emis.esv2.batch.impl.ProcessingError.Severity.FATAL;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+public class PrescribingDrugRecordProcessor extends BatchingBatchDataProcessor&lt;PrescribingDrugRecord&gt; implements BatchProcessorHelperMixin&lt;PrescribingDrugRecord&gt; {
+
+    private static final String DUPLICATES_METRIC_NAME = &quot;pkb_phr_integration_emis_drugrecord_duplicate_count&quot;;
+<span class="fc" id="L67">    private static final Counter DUPLICATES = Counter.builder(DUPLICATES_METRIC_NAME)</span>
+<span class="fc" id="L68">            .description(&quot;Number of duplicate records detected during extract&quot;)</span>
+<span class="fc" id="L69">            .register(Metrics.globalRegistry);</span>
+
+    private static final String DMD_CODING_SYSTEM = &quot;dm+d&quot;;
+
+<span class="fc" id="L73">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L74">    private static final EmisFileType TYPE = EmisFileType.PRESCRIBING_DRUG_RECORD;</span>
+
+    private final UserManager userManager;
+
+    private final TolvenBeanFactory beanFactory;
+
+    private final EmisPersonStatHelper emisPersonStatHelper;
+
+    private final EHRMedicationManager ehrMedicationManager;
+
+    public PrescribingDrugRecordProcessor(EmisEsProcessedRowService emisEsProcessedRowService, EmisEsManager emisEsManager,
+                                          EmisProcessorAborter emisProcessAborter, Kms kmsClient, PhrConfig config,
+                                          DateTimeService dateTimeService, ExternalIdService externalIdService,
+                                          INotificationManager notificationManager, UserManager userManager,
+                                          TolvenBeanFactory beanFactory, EmisEsStatusService emisEsStatusService,
+                                          EmisOrgHelper emisOrgHelper, EmisPersonStatHelper emisPersonStatHelper,
+                                          EHRMedicationManager ehrMedicationManager) {
+<span class="fc" id="L91">        super(emisEsProcessedRowService, emisEsManager, emisProcessAborter, kmsClient, config, dateTimeService, externalIdService, notificationManager, emisEsStatusService, emisOrgHelper);</span>
+<span class="fc" id="L92">        this.userManager = userManager;</span>
+<span class="fc" id="L93">        this.beanFactory = beanFactory;</span>
+<span class="fc" id="L94">        this.emisPersonStatHelper = emisPersonStatHelper;</span>
+<span class="fc" id="L95">        this.ehrMedicationManager = ehrMedicationManager;</span>
+<span class="fc" id="L96">    }</span>
+
+    @Override
+    public Class&lt;PrescribingDrugRecord&gt; interfaceClass() {
+<span class="fc" id="L100">        return PrescribingDrugRecord.class;</span>
+    }
+
+    @Override
+    public boolean canProcess(@NotNull EmisFileType fileType) {
+<span class="pc bpc" id="L105" title="1 of 2 branches missed.">        return fileType == TYPE;</span>
+    }
+
+    @Override
+    public boolean process(java.util.List&lt;ResultWithId&lt;PrescribingDrugRecord, Long&gt;&gt; rows, EmisEsProcessedRow fileState) {
+<span class="fc" id="L110">        rows.forEach(r -&gt; emisProcessAborter.executeTestControl(TYPE, r.getRowId().getId()));</span>
+<span class="fc" id="L111">        List&lt;ResultWithId&lt;PrescribingDrugRecord, Long&gt;&gt; records = List.ofAll(rows);</span>
+
+<span class="fc" id="L113">        var recordToOrgMergeHelper = getRecordToOrgMergeHelperMapTimed(records, PrescribingDrugRecord::organisationGuid);</span>
+
+<span class="fc" id="L115">        var recordToSurvivorOrg = recordToOrgMergeHelper.mapValues(OrgMergeHelper::getOrg);</span>
+
+<span class="fc" id="L117">        Map&lt;PrescribingDrugRecord, Either&lt;ProcessingError&lt;PrescribingDrugRecord&gt;, AdminPatient&gt;&gt; adminPatientsOrFailures = fetchAdminPatientsTimed(</span>
+                recordToOrgMergeHelper);
+<span class="fc" id="L119">        Seq&lt;ProcessingError&lt;PrescribingDrugRecord&gt;&gt; failures = extractFailures(adminPatientsOrFailures).values();</span>
+
+<span class="fc" id="L121">        Map&lt;PrescribingDrugRecord, AdminPatient&gt; adminPatients = extractSuccesses(adminPatientsOrFailures);</span>
+<span class="fc" id="L122">        Set&lt;PrescribingDrugRecord&gt; saveableRecords = adminPatients.keySet();</span>
+<span class="fc" id="L123">        Map&lt;PrescribingDrugRecord, Either&lt;ProcessingError&lt;PrescribingDrugRecord&gt;, PKBPersonInfo&gt;&gt; pkbPersonsOrFailures = fetchPkbPersonsTimed(</span>
+<span class="fc" id="L124">                adminPatients.map((k, v) -&gt; Tuple.of(k, Tuple.of(recordToSurvivorOrg.apply(k), v))));</span>
+<span class="fc" id="L125">        failures = failures.appendAll(extractFailures(pkbPersonsOrFailures).values());</span>
+<span class="fc" id="L126">        failures.appendAll(pkbPersonsOrFailures.values().flatMap(failureOrSuccess -&gt; failureOrSuccess.left()));</span>
+<span class="fc" id="L127">        Map&lt;PrescribingDrugRecord, PKBPersonInfo&gt; pkbPersons = extractSuccesses(pkbPersonsOrFailures);</span>
+<span class="fc" id="L128">        saveableRecords = saveableRecords.intersect(pkbPersons.keySet());</span>
+<span class="fc" id="L129">        Map&lt;PrescribingDrugRecord, Either&lt;ProcessingError&lt;PrescribingDrugRecord&gt;, Long&gt;&gt; defaultAccountIdsOrFailures = fetchDefaultAccountIdsTimed(</span>
+<span class="fc" id="L130">                restrict(pkbPersons, saveableRecords));</span>
+<span class="fc" id="L131">        Map&lt;PrescribingDrugRecord, Long&gt; defaultAccountIds = extractSuccesses(defaultAccountIdsOrFailures);</span>
+<span class="fc" id="L132">        saveableRecords = saveableRecords.intersect(defaultAccountIds.keySet());</span>
+        // treat 0 issues like the deleted flag -- this can go &gt;0 and then back to 0, and we delete in that case
+<span class="fc" id="L134">        Set&lt;PrescribingDrugRecord&gt; deletions = saveableRecords.filter(pdr -&gt; pdr.isHandleAsDeleted(adminPatients.get(pdr).getOrNull()))</span>
+<span class="fc" id="L135">                .intersect(recordToSurvivorOrg.keySet())</span>
+<span class="fc" id="L136">                .intersect(defaultAccountIds.keySet());</span>
+<span class="fc" id="L137">        saveableRecords = saveableRecords.removeAll(deletions);</span>
+<span class="fc" id="L138">        Map&lt;PrescribingDrugRecord, AdminUserInRole&gt; adminUserInRoles = fetchAdminUserInRolesTimed(recordToSurvivorOrg,</span>
+                PrescribingDrugRecord::enteredByUserInRoleGuid);
+<span class="fc" id="L140">        failures = failures.appendAll(extractFailures(defaultAccountIdsOrFailures).values());</span>
+<span class="fc" id="L141">        Map&lt;PrescribingDrugRecord, Either&lt;ProcessingError&lt;PrescribingDrugRecord&gt;, CodingDrugCode&gt;&gt; drugCodesOrFailures = fetchCodingDrugCodesTimed(</span>
+                saveableRecords);
+<span class="fc" id="L143">        failures = failures.appendAll(extractFailures(drugCodesOrFailures).values());</span>
+<span class="fc" id="L144">        Map&lt;PrescribingDrugRecord, CodingDrugCode&gt; drugCodes = extractSuccesses(drugCodesOrFailures);</span>
+<span class="fc" id="L145">        saveableRecords = saveableRecords.intersect(drugCodes.keySet());</span>
+
+<span class="fc" id="L147">        failures</span>
+<span class="fc" id="L148">                .groupBy(f -&gt; f.getSeverity())</span>
+<span class="fc" id="L149">                .forEach(f -&gt; {</span>
+<span class="fc" id="L150">                    Seq&lt;ProcessingError&lt;PrescribingDrugRecord&gt;&gt; errors = f._2;</span>
+
+<span class="fc bfc" id="L152" title="All 2 branches covered.">                    if (f._1 == FATAL) {</span>
+<span class="fc" id="L153">                        incrementProcessedRowsCounter(ProcessedRowStatus.FAILED, errors.size());</span>
+<span class="fc" id="L154">                        String errorString = errors.map(pe -&gt; pe.getMessage()).collect(Collectors.joining(&quot;\n&quot;));</span>
+<span class="fc" id="L155">                        LOGGER.error(&quot;Failed to process {} drug records:\n{}&quot;, errors.size(), errorString);</span>
+<span class="fc" id="L156">                    } else {</span>
+<span class="fc" id="L157">                        incrementProcessedRowsCounter(ProcessedRowStatus.SKIPPED, errors.size());</span>
+<span class="fc" id="L158">                        String samples = errors.distinctBy(e -&gt; e.getMessageKey()).map(e -&gt; e.getMessage()).collect(Collectors.joining(&quot;\n&quot;));</span>
+<span class="fc" id="L159">                        LOGGER.warn(&quot;Skipping {} medications because of non-fatal failures\nmessages with samples:\n{}&quot;, errors.size(), samples);</span>
+                    }
+<span class="fc" id="L161">                });</span>
+
+<span class="fc" id="L163">        Table&lt;String, UUID, UUID&gt; observationGuidToUniqueId = getOrCreateExternalIdsTimed(saveableRecords, deletions, PrescribingDrugRecord::drugRecordGuid, recordToSurvivorOrg);</span>
+<span class="fc" id="L164">        java.util.Map&lt;String, Long&gt; internalIdCounts = observationGuidToUniqueId.cellSet().stream().collect(Collectors.groupingBy(cell -&gt; cell.getRowKey(), Collectors.counting()));</span>
+
+        //noinspection deprecation
+<span class="fc" id="L167">        var deletionResults = handleDeletableRecordsTimed(deletions,</span>
+                PrescribingDrugRecord::drugRecordGuid,
+<span class="fc" id="L169">                uuidAndAccountPairs -&gt; beanFactory.getEhrRemote().deleteAllForUniqueForSystemProcessWithoutAuditRow(uuidAndAccountPairs),</span>
+                observationGuidToUniqueId,
+                recordToSurvivorOrg,
+                defaultAccountIds);
+<span class="fc" id="L173">        notifyAboutDeletion(deletions, deletionResults, PrescribingDrugRecord::drugRecordGuid, recordToSurvivorOrg, observationGuidToUniqueId, pkbPersons);</span>
+
+<span class="fc" id="L175">        var saveableRecords2 = saveableRecords;</span>
+<span class="fc" id="L176">        recordTime(&quot;save&quot;, () -&gt; {</span>
+
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">            java.util.Set&lt;PrescribingDrugRecord&gt; additions = saveableRecords2.filter(pdr -&gt; !pdr.isHandleAsDeleted(adminPatients.get(pdr).getOrNull()))</span>
+<span class="fc" id="L179">                    .intersect(recordToSurvivorOrg.keySet())</span>
+<span class="fc" id="L180">                    .intersect(defaultAccountIds.keySet())</span>
+<span class="fc" id="L181">                    .intersect(drugCodes.keySet())</span>
+<span class="fc" id="L182">                    .toJavaSet();</span>
+<span class="fc" id="L183">            Map&lt;ProcessedRowStatus, Integer&gt; saveCounts = add(</span>
+                    additions,
+                    recordToSurvivorOrg,
+                    defaultAccountIds,
+                    adminUserInRoles,
+                    drugCodes,
+<span class="fc" id="L189">                    attemptKeyLookup(defaultAccountIds.values().distinct()),</span>
+                    observationGuidToUniqueId);
+
+<span class="fc" id="L192">            saveCounts.forEach(</span>
+                    (status, count) -&gt; {
+<span class="fc" id="L194">                        incrementProcessedCodedDataCounter(status, MEDICATION.toString(), count);</span>
+<span class="fc" id="L195">                        incrementProcessedRowsCounter(status, count);</span>
+<span class="fc" id="L196">                    }); // SAVED and EXCLUDED_BY_CODE</span>
+
+            //noinspection deprecation
+<span class="fc" id="L199">            deleteOldGpDatapointsToPreventDuplicates(additions,</span>
+                    PrescribingDrugRecord::drugRecordGuid,
+<span class="fc" id="L201">                    uuidsWithAccountId -&gt; beanFactory.getEhrRemote().deleteAllForUniqueForSystemProcessWithoutAuditRow(uuidsWithAccountId),</span>
+                    observationGuidToUniqueId,
+                    recordToSurvivorOrg,
+                    defaultAccountIds);
+
+<span class="fc" id="L206">            HashSet.ofAll(additions)</span>
+<span class="fc bfc" id="L207" title="All 2 branches covered.">                    .filter(rec -&gt; !addedDueToGpChange(rec, PrescribingDrugRecord::drugRecordGuid, internalIdCounts))</span>
+<span class="fc" id="L208">                    .map(record -&gt; Tuple.of(pkbPersons.apply(record), recordToSurvivorOrg.apply(record)))</span>
+<span class="fc" id="L209">                    .forEach(t -&gt; notify(t._1, t._2, Activity.Action.EDITED_MEDICATION_RECORD));</span>
+<span class="fc" id="L210">        });</span>
+
+<span class="fc bfc" id="L212" title="All 2 branches covered.">        return failures.find(f -&gt; f.getSeverity() == FATAL).isEmpty();</span>
+    }
+
+    /**
+     * Adds PKB medications to patient records
+     */
+    private Map&lt;ProcessedRowStatus, Integer&gt; add(
+            java.util.Set&lt;PrescribingDrugRecord&gt; observations,
+            Map&lt;PrescribingDrugRecord, Org&gt; recordToOrg,
+            Map&lt;PrescribingDrugRecord, Long&gt; recordToDefaultAccountId,
+            Map&lt;PrescribingDrugRecord, AdminUserInRole&gt; recordToEnteredBy,
+            Map&lt;PrescribingDrugRecord, CodingDrugCode&gt; drugCodes,
+            Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys,
+            Table&lt;String, UUID, UUID&gt; observationGuidToUniqueId) {
+
+<span class="fc" id="L227">        List&lt;Tuple3&lt;PrescribingDrugRecord, Medication, EHRRequestContext&gt;&gt; pkbObservations = observations.stream()</span>
+<span class="fc" id="L228">                .map(observation -&gt; {</span>
+<span class="fc" id="L229">                    Org org = recordToOrg.apply(observation);</span>
+<span class="fc" id="L230">                    var requestContext = getEmisContextWithDefaultTeam(org);</span>
+<span class="fc" id="L231">                    return Tuple.of(observation,</span>
+<span class="fc" id="L232">                            createMedication(observation,</span>
+                                    requestContext,
+<span class="fc" id="L234">                                    recordToOrg.apply(observation),</span>
+<span class="fc" id="L235">                                    recordToDefaultAccountId.apply(observation),</span>
+<span class="fc" id="L236">                                    recordToEnteredBy.getOrElse(observation, null),</span>
+<span class="fc" id="L237">                                    drugCodes.apply(observation),</span>
+                                    observationGuidToUniqueId), requestContext);
+                })
+<span class="fc" id="L240">                .collect(List.collector());</span>
+
+<span class="fc" id="L242">        List&lt;Tuple3&lt;PrescribingDrugRecord, Medication, EHRRequestContext&gt;&gt; dedupedObservations = recordTime(&quot;dedup&quot;, () -&gt; removeDuplicates(observations, pkbObservations, accountIdToAccountKeys));</span>
+
+<span class="fc" id="L244">        List&lt;Tuple2&lt;Medication, EHRRequestContext&gt;&gt; medications = dedupedObservations.map(t -&gt; Tuple.of(t._2, t._3));</span>
+<span class="fc" id="L245">        int excludedCount = emisEsManager.transactional(() -&gt; {</span>
+<span class="fc" id="L246">            LOGGER.info(&quot;Saving {} medications&quot;, medications.size());</span>
+<span class="fc" id="L247">            DataPointSaveResult&lt;Medication&gt; saveResult = ehrMedicationManager.addToMultipleAccounts(medications.toJavaList());</span>
+<span class="fc" id="L248">            LOGGER.info(&quot;Updating the status of {} uploaded data records (medications)&quot;, medications.size());</span>
+<span class="fc" id="L249">            return saveResult.getExcludedDataPoints().size();</span>
+        });
+
+<span class="fc" id="L252">        return HashMap.of(</span>
+<span class="fc" id="L253">                ProcessedRowStatus.SAVED, medications.size() - excludedCount,</span>
+<span class="fc" id="L254">                ProcessedRowStatus.EXCLUDED_BY_CODE, excludedCount);</span>
+    }
+
+    /**
+     * Create a PKB Medication*
+     *
+     * @return a PKB medication and corresponding UploadedDataDTOs
+     */
+    private Medication createMedication(
+            PrescribingDrugRecord prescribingDrugRecord,
+            EHRRequestContext requestContext,
+            Org org,
+            long defaultAccountId,
+            @Nullable AdminUserInRole enteredBy,
+            CodingDrugCode drugCode,
+            Table&lt;String, UUID, UUID&gt; observationGuidToUniqueId) {
+
+<span class="fc" id="L271">        Medication medication = new Medication(initializeSourceDetails(requestContext, enteredBy));</span>
+<span class="fc" id="L272">        prescribingDrugRecord.effectiveDate()</span>
+<span class="fc" id="L273">                .map(ed -&gt; parseDate(ed, org).map(Date::from).orElse(null))</span>
+<span class="fc" id="L274">                .ifPresent(medication::setStartDate);</span>
+<span class="fc" id="L275">        prescribingDrugRecord.cancellationDate()</span>
+<span class="pc" id="L276">                .map(ed -&gt; parseDate(ed, org).map(Date::from).orElse(null))</span>
+<span class="fc" id="L277">                .ifPresent(medication::setEndDate);</span>
+<span class="fc" id="L278">        prescribingDrugRecord.isActive()</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">                .map(activeFlag -&gt; activeFlag ? MedicationStatus.ACTIVE : MedicationStatus.INACTIVE)</span>
+<span class="fc" id="L280">                .ifPresent(medication::setStatus);</span>
+<span class="fc" id="L281">        medication.setInstructions(prescribingDrugRecord.dosage().orElse(null));</span>
+<span class="fc" id="L282">        CodeableConcept.Builder builder = new CodeableConcept.Builder(drugCode.term());</span>
+
+<span class="fc" id="L284">        drugCode.dmdProductCodeId().ifPresent(dmdCodeId -&gt; builder.coding(new Coding.Builder(String.valueOf(dmdCodeId), DMD_CODING_SYSTEM).build()));</span>
+<span class="fc" id="L285">        CodeableConcept coding = builder.build();</span>
+<span class="fc" id="L286">        medication.setMedication(coding);</span>
+<span class="fc" id="L287">        UUID uniqueId = observationGuidToUniqueId.get(prescribingDrugRecord.drugRecordGuid(), org.getPublicId());</span>
+<span class="fc" id="L288">        medication.getBaseFields().setUniqueId(uniqueId);</span>
+<span class="fc" id="L289">        medication.getBaseFields().setPrivacyFlag(PrivacyFlag.GENERAL);</span>
+<span class="fc" id="L290">        medication.setPatientOnMedication(Boolean.TRUE);</span>
+<span class="fc" id="L291">        medication.setPatientAccountId(defaultAccountId);</span>
+
+<span class="fc" id="L293">        mapEnteredDate(medication, prescribingDrugRecord, org);</span>
+
+<span class="fc" id="L295">        return medication;</span>
+    }
+
+    private List&lt;Tuple3&lt;PrescribingDrugRecord, Medication, EHRRequestContext&gt;&gt; removeDuplicates(
+            java.util.Set&lt;PrescribingDrugRecord&gt; observations,
+            List&lt;Tuple3&lt;PrescribingDrugRecord, Medication, EHRRequestContext&gt;&gt; pkbObservations,
+            Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys) {
+
+<span class="fc" id="L303">        List&lt;DeduplicationCandidateDto&lt;Medication&gt;&gt; candidates = pkbObservations</span>
+<span class="fc" id="L304">                .map(obs -&gt; DeduplicationCandidateDto.uncoded(obs._1.transientProcessingId(), obs._2, obs._3));</span>
+
+<span class="fc" id="L306">        var duplicateTransientIds = ehrMedicationManager.checkForDuplicates(candidates, accountIdToAccountKeys);</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">        if (isNotEmpty(duplicateTransientIds)) {</span>
+<span class="fc" id="L308">            observations.removeIf(obs -&gt; duplicateTransientIds.contains(obs.transientProcessingId()));</span>
+<span class="fc" id="L309">            Metrics.counter(DUPLICATES_METRIC_NAME).increment(duplicateTransientIds.size());</span>
+        }
+
+<span class="fc" id="L312">        return pkbObservations.filter(t -&gt; observations.contains(t._1));</span>
+    }
+
+    @Override
+    public UserManager getUserManager() {
+<span class="fc" id="L317">        return userManager;</span>
+    }
+
+    @Override
+    public PhrConfig getConfig() {
+<span class="nc" id="L322">        return config;</span>
+    }
+
+    @Override
+    public EmisPersonStatHelper getEmisPersonStatHelper() {
+<span class="fc" id="L327">        return emisPersonStatHelper;</span>
+    }
+
+    @Override
+    public EmisEsManager getEmisEsManager() {
+<span class="fc" id="L332">        return emisEsManager;</span>
+    }
+
+    @Override
+    public int getBatchSize() {
+<span class="fc" id="L337">        return config.getEmisEsProcessingBatchSize();</span>
+    }
+
+    @Override
+    public boolean isPostProcessingRequired() {
+<span class="fc" id="L342">        return false;</span>
+    }
+
+    @Override
+    protected boolean doPostProcess(EmisEsProcessedRow rowState) {
+<span class="nc" id="L347">        return true;</span>
+    }
+
+    @Override
+    public ProcessorType getProcessorType() {
+<span class="fc" id="L352">        return NORMAL;</span>
+    }
+
+    @Override
+    public EmisFileType getSupportedType() {
+<span class="fc" id="L357">        return TYPE;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PKBSiteMeshFilter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.servlets.filter</a> &gt; <span class="el_source">PKBSiteMeshFilter.java</span></div><h1>PKBSiteMeshFilter.java</h1><pre class="source lang-java linenums">package com.pkb.servlets.filter;
+
+import org.apache.struts2.dispatcher.multipart.MultiPartRequestWrapper;
+import org.jetbrains.annotations.Nullable;
+import org.sitemesh.DecoratorSelector;
+import org.sitemesh.builder.BaseSiteMeshFilterBuilder;
+import org.sitemesh.config.ObjectFactory;
+import org.sitemesh.config.properties.PropertiesFilterConfigurator;
+import org.sitemesh.config.xml.XmlFilterConfigurator;
+import org.sitemesh.content.ContentProcessor;
+import org.sitemesh.webapp.SiteMeshFilter;
+import org.sitemesh.webapp.WebAppContext;
+import org.sitemesh.webapp.contentfilter.BasicSelector;
+import org.sitemesh.webapp.contentfilter.Selector;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.xml.sax.SAXException;
+
+import javax.servlet.Filter;
+import javax.servlet.FilterChain;
+import javax.servlet.FilterConfig;
+import javax.servlet.ServletContext;
+import javax.servlet.ServletException;
+import javax.servlet.ServletRequest;
+import javax.servlet.ServletResponse;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+import javax.xml.parsers.DocumentBuilder;
+import javax.xml.parsers.DocumentBuilderFactory;
+import javax.xml.parsers.ParserConfigurationException;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * copied from ConfigurableSiteMeshFilter
+ * */
+<span class="fc" id="L43">public class PKBSiteMeshFilter implements Filter {</span>
+    private static class ExclusionPriorityFilter extends SiteMeshFilter {
+
+        /**
+         * @param selector          Provides the rules for whether SiteMesh should be
+         *                          used for a specific request. For a basic implementation, use
+         *                          {@link BasicSelector}.
+         * @param contentProcessor
+         * @param decoratorSelector
+         * @param includeErrorPages
+         */
+        public ExclusionPriorityFilter(Selector selector, ContentProcessor contentProcessor, DecoratorSelector&lt;WebAppContext&gt; decoratorSelector, boolean includeErrorPages) {
+<span class="fc" id="L55">            super(selector, contentProcessor, decoratorSelector, includeErrorPages);</span>
+<span class="fc" id="L56">        }</span>
+
+        @Override
+        public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain) throws IOException, ServletException {
+<span class="fc" id="L60">            HttpServletRequest request = (HttpServletRequest) servletRequest;</span>
+<span class="fc" id="L61">            String exclusionPattern = getSelector().excludePatternInUse(request);</span>
+<span class="fc" id="L62">            HttpServletResponse response = (HttpServletResponse) servletResponse;</span>
+            // ┌─┐    If the request is a multipart request then we should not run it through SiteMesh because it will
+            // ┴─┴    wrap it into another request type and then Struts FileUploadInterceptor won't catch it.
+            // ಠ_ರ   The only multipart request we handle through Struts is file upload. Yes. I don't like it either.
+            //        Alternatively, we could use our own FileUploadInterceptor derivative.
+<span class="fc bfc" id="L67" title="All 4 branches covered.">            if (exclusionPattern != null || request instanceof MultiPartRequestWrapper) {</span>
+<span class="fc" id="L68">                filterChain.doFilter(request, response);</span>
+<span class="fc" id="L69">                return;</span>
+            }
+<span class="fc" id="L71">            super.doFilter(servletRequest, servletResponse, filterChain);</span>
+<span class="fc" id="L72">        }</span>
+    }
+
+    private static class ExclusionPriorityFilterBuilder extends BaseSiteMeshFilterBuilder&lt;ExclusionPriorityFilterBuilder&gt; {
+        /**
+         * Create the SiteMesh Filter.
+         */
+        @Override public Filter create() {
+<span class="fc" id="L80">            return new ExclusionPriorityFilter(</span>
+<span class="fc" id="L81">                    getSelector(),</span>
+<span class="fc" id="L82">                    getContentProcessor(),</span>
+<span class="fc" id="L83">                    getDecoratorSelector(),</span>
+<span class="fc" id="L84">                    isIncludeErrorPages());</span>
+        }
+    }
+    
+<span class="fc" id="L88">    private final static Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    // Final(ish) fields. These are intialized during init() and will never change. Can't be marked final
+    // as they can't be initialized in constructor.
+    private boolean initialized;
+    private File xmlConfigFile;
+    private FilterConfig filterConfig;
+    private Map&lt;String,String&gt; configProperties;
+    private boolean autoReload;
+
+    // Fields that may change during the lifecycle of the Filter (if enableReload==true).
+    // Modifications of these should be synchronized on configLock (below).
+    private volatile Filter filter;
+    private volatile long timestampOfXmlFileAtLastLoad;
+
+    // See above.
+<span class="fc" id="L104">    private final Object configLock = new Object();</span>
+
+    public static final String CONFIG_FILE_PARAM = &quot;configFile&quot;;
+    public static final String CONFIG_FILE_DEFAULT = &quot;/WEB-INF/sitemesh3.xml&quot;;
+
+    public static final String AUTO_RELOAD_PARAM = &quot;autoReload&quot;;
+    public static final boolean AUTO_RELOAD_DEFAULT = true;
+
+    @Override public void init(FilterConfig filterConfig) throws ServletException {
+<span class="fc" id="L113">        this.filterConfig = filterConfig;</span>
+<span class="fc" id="L114">        configProperties = getConfigProperties(filterConfig);</span>
+<span class="fc" id="L115">        autoReload = getAutoReload();</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">        LOGGER.info(&quot;Auto reloading {}&quot;, (autoReload ? &quot;enabled&quot; : &quot;disabled&quot;));</span>
+
+<span class="fc" id="L118">        synchronized (configLock) {</span>
+<span class="fc" id="L119">            deployNewFilter(setup());</span>
+<span class="fc" id="L120">        }</span>
+<span class="fc" id="L121">        initialized = true;</span>
+<span class="fc" id="L122">    }</span>
+
+    @Override public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain) throws IOException, ServletException {
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">        if (!initialized) {</span>
+<span class="nc" id="L126">            throw new ServletException(getClass().getName() + &quot;.init(FilterConfig) was not called&quot;);</span>
+        }
+<span class="fc" id="L128">        reloadIfNecessary();</span>
+<span class="fc" id="L129">        filter.doFilter(servletRequest, servletResponse, filterChain);</span>
+<span class="fc" id="L130">    }</span>
+
+    @Override public void destroy() {
+<span class="nc" id="L133">        synchronized (configLock) {</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">            if (filter != null) {</span>
+<span class="nc" id="L135">                filter.destroy();</span>
+            }
+<span class="nc" id="L137">        }</span>
+<span class="nc" id="L138">    }</span>
+
+    /**
+     * Return the configuration properties that are passed to {@link org.sitemesh.config.properties.PropertiesFilterConfigurator}.
+     *
+     * &lt;p&gt;This implementation simply reads them from the Filter's {@code &lt;init-param&gt;}s in {@code web.xml}.
+     * To read from another place, override this.&lt;/p&gt;
+     */
+    protected Map&lt;String, String&gt; getConfigProperties(FilterConfig filterConfig) {
+<span class="fc" id="L147">        Map&lt;String, String&gt; initParams = new HashMap&lt;&gt;();</span>
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">        for (Enumeration initParameterNames = filterConfig.getInitParameterNames(); initParameterNames.hasMoreElements();) {</span>
+<span class="nc" id="L149">            String key = (String) initParameterNames.nextElement();</span>
+<span class="nc" id="L150">            String value = filterConfig.getInitParameter(key).trim();</span>
+<span class="nc" id="L151">            initParams.put(key, value);</span>
+<span class="nc" id="L152">        }</span>
+<span class="fc" id="L153">        return initParams;</span>
+    }
+
+    protected Filter setup() throws ServletException {
+<span class="fc" id="L157">        ObjectFactory objectFactory = getObjectFactory();</span>
+<span class="fc" id="L158">        ExclusionPriorityFilterBuilder builder = new ExclusionPriorityFilterBuilder();</span>
+
+<span class="fc" id="L160">        new PropertiesFilterConfigurator(objectFactory, configProperties)</span>
+<span class="fc" id="L161">                .configureFilter(builder);</span>
+
+<span class="fc" id="L163">        new XmlFilterConfigurator(getObjectFactory(),</span>
+<span class="fc" id="L164">                loadConfigXml(filterConfig, getConfigFileName()))</span>
+<span class="fc" id="L165">                .configureFilter(builder);</span>
+
+<span class="fc" id="L167">        applyCustomConfiguration(builder);</span>
+
+<span class="fc" id="L169">        return builder.create();</span>
+    }
+
+    /**
+     * Override this to apply custom configuration after after the default configuration mechanisms.
+     */
+    @SuppressWarnings(&quot;UnusedDeclaration&quot;)
+    protected void applyCustomConfiguration(ExclusionPriorityFilterBuilder builder) {
+<span class="fc" id="L177">    }</span>
+
+    /**
+     * Determine if a reload is required. Override this to change the behavior.
+     */
+    protected boolean reloadRequired() {
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">        return timestampOfXmlFileAtLastLoad != xmlConfigFile.lastModified();</span>
+    }
+
+    /**
+     * Whether the config file should be monitored for changes and automatically reloaded.
+     */
+    protected boolean getAutoReload() {
+<span class="fc" id="L190">        String autoReload = configProperties.get(AUTO_RELOAD_PARAM);</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">        if (autoReload == null) {</span>
+<span class="fc" id="L192">            return AUTO_RELOAD_DEFAULT;</span>
+        } else {
+<span class="nc" id="L194">            String lower = autoReload.toLowerCase();</span>
+<span class="nc bnc" id="L195" title="All 6 branches missed.">            return lower.equals(&quot;1&quot;) || lower.equals(&quot;true&quot;) || lower.equals(&quot;yes&quot;);</span>
+        }
+    }
+
+    /**
+     * Gets the SiteMesh XML config file name.
+     * Looks for a 'config' property in the Filter init-params.
+     * If not found, defaults to '/WEB-INF/sitemesh3.xml'.
+     */
+    protected String getConfigFileName() {
+<span class="fc" id="L205">        String config = configProperties.get(CONFIG_FILE_PARAM);</span>
+<span class="pc bpc" id="L206" title="3 of 4 branches missed.">        if (config == null || config.isEmpty()) {</span>
+<span class="fc" id="L207">            config = CONFIG_FILE_DEFAULT;</span>
+        }
+<span class="fc" id="L209">        return config;</span>
+    }
+
+    protected ObjectFactory getObjectFactory() {
+<span class="fc" id="L213">        return new ObjectFactory.Default();</span>
+    }
+
+    /**
+     * Load the XML config file. Will try a number of locations until it finds the file.
+     * &lt;pre&gt;
+     * - Will first search for a file on disk relative to the root of the web-app.
+     * - Then a file with the absolute path.
+     * - Then a file as a resource in the ServletContext (allowing for files embedded in a .war file).
+     * - If none of those find the file, null will be returned.
+     * &lt;/pre&gt;
+     */
+    protected @Nullable Element loadConfigXml(FilterConfig filterConfig, String configFilePath) throws ServletException {
+        try {
+<span class="fc" id="L227">            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();</span>
+<span class="fc" id="L228">            DocumentBuilder documentBuilder = factory.newDocumentBuilder();</span>
+
+<span class="fc" id="L230">            xmlConfigFile = new File(configFilePath);</span>
+
+<span class="fc" id="L232">            ServletContext servletContext = filterConfig.getServletContext();</span>
+
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">            if (servletContext.getRealPath(configFilePath) != null) {</span>
+<span class="fc" id="L235">                xmlConfigFile = new File(servletContext.getRealPath(configFilePath));</span>
+            }
+
+<span class="pc bpc" id="L238" title="1 of 2 branches missed.">            if (xmlConfigFile.canRead()) {</span>
+                try {
+<span class="fc" id="L240">                    timestampOfXmlFileAtLastLoad = xmlConfigFile.lastModified();</span>
+<span class="fc" id="L241">                    LOGGER.info(&quot;Loading SiteMesh 3 config file: {}&quot;, xmlConfigFile.getAbsolutePath());</span>
+<span class="fc" id="L242">                    Document document = documentBuilder.parse(xmlConfigFile);</span>
+<span class="fc" id="L243">                    return document.getDocumentElement();</span>
+<span class="nc" id="L244">                } catch (SAXException e) {</span>
+<span class="nc" id="L245">                    throw new ServletException(&quot;Could not parse &quot; + xmlConfigFile.getAbsolutePath(), e);</span>
+                }
+            } else {
+<span class="nc" id="L248">                InputStream stream = servletContext.getResourceAsStream(configFilePath);</span>
+<span class="nc" id="L249">                try (stream) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">                    if (stream == null) {</span>
+<span class="nc" id="L251">                        LOGGER.info(&quot;No config file present - using defaults and init-params. Tried: {} and ServletContext:{}&quot;,</span>
+<span class="nc" id="L252">                                xmlConfigFile.getAbsolutePath(), configFilePath);</span>
+<span class="nc" id="L253">                        return null;</span>
+                    }
+<span class="nc" id="L255">                    LOGGER.info(&quot;Loading SiteMesh 3 config file from ServletContext {}&quot;, configFilePath);</span>
+<span class="nc" id="L256">                    Document document = documentBuilder.parse(stream);</span>
+<span class="nc" id="L257">                    return document.getDocumentElement();</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">                } catch (SAXException e) {</span>
+<span class="nc" id="L259">                    throw new ServletException(&quot;Could not parse &quot; + configFilePath + &quot; (loaded by ServletContext)&quot;, e);</span>
+                }
+            }
+
+<span class="nc" id="L263">        } catch (IOException e) {</span>
+<span class="nc" id="L264">            throw new ServletException(e);</span>
+<span class="nc" id="L265">        } catch (ParserConfigurationException e) {</span>
+<span class="nc" id="L266">            throw new ServletException(&quot;Could not initialize DOM parser&quot;, e);</span>
+        }
+    }
+
+    protected void reloadIfNecessary() throws ServletException {
+        // TODO: Allow finer grained control of reload strategies:
+        // - don't check file timestamp on every single request (once per N seconds).
+        // - periodically check in background, instead of blocking request threads.
+
+<span class="pc bpc" id="L275" title="2 of 4 branches missed.">        if (autoReload &amp;&amp; reloadRequired()) {</span>
+<span class="nc" id="L276">            synchronized (configLock) { // Double check lock for performance (works in JDK5+, with volatile items).</span>
+<span class="nc bnc" id="L277" title="All 2 branches missed.">                if (reloadRequired()) {</span>
+<span class="nc" id="L278">                    deployNewFilter(setup());</span>
+                }
+<span class="nc" id="L280">            }</span>
+        }
+<span class="fc" id="L282">    }</span>
+
+    protected void deployNewFilter(Filter newFilter) throws ServletException {
+<span class="fc" id="L285">        Filter oldFilter = filter;</span>
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">        if (newFilter == null) {</span>
+<span class="nc" id="L287">            throw new ServletException(&quot;Cannot deploy null filter&quot;);</span>
+        }
+<span class="fc" id="L289">        newFilter.init(filterConfig);</span>
+<span class="fc" id="L290">        filter = newFilter;</span>
+<span class="pc bpc" id="L291" title="1 of 2 branches missed.">        if (oldFilter != null) {</span>
+<span class="nc" id="L292">            oldFilter.destroy();</span>
+        }
+<span class="fc" id="L294">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

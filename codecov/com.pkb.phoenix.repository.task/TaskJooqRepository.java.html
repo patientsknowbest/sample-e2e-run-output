@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TaskJooqRepository.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.phoenix.repository.task</a> &gt; <span class="el_source">TaskJooqRepository.java</span></div><h1>TaskJooqRepository.java</h1><pre class="source lang-java linenums">package com.pkb.phoenix.repository.task;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.phoenix.enums.TaskEvent;
+import com.pkb.phoenix.repository.task.projection.ImmutableTask;
+import com.pkb.phoenix.repository.task.projection.Task;
+import com.pkb.phoenix.repository.taskeventlog.projection.EventWithActorDetails;
+import com.pkb.phoenix.repository.taskeventlog.projection.ImmutableEventWithActorDetails;
+import com.pkb.phoenix.tables.daos.TaskDao;
+import com.pkb.phoenix.tables.interfaces.IPUser;
+import com.pkb.phoenix.tables.interfaces.ITask;
+import com.pkb.phoenix.tables.interfaces.ITaskEventLog;
+import com.pkb.phoenix.tables.pojos.PUser;
+import com.pkb.phoenix.tables.pojos.TaskEventLog;
+import com.pkb.phoenix.tables.records.TaskEventLogRecord;
+import io.vavr.Tuple;
+import org.jetbrains.annotations.NotNull;
+import org.jooq.Condition;
+import org.jooq.Configuration;
+import org.jooq.Param;
+import org.jooq.Record;
+import org.jooq.Select;
+import org.jooq.impl.DSL;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static com.google.common.collect.Lists.newArrayList;
+import static com.pkb.phoenix.Tables.P_USER;
+import static com.pkb.phoenix.Tables.TASK;
+import static com.pkb.phoenix.Tables.TASK_EVENT_LOG;
+import static com.pkb.phoenix.repository.taskeventlog.TaskEventLogJooqRepository.MOST_RECENT_EVENTS;
+import static com.pkb.phoenix.repository.taskeventlog.TaskEventLogJooqRepository.latestEventFor;
+import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
+import static java.util.Optional.ofNullable;
+import static java.util.stream.Collectors.toMap;
+import static java.util.stream.Collectors.toUnmodifiableList;
+import static org.jooq.impl.DSL.inline;
+import static org.jooq.impl.SQLDataType.VARCHAR;
+
+public class TaskJooqRepository extends TaskDao implements TaskRepository {
+    public TaskJooqRepository(Configuration configuration) {
+<span class="fc" id="L47">        super(configuration);</span>
+<span class="fc" id="L48">    }</span>
+    @Override
+    public List&lt;Task&lt;?&gt;&gt; fetchTasksByCriteria(TaskSearchCriteria criteria) {
+<span class="fc" id="L51">        var taskIdToLatestEventId = buildQuery(criteria)</span>
+<span class="fc" id="L52">                .fetchStreamInto(TaskEventLogRecord.class)</span>
+<span class="fc" id="L53">                .collect(toMap(TaskEventLogRecord::getTask, TaskEventLogRecord::getId));</span>
+
+<span class="fc" id="L55">        return fetchDetailedTasks(taskIdToLatestEventId);</span>
+    }
+
+    @Override
+    public Optional&lt;Task&lt;?&gt;&gt; findTaskById(int taskId) {
+<span class="fc" id="L60">        var mostRecentEventsFor = latestEventFor(taskId);</span>
+
+<span class="fc" id="L62">        var maybe = ctx()</span>
+<span class="fc" id="L63">                .with(mostRecentEventsFor)</span>
+<span class="fc" id="L64">                .select(mostRecentEventsFor.fields())</span>
+<span class="fc" id="L65">                .from(mostRecentEventsFor)</span>
+<span class="fc" id="L66">                .fetchOptionalInto(TaskEventLogRecord.class)</span>
+<span class="fc" id="L67">                .map(event -&gt; Map.of(taskId, event.getId()));</span>
+
+<span class="fc" id="L69">        return maybe.flatMap(taskIdToLatestEventId -&gt; fetchDetailedTasks(taskIdToLatestEventId).stream().findFirst());</span>
+    }
+
+    @Override
+    public Task&lt;?&gt; getTaskById(int id) {
+<span class="pc" id="L74">        return findTaskById(id).orElseThrow(() -&gt; new IllegalStateException(format(&quot;Task instance with id=[%s] is absent&quot;, id)));</span>
+    }
+
+    @Override
+    public ITask addTask(String taskTypeCode, String parameters) {
+<span class="fc" id="L79">        return requireNonNull(ctx()</span>
+<span class="fc" id="L80">                .insertInto(TASK)</span>
+<span class="fc" id="L81">                .set(TASK.TYPE, taskTypeCode)</span>
+<span class="fc" id="L82">                .set(TASK.PARAMETERS, parameters)</span>
+<span class="fc" id="L83">                .returning()</span>
+<span class="fc" id="L84">                .fetchOne());</span>
+    }
+
+    @VisibleForTesting
+    Select&lt;Record&gt; buildQuery(TaskSearchCriteria criteria) {
+<span class="fc" id="L89">        var selectFromMostRecentEvent = ctx()</span>
+<span class="fc" id="L90">                .with(MOST_RECENT_EVENTS)</span>
+<span class="fc" id="L91">                .select(MOST_RECENT_EVENTS.fields())</span>
+<span class="fc" id="L92">                .from(MOST_RECENT_EVENTS);</span>
+
+<span class="fc" id="L94">        var maybeEventRestriction = getCondition(criteria);</span>
+
+        // if task type code is also searched, then we need to join against task table, to get the task type code.
+<span class="fc" id="L97">        return criteria.taskTypeCode()</span>
+<span class="fc" id="L98">                .map(taskTypeCode -&gt; {</span>
+<span class="fc" id="L99">                    var taskCondition = TASK.ID.eq(MOST_RECENT_EVENTS.field(&quot;task&quot;, Integer.class));</span>
+
+<span class="fc" id="L101">                    return (Select&lt;Record&gt;) selectFromMostRecentEvent</span>
+<span class="fc" id="L102">                            .innerJoin(TASK)</span>
+<span class="fc" id="L103">                            .on(TASK.TYPE.eq(inline(taskTypeCode)).and(maybeEventRestriction.map(taskCondition::and).orElse(taskCondition)));</span>
+                })
+<span class="fc" id="L105">                .orElseGet(() -&gt; maybeEventRestriction</span>
+<span class="fc" id="L106">                        .map(eventIn -&gt; (Select&lt;Record&gt;) selectFromMostRecentEvent.where(eventIn))</span>
+<span class="fc" id="L107">                        .orElse(selectFromMostRecentEvent));</span>
+    }
+
+    @VisibleForTesting
+    Select&lt;Record&gt; buildQuery(Collection&lt;Integer&gt; taskIds) {
+<span class="fc" id="L112">        return ctx()</span>
+<span class="fc" id="L113">                .select(TASK.fields())</span>
+<span class="fc" id="L114">                .select(TASK_EVENT_LOG.fields())</span>
+<span class="fc" id="L115">                .select(P_USER.fields())</span>
+<span class="fc" id="L116">                .from(TASK)</span>
+<span class="fc" id="L117">                .innerJoin(TASK_EVENT_LOG).on(TASK_EVENT_LOG.TASK.eq(TASK.ID).and(TASK.ID.in(taskIds)))</span>
+<span class="fc" id="L118">                .innerJoin(P_USER).on(P_USER.ID.eq(TASK_EVENT_LOG.ACTOR))</span>
+<span class="fc" id="L119">                .orderBy(TASK.ID);</span>
+    }
+
+    private List&lt;Task&lt;?&gt;&gt; fetchDetailedTasks(Map&lt;Integer, Integer&gt; taskIdToLatestEventId) {
+<span class="fc" id="L123">        return buildQuery(taskIdToLatestEventId.keySet())</span>
+<span class="fc" id="L124">                .fetchGroups(</span>
+                        // group generator
+<span class="fc" id="L126">                        record -&gt; record.into(TASK).into(com.pkb.phoenix.tables.pojos.Task.class),</span>
+                        // group members
+                        record -&gt; {
+<span class="fc" id="L129">                            var event = record.into(TASK_EVENT_LOG).into(TaskEventLog.class);</span>
+<span class="fc" id="L130">                            var actor = record.into(P_USER).into(PUser.class);</span>
+<span class="fc" id="L131">                            return Tuple.of(event, actor);</span>
+                        })
+<span class="fc" id="L133">                .entrySet().stream()</span>
+<span class="fc" id="L134">                .reduce(newArrayList(), (accumulator, entry) -&gt; {</span>
+<span class="fc" id="L135">                    var task = entry.getKey();</span>
+
+<span class="fc" id="L137">                    var events = entry.getValue()</span>
+<span class="fc" id="L138">                            .stream()</span>
+<span class="fc" id="L139">                            .map(tuple -&gt; buildModel(tuple._1, tuple._2))</span>
+<span class="fc" id="L140">                            .collect(toUnmodifiableList());</span>
+
+<span class="fc" id="L142">                    var latest = events.stream()</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">                            .filter($ -&gt; $.eventId() == taskIdToLatestEventId.get($.getTaskId()))</span>
+<span class="fc" id="L144">                            .findFirst().orElseThrow();</span>
+
+<span class="fc" id="L146">                    accumulator.add(buildModel(task, latest, events));</span>
+
+<span class="fc" id="L148">                    return accumulator;</span>
+                }, (a1, a2) -&gt; {
+<span class="nc" id="L150">                    var ret = new ArrayList&lt;Task&lt;?&gt;&gt;();</span>
+<span class="nc" id="L151">                    ret.addAll(a1);</span>
+<span class="nc" id="L152">                    ret.addAll(a2);</span>
+<span class="nc" id="L153">                    return ret;</span>
+                });
+    }
+
+    private Task&lt;?&gt; buildModel(
+            ITask task,
+            EventWithActorDetails lastEvent,
+            List&lt;EventWithActorDetails&gt; allEvents) {
+<span class="fc" id="L161">        return ImmutableTask.builder()</span>
+<span class="fc" id="L162">                .id(task.getId())</span>
+<span class="fc" id="L163">                .typeCode(task.getType())</span>
+<span class="fc" id="L164">                .parameters(task.getParameters())</span>
+<span class="fc" id="L165">                .latestEvent(lastEvent)</span>
+<span class="fc" id="L166">                .addAllEvents(allEvents)</span>
+<span class="fc" id="L167">                .build();</span>
+    }
+
+    private EventWithActorDetails buildModel(ITaskEventLog event, IPUser actor) {
+<span class="fc" id="L171">        return ImmutableEventWithActorDetails.builder()</span>
+<span class="fc" id="L172">                .eventId(event.getId())</span>
+<span class="fc" id="L173">                .taskId(event.getTask())</span>
+<span class="fc" id="L174">                .event(event.getEvent())</span>
+<span class="fc" id="L175">                .at(event.getAt())</span>
+<span class="fc" id="L176">                .note(ofNullable(event.getNote()))</span>
+<span class="fc" id="L177">                .actorId(actor.getId())</span>
+<span class="fc" id="L178">                .actorName(actor.getName())</span>
+<span class="fc" id="L179">                .isActorIg(actor.getIsig())</span>
+<span class="fc" id="L180">                .build();</span>
+    }
+
+    @NotNull
+    private Optional&lt;Condition&gt; getCondition(TaskSearchCriteria criteria) {
+        @SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L186">        Param&lt;TaskEvent&gt;[] params = criteria.events().stream().map(DSL::inline).toArray(Param[]::new);</span>
+
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">        return criteria.events().isEmpty() ? //</span>
+<span class="nc" id="L189">                Optional.empty() : //</span>
+<span class="fc" id="L190">                Optional.of(MOST_RECENT_EVENTS.field(&quot;event&quot;, VARCHAR.asEnumDataType(TaskEvent.class)).in(params));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

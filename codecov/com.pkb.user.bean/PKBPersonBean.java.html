@@ -1,0 +1,1586 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PKBPersonBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.user.bean</a> &gt; <span class="el_source">PKBPersonBean.java</span></div><h1>PKBPersonBean.java</h1><pre class="source lang-java linenums">package com.pkb.user.bean;
+
+import com.google.api.client.util.Lists;
+import com.pkb.VersionDetails;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.config.PkbPluginConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.consent.entity.PatientOptOut;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.projections.ImmutablePersonComparator;
+import com.pkb.datamodel.projections.PersonComparator;
+import com.pkb.entities.enums.AccountUserStatus;
+import com.pkb.entities.enums.ContactType;
+import com.pkb.entities.enums.HasNationalId;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.NotificationOption;
+import com.pkb.entities.enums.PropertyName;
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.exception.PKBPluginException;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.PatientSearchOptionsDto;
+import com.pkb.query.domain.QueryMetadata;
+import com.pkb.tolven.PKBAccountDAOLocal;
+import com.pkb.user.PKBPersonLocal;
+import com.pkb.user.PKBPersonRemote;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.PKBAccountUser;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PKBPerson.Lazy;
+import com.pkb.user.entity.PKBPersonHelper;
+import com.pkb.user.entity.PKBPersonIdentifierPair;
+import com.pkb.user.entity.PKBPersonProperty;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.util.Constants;
+import com.pkb.util.CorrelationIdAroundAdvice;
+import com.pkb.util.DbUtil;
+import com.pkb.util.mapper.PKBAccountUserMapper;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.hibernate.cfg.NotYetImplementedException;
+import org.hibernate.transform.ResultTransformer;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.tolven.core.entity.Account;
+import org.tolven.core.entity.AccountUser;
+
+import javax.ejb.EJB;
+import javax.ejb.Local;
+import javax.ejb.Remote;
+import javax.ejb.Stateless;
+import javax.inject.Inject;
+import javax.interceptor.Interceptors;
+import javax.persistence.EntityGraph;
+import javax.persistence.EntityManager;
+import javax.persistence.PersistenceContext;
+import javax.persistence.Query;
+import javax.persistence.TypedQuery;
+import java.lang.invoke.MethodHandles;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.common.util.FrameFilter.filter;
+import static com.pkb.entities.enums.PropertyName.EMAIL_NEWS_LETTER;
+import static com.pkb.institute.entity.PatientSearchOptionsDto.SEARCH_ID_NATIONAL;
+import static com.pkb.institute.entity.PatientSearchOptionsDto.SEARCH_ID_ORG;
+import static com.pkb.institute.entity.PatientSearchOptionsDto.SEARCH_ID_TEAM;
+import static com.pkb.query.domain.QuerySortOrder.SortOrderDirection.ASC;
+import static com.pkb.user.bean.DefaultAccountIdIsNullException.GDE_1541_ACTIVELY_NULLING_OUT_DEFAULT_ACCOUNT_ID;
+import static java.lang.String.format;
+import static java.util.Collections.emptyMap;
+import static java.util.Comparator.comparing;
+import static java.util.Objects.isNull;
+import static java.util.Objects.nonNull;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toMap;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.trimToNull;
+
+/**
+ * Bean class to handle operations on PKBPerson
+ *
+ * @author pravinam
+ */
+@Stateless(mappedName = &quot;PKBPersonBean&quot;)
+@Interceptors(CorrelationIdAroundAdvice.class)
+@Local(PKBPersonLocal.class)
+@Remote(PKBPersonRemote.class)
+<span class="fc" id="L125">public class PKBPersonBean implements PKBPersonLocal {</span>
+
+    private static final String ID_LIST_QUERY_PARAM_NAME = &quot;idList&quot;;
+<span class="fc" id="L128">    private static final String ID_LIST_QUERY_PARAM = format(&quot; (:%s) &quot;, ID_LIST_QUERY_PARAM_NAME);</span>
+
+<span class="fc" id="L130">    private static final Pattern SUBGRAPH_ATTRIBUTE_QUALIFIER_REGEX = Pattern.compile(&quot;[.]&quot;);</span>
+
+    @PersistenceContext
+    private EntityManager em;
+
+    @EJB
+    private PKBAccountDAOLocal accountBean;
+
+    @Inject
+    private DateTimeService dateTimeService;
+
+    @Inject
+    private PKBPersonHelper pkbPersonHelper;
+
+    @Inject
+    private PKBAccountUserMapper pkbAccountUserMapper;
+
+    @Inject
+    private PkbPluginConfig configuration;
+
+<span class="fc" id="L150">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    protected static final String COUNT_ORG_NETWORKS = &quot;SELECT COUNT(*) AS count FROM orgnetworkmember onm &quot; +
+            &quot;JOIN org o ON onm.org_id = o.id &quot; +
+            &quot;JOIN core.account_org ao ON ao.org_id = o.id &quot; +
+            &quot;JOIN pkbperson p ON ao.account_id = p.defaultaccountid &quot; +
+            &quot;WHERE p.id = :personId &quot; +
+            &quot;AND onm.orgnetwork_id IN :orgNetworkIds&quot;;
+    protected static final String COUNT_ORGS = &quot;SELECT COUNT(*) AS count FROM org o &quot; +
+            &quot;JOIN core.account_org ao ON ao.org_id = o.id &quot; +
+            &quot;JOIN pkbperson p ON ao.account_id = p.defaultaccountid &quot; +
+            &quot;WHERE p.id = :personId &quot; +
+            &quot;AND o.id IN :orgIds &quot;;
+    protected static final String COUNT_ORGS_AND_ORG_NETWORKS = &quot;SELECT SUM(count) FROM (&quot; + COUNT_ORGS + &quot;UNION &quot; + COUNT_ORG_NETWORKS + &quot;) as org_orgnet&quot;;
+
+    @Override
+    public PKBPerson createPKBPerson(PKBPerson person, VersionDetails versionDetails) {
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">        if (person.getUserType() == null) {</span>
+<span class="nc" id="L168">            throw new RuntimeException(&quot;Person userType can't be null&quot;);</span>
+        }
+        try {
+<span class="fc" id="L171">            person.setVersionDetails(versionDetails);</span>
+
+            // default notification setting for PATIENTS only: throttle
+<span class="pc bpc" id="L174" title="1 of 4 branches missed.">            if (person.isPatient() &amp;&amp; person.getNotificationOption() == null) {</span>
+<span class="fc" id="L175">                person.setNotificationOption(NotificationOption.MAX_ONE_EMAIL_PER_DAY);</span>
+            }
+
+<span class="fc" id="L178">            em.persist(person);</span>
+
+<span class="fc bfc" id="L180" title="All 2 branches covered.">            if (person.getStatus() != UserStatus.NEW) {</span>
+<span class="fc" id="L181">                person.getVersionDetails().setSourcePersonId(person.getId());</span>
+<span class="pc bpc" id="L182" title="1 of 2 branches missed.">                for (var nid : CollectionUtils.emptyIfNull(person.getNationalIds())) {</span>
+<span class="nc" id="L183">                    nid.getVersionDetails().setSourcePersonId(person.getId());</span>
+<span class="nc" id="L184">                }</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">                for (var olid : CollectionUtils.emptyIfNull(person.getOrgLevelIds())) {</span>
+<span class="nc" id="L186">                    olid.getVersionDetails().setSourcePersonId(person.getId());</span>
+<span class="nc" id="L187">                }</span>
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">                for (var tid : CollectionUtils.emptyIfNull(person.getTeamLevelIds())) {</span>
+<span class="nc" id="L189">                    tid.getVersionDetails().setSourcePersonId(person.getId());</span>
+<span class="nc" id="L190">                }</span>
+            }
+            // TODO: remove when EJBs get finally to spring managed service PHR-8091
+<span class="fc" id="L193">            em.flush();</span>
+<span class="fc" id="L194">            return person;</span>
+<span class="nc" id="L195">        } catch (Exception e) {</span>
+<span class="nc" id="L196">            throw new RuntimeException(&quot;error creating PKBPerson &quot; + person, e);</span>
+        }
+    }
+
+    @Override
+    public PKBPerson beginNonInstRegistration(PKBPerson person) {
+<span class="fc" id="L202">        em.persist(person);</span>
+<span class="fc" id="L203">        em.flush();</span>
+<span class="fc" id="L204">        return person;</span>
+    }
+
+    @Override
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findPKBPersonByNationalId(ValidNationalId nationalId, Lazy... fields) {
+<span class="fc" id="L209">        return findPKBPersonByNationalId(nationalId.value(), nationalId.type(), fields);</span>
+    }
+
+    @Override
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findPKBPersonByNationalId(NationalId nid, Lazy... fields) {
+<span class="fc" id="L214">        return findPKBPersonByNationalId(nid.getValue(), nid.getType(), fields);</span>
+    }
+
+    @Override
+    public Map&lt;ValidNationalId, Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt;&gt; findPKBPersonByValidNationalIds(Set&lt;ValidNationalId&gt; nationalIds, Lazy... fields) {
+<span class="fc" id="L219">        return doFindPKBPersonByNationalIds(nationalIds, fields);</span>
+    }
+
+    @Override
+    public Map&lt;NationalId, Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt;&gt; findPKBPersonByNationalIds(Set&lt;NationalId&gt; nationalIds, Lazy... fields) {
+<span class="fc" id="L224">        return doFindPKBPersonByNationalIds(nationalIds, fields);</span>
+    }
+
+    private &lt;T extends HasNationalId&gt; Map&lt;T, Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt;&gt; doFindPKBPersonByNationalIds(Set&lt;T&gt; nationalIds, Lazy... fields) {
+<span class="fc bfc" id="L228" title="All 2 branches covered.">        if (isEmpty(nationalIds)) {</span>
+<span class="fc" id="L229">            return Collections.emptyMap();</span>
+        }
+
+<span class="fc" id="L232">        Set&lt;NationalIdType&gt; types = EnumSet.noneOf(NationalIdType.class);</span>
+<span class="fc" id="L233">        Set&lt;String&gt; nationalIdValues = new HashSet&lt;&gt;(nationalIds.size());</span>
+<span class="fc bfc" id="L234" title="All 2 branches covered.">        for (T actual : nationalIds) {</span>
+<span class="fc" id="L235">            String actualValue = trimToNull(actual.nationalIdValue());</span>
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">            if (actualValue != null) {</span>
+<span class="fc" id="L237">                types.add(actual.nationalIdType());</span>
+<span class="fc" id="L238">                nationalIdValues.add(actualValue);</span>
+            }
+<span class="fc" id="L240">        }</span>
+
+<span class="pc bpc" id="L242" title="2 of 4 branches missed.">        if (types.isEmpty() || nationalIdValues.isEmpty()) {</span>
+<span class="nc" id="L243">            return Collections.emptyMap();</span>
+        }
+
+<span class="fc" id="L246">        List&lt;Long&gt; personIds = findPKBPersonByNationalIds(nationalIdValues, types);</span>
+<span class="fc" id="L247">        var results = findPKBPersonList(personIds, fields);</span>
+
+<span class="fc" id="L249">        var valuesAndKeys = nationalIds.stream().collect(toMap(k -&gt; getKeyValueTuple(k), identity()));</span>
+
+<span class="fc" id="L251">        Map&lt;T, LinkedHashSet&lt;PKBPerson&gt;&gt; groupByNationalId = new LinkedHashMap&lt;&gt;(nationalIds.size());</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">        for (PKBPerson actual : results) {</span>
+<span class="fc bfc" id="L253" title="All 2 branches covered.">            for (NationalId actualNid : actual.getNationalIds()) {</span>
+<span class="fc" id="L254">                var key = getKeyValueTuple(actualNid);</span>
+<span class="fc" id="L255">                T value = valuesAndKeys.get(key);</span>
+<span class="pc bpc" id="L256" title="1 of 2 branches missed.">                if (value != null) {</span>
+<span class="fc" id="L257">                    groupByNationalId.computeIfAbsent(value, n -&gt; new LinkedHashSet&lt;&gt;()).add(actual);</span>
+                }
+<span class="fc" id="L259">            }</span>
+<span class="fc" id="L260">        }</span>
+
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">        var duplicateNationalIds = groupByNationalId.entrySet().stream().filter(e -&gt; 1 &lt; e.getValue().size()).collect(toList());</span>
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">        if (!duplicateNationalIds.isEmpty()) {</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">            if (configuration.isExceptionForMultipleAccountForSingleNationalIdExceptionEnabled()) {</span>
+<span class="nc" id="L265">                String duplicateMessage = duplicateNationalIds.stream().map(e -&gt; &quot;nationalId=[&quot; + getKeyValueTuple(e.getKey()) + &quot;],personIds=[&quot; + e.getValue().stream().map(p -&gt; p.getId().toString()).collect(joining(&quot;,&quot;)) + &quot;]\n&quot;)</span>
+<span class="nc" id="L266">                        .collect(joining());</span>
+<span class="nc" id="L267">                throw new IllegalStateException(&quot;PHR-5705: Got multiple records for national ids:\n&quot; + duplicateMessage);</span>
+            }
+
+<span class="nc" id="L270">            String duplicateMessage = &quot;PHR-5705: Got multiple records for national ids.\n&quot;</span>
+<span class="nc" id="L271">                    + duplicateNationalIds.stream().map(e -&gt; &quot;nationalId=[&quot; + getKeyValueTuple(e.getKey()) + &quot;],personIds=[&quot; + e.getValue().stream().map(p -&gt; p.getId().toString()).collect(joining(&quot;,&quot;)) + &quot;] letting caller handle it!\n&quot;).collect(joining());</span>
+<span class="nc" id="L272">            LOGGER.error(duplicateMessage, filter(new Exception(&quot;Got multiple records for national id type&quot;).fillInStackTrace()));</span>
+        }
+
+<span class="fc" id="L275">        return groupByNationalId.entrySet().stream().collect(toMap(e -&gt; e.getKey(), e -&gt; getResult(e.getValue())));</span>
+    }
+
+    private Tuple2&lt;NationalIdType, String&gt; getKeyValueTuple(HasNationalId input) {
+<span class="fc" id="L279">        return Tuple.of(input.nationalIdType(), trimToNull(input.nationalIdValue()));</span>
+    }
+
+    private Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt; getResult(Collection&lt;PKBPerson&gt; persons) {
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">        if (1 &lt; persons.size()) {</span>
+<span class="nc" id="L284">            return Either.right(Lists.newArrayList(persons));</span>
+        }
+<span class="fc" id="L286">        return Either.left(persons.stream().findFirst().orElseThrow());</span>
+    }
+
+    private Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; getMaybeResult(Collection&lt;PKBPerson&gt; persons) {
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">        if (1 &lt; persons.size()) {</span>
+<span class="nc" id="L291">            return Either.right(Lists.newArrayList(persons));</span>
+        }
+<span class="fc" id="L293">        return Either.left(Option.ofOptional(persons.stream().findFirst()));</span>
+    }
+
+    private List&lt;Long&gt; findPKBPersonByNationalIds(Set&lt;String&gt; nationalIds, Set&lt;NationalIdType&gt; idTypes) {
+<span class="fc" id="L297">        String select = &quot;SELECT pp.id &quot; +</span>
+                &quot; FROM PKBPerson pp JOIN pp.nationalIds n &quot; +
+                &quot; WHERE n.value IN (:idValues) &quot; +
+                &quot;   AND n.type IN (:idTypes) &quot; +
+                &quot; ORDER BY n.id&quot;;
+<span class="fc" id="L302">        var query = em.createQuery(select, Long.class)</span>
+<span class="fc" id="L303">                .setParameter(&quot;idValues&quot;, nationalIds)</span>
+<span class="fc" id="L304">                .setParameter(&quot;idTypes&quot;, idTypes);</span>
+<span class="fc" id="L305">        return query.getResultList();</span>
+    }
+
+    private Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findPKBPersonByNationalId(String nationalId, NationalIdType idType, Lazy... fields) {
+<span class="fc" id="L309">        String select = &quot;SELECT pp &quot; +</span>
+                &quot; FROM PKBPerson pp JOIN pp.nationalIds n &quot; +
+                &quot; WHERE n.value = :idValue &quot; +
+                &quot; AND n.type = :idType &quot; +
+                &quot; ORDER BY n.id&quot;;
+<span class="fc" id="L314">        List&lt;PKBPerson&gt; matchingPatientRecords = em.createQuery(select, PKBPerson.class)</span>
+<span class="fc" id="L315">                .setParameter(&quot;idValue&quot;, nationalId)</span>
+<span class="fc" id="L316">                .setParameter(&quot;idType&quot;, idType)</span>
+<span class="fc" id="L317">                .getResultList();</span>
+
+<span class="fc bfc" id="L319" title="All 2 branches covered.">        if (matchingPatientRecords.isEmpty()) {</span>
+<span class="fc" id="L320">            return Either.left(Option.none());</span>
+        }
+
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">        if (matchingPatientRecords.size() &gt; 1) {</span>
+<span class="nc" id="L324">            String message = format(&quot;PHR-5705: Got multiple records for national id type=[%s] with value=[%s], personIds=[%s]&quot;, idType, nationalId, matchingPatientRecords.stream().map(p -&gt; p.getId().toString()).collect(joining(&quot;,&quot;)));</span>
+<span class="nc bnc" id="L325" title="All 2 branches missed.">            if (configuration.isExceptionForMultipleAccountForSingleNationalIdExceptionEnabled()) {</span>
+<span class="nc" id="L326">                throw new IllegalStateException(message);</span>
+            }
+<span class="nc" id="L328">            LOGGER.error(&quot;{}. Letting caller handle it!&quot;, message, filter(new Exception(&quot;Got multiple records for national id type&quot;).fillInStackTrace()));</span>
+<span class="nc" id="L329">            matchingPatientRecords.forEach(p -&gt; p.fetchLazies(fields));</span>
+<span class="nc" id="L330">            return Either.right(matchingPatientRecords);</span>
+        }
+
+<span class="fc" id="L333">        var patient = matchingPatientRecords.get(0);</span>
+<span class="fc" id="L334">        patient.fetchLazies(fields);</span>
+<span class="fc" id="L335">        return Either.left(Option.of(patient));</span>
+    }
+
+    @Override
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findPKBPersonByOrgLevelId(OrgLevelId olid,
+                                                                                Lazy... fields) {
+<span class="fc" id="L341">        String select = &quot;SELECT olid.personId FROM OrgLevelId olid&quot;</span>
+                + &quot; WHERE olid.value = :idValue&quot;
+                + &quot; AND olid.type.id = :typeId&quot;
+                + &quot; AND olid.personId IS NOT NULL&quot;;
+<span class="fc" id="L345">        TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="fc" id="L346">        query.setParameter(&quot;idValue&quot;, olid.getValue());</span>
+<span class="fc" id="L347">        query.setParameter(&quot;typeId&quot;, olid.getType().getId());</span>
+<span class="fc" id="L348">        List&lt;Long&gt; items = query.getResultList();</span>
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">        if (items.size() &gt; 1) {</span>
+<span class="nc" id="L350">            LOGGER.error(&quot;got more than one result for org-level id {} and orgLevelIdType {}&quot;, olid.getValue(), olid.getType().getId());</span>
+        }
+
+<span class="fc" id="L353">        return getMaybeResult(findPKBPersonList(items, fields));</span>
+    }
+
+    @Override
+    public Map&lt;Tuple2&lt;Long, String&gt;, Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt;&gt; findPKBPersonByOrgLevelIds(Set&lt;OrgLevelId&gt; olids, Lazy... fields) {
+<span class="fc" id="L358">        return doFindPKBPersonByIdType(olids, OrgLevelId::getValue, olid -&gt; olid.getType().getId(), PKBPerson::getOrgLevelIds, (valueSet, typeSet) -&gt; {</span>
+<span class="fc" id="L359">            String select = &quot;SELECT olid.personId FROM OrgLevelId olid&quot;</span>
+                    + &quot; WHERE olid.value IN (:idValues)&quot;
+                    + &quot; AND olid.type.id IN (:typeIds)&quot;
+                    + &quot; AND olid.personId IS NOT NULL&quot;;
+<span class="fc" id="L363">            TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="fc" id="L364">            query.setParameter(&quot;idValues&quot;, valueSet);</span>
+<span class="fc" id="L365">            query.setParameter(&quot;typeIds&quot;, typeSet);</span>
+
+<span class="fc" id="L367">            var personIds = query.getResultList();</span>
+<span class="fc" id="L368">            return findPKBPersonList(personIds, fields);</span>
+        }, fields);
+    }
+
+    private &lt;T&gt; Map&lt;Tuple2&lt;Long, String&gt;, Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt;&gt; doFindPKBPersonByIdType(Set&lt;T&gt; inputs, Function&lt;T, String&gt; valueMapper, Function&lt;T, Long&gt; typeIdMapper,
+                                                                                                      Function&lt;PKBPerson, Set&lt;T&gt;&gt; sourceMapper, BiFunction&lt;Set&lt;String&gt;, Set&lt;Long&gt;, List&lt;PKBPerson&gt;&gt; query, Lazy... fields) {
+<span class="fc bfc" id="L374" title="All 2 branches covered.">        if (isEmpty(inputs)) {</span>
+<span class="fc" id="L375">            return Collections.emptyMap();</span>
+        }
+
+<span class="fc" id="L378">        Set&lt;String&gt; values = new HashSet&lt;&gt;(inputs.size());</span>
+<span class="fc" id="L379">        Set&lt;Long&gt; types = new HashSet&lt;&gt;(inputs.size());</span>
+
+<span class="fc bfc" id="L381" title="All 2 branches covered.">        for (T actual : inputs) {</span>
+<span class="fc" id="L382">            values.add(valueMapper.apply(actual));</span>
+<span class="fc" id="L383">            types.add(typeIdMapper.apply(actual));</span>
+<span class="fc" id="L384">        }</span>
+
+<span class="pc bpc" id="L386" title="2 of 4 branches missed.">        if (values.isEmpty() || types.isEmpty()) {</span>
+<span class="nc" id="L387">            return Collections.emptyMap();</span>
+        }
+
+<span class="fc" id="L390">        List&lt;PKBPerson&gt; items = query.apply(values, types);</span>
+
+<span class="fc" id="L392">        Map&lt;T, LinkedHashSet&lt;PKBPerson&gt;&gt; groupById = new LinkedHashMap&lt;&gt;(inputs.size());</span>
+<span class="fc bfc" id="L393" title="All 2 branches covered.">        for (PKBPerson actual : items) {</span>
+<span class="fc" id="L394">            Set&lt;T&gt; ids = sourceMapper.apply(actual);</span>
+<span class="fc bfc" id="L395" title="All 2 branches covered.">            for (T actualId : ids) {</span>
+<span class="fc bfc" id="L396" title="All 2 branches covered.">                if (inputs.contains(actualId)) {</span>
+<span class="fc" id="L397">                    groupById.computeIfAbsent(actualId, n -&gt; new LinkedHashSet&lt;&gt;()).add(actual);</span>
+                }
+<span class="fc" id="L399">            }</span>
+<span class="fc" id="L400">        }</span>
+
+<span class="pc bpc" id="L402" title="1 of 2 branches missed.">        var duplicates = groupById.entrySet().stream().filter(e -&gt; 1 &lt; e.getValue().size()).collect(toList());</span>
+<span class="pc bpc" id="L403" title="1 of 2 branches missed.">        if (!duplicates.isEmpty()) {</span>
+            //https://patientsknowbest.slack.com/archives/C1DSXL75G/p1620748335175400
+<span class="nc" id="L405">            String duplicateMessage = &quot;Got more than one result for ids.\n&quot; + duplicates.stream().map(e -&gt; &quot;IdType=[&quot; + typeIdMapper.apply(e.getKey()) + &quot;] with value=[&quot;</span>
+<span class="nc" id="L406">                    + valueMapper.apply(e.getKey()) + &quot;], personIds=[&quot; + e.getValue().stream().map(p -&gt; p.getId().toString()).collect(joining(&quot;,&quot;)) + &quot;] letting caller handle it!\n&quot;).collect(joining());</span>
+<span class="nc" id="L407">            LOGGER.error(duplicateMessage, filter(new Exception(&quot;Got multiple records for ids&quot;).fillInStackTrace()));</span>
+        }
+
+<span class="fc" id="L410">        Map&lt;Tuple2&lt;Long, String&gt;, Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt;&gt; resultMap = new HashMap&lt;&gt;(groupById.size());</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">        for (Map.Entry&lt;T, LinkedHashSet&lt;PKBPerson&gt;&gt; actual : groupById.entrySet()) {</span>
+<span class="fc" id="L412">            T key = actual.getKey();</span>
+<span class="fc" id="L413">            resultMap.put(Tuple.of(typeIdMapper.apply(key), valueMapper.apply(key)), getResult(actual.getValue()));</span>
+<span class="fc" id="L414">        }</span>
+<span class="fc" id="L415">        return resultMap;</span>
+    }
+
+    @Override
+    public Option&lt;PKBPerson&gt; findPKBPersonByEmisPersonGuid(String personGuid, Lazy... fields) {
+<span class="fc" id="L420">        String select = &quot;SELECT em.person FROM EmisEsPersonGuid em&quot;</span>
+                + &quot; WHERE em.value = :idValue&quot;;
+
+<span class="fc" id="L423">        TypedQuery&lt;PKBPerson&gt; query = em.createQuery(select, PKBPerson.class);</span>
+<span class="fc" id="L424">        query.setParameter(&quot;idValue&quot;, personGuid);</span>
+
+<span class="fc" id="L426">        PKBPerson person = DbUtil.getExactlyOneUniqueResultOrNull(query);</span>
+<span class="fc bfc" id="L427" title="All 2 branches covered.">        if (person != null) {</span>
+<span class="fc" id="L428">            person.fetchLazies(fields);</span>
+        }
+
+<span class="fc" id="L431">        return Option.of(person);</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPKBPersonByEmisPersonGuid(Set&lt;String&gt; personGUIDs, Lazy... fields) {
+<span class="pc bpc" id="L436" title="1 of 2 branches missed.">        if (isEmpty(personGUIDs)) {</span>
+<span class="nc" id="L437">            return Collections.emptyList();</span>
+        }
+<span class="fc" id="L439">        String select = &quot;SELECT em.person.id FROM EmisEsPersonGuid em&quot;</span>
+                + &quot; WHERE em.value IN (:idValues)&quot;;
+
+<span class="fc" id="L442">        TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="fc" id="L443">        query.setParameter(&quot;idValues&quot;, personGUIDs);</span>
+
+<span class="fc" id="L445">        var personIds = query.getResultList();</span>
+<span class="fc" id="L446">        return findPKBPersonList(personIds, fields);</span>
+    }
+
+    @Override
+    public Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; findPKBPersonByTeamLevelId(TeamLevelId tlid, Lazy... fields) {
+<span class="fc" id="L451">        String select = &quot;SELECT tlid.personId FROM TeamLevelId tlid&quot;</span>
+                + &quot; WHERE tlid.value = :idValue&quot;
+                + &quot; AND tlid.type.id = :typeId&quot;;
+<span class="fc" id="L454">        TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="fc" id="L455">        query.setParameter(&quot;idValue&quot;, tlid.getValue());</span>
+<span class="fc" id="L456">        query.setParameter(&quot;typeId&quot;, tlid.getType().getId());</span>
+<span class="fc" id="L457">        List&lt;Long&gt; items = query.getResultList();</span>
+
+<span class="pc bpc" id="L459" title="1 of 2 branches missed.">        if (items.size() &gt; 1) {</span>
+<span class="nc" id="L460">            LOGGER.error(&quot;got more than one result for team-level id {} and teamLevelIdType {}&quot;, tlid.getValue(), tlid.getType().getId());</span>
+        }
+
+<span class="fc" id="L463">        return getMaybeResult(findPKBPersonList(items, fields));</span>
+    }
+
+    @Override
+    public Map&lt;Tuple2&lt;Long, String&gt;, Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt;&gt; findPKBPersonByTeamLevelIds(Set&lt;TeamLevelId&gt; tlids, Lazy... fields) {
+<span class="pc" id="L468">        return doFindPKBPersonByIdType(tlids, TeamLevelId::getValue, tlid -&gt; tlid.getType().getId(), PKBPerson::getTeamLevelIds, (valueSet, typeSet) -&gt; {</span>
+<span class="nc" id="L469">            String select = &quot;SELECT tlid.personId FROM TeamLevelId tlid&quot;</span>
+                    + &quot; WHERE tlid.value IN (:idValues)&quot;
+                    + &quot; AND tlid.type.id IN (:typeIds)&quot;;
+<span class="nc" id="L472">            TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="nc" id="L473">            query.setParameter(&quot;idValues&quot;, valueSet);</span>
+<span class="nc" id="L474">            query.setParameter(&quot;typeIds&quot;, typeSet);</span>
+
+<span class="nc" id="L476">            var personIds = query.getResultList();</span>
+<span class="nc" id="L477">            return findPKBPersonList(personIds, fields);</span>
+        }, fields);
+    }
+
+    @Override
+    public Option&lt;PKBPerson&gt; findPKBPersonByPublicId(UUID pid) {
+
+<span class="fc" id="L484">        String select = &quot;SELECT DISTINCT person FROM PKBPerson person, PKBPersonIdentifierPair pair\n&quot;</span>
+                + &quot;LEFT JOIN FETCH person.contacts\n&quot;
+                + &quot;LEFT JOIN FETCH person.nationalIds\n&quot;
+                + &quot;WHERE person.id = pair.id AND pair.uuid= :publicId ORDER BY person.id&quot;;
+
+<span class="fc" id="L489">        TypedQuery&lt;PKBPerson&gt; query = em.createQuery(select, PKBPerson.class);</span>
+<span class="fc" id="L490">        query.setParameter(&quot;publicId&quot;, pid);</span>
+
+<span class="fc" id="L492">        return DbUtil.findSingleResultForRemote(query);</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPKBPersonsByPublicIds(Collection&lt;UUID&gt; pids) {
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">        if (isEmpty(pids)) {</span>
+<span class="nc" id="L498">            return Collections.emptyList();</span>
+        }
+<span class="fc" id="L500">        String select = &quot;SELECT DISTINCT person FROM PKBPerson person, PKBPersonIdentifierPair pair\n&quot;</span>
+                + &quot;LEFT JOIN FETCH person.contacts\n&quot;
+                + &quot;LEFT JOIN FETCH person.nationalIds\n&quot;
+                + &quot;WHERE person.id = pair.id AND pair.uuid IN (:publicIds)&quot;;
+
+<span class="fc" id="L505">        TypedQuery&lt;PKBPerson&gt; query = em.createQuery(select, PKBPerson.class);</span>
+<span class="fc" id="L506">        query.setParameter(&quot;publicIds&quot;, pids);</span>
+<span class="fc" id="L507">        return query.getResultList();</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPKBPersonsByPublicId(Collection&lt;UUID&gt; pids) {
+<span class="fc" id="L512">        return em.createQuery(&quot;SELECT person FROM PKBPerson person\n&quot;</span>
+                        + &quot;WHERE person.publicId IN :pids ORDER BY person.id&quot;, PKBPerson.class)
+                // .setHint(&quot;hibernate.query.passDistinctThrough&quot;, false) // This doesn't work because of https://hibernate.atlassian.net/browse/HHH-13280
+<span class="fc" id="L515">                .setParameter(&quot;pids&quot;, pids)</span>
+<span class="fc" id="L516">                .setHint(&quot;javax.persistence.fetchgraph&quot;, constructPersonEntityGraph(Lazy.NATIONAL_AND_LOCAL_IDS))</span>
+<span class="fc" id="L517">                .getResultList()</span>
+<span class="fc" id="L518">                .stream()</span>
+<span class="fc" id="L519">                .distinct()</span>
+<span class="fc" id="L520">                .collect(Collectors.toUnmodifiableList());</span>
+    }
+
+    @Override // TODO Move SciStore-specifics out of here
+    public List&lt;PKBPerson&gt; findUnsyncedSciStorePatients(int maxResults) {
+<span class="fc" id="L525">        em.flush();</span>
+
+<span class="fc" id="L527">        List&lt;Long&gt; chiPersonIds = em.createQuery(&quot;SELECT p.id FROM PKBPerson p &quot; +</span>
+                        &quot; JOIN p.nationalIds nid &quot; +
+                        &quot; WHERE nid.type = :chiNumber &quot;, Long.class)
+<span class="fc" id="L530">                .setParameter(&quot;chiNumber&quot;, NationalIdType.CHI_NUMBER)</span>
+<span class="fc" id="L531">                .getResultList();</span>
+
+<span class="fc" id="L533">        Stream&lt;BigInteger&gt; personIds = DbUtil.getInStreamOfBatches(chiPersonIds, configuration.getPKBPersonListFetchSize(), personIdBatch -&gt;</span>
+<span class="fc" id="L534">                em.createNativeQuery(&quot;SELECT pkbPatientId FROM SciStorePatientCredentials&quot; +</span>
+                                &quot; WHERE pkbPatientId IN (:personIdBatch)&quot;)
+<span class="fc" id="L536">                        .setParameter(&quot;personIdBatch&quot;, personIdBatch)</span>
+<span class="fc" id="L537">                        .getResultList());</span>
+
+<span class="fc" id="L539">        personIds.map(BigInteger::longValue).forEach(chiPersonIds::remove);</span>
+
+<span class="fc" id="L541">        List&lt;PKBPerson&gt; result = findPKBPersonList(chiPersonIds,</span>
+<span class="fc" id="L542">                QueryMetadata.create().withPagination(maxResults, 0),</span>
+<span class="fc" id="L543">                comparing(PersonComparator::getId),</span>
+                Lazy.NATIONAL_AND_LOCAL_IDS);
+
+<span class="fc" id="L546">        LOGGER.info(&quot;SJG: Found {} patients with CHI numbers but not SCIStoreIds&quot;, result.size());</span>
+<span class="fc" id="L547">        return result;</span>
+    }
+
+    @Override
+    public List&lt;Org&gt; findOrgsForPatient(long patientId, Org.Lazy... fields) {
+        // TODO - fix before anyone uses it
+<span class="fc" id="L553">        TypedQuery&lt;Org&gt; query = em.createQuery(getOrgQuery(fields).toString(), Org.class);</span>
+<span class="fc" id="L554">        query.setParameter(&quot;patientId&quot;, patientId);</span>
+<span class="fc" id="L555">        return query.getResultList();</span>
+    }
+
+    private StringBuilder getOrgQuery(Org.Lazy[] fields) {
+<span class="fc" id="L559">        StringBuilder queryBuilder = new StringBuilder(&quot;SELECT DISTINCT iu.institute.org FROM InstituteUserEntity iu &quot;);</span>
+<span class="fc bfc" id="L560" title="All 2 branches covered.">        if (ArrayUtils.contains(fields, Org.Lazy.TEAMS)) {</span>
+<span class="fc" id="L561">            queryBuilder.append(&quot; LEFT JOIN FETCH iu.institute.org.teams &quot;);</span>
+        }
+
+<span class="pc bpc" id="L564" title="1 of 2 branches missed.">        if (ArrayUtils.contains(fields, Org.Lazy.EXTERNAL_IDS)) {</span>
+<span class="nc" id="L565">            queryBuilder.append(&quot; LEFT JOIN FETCH iu.institute.org.externalIds &quot;);</span>
+        }
+<span class="fc" id="L567">        queryBuilder.append(&quot;WHERE iu.personId = :patientId&quot;);</span>
+<span class="fc" id="L568">        return queryBuilder;</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findOrgCoords(long orgId) {
+        try {
+<span class="fc" id="L574">            List&lt;Long&gt; orgCoordIds = em.createQuery(</span>
+                            &quot; SELECT iu.personId &quot;
+                                    + &quot; FROM InstituteUserEntity iu, Team t &quot;
+                                    + &quot; WHERE iu.institute=t &quot;
+                                    + &quot; AND t.org.id = :orgId &quot;
+                                    + &quot; AND iu.userType = :userType&quot;,
+                            Long.class)
+<span class="fc" id="L581">                    .setParameter(&quot;orgId&quot;, orgId)</span>
+<span class="fc" id="L582">                    .setParameter(&quot;userType&quot;, UserType.ORG_COORD)</span>
+<span class="fc" id="L583">                    .getResultList();</span>
+
+<span class="fc" id="L585">            return findPKBPersonList(orgCoordIds, Lazy.CONTACTS);</span>
+<span class="nc" id="L586">        } catch (Exception e) {</span>
+<span class="nc" id="L587">            throw new RuntimeException(&quot;Error fetching org-coords for org-&quot; + orgId, e);</span>
+        }
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPrivacyOfficers(Org org) {
+        try {
+<span class="fc" id="L594">            List&lt;Long&gt; orgPersonIds = em.createQuery(</span>
+                            &quot;SELECT iu.personId &quot;
+                                    + &quot;FROM InstituteUserEntity iu, Team t, PKBPerson p &quot;
+                                    + &quot;WHERE iu.institute=t &quot;
+                                    + &quot;AND t.org = :org &quot;
+                                    + &quot;AND iu.userType = :userType &quot;
+                                    + &quot;AND iu.sponsorshipStatus = :active &quot;
+                                    + &quot;AND p.id = iu.personId &quot;
+                                    + &quot;AND p.status &lt;&gt; :inactive&quot;,
+                            Long.class)
+<span class="fc" id="L604">                    .setParameter(&quot;org&quot;, org)</span>
+<span class="fc" id="L605">                    .setParameter(&quot;userType&quot;, UserType.PRIVACY_OFFICER)</span>
+<span class="fc" id="L606">                    .setParameter(&quot;active&quot;, SponsorshipStatus.ACTIVE)</span>
+<span class="fc" id="L607">                    .setParameter(&quot;inactive&quot;, UserStatus.INACTIVE)</span>
+<span class="fc" id="L608">                    .getResultList();</span>
+
+<span class="fc" id="L610">            return findPKBPersonList(orgPersonIds, Lazy.CONTACTS);</span>
+<span class="nc" id="L611">        } catch (Exception e) {</span>
+<span class="nc" id="L612">            throw new RuntimeException(&quot;Error fetching privacy officers for org-&quot; + org.getId(), e);</span>
+        }
+    }
+
+    @Override
+    public PKBPerson updatePKBPerson(EHRRequestContext requestContext, PKBPerson person) {
+<span class="fc" id="L618">        return updatePKBPerson(person, VersionDetails.of(requestContext, dateTimeService.now()));</span>
+    }
+
+    @Override
+    public void unassignTeamLevelIds(Collection&lt;TeamLevelId&gt; teamLevelIds) {
+<span class="fc" id="L623">        List&lt;Long&gt; teamLevelIdIds = teamLevelIds.stream()</span>
+<span class="fc" id="L624">                .map(TeamLevelId::getId).collect(toList());</span>
+<span class="fc" id="L625">        em.createQuery(&quot;UPDATE TeamLevelId SET person_id = null WHERE id IN (:teamLevelIds)&quot;)</span>
+<span class="fc" id="L626">                .setParameter(&quot;teamLevelIds&quot;, teamLevelIdIds)</span>
+<span class="fc" id="L627">                .executeUpdate();</span>
+<span class="fc" id="L628">        em.flush();</span>
+<span class="fc" id="L629">    }</span>
+
+    @Override
+    public PKBPerson updatePKBPerson(PKBPerson person, VersionDetails versionDetails) {
+<span class="fc" id="L633">        actOnNullDefaultAccountId(person);</span>
+<span class="fc" id="L634">        preventNullOverwrites(person);</span>
+
+        try {
+<span class="fc" id="L637">            person.setVersionDetails(versionDetails);</span>
+<span class="fc" id="L638">            PKBPerson rval = mergePkbPerson(person);</span>
+<span class="fc" id="L639">            em.flush();</span>
+<span class="fc" id="L640">            return rval;</span>
+<span class="nc" id="L641">        } catch (Exception e) {</span>
+<span class="nc" id="L642">            LOGGER.error(&quot;Error updating PKBPerson &quot;, e);</span>
+<span class="nc" id="L643">            throw new RuntimeException(&quot;Error updating PKBPerson-&quot; + person.getId(), e);</span>
+        }
+
+    }
+
+    /**
+     * Load unloaded lazy collection to keep mapped entities during merge.
+     *
+     * @param person person to merge
+     * @return person merged by {@link EntityManager#merge(Object)}
+     */
+    @Override
+    public PKBPerson mergePkbPerson(PKBPerson person) {
+<span class="pc bpc" id="L656" title="1 of 6 branches missed.">        if (!person.hasOrgLevelIdsLoaded() || !person.hasTeamLevelIdsLoaded() || !person.hasNationalIdsLoaded()) {</span>
+<span class="fc" id="L657">            PKBPerson originalPerson = getPKBPerson(person.getId(), Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="fc bfc" id="L658" title="All 2 branches covered.">            if (!person.hasOrgLevelIdsLoaded()) {</span>
+<span class="fc" id="L659">                person.setOrgLevelIds(originalPerson.getOrgLevelIds());</span>
+            }
+<span class="fc bfc" id="L661" title="All 2 branches covered.">            if (!person.hasTeamLevelIdsLoaded()) {</span>
+<span class="fc" id="L662">                person.setTeamLevelIds(originalPerson.getTeamLevelIds());</span>
+            }
+<span class="fc bfc" id="L664" title="All 2 branches covered.">            if (!person.hasNationalIdsLoaded()) {</span>
+<span class="fc" id="L665">                person.setNationalIds(originalPerson.getNationalIds());</span>
+            }
+        }
+<span class="fc" id="L668">        return em.merge(person);</span>
+    }
+
+    private void preventNullOverwrites(PKBPerson person) {
+<span class="pc bpc" id="L672" title="2 of 4 branches missed.">        if (isNull(person) || isNull(person.getId())) {</span>
+<span class="nc" id="L673">            return;</span>
+        }
+<span class="fc" id="L675">        PKBPerson persistedPerson = em.find(PKBPerson.class, person.getId());</span>
+<span class="fc" id="L676">        handlePkbPersonOverwrites(&quot;registeredOn&quot;, persistedPerson, PKBPerson::getRegisteredOn, PKBPerson::setRegisteredOn, person);</span>
+<span class="fc" id="L677">        handlePkbPersonOverwrites(&quot;publicId&quot;, persistedPerson, PKBPerson::getPublicId, PKBPerson::setPublicId, person);</span>
+<span class="fc" id="L678">        handlePkbPersonOverwrites(&quot;defaultAccountId&quot;, persistedPerson, PKBPerson::getDefaultAccountId, PKBPerson::setDefaultAccountId, person);</span>
+<span class="fc" id="L679">    }</span>
+
+    private &lt;T&gt; void handlePkbPersonOverwrites(String fieldName, PKBPerson oldPerson, Function&lt;PKBPerson, T&gt; getter, BiConsumer&lt;PKBPerson, T&gt; setter, PKBPerson newPerson) {
+<span class="fc" id="L682">        T oldValue = getter.apply(oldPerson);</span>
+<span class="fc" id="L683">        T newValue = getter.apply(newPerson);</span>
+<span class="pc bpc" id="L684" title="1 of 4 branches missed.">        if (nonNull(oldValue) &amp;&amp; !Objects.equals(oldValue, newValue)) {</span>
+<span class="nc" id="L685">            String errorMessage = format(&quot;PHR-6191 Attempt to overwrite final PkbPerson field (%s) : old value : %s , new value : %s&quot;, fieldName, oldValue, newValue);</span>
+<span class="nc bnc" id="L686" title="All 2 branches missed.">            if (isNull(newValue)) {</span>
+<span class="nc" id="L687">                setter.accept(newPerson, oldValue);</span>
+            }
+<span class="nc bnc" id="L689" title="All 2 branches missed.">            if (configuration.isExceptionForPkbPersonOverwritesEnabled()) {</span>
+<span class="nc" id="L690">                throw new IllegalStateException(errorMessage);</span>
+            }
+<span class="nc" id="L692">            LOGGER.error(errorMessage, filter(new Exception(&quot;Attempt to overwrite final PkbPerson field&quot;).fillInStackTrace()));</span>
+        }
+<span class="fc" id="L694">    }</span>
+
+    @Override
+    public void deletePKBPerson(PKBPerson person) {
+        // Check if the entity exist
+        // PKBPerson pkbPerson = findPKBPerson(person.getUserName());
+<span class="nc bnc" id="L700" title="All 2 branches missed.">        if (person.getId() != null) {</span>
+<span class="nc" id="L701">            em.remove(person);</span>
+        } else {
+<span class="nc" id="L703">            throw new RuntimeException(&quot;Error while deleting user : Invalid user Id : &quot; + person.getId());</span>
+        }
+<span class="nc" id="L705">    }</span>
+
+    @Override
+    @Nullable
+    public PKBAccountUser getDefaultPKBAccountUser(long userId) {
+        try {
+<span class="fc" id="L711">            AccountUser accountUser = getActiveDefaultAccountUser(userId);</span>
+<span class="pc bpc" id="L712" title="1 of 2 branches missed.">            if (accountUser == null) {</span>
+<span class="nc" id="L713">                return null;</span>
+            }
+
+<span class="fc" id="L716">            PKBAccountUser pkbAccountUser = null;</span>
+<span class="fc" id="L717">            PKBPerson person = findPKBPerson(userId).getOrNull();</span>
+<span class="fc" id="L718">            pkbAccountUser = pkbAccountUserMapper.map(accountUser, person);</span>
+<span class="fc" id="L719">            return pkbAccountUser;</span>
+<span class="nc" id="L720">        } catch (Exception e) {</span>
+<span class="nc" id="L721">            throw new RuntimeException(&quot;Exception while getting account for user-&quot; + userId, e);</span>
+        }
+    }
+
+    @Override
+    public @Nullable Long getAccountOwnerId(long accountId) {
+
+<span class="fc" id="L728">        TypedQuery&lt;Long&gt; query = em.createQuery(</span>
+                        &quot;SELECT p.id FROM PKBPerson p&quot; +
+                                &quot; WHERE p.defaultAccountId = :accountId&quot;,
+                        Long.class)
+<span class="fc" id="L732">                .setParameter(&quot;accountId&quot;, accountId);</span>
+
+<span class="fc" id="L734">        return DbUtil.getExactlyOneResultOrNull(query);</span>
+    }
+
+    @Override
+    @Nullable
+    public AccountUser getOwnerAccountUser(long accountId) {
+        try {
+<span class="fc" id="L741">            return accountBean.getOwnerAccountUser(accountId);</span>
+<span class="nc" id="L742">        } catch (Exception e) {</span>
+<span class="nc" id="L743">            throw new RuntimeException(&quot;error getOwnerAccountUser for &quot; + accountId, e);</span>
+        }
+    }
+
+    @Override
+    @Nullable
+    public PKBPerson getAccountOwner(long accountId, Lazy... lazies) {
+        try {
+<span class="fc" id="L751">            Long personId = getAccountOwnerId(accountId);</span>
+
+<span class="pc bpc" id="L753" title="1 of 2 branches missed.">            if (personId != null) {</span>
+<span class="fc" id="L754">                return findPKBPerson(personId, lazies).getOrNull();</span>
+            }
+<span class="nc" id="L756">        } catch (Exception e) {</span>
+<span class="nc" id="L757">            throw new RuntimeException(&quot;error getting owner of accountId &quot; + accountId, e);</span>
+<span class="nc" id="L758">        }</span>
+<span class="nc" id="L759">        return null; // failed above</span>
+
+    }
+
+    @Override
+    public @NotNull Map&lt;Long, PKBPerson&gt; getAccountOwners(Collection&lt;Long&gt; accountIds, Lazy... lazies) {
+<span class="pc bpc" id="L765" title="1 of 2 branches missed.">        if (isEmpty(accountIds)) {</span>
+<span class="nc" id="L766">            return emptyMap();</span>
+        }
+<span class="fc" id="L768">        List&lt;AccountUser&gt; accountUsers = accountBean.getOwnerAccountUsers(accountIds);</span>
+<span class="fc" id="L769">        Set&lt;Long&gt; personIds = accountUsers.stream().map(AccountUser::getPersonId).collect(Collectors.toSet());</span>
+<span class="fc" id="L770">        Map&lt;Long, PKBPerson&gt; personIdToPKBPerson = findPKBPersonList(personIds, lazies).stream().collect(toMap(PKBPerson::getId, identity()));</span>
+<span class="fc" id="L771">        return accountUsers.stream().collect(toMap(au -&gt; au.getAccount().getId(), au -&gt; personIdToPKBPerson.get(au.getPersonId())));</span>
+    }
+
+    @Override
+    @Nullable
+    public AccountUser getActiveDefaultAccountUser(long personId) {
+
+<span class="fc" id="L778">        TypedQuery&lt;AccountUser&gt; query = em.createQuery(</span>
+                        &quot;SELECT au FROM AccountUser au\n&quot; +
+                                &quot;WHERE au.personId = :personId\n&quot; +
+                                &quot;AND au.defaultAccount = :isDefault\n&quot; +
+                                &quot;AND au.status = :status\n&quot; +
+                                &quot;ORDER BY au.id DESC&quot;,
+                        AccountUser.class)
+<span class="fc" id="L785">                .setParameter(&quot;personId&quot;, personId)</span>
+<span class="fc" id="L786">                .setParameter(&quot;isDefault&quot;, Boolean.TRUE)</span>
+<span class="fc" id="L787">                .setParameter(&quot;status&quot;, AccountUserStatus.ACTIVE);</span>
+
+<span class="fc" id="L789">        return DbUtil.getExactlyOneUniqueResultOrNull(query);</span>
+    }
+
+    private static class PersonAndAccountHolderTransformer implements ResultTransformer {
+
+        @Override
+        public Object transformTuple(Object[] objects, String[] strings) {
+<span class="nc" id="L796">            return new PersonAndAccountHolder((Account) objects[0], (PKBPerson) objects[1]);</span>
+        }
+
+        @Override
+        public List transformList(List list) {
+<span class="nc" id="L801">            return list;</span>
+        }
+    }
+
+    @Override
+    public @Nullable Long getDefaultAccountId(Long personId) {
+<span class="fc" id="L807">        return DbUtil.getExactlyOneResultOrNull(em.createQuery(&quot;SELECT p.defaultAccountId FROM PKBPerson p WHERE p.id = :personId&quot;, Long.class)</span>
+<span class="fc" id="L808">                .setParameter(&quot;personId&quot;, personId));</span>
+    }
+
+    @Override
+    public Map&lt;Long, Long&gt; getDefaultAccountIds(Collection&lt;Long&gt; personIds) {
+<span class="fc" id="L813">        return DbUtil.getInStreamOfBatches(personIds,</span>
+<span class="fc" id="L814">                        batch -&gt; (List&lt;Object[]&gt;) em.createQuery(&quot;SELECT p.id, p.defaultAccountId FROM PKBPerson p WHERE p.id IN  (:personIds)&quot;)</span>
+<span class="fc" id="L815">                                .setParameter(&quot;personIds&quot;, batch)</span>
+<span class="fc" id="L816">                                .getResultList())</span>
+<span class="pc bpc" id="L817" title="1 of 2 branches missed.">                .filter(t -&gt; t[1] != null) // According to ecb2c46136df8ae34867147c6036ed06ab6ad157 null is still possible but the toMap call will throw an NPE in that case</span>
+<span class="fc" id="L818">                .collect(toMap(t -&gt; (Long) t[0], t -&gt; (Long) t[1]));</span>
+    }
+
+    @Override
+    public boolean isMemberOfAnyOrgOrOrgnetwork(List&lt;Long&gt; orgIds, List&lt;Long&gt; orgNetworkIds, PKBPerson pkbPerson) {
+<span class="pc bpc" id="L823" title="1 of 4 branches missed.">        if (orgIds.isEmpty() &amp;&amp; orgNetworkIds.isEmpty()) {</span>
+<span class="nc" id="L824">            return false;</span>
+        }
+
+<span class="fc bfc" id="L827" title="All 2 branches covered.">        if (orgIds.isEmpty()) {</span>
+<span class="fc" id="L828">            BigInteger numberOfOrgNetworks = (BigInteger) em.createNativeQuery(COUNT_ORG_NETWORKS)</span>
+<span class="fc" id="L829">                    .setParameter(&quot;personId&quot;, pkbPerson.getId())</span>
+<span class="fc" id="L830">                    .setParameter(&quot;orgNetworkIds&quot;, orgNetworkIds)</span>
+<span class="fc" id="L831">                    .getSingleResult();</span>
+
+<span class="fc bfc" id="L833" title="All 2 branches covered.">            return numberOfOrgNetworks.intValue() &gt; 0;</span>
+        }
+
+<span class="pc bpc" id="L836" title="1 of 2 branches missed.">        if (orgNetworkIds.isEmpty()) {</span>
+<span class="nc" id="L837">            BigInteger numberOfOrgs = (BigInteger) em.createNativeQuery(COUNT_ORGS)</span>
+<span class="nc" id="L838">                    .setParameter(&quot;personId&quot;, pkbPerson.getId())</span>
+<span class="nc" id="L839">                    .setParameter(&quot;orgIds&quot;, orgIds)</span>
+<span class="nc" id="L840">                    .getSingleResult();</span>
+
+<span class="nc bnc" id="L842" title="All 2 branches missed.">            return numberOfOrgs.intValue() &gt; 0;</span>
+        }
+
+<span class="fc" id="L845">        BigDecimal numberOfOrgsAndOrgNetworks = (BigDecimal) em.createNativeQuery(COUNT_ORGS_AND_ORG_NETWORKS)</span>
+<span class="fc" id="L846">                .setParameter(&quot;personId&quot;, pkbPerson.getId())</span>
+<span class="fc" id="L847">                .setParameter(&quot;orgIds&quot;, orgIds)</span>
+<span class="fc" id="L848">                .setParameter(&quot;orgNetworkIds&quot;, orgNetworkIds)</span>
+<span class="fc" id="L849">                .getSingleResult();</span>
+
+<span class="pc bpc" id="L851" title="1 of 2 branches missed.">        return numberOfOrgsAndOrgNetworks.intValue() &gt; 0;</span>
+    }
+
+    @Override
+    public Account getDefaultAccount(long personId) {
+<span class="fc" id="L856">        TypedQuery&lt;Account&gt; query = em.createQuery(</span>
+                        &quot;SELECT a FROM Account a\n&quot; +
+                                &quot;WHERE a.id = (SELECT p.defaultAccountId FROM PKBPerson p WHERE p.id = :personId)&quot;,
+                        Account.class)
+<span class="fc" id="L860">                .setParameter(&quot;personId&quot;, personId);</span>
+<span class="fc" id="L861">        return DbUtil.findSingleResult(query).orElse(null);</span>
+    }
+
+    @Override
+    public Map&lt;Long, PKBPerson&gt; findPKBPersonMap(@NotNull Collection&lt;Long&gt; ids, Lazy... fields) {
+<span class="fc" id="L866">        List&lt;PKBPerson&gt; result = findPKBPersonList(ids, fields);</span>
+<span class="fc" id="L867">        return result.stream().collect(toMap(PKBPerson::getId, identity()));</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPKBPersonList(@NotNull Collection&lt;Long&gt; ids, Lazy... fields) {
+<span class="fc" id="L872">        return findPKBPersonList(ids, QueryMetadata.create().withOrder(&quot;id&quot;, ASC), comparing(PersonComparator::getId), fields);</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPKBPersonListOrderedByFirstAndLastNameAscending(@NotNull Collection&lt;Long&gt; ids, Lazy... fields) {
+<span class="fc" id="L877">        return findPKBPersonList(ids, QueryMetadata.create().withOrder(&quot;lastName&quot;, ASC).withOrder(&quot;firstName&quot;, ASC),</span>
+<span class="fc" id="L878">                comparing(PersonComparator::getLastName).thenComparing(PersonComparator::getFirstName), fields);</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPKBPersonList(@NotNull Collection&lt;Long&gt; ids, @NotNull QueryMetadata queryMetadata, Comparator&lt;PersonComparator&gt; comparator, Lazy... fields) {
+<span class="fc bfc" id="L883" title="All 2 branches covered.">        if (isEmpty(ids)) {</span>
+<span class="fc" id="L884">            return new ArrayList&lt;&gt;();</span>
+        }
+<span class="fc bfc" id="L886" title="All 4 branches covered.">        if (queryMetadata.isPaginated() || ids.size() &gt;= configuration.getPKBPersonListFetchSize()) {</span>
+<span class="fc" id="L887">            String idAndNameQuery = &quot;SELECT p.id, p.firstName, p.lastName FROM PKBPerson p&quot; +</span>
+                    &quot; WHERE p.id IN &quot; + ID_LIST_QUERY_PARAM;
+<span class="fc" id="L889">            Function&lt;Object[], PersonComparator&gt; mapper = queryFields -&gt; ImmutablePersonComparator.builder()</span>
+<span class="fc" id="L890">                    .id((Long) queryFields[0])</span>
+<span class="fc" id="L891">                    .firstName((String) queryFields[1])</span>
+<span class="fc" id="L892">                    .lastName((String) queryFields[2])</span>
+<span class="fc" id="L893">                    .build();</span>
+<span class="fc" id="L894">            return retrievePkbPersons(idAndNameQuery, queryMetadata, Map.of(ID_LIST_QUERY_PARAM_NAME, ids), comparator, mapper, fields);</span>
+        } else {
+<span class="fc" id="L896">            return retrievePkbPersonPage(ids, queryMetadata, fields);</span>
+        }
+    }
+
+    @NotNull
+    private String createOrderByClause(@NotNull QueryMetadata queryMetadata) {
+<span class="fc bfc" id="L902" title="All 2 branches covered.">        return queryMetadata.isOrdered()</span>
+<span class="fc" id="L903">                ? &quot; ORDER BY &quot; + queryMetadata.order().stream().map(order -&gt; format(&quot;%s %s&quot;, order.getFieldName(), order.getDirection())).collect(joining(&quot;,&quot;))</span>
+<span class="fc" id="L904">                : &quot;&quot;;</span>
+    }
+
+    private List&lt;PKBPerson&gt; retrievePkbPersons(String idQuery, Map&lt;String, Object&gt; additionalParams, Lazy... fields) {
+<span class="nc" id="L908">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder().id((Long) row[0]).firstName(&quot;&quot;).lastName(&quot;&quot;).build();</span>
+<span class="nc" id="L909">        return retrievePkbPersons(idQuery, QueryMetadata.create(), additionalParams, comparing(PersonComparator::getId), mapper, fields);</span>
+    }
+
+    private List&lt;PKBPerson&gt; retrievePkbPersons(String idOrNameQuery, QueryMetadata queryMetadata, Map&lt;String, Object&gt; additionalParams,
+                                               Comparator&lt;PersonComparator&gt; comparator, Function&lt;Object[], PersonComparator&gt; mapper, Lazy... fields) {
+<span class="fc" id="L914">        List&lt;Long&gt; personIds = retrievePkbPersonIds(idOrNameQuery, queryMetadata, additionalParams, comparator, mapper);</span>
+<span class="fc" id="L915">        return retrievePkbPersonPage(personIds, queryMetadata, fields);</span>
+    }
+
+    private List&lt;Long&gt; retrievePkbPersonIds(String idOrNameQuery, QueryMetadata queryMetadata, Map&lt;String, Object&gt; additionalParams,
+                                            Comparator&lt;PersonComparator&gt; comparator, Function&lt;Object[], PersonComparator&gt; mapper) {
+<span class="fc bfc" id="L920" title="All 2 branches covered.">        if (additionalParams.containsKey(ID_LIST_QUERY_PARAM_NAME)) {</span>
+<span class="fc" id="L921">            Collection&lt;Long&gt; ids = (Collection&lt;Long&gt;) additionalParams.get(ID_LIST_QUERY_PARAM_NAME);</span>
+<span class="fc bfc" id="L922" title="All 2 branches covered.">            if (ids.size() &gt; configuration.getPKBPersonListFetchSize()) {</span>
+<span class="fc" id="L923">                Map&lt;String, Object&gt; paramsWithoutIds = new HashMap&lt;&gt;(additionalParams);</span>
+<span class="fc" id="L924">                paramsWithoutIds.remove(ID_LIST_QUERY_PARAM_NAME);</span>
+<span class="fc" id="L925">                return doRetrievePkbPersonIdsInBatches(idOrNameQuery, queryMetadata, paramsWithoutIds, ids, comparator, mapper);</span>
+            } else {
+<span class="fc" id="L927">                return doRetrievePkbPersonIds(idOrNameQuery, queryMetadata, additionalParams);</span>
+            }
+        } else {
+<span class="fc" id="L930">            return doRetrievePkbPersonIds(idOrNameQuery, queryMetadata, additionalParams);</span>
+        }
+    }
+
+    private List&lt;Long&gt; doRetrievePkbPersonIdsInBatches(String idOrNameQuery, QueryMetadata queryMetadata, Map&lt;String, Object&gt; paramsWithoutIds, Collection&lt;Long&gt; ids,
+                                                       Comparator&lt;PersonComparator&gt; comparator, Function&lt;Object[], PersonComparator&gt; mapper) {
+<span class="fc" id="L936">        List&lt;Long&gt; allIds = DbUtil.getInBatches(ids, configuration.getPKBPersonListFetchSize(), batchOfIds -&gt; {</span>
+<span class="pc bpc" id="L937" title="1 of 4 branches missed.">                    if (idOrNameQuery.contains(&quot;p.firstName&quot;) &amp;&amp; idOrNameQuery.contains(&quot;p.lastName&quot;)) {</span>
+<span class="fc" id="L938">                        return getBatchResultsWithFirstAndLastName(idOrNameQuery, paramsWithoutIds, batchOfIds, mapper);</span>
+                    } else {
+<span class="fc" id="L940">                        return getBatchResultsWithPersonId(idOrNameQuery, paramsWithoutIds, batchOfIds, mapper);</span>
+                    }
+                },
+                comparator,
+                PersonComparator::getId);
+
+<span class="fc bfc" id="L946" title="All 2 branches covered.">        if (queryMetadata.isPaginated()) {</span>
+<span class="fc" id="L947">            int fromIdx = queryMetadata.pagination().getOffset();</span>
+<span class="pc bpc" id="L948" title="1 of 2 branches missed.">            if (fromIdx &lt; allIds.size()) {</span>
+<span class="fc" id="L949">                int toIdx = fromIdx + queryMetadata.pagination().getPageSize();</span>
+<span class="fc bfc" id="L950" title="All 2 branches covered.">                return new ArrayList&lt;&gt;(allIds.subList(fromIdx, toIdx &lt; allIds.size() ? toIdx : allIds.size()));</span>
+            } else {
+<span class="nc" id="L952">                return new ArrayList&lt;&gt;();</span>
+            }
+        } else {
+<span class="fc" id="L955">            return allIds;</span>
+        }
+    }
+
+    private List&lt;PersonComparator&gt; getBatchResultsWithFirstAndLastName(String idAndNameQuery, Map&lt;String, Object&gt; paramsWithoutIds, Iterable&lt;Long&gt; batchOfIds,
+                                                                       Function&lt;Object[], PersonComparator&gt; mapper) {
+<span class="fc" id="L961">        TypedQuery&lt;Object[]&gt; projectionQuery = em.createQuery(idAndNameQuery, Object[].class);</span>
+<span class="fc" id="L962">        paramsWithoutIds.forEach(projectionQuery::setParameter);</span>
+<span class="fc" id="L963">        projectionQuery.setParameter(ID_LIST_QUERY_PARAM_NAME, batchOfIds);</span>
+<span class="fc" id="L964">        List&lt;Object[]&gt; batchResults = projectionQuery.getResultList();</span>
+
+<span class="fc" id="L966">        return batchResults.stream().map(mapper).collect(toList());</span>
+    }
+
+    private List&lt;PersonComparator&gt; getBatchResultsWithPersonId(String idQuery, Map&lt;String, Object&gt; paramsWithoutIds, Iterable&lt;Long&gt; batchOfIds,
+                                                               Function&lt;Object[], PersonComparator&gt; mapper) {
+<span class="fc" id="L971">        TypedQuery&lt;Long&gt; projectionQuery = em.createQuery(idQuery, Long.class);</span>
+<span class="fc" id="L972">        paramsWithoutIds.forEach(projectionQuery::setParameter);</span>
+<span class="fc" id="L973">        projectionQuery.setParameter(ID_LIST_QUERY_PARAM_NAME, batchOfIds);</span>
+<span class="fc" id="L974">        List&lt;Long&gt; batchResults = projectionQuery.getResultList();</span>
+
+<span class="fc" id="L976">        return batchResults.stream().map(personId -&gt; mapper.apply(new Object[]{personId})).collect(toList());</span>
+    }
+
+    private List&lt;Long&gt; doRetrievePkbPersonIds(String idOrNameQuery, QueryMetadata queryMetadata, Map&lt;String, Object&gt; additionalParams) {
+<span class="pc bpc" id="L980" title="1 of 4 branches missed.">        if (idOrNameQuery.contains(&quot;p.firstName&quot;) &amp;&amp; idOrNameQuery.contains(&quot;p.lastName&quot;)) {</span>
+            // extra fields we don't care about, we only need the personId
+<span class="fc" id="L982">            TypedQuery&lt;Object[]&gt; query = em.createQuery(idOrNameQuery + createOrderByClause(queryMetadata), Object[].class);</span>
+<span class="fc" id="L983">            additionalParams.forEach(query::setParameter);</span>
+<span class="fc bfc" id="L984" title="All 2 branches covered.">            if (queryMetadata.isPaginated()) {</span>
+<span class="fc" id="L985">                query.setMaxResults(queryMetadata.pagination().getPageSize());</span>
+<span class="fc" id="L986">                query.setFirstResult(queryMetadata.pagination().getOffset());</span>
+            }
+<span class="fc" id="L988">            List&lt;Object[]&gt; results = query.getResultList();</span>
+<span class="fc" id="L989">            List&lt;Long&gt; personIds = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L990">            results.forEach(row -&gt; personIds.add((Long) row[0]));</span>
+<span class="fc" id="L991">            return personIds;</span>
+        } else {
+<span class="fc" id="L993">            TypedQuery&lt;Long&gt; personIdQuery = em.createQuery(idOrNameQuery + createOrderByClause(queryMetadata), Long.class);</span>
+<span class="fc" id="L994">            additionalParams.forEach(personIdQuery::setParameter);</span>
+<span class="fc bfc" id="L995" title="All 2 branches covered.">            if (queryMetadata.isPaginated()) {</span>
+<span class="fc" id="L996">                personIdQuery.setMaxResults(queryMetadata.pagination().getPageSize());</span>
+<span class="fc" id="L997">                personIdQuery.setFirstResult(queryMetadata.pagination().getOffset());</span>
+            }
+<span class="fc" id="L999">            return personIdQuery.getResultList();</span>
+        }
+    }
+
+    private List&lt;PKBPerson&gt; retrievePkbPersonPage(Collection&lt;Long&gt; personIdPage, QueryMetadata queryMetadata, Lazy... fields) {
+<span class="fc bfc" id="L1004" title="All 2 branches covered.">        if (isEmpty(personIdPage)) {</span>
+<span class="fc" id="L1005">            return new ArrayList&lt;&gt;();</span>
+        }
+        // HIBERNATE cannot 'join fetch' with pagination https://vladmihalcea.com/fix-hibernate-hhh000104-entity-fetch-pagination-warning-message/
+<span class="fc" id="L1008">        queryMetadata.resetPagination();</span>
+
+<span class="fc" id="L1010">        String select = &quot;SELECT p FROM PKBPerson p&quot; +</span>
+                &quot; WHERE p.id IN &quot; + ID_LIST_QUERY_PARAM +
+<span class="fc" id="L1012">                createOrderByClause(queryMetadata);</span>
+<span class="fc bfc" id="L1013" title="All 2 branches covered.">        if (personIdPage.size() &lt; configuration.getPKBPersonListFetchSize()) {</span>
+<span class="fc" id="L1014">            return retrievePkbPersonPageWithoutPartitions(personIdPage, select, fields);</span>
+        } else {
+<span class="fc" id="L1016">            return retrievePkbPersonPageInPartitions(personIdPage, select, fields);</span>
+        }
+    }
+
+    @Override
+    public List&lt;Long&gt; findPKBPersonIdListByUserTypeAndContactType(@NotNull Collection&lt;Long&gt; ids,
+                                                                  @NotNull Collection&lt;UserType&gt; userTypes,
+                                                                  @NotNull Collection&lt;ContactType&gt; contactTypes) {
+<span class="pc bpc" id="L1024" title="3 of 6 branches missed.">        if (ids.isEmpty() || userTypes.isEmpty() || contactTypes.isEmpty()) {</span>
+<span class="nc" id="L1025">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="fc" id="L1028">        String idQuery = &quot;SELECT distinct p.id FROM PKBPerson p LEFT JOIN p.contacts pc&quot; +</span>
+                &quot; WHERE p.id IN &quot; + ID_LIST_QUERY_PARAM +
+                &quot; AND p.userType IN (:userTypes)&quot; +
+                &quot; AND pc.contactType = (:contactTypes)&quot;;
+
+<span class="fc" id="L1033">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder().id((Long) row[0]).firstName(&quot;&quot;).lastName(&quot;&quot;).build();</span>
+<span class="fc" id="L1034">        return retrievePkbPersonIds(idQuery,</span>
+<span class="fc" id="L1035">                QueryMetadata.create().withOrder(&quot;p.id&quot;, ASC),</span>
+<span class="fc" id="L1036">                Map.of(ID_LIST_QUERY_PARAM_NAME, ids, &quot;userTypes&quot;, userTypes, &quot;contactTypes&quot;, contactTypes),</span>
+<span class="fc" id="L1037">                comparing(PersonComparator::getId),</span>
+                mapper);
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPKBPersonListByUserTypeAndStatus(@NotNull Collection&lt;Long&gt; ids,
+                                                                @NotNull Collection&lt;UserType&gt; userTypes,
+                                                                @NotNull Collection&lt;UserStatus&gt; statuses,
+                                                                @NotNull QueryMetadata queryMetadata,
+                                                                Comparator&lt;PersonComparator&gt; comparator,
+                                                                Lazy... fields) {
+
+<span class="nc bnc" id="L1049" title="All 6 branches missed.">        if (ids.isEmpty() || userTypes.isEmpty() || statuses.isEmpty()) {</span>
+<span class="nc" id="L1050">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="nc" id="L1053">        String idAndNameQuery = &quot;SELECT p.id, p.firstName, p.lastName FROM PKBPerson p&quot; +</span>
+                &quot; WHERE p.id IN &quot; + ID_LIST_QUERY_PARAM +
+                &quot; AND p.userType IN (:userTypes)&quot; +
+                &quot; AND p.status IN (:statuses)&quot;;
+
+<span class="nc" id="L1058">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder()</span>
+<span class="nc" id="L1059">                .id((Long) row[0])</span>
+<span class="nc" id="L1060">                .firstName((String) row[1])</span>
+<span class="nc" id="L1061">                .lastName((String) row[2])</span>
+<span class="nc" id="L1062">                .build();</span>
+
+<span class="nc" id="L1064">        return retrievePkbPersons(</span>
+                idAndNameQuery,
+                queryMetadata,
+<span class="nc" id="L1067">                Map.of(ID_LIST_QUERY_PARAM_NAME, ids, &quot;userTypes&quot;, userTypes, &quot;statuses&quot;, statuses),</span>
+                comparator,
+                mapper,
+                fields);
+    }
+
+    @Override
+    public List&lt;Long&gt; findPKBPersonIdListByUserTypeAndStatus(@NotNull Collection&lt;Long&gt; ids,
+                                                             @NotNull Collection&lt;UserType&gt; userTypes,
+                                                             @NotNull Collection&lt;UserStatus&gt; statuses) {
+
+<span class="pc bpc" id="L1078" title="3 of 6 branches missed.">        if (ids.isEmpty() || userTypes.isEmpty() || statuses.isEmpty()) {</span>
+<span class="nc" id="L1079">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="fc" id="L1082">        String idQuery = &quot;SELECT p.id FROM PKBPerson p&quot; +</span>
+                &quot; WHERE p.id IN &quot; + ID_LIST_QUERY_PARAM +
+                &quot; AND p.userType IN (:userTypes)&quot; +
+                &quot; AND p.status IN (:statuses)&quot;;
+
+<span class="fc" id="L1087">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder().id((Long) row[0]).firstName(&quot;&quot;).lastName(&quot;&quot;).build();</span>
+<span class="fc" id="L1088">        return retrievePkbPersonIds(idQuery,</span>
+<span class="fc" id="L1089">                QueryMetadata.create(),</span>
+<span class="fc" id="L1090">                Map.of(ID_LIST_QUERY_PARAM_NAME, ids, &quot;userTypes&quot;, userTypes, &quot;statuses&quot;, statuses),</span>
+<span class="fc" id="L1091">                comparing(PersonComparator::getId),</span>
+                mapper);
+    }
+
+    @Override
+    public List&lt;Long&gt; findPKBPersonIdListByUserTypeAndStatusDobIntervalWithoutBirthdayEmailSent(@NotNull Collection&lt;UserType&gt; userTypes,
+                                                                                                @NotNull Collection&lt;UserStatus&gt; statuses,
+                                                                                                @NotNull Instant birthdayFrom,
+                                                                                                @NotNull Instant birthdayTo,
+                                                                                                @NotNull PropertyName propertyName) {
+<span class="pc bpc" id="L1101" title="2 of 4 branches missed.">        if (userTypes.isEmpty() || statuses.isEmpty()) {</span>
+<span class="nc" id="L1102">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="fc" id="L1105">        String idQuery = &quot;SELECT p.id FROM PKBPerson p&quot; +</span>
+                &quot; WHERE p.userType IN (:userTypes)&quot; +
+                &quot; AND p.status IN (:statuses)&quot; +
+                &quot; AND to_date(p.dateOfBirthString, 'yyyy-MM-dd') BETWEEN :birthdayFrom AND :birthdayTo&quot; +
+                &quot;    AND NOT EXISTS (&quot; +
+                &quot;        SELECT 1 FROM PKBPersonProperty prop&quot; +
+                &quot;        WHERE prop.person.id = p.id&quot; +
+                &quot;            AND prop.propertyName = :propName&quot; +
+                &quot;            AND prop.propertyValue = 'true'&quot; +
+                &quot;    )&quot;;
+
+<span class="fc" id="L1116">        Map&lt;String, Object&gt; queryParams = Map.of(</span>
+                &quot;userTypes&quot;, userTypes,
+                &quot;statuses&quot;, statuses,
+<span class="fc" id="L1119">                &quot;birthdayFrom&quot;, Date.from(birthdayFrom),</span>
+<span class="fc" id="L1120">                &quot;birthdayTo&quot;, Date.from(birthdayTo),</span>
+                &quot;propName&quot;, propertyName);
+
+<span class="pc" id="L1123">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder().id((Long) row[0]).firstName(&quot;&quot;).lastName(&quot;&quot;).build();</span>
+<span class="fc" id="L1124">        return retrievePkbPersonIds(idQuery, QueryMetadata.create(), queryParams, comparing(PersonComparator::getId), mapper);</span>
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPKBPersonListByStatusAndUserTypeNotIn(@NotNull Collection&lt;Long&gt; ids,
+                                                                     @NotNull Collection&lt;UserStatus&gt; statuses,
+                                                                     @NotNull Collection&lt;UserType&gt; userTypes,
+                                                                     @NotNull QueryMetadata queryMetadata,
+                                                                     Comparator&lt;PersonComparator&gt; comparator,
+                                                                     Lazy... fields) {
+<span class="nc bnc" id="L1134" title="All 6 branches missed.">        if (ids.isEmpty() || userTypes.isEmpty() || statuses.isEmpty()) {</span>
+<span class="nc" id="L1135">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="nc" id="L1138">        String idAndNameQuery = &quot;SELECT p.id, p.firstName, p.lastName FROM PKBPerson p&quot; +</span>
+                &quot; WHERE p.id IN &quot; + ID_LIST_QUERY_PARAM +
+                &quot; AND p.userType NOT IN (:userTypes)&quot; +
+                &quot; AND p.status IN (:statuses)&quot;;
+
+<span class="nc" id="L1143">        Map&lt;String, Object&gt; queryParams = Map.of(ID_LIST_QUERY_PARAM_NAME, ids, &quot;userTypes&quot;, userTypes, &quot;statuses&quot;, statuses);</span>
+
+<span class="nc" id="L1145">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder()</span>
+<span class="nc" id="L1146">                .id((Long) row[0])</span>
+<span class="nc" id="L1147">                .firstName((String) row[1])</span>
+<span class="nc" id="L1148">                .lastName((String) row[2])</span>
+<span class="nc" id="L1149">                .build();</span>
+
+<span class="nc" id="L1151">        return retrievePkbPersons(</span>
+                idAndNameQuery,
+                queryMetadata,
+                queryParams,
+                comparator,
+                mapper,
+                fields);
+    }
+
+    @Override
+    public List&lt;PKBPerson&gt; findPatientListByPersonIdsAndPatientSearchOptions(@NotNull Collection&lt;Long&gt; patientIds,
+                                                                             @NotNull PatientSearchOptionsDto options) {
+<span class="fc" id="L1163">        QueryMetadata queryMetadata = QueryMetadata.create()</span>
+<span class="fc" id="L1164">                .withOrder(&quot;p.id&quot;, ASC);</span>
+
+<span class="fc" id="L1166">        List&lt;Long&gt; patientIdsFiltered = doFindPatientIdListByPatientSearchOptions(patientIds, options, queryMetadata, comparing(PersonComparator::getId));</span>
+<span class="fc" id="L1167">        return retrievePkbPersonPage(patientIdsFiltered, queryMetadata, options.lazies());</span>
+    }
+
+
+    @Override
+    public List&lt;Long&gt; findPatientIdListByPatientSearchOptions(@NotNull Collection&lt;Long&gt; patientIds, @NotNull PatientSearchOptionsDto options) {
+<span class="fc" id="L1173">        QueryMetadata queryMetadata = QueryMetadata.create()</span>
+<span class="fc" id="L1174">                .withOrder(&quot;p.lastName&quot;, ASC)</span>
+<span class="fc" id="L1175">                .withOrder(&quot;p.firstName&quot;, ASC)</span>
+<span class="fc" id="L1176">                .withOrder(&quot;p.id&quot;, ASC);</span>
+<span class="fc" id="L1177">        return doFindPatientIdListByPatientSearchOptions(patientIds, options, queryMetadata,</span>
+<span class="fc" id="L1178">                comparing(PersonComparator::getLastName).thenComparing(PersonComparator::getFirstName).thenComparing(PersonComparator::getId));</span>
+    }
+
+    private List&lt;Long&gt; doFindPatientIdListByPatientSearchOptions(@NotNull Collection&lt;Long&gt; patientIds, @NotNull PatientSearchOptionsDto options, QueryMetadata queryMetadata, Comparator&lt;PersonComparator&gt; comparator) {
+<span class="fc bfc" id="L1182" title="All 2 branches covered.">        if (patientIds.isEmpty()) {</span>
+<span class="fc" id="L1183">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="fc" id="L1186">        String idAndNameQuery = getIdQueryStringByPatientSearchOptions(options);</span>
+
+<span class="fc" id="L1188">        Map&lt;String, Object&gt; queryParameters = getCommonQueryParameters(options);</span>
+<span class="fc" id="L1189">        queryParameters.put(ID_LIST_QUERY_PARAM_NAME, patientIds);</span>
+<span class="fc bfc" id="L1190" title="All 2 branches covered.">        if (options.maxRecords() != null) {</span>
+<span class="fc" id="L1191">            queryMetadata.withPagination(options.maxRecords(), 0);</span>
+        }
+
+<span class="fc" id="L1194">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder()</span>
+<span class="fc" id="L1195">                .id((Long) row[0])</span>
+<span class="fc" id="L1196">                .firstName((String) row[1])</span>
+<span class="fc" id="L1197">                .lastName((String) row[2])</span>
+<span class="fc" id="L1198">                .build();</span>
+
+<span class="fc" id="L1200">        return retrievePkbPersonIds(idAndNameQuery, queryMetadata, queryParameters, comparator, mapper);</span>
+    }
+
+    @Override
+    public List&lt;Long&gt; findPersonIdsByIdentifier(@NotNull PatientSearchOptionsDto options) {
+<span class="fc" id="L1205">        List&lt;Long&gt; result = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L1207" title="All 2 branches covered.">        if (options.searchId() != null) {</span>
+<span class="fc bfc" id="L1208" title="All 2 branches covered.">            if (SEARCH_ID_TEAM.equals(options.searchIdType())) {</span>
+<span class="fc" id="L1209">                result = em.createQuery(&quot;SELECT tid.personId FROM TeamLevelId tid&quot; +</span>
+                                &quot; WHERE tid.value=:searchId&quot;, Long.class)
+<span class="fc" id="L1211">                        .setParameter(&quot;searchId&quot;, options.searchId())</span>
+<span class="fc" id="L1212">                        .getResultList();</span>
+<span class="fc bfc" id="L1213" title="All 2 branches covered.">            } else if (SEARCH_ID_ORG.equals(options.searchIdType())) {</span>
+<span class="fc" id="L1214">                result = em.createQuery(&quot;SELECT olid.personId FROM OrgLevelId olid&quot; +</span>
+                                &quot; WHERE olid.value=:searchId&quot;, Long.class)
+<span class="fc" id="L1216">                        .setParameter(&quot;searchId&quot;, options.searchId())</span>
+<span class="fc" id="L1217">                        .getResultList();</span>
+<span class="pc bpc" id="L1218" title="1 of 2 branches missed.">            } else if (SEARCH_ID_NATIONAL.equals(options.searchIdType())) {</span>
+<span class="fc" id="L1219">                result = em.createQuery(&quot;SELECT nid.person.id FROM NationalId nid&quot; +</span>
+                                &quot; WHERE nid.value=:searchId&quot;, Long.class)
+<span class="fc" id="L1221">                        .setParameter(&quot;searchId&quot;, options.searchId())</span>
+<span class="fc" id="L1222">                        .getResultList();</span>
+            }
+        }
+<span class="fc" id="L1225">        return result;</span>
+    }
+
+    @NotNull
+    private String getIdQueryStringByPatientSearchOptions(PatientSearchOptionsDto options) {
+<span class="fc" id="L1230">        String personSql = &quot;SELECT p.id, p.firstName, p.lastName FROM PKBPerson p WHERE p.userType = 'PATIENT' AND p.id IN &quot; + ID_LIST_QUERY_PARAM;</span>
+
+        //Add on join clauses to id tables (if used), and additional filters on pkbperson such as name and dob.
+<span class="fc" id="L1233">        personSql = appendCommonQueryStrings(options, personSql, options.searchIdType());</span>
+<span class="fc" id="L1234">        return personSql;</span>
+    }
+
+    private String appendCommonQueryStrings(PatientSearchOptionsDto options, String sql, String searchIdType) {
+<span class="fc" id="L1238">        sql = appendIfNotNull(sql, options.searchEmail(), constructEmailSearchSubquery());</span>
+<span class="fc" id="L1239">        sql = appendIfNotNull(sql, options.searchName(), &quot; AND tsmatch(&quot; + Constants.PKB_PERSON_NAME_SEARCH_INDEXED_EXPRESSION.apply(&quot;p&quot;) + &quot;, to_tsquery('simple',quote_literal(quote_literal(:searchName)) || ':*')) = true&quot;);</span>
+
+<span class="fc bfc" id="L1241" title="All 6 branches covered.">        if (options.searchDobYear() != null &amp;&amp; options.searchDobMonth() != null &amp;&amp; options.searchDobDay() != null) {</span>
+<span class="fc" id="L1242">            sql += &quot; AND p.dateOfBirthString = :fullSearchDateString&quot;;</span>
+        } else {
+<span class="fc" id="L1244">            sql = appendIfNotNull(sql, options.searchDobYear(), &quot; AND CAST(SUBSTRING(p.dateOfBirthString, 1, 4) AS java.lang.Integer) = :searchDobYear&quot;);</span>
+<span class="fc" id="L1245">            sql = appendIfNotNull(sql, options.searchDobMonth(), &quot; AND CAST(SUBSTRING(p.dateOfBirthString, 6, 2) AS java.lang.Integer) = :searchDobMonth&quot;);</span>
+<span class="fc" id="L1246">            sql = appendIfNotNull(sql, options.searchDobDay(), &quot; AND CAST(SUBSTRING(p.dateOfBirthString, 9, 2) AS java.lang.Integer) = :searchDobDay&quot;);</span>
+        }
+<span class="fc" id="L1248">        return sql;</span>
+    }
+
+    private Map&lt;String, Object&gt; getCommonQueryParameters(PatientSearchOptionsDto options) {
+<span class="fc" id="L1252">        Map&lt;String, Object&gt; result = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L1253" title="All 2 branches covered.">        addParameterIfNotNull(result, &quot;searchEmail&quot;, options.searchEmail() == null ? null : options.searchEmail().address());</span>
+<span class="fc" id="L1254">        addParameterIfNotNull(result, &quot;searchName&quot;, options.searchName());</span>
+<span class="fc bfc" id="L1255" title="All 6 branches covered.">        if (options.searchDobYear() != null &amp;&amp; options.searchDobMonth() != null &amp;&amp; options.searchDobDay() != null) {</span>
+<span class="fc" id="L1256">            var fullSearchDateString = String.format(&quot;%04d-%02d-%02d&quot;, options.searchDobYear(), options.searchDobMonth(), options.searchDobDay());</span>
+<span class="fc" id="L1257">            addParameterIfNotNull(result, &quot;fullSearchDateString&quot;, fullSearchDateString);</span>
+<span class="fc" id="L1258">        } else {</span>
+<span class="fc" id="L1259">            addParameterIfNotNull(result, &quot;searchDobYear&quot;, options.searchDobYear());</span>
+<span class="fc" id="L1260">            addParameterIfNotNull(result, &quot;searchDobMonth&quot;, options.searchDobMonth());</span>
+<span class="fc" id="L1261">            addParameterIfNotNull(result, &quot;searchDobDay&quot;, options.searchDobDay());</span>
+        }
+<span class="fc" id="L1263">        return result;</span>
+    }
+
+    @NotNull
+    private String constructEmailSearchSubquery() {
+<span class="fc" id="L1268">        return &quot; AND p.id IN (&quot;</span>
+                + &quot; SELECT pcontact.person.id FROM PersonContact AS pcontact&quot;
+<span class="fc" id="L1270">                + &quot; WHERE pcontact.contactType = '&quot; + ContactType.EMAIL.name() + &quot;'&quot;</span>
+                + &quot; AND LOWER(contactValue) = LOWER(:searchEmail)&quot;
+                + &quot;)&quot;;
+    }
+
+    private List&lt;PKBPerson&gt; retrievePkbPersonPageWithoutPartitions(Collection&lt;Long&gt; personIdPage, String select, Lazy... fields) {
+<span class="fc" id="L1276">        TypedQuery&lt;PKBPerson&gt; personQuery = em.createQuery(</span>
+                        select,
+                        PKBPerson.class)
+<span class="fc" id="L1279">                .setHint(&quot;javax.persistence.fetchgraph&quot;, constructPersonEntityGraph(fields))</span>
+<span class="fc" id="L1280">                .setParameter(ID_LIST_QUERY_PARAM_NAME, personIdPage);</span>
+<span class="fc" id="L1281">        return personQuery.getResultList();</span>
+    }
+
+    private List&lt;PKBPerson&gt; retrievePkbPersonPageInPartitions(Collection&lt;Long&gt; personIdPage, String select, Lazy... fields) {
+<span class="fc" id="L1285">        return DbUtil.getInBatches(personIdPage, configuration.getPKBPersonListFetchSize(), idList -&gt; {</span>
+<span class="fc" id="L1286">            TypedQuery&lt;PKBPerson&gt; query = em.createQuery(select, PKBPerson.class);</span>
+<span class="fc" id="L1287">            query.setParameter(ID_LIST_QUERY_PARAM_NAME, idList);</span>
+<span class="fc" id="L1288">            EntityGraph&lt;PKBPerson&gt; personGraph = constructPersonEntityGraph(fields);</span>
+<span class="fc" id="L1289">            query.setHint(&quot;javax.persistence.fetchgraph&quot;, personGraph);</span>
+<span class="fc" id="L1290">            return query.getResultList();</span>
+        });
+    }
+
+    @NotNull
+    private EntityGraph&lt;PKBPerson&gt; constructPersonEntityGraph(Lazy... fields) {
+<span class="fc" id="L1296">        EntityGraph&lt;PKBPerson&gt; personGraph = em.createEntityGraph(PKBPerson.class);</span>
+<span class="fc" id="L1297">        Arrays.stream(fields)</span>
+<span class="fc" id="L1298">                .map(Lazy::getSubgraph)</span>
+<span class="fc" id="L1299">                .flatMap(Collection::stream)</span>
+<span class="fc" id="L1300">                .filter(StringUtils::isNotBlank)</span>
+<span class="fc" id="L1301">                .forEach(subgraph -&gt; addPersonEntityGraphAttribute(personGraph, subgraph));</span>
+<span class="fc" id="L1302">        personGraph.addAttributeNodes(&quot;optoutDetails&quot;, &quot;emisEsPersonGuid&quot;);</span>
+
+<span class="pc bpc" id="L1304" title="2 of 4 branches missed.">        if (Arrays.stream(fields).anyMatch(f -&gt; f == Lazy.CONTACTS_DEEP)) {</span>
+<span class="nc" id="L1305">            throw new NotYetImplementedException(&quot;This code path will need implementing and testing - add a subgraph for contacts property and add attribute nodes refPerson&quot;);</span>
+        }
+<span class="fc" id="L1307">        return personGraph;</span>
+    }
+
+    private void addPersonEntityGraphAttribute(EntityGraph&lt;PKBPerson&gt; personGraph, String subgraph) {
+<span class="fc bfc" id="L1311" title="All 2 branches covered.">        if (subgraph.contains(&quot;.&quot;)) {</span>
+<span class="fc" id="L1312">            String[] attributePath = SUBGRAPH_ATTRIBUTE_QUALIFIER_REGEX.split(subgraph);</span>
+<span class="pc bpc" id="L1313" title="1 of 2 branches missed.">            if (attributePath.length &gt; 2) {</span>
+<span class="nc" id="L1314">                throw new UnsupportedOperationException(&quot;No subgraphs above 2 levels are supported&quot;);</span>
+            } else {
+<span class="fc" id="L1316">                personGraph.addSubgraph(attributePath[0]).addAttributeNodes(attributePath[1]);</span>
+            }
+<span class="fc" id="L1318">        } else {</span>
+<span class="fc" id="L1319">            personGraph.addAttributeNodes(subgraph);</span>
+        }
+<span class="fc" id="L1321">    }</span>
+
+    @Override
+    public Option&lt;PKBPerson&gt; findPKBPerson(Long id, Lazy... fields) {
+        try {
+<span class="pc bpc" id="L1326" title="1 of 2 branches missed.">            if (id == null) {</span>
+<span class="nc" id="L1327">                return Option.none();</span>
+            }
+<span class="fc" id="L1329">            String select = &quot;SELECT p FROM PKBPerson p&quot;;</span>
+<span class="fc bfc" id="L1330" title="All 2 branches covered.">            if (ArrayUtils.contains(fields, Lazy.CONTACTS_DEEP)</span>
+<span class="fc bfc" id="L1331" title="All 2 branches covered.">                    || ArrayUtils.contains(fields, Lazy.CONTACTS)) {</span>
+<span class="fc" id="L1332">                select += &quot; LEFT JOIN FETCH p.contacts&quot;;</span>
+            }
+<span class="fc bfc" id="L1334" title="All 2 branches covered.">            if (ArrayUtils.contains(fields, Lazy.NATIONAL_AND_LOCAL_IDS)) {</span>
+<span class="fc" id="L1335">                select += &quot; LEFT JOIN FETCH p.nationalIds&quot;;</span>
+            }
+<span class="fc bfc" id="L1337" title="All 2 branches covered.">            if (ArrayUtils.contains(fields, Lazy.PROPERTIES)) {</span>
+<span class="fc" id="L1338">                select += &quot; LEFT JOIN FETCH p.properties&quot;;</span>
+            }
+<span class="fc" id="L1340">            select += &quot; WHERE p.id = :id&quot;;</span>
+<span class="fc" id="L1341">            List&lt;PKBPerson&gt; items = em.createQuery(select, PKBPerson.class).setParameter(&quot;id&quot;, id).getResultList();</span>
+
+<span class="fc bfc" id="L1343" title="All 2 branches covered.">            if (items.isEmpty()) {</span>
+<span class="fc" id="L1344">                return Option.none();</span>
+            } else {
+<span class="fc" id="L1346">                PKBPerson person = items.get(0);</span>
+<span class="fc" id="L1347">                person.fetchLazies(fields);</span>
+<span class="fc" id="L1348">                return Option.of(person);</span>
+            }
+<span class="nc" id="L1350">        } catch (Exception e) {</span>
+<span class="nc" id="L1351">            throw new PKBPluginException(&quot;failed finding pkbperson &quot; + id, e);</span>
+        }
+    }
+
+    @Override
+    public @NotNull PKBPerson getPKBPerson(long userId, Lazy... fields) {
+<span class="fc" id="L1357">        return findPKBPerson(userId, fields).getOrElseThrow(() -&gt; new IllegalStateException(&quot;Could not find person for id: &quot; + userId));</span>
+    }
+
+    @Override
+    public void updateUserStatus(long userId, UserStatus status) {
+        try {
+<span class="fc" id="L1363">            Option&lt;PKBPerson&gt; maybePerson = findPKBPerson(userId);</span>
+<span class="pc bpc" id="L1364" title="1 of 2 branches missed.">            if (maybePerson.isDefined()) {</span>
+<span class="fc" id="L1365">                var person = maybePerson.get();</span>
+<span class="fc" id="L1366">                person.setStatus(status, dateTimeService.now());</span>
+<span class="fc" id="L1367">                mergePkbPerson(person);</span>
+            }
+<span class="nc" id="L1369">        } catch (Exception e) {</span>
+<span class="nc" id="L1370">            throw new RuntimeException(&quot;Exception while updating status for person-&quot; + userId, e);</span>
+<span class="fc" id="L1371">        }</span>
+<span class="fc" id="L1372">    }</span>
+
+    @Override
+    public void updateUserPrimaryContact(long personId, Email email) {
+        try {
+<span class="fc" id="L1377">            String select = &quot;SELECT pc FROM PersonContact pc WHERE pc.person.id = :personId and pc.isPrimary = true&quot;;</span>
+<span class="fc" id="L1378">            Query query = em.createQuery(select);</span>
+<span class="fc" id="L1379">            query.setParameter(&quot;personId&quot;, personId);</span>
+<span class="fc" id="L1380">            PersonContact pc = (PersonContact) query.getSingleResult();</span>
+<span class="fc" id="L1381">            pc.setContactAsEmail(email);</span>
+<span class="fc" id="L1382">            em.merge(pc);</span>
+<span class="nc" id="L1383">        } catch (Exception e) {</span>
+<span class="nc" id="L1384">            throw new RuntimeException(</span>
+                    &quot;Exception while updating primary contact for person-&quot; + personId, e);
+<span class="fc" id="L1386">        }</span>
+<span class="fc" id="L1387">    }</span>
+
+    @Override
+    public void updateLastEmailSent(Long personId, Date emailDate) {
+        try {
+
+<span class="fc" id="L1393">            em.createQuery(&quot;update PKBPerson p set lastEmailSent = :date WHERE id = :personId&quot;)</span>
+<span class="fc" id="L1394">                    .setParameter(&quot;date&quot;, emailDate)</span>
+<span class="fc" id="L1395">                    .setParameter(&quot;personId&quot;, personId)</span>
+<span class="fc" id="L1396">                    .executeUpdate();</span>
+
+<span class="nc" id="L1398">        } catch (Exception e) {</span>
+<span class="nc" id="L1399">            LOGGER.info(&quot;Exception while updating last email date for user&quot;, e);</span>
+<span class="nc" id="L1400">            throw new RuntimeException(&quot;Exception while updating last email date for user-&quot;</span>
+                    + personId, e);
+<span class="fc" id="L1402">        }</span>
+<span class="fc" id="L1403">    }</span>
+
+    /**
+     * @throws IllegalArgumentException if {@code deathTimestamp} is a future time
+     * @throws IllegalStateException    if the person is already in {@link UserStatus#DEAD} status
+     */
+    @Override
+    public void markAsDeceased(PKBPerson patient, Instant deathTimestamp) {
+<span class="fc" id="L1411">        actOnNullDefaultAccountId(patient);</span>
+<span class="fc" id="L1412">        patient.markDeceased(pkbPersonHelper.validateDeathTimestamp(deathTimestamp));</span>
+<span class="fc" id="L1413">        mergePkbPerson(patient);</span>
+<span class="fc" id="L1414">        changeNewsletterFlag(patient, false);</span>
+<span class="fc" id="L1415">    }</span>
+
+    private void changeNewsletterFlag(PKBPerson patient, boolean newValue) {
+<span class="fc" id="L1418">        PKBPersonProperty property = patient.getProperties().stream()</span>
+<span class="fc bfc" id="L1419" title="All 2 branches covered.">                .filter(prop -&gt; EMAIL_NEWS_LETTER == prop.getPropertyName())</span>
+<span class="fc" id="L1420">                .findFirst()</span>
+<span class="fc" id="L1421">                .orElse(new PKBPersonProperty(EMAIL_NEWS_LETTER));</span>
+<span class="fc" id="L1422">        property.setPropertyValue(Boolean.valueOf(newValue).toString());</span>
+<span class="pc bpc" id="L1423" title="1 of 2 branches missed.">        if (property.getId() != null) {</span>
+<span class="fc" id="L1424">            em.merge(property);</span>
+        } else {
+<span class="nc" id="L1426">            em.persist(property);</span>
+        }
+<span class="fc" id="L1428">    }</span>
+
+    @Override
+    public void markNotDeceased(PKBPerson patient) {
+<span class="fc" id="L1432">        actOnNullDefaultAccountId(patient);</span>
+<span class="fc" id="L1433">        patient.markNotDeceased();</span>
+<span class="fc" id="L1434">        mergePkbPerson(patient);</span>
+<span class="fc" id="L1435">        changeNewsletterFlag(patient, true);</span>
+<span class="fc" id="L1436">    }</span>
+
+    @Override
+    public List&lt;PKBPerson&gt; getPKBPersonListByHumanUUID(@NotNull String humanUUID, Lazy... fields) {
+<span class="fc" id="L1440">        String idQuery = &quot;SELECT p.id FROM PKBPerson p WHERE humanUUID = :humanUUID&quot;;</span>
+<span class="pc" id="L1441">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder().id((Long) row[0]).firstName(&quot;&quot;).lastName(&quot;&quot;).build();</span>
+<span class="fc" id="L1442">        return retrievePkbPersons(idQuery, QueryMetadata.create().withOrder(&quot;id&quot;, ASC), Map.of(&quot;humanUUID&quot;, humanUUID), comparing(PersonComparator::getId), mapper, fields);</span>
+    }
+
+    @Override
+    @SuppressWarnings(&quot;unchecked&quot;)
+    public List&lt;String&gt; getHumanUUIDListForMultiplePKBPerson() {
+<span class="nc" id="L1448">        String select = &quot;SELECT p.humanUUID, COUNT(p.humanUUID) FROM PKBPerson p WHERE p.humanUUID IS NOT NULL&quot;</span>
+                + &quot; GROUP BY p.humanUUID HAVING COUNT(p.humanUUID) &gt; 1&quot;;
+<span class="nc" id="L1450">        Query query = em.createQuery(select);</span>
+<span class="nc" id="L1451">        List&lt;Object[]&gt; queryResult = query.getResultList();</span>
+<span class="nc bnc" id="L1452" title="All 2 branches missed.">        if (queryResult == null) {</span>
+<span class="nc" id="L1453">            return new ArrayList&lt;&gt;();</span>
+        }
+<span class="nc" id="L1455">        return queryResult.stream().map(objects -&gt; (String) objects[0]).collect(toList());</span>
+    }
+
+    @Override
+    @Deprecated
+    public PKBPersonIdentifierPair getIdentifierPair(long internalPersonId) {
+<span class="fc" id="L1461">        TypedQuery&lt;PKBPersonIdentifierPair&gt; query = em.createQuery(&quot;SELECT pair FROM PKBPersonIdentifierPair pair WHERE id = :internalPersonId&quot;, PKBPersonIdentifierPair.class);</span>
+<span class="fc" id="L1462">        query.setParameter(&quot;internalPersonId&quot;, internalPersonId);</span>
+<span class="fc" id="L1463">        return query.getSingleResult();</span>
+    }
+
+    /**
+     * This method should be deleted ones we made sure that defaultAccountId is reliably populated.
+     */
+    private void actOnNullDefaultAccountId(PKBPerson user) {
+<span class="pc bpc" id="L1470" title="1 of 2 branches missed.">        if (user.getDefaultAccountId() == null) {</span>
+<span class="nc bnc" id="L1471" title="All 2 branches missed.">            if (configuration.isExceptionForNullDefaultAccountIdEnabled()) {</span>
+<span class="nc" id="L1472">                throw new DefaultAccountIdIsNullException();</span>
+            }
+
+<span class="nc" id="L1475">            LOGGER.error(GDE_1541_ACTIVELY_NULLING_OUT_DEFAULT_ACCOUNT_ID,</span>
+<span class="nc" id="L1476">                    filter(new RuntimeException(&quot;Actively nulling out default account id for personId &quot; + user.getId()).fillInStackTrace()));</span>
+        }
+<span class="fc" id="L1478">    }</span>
+
+    @Override
+    public List&lt;PKBPerson&gt; findContactablePatients(Collection&lt;Long&gt; patientIds, int batchSize) {
+<span class="pc bpc" id="L1482" title="1 of 2 branches missed.">        if (patientIds.isEmpty()) {</span>
+<span class="nc" id="L1483">            return new ArrayList&lt;&gt;();</span>
+        }
+
+<span class="fc" id="L1486">        String idQuery = &quot; SELECT DISTINCT p.id &quot; +</span>
+                &quot; FROM PKBPerson p&quot; +
+                &quot; LEFT JOIN p.contacts pc&quot; +
+                &quot; WHERE p.userType = :userType&quot; +
+                &quot; AND pc.contactType = :contactType&quot; +
+                &quot; AND pc.isPrimary = true&quot; +
+                &quot; AND pc.confirmed = true&quot; +
+                &quot; AND p.status = :userStatus&quot; +
+                &quot; AND p.id IN &quot; + ID_LIST_QUERY_PARAM;
+
+<span class="fc" id="L1496">        QueryMetadata queryMetadata = QueryMetadata.create().withOrder(&quot;p.id&quot;, ASC);</span>
+
+<span class="pc bpc" id="L1498" title="1 of 2 branches missed.">        if (batchSize &gt; 0) {</span>
+<span class="fc" id="L1499">            queryMetadata.withPagination(batchSize, 0);</span>
+        }
+
+<span class="fc" id="L1502">        Map&lt;String, Object&gt; args = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L1503">        args.put(ID_LIST_QUERY_PARAM_NAME, patientIds);</span>
+<span class="fc" id="L1504">        args.put(&quot;userType&quot;, UserType.PATIENT);</span>
+<span class="fc" id="L1505">        args.put(&quot;contactType&quot;, ContactType.EMAIL);</span>
+<span class="fc" id="L1506">        args.put(&quot;userStatus&quot;, UserStatus.EMAIL_CONFIRMED);</span>
+
+<span class="pc" id="L1508">        Function&lt;Object[], PersonComparator&gt; mapper = row -&gt; ImmutablePersonComparator.builder().id((Long) row[0]).firstName(&quot;&quot;).lastName(&quot;&quot;).build();</span>
+<span class="fc" id="L1509">        return retrievePkbPersons(idQuery, queryMetadata, args, comparing(PersonComparator::getId), mapper, Lazy.CONTACTS);</span>
+    }
+
+    private String appendIfNotNull(String query, Object arg, String toAppend) {
+<span class="fc bfc" id="L1513" title="All 2 branches covered.">        if (arg != null) {</span>
+<span class="fc" id="L1514">            query += toAppend;</span>
+        }
+<span class="fc" id="L1516">        return query;</span>
+    }
+
+    private &lt;T&gt; void addParameterIfNotNull(Map&lt;String, Object&gt; parameterMap, String argName, Object arg) {
+<span class="fc bfc" id="L1520" title="All 2 branches covered.">        if (arg != null) {</span>
+<span class="fc" id="L1521">            parameterMap.put(argName, arg);</span>
+        }
+<span class="fc" id="L1523">    }</span>
+
+    @Override
+    @NotNull
+    public List&lt;String&gt; findPKBPersonEmailList(@NotNull List&lt;Long&gt; personIds) {
+<span class="pc bpc" id="L1528" title="1 of 2 branches missed.">        if (personIds.isEmpty()) {</span>
+<span class="nc" id="L1529">            return new ArrayList&lt;&gt;();</span>
+        }
+<span class="fc" id="L1531">        return DbUtil.getInBatches(personIds, configuration.getPKBPersonListFetchSize(),</span>
+<span class="fc" id="L1532">                patientIdBatch -&gt; em.createQuery(&quot;SELECT DISTINCT pc.contactValue FROM PersonContact pc&quot; +</span>
+                                &quot; WHERE pc.person.id IN (:patientIdBatch)&quot; +
+                                &quot; AND pc.contactType = :contactType&quot;, String.class)
+<span class="fc" id="L1535">                        .setParameter(&quot;patientIdBatch&quot;, patientIdBatch)</span>
+<span class="fc" id="L1536">                        .setParameter(&quot;contactType&quot;, ContactType.EMAIL)</span>
+<span class="fc" id="L1537">                        .getResultList());</span>
+    }
+
+    @Override
+    public void setChildBirthdayEmailProperty(PKBPerson patient, PropertyName propertyName) {
+        // Try to find the correct property
+<span class="fc bfc" id="L1543" title="All 2 branches covered.">        for (PKBPersonProperty prop : patient.getProperties()) {</span>
+<span class="pc bpc" id="L1544" title="1 of 2 branches missed.">            if (propertyName == prop.getPropertyName()) {</span>
+<span class="nc" id="L1545">                prop.setPropertyValue(Boolean.TRUE.toString());</span>
+<span class="nc" id="L1546">                em.merge(prop);</span>
+<span class="nc" id="L1547">                return;</span>
+            }
+<span class="fc" id="L1549">        }</span>
+
+        // If we didn't find the property, create it
+<span class="fc" id="L1552">        PKBPersonProperty prop = new PKBPersonProperty();</span>
+<span class="fc" id="L1553">        prop.setPropertyName(propertyName);</span>
+<span class="fc" id="L1554">        prop.setPerson(patient);</span>
+<span class="fc" id="L1555">        patient.addProperty(prop);</span>
+<span class="fc" id="L1556">        prop.setPropertyValue(Boolean.TRUE.toString());</span>
+<span class="fc" id="L1557">        em.persist(prop);</span>
+<span class="fc" id="L1558">    }</span>
+
+    @Override
+    public void savePatientOptOut(PatientOptOut optoutDetails) {
+<span class="fc" id="L1562">        em.merge(optoutDetails);</span>
+<span class="fc" id="L1563">    }</span>
+
+    @Override
+    public void saveUserCredentials(long resetUserId, UUID passwordDocId) {
+<span class="fc" id="L1567">        var resetUser = getPKBPerson(resetUserId);</span>
+<span class="fc" id="L1568">        resetUser.setPwdAccessDocumentMetadataId(passwordDocId);</span>
+<span class="fc" id="L1569">        em.merge(resetUser);</span>
+<span class="fc" id="L1570">    }</span>
+
+    /**
+     * This is temporarily required because updatePKBPerson(...) is not useable without a valid
+     * {@link com.pkb.app.entity.LoggedInEHRRequestContext} and from both
+     * StartLetterInvitedPatientActivationAction.activatePatient() and
+     * HL7ApiHelper.updatePatientDemographics(...) this is not possible.
+     *
+     * Note: this is the same as the EJB previously did.
+     */
+    @Override
+    public void clearPwdAccessDocumentMetadataId(@NotNull PKBPerson person) {
+<span class="fc" id="L1582">        person.setPwdAccessDocumentMetadataId(null);</span>
+<span class="fc" id="L1583">        em.merge(person);</span>
+<span class="fc" id="L1584">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

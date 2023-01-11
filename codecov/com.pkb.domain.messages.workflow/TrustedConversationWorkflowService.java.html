@@ -1,0 +1,373 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TrustedConversationWorkflowService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.messages.workflow</a> &gt; <span class="el_source">TrustedConversationWorkflowService.java</span></div><h1>TrustedConversationWorkflowService.java</h1><pre class="source lang-java linenums">package com.pkb.domain.messages.workflow;
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.entity.mapper.ConversationWorkflowMapper;
+import com.pkb.datamodel.messages.workflow.ConversationWorkflow;
+import com.pkb.datamodel.messages.workflow.ConversationWorkflowExisting;
+import com.pkb.datamodel.messages.workflow.ConversationWorkflowNew;
+import com.pkb.datamodel.messages.workflow.ImmutableConversationWorkflowExisting;
+import com.pkb.datamodel.messages.workflow.ImmutableConversationWorkflowNew;
+import com.pkb.entities.pub.PublicConversationWorkflow;
+import com.pkb.repository.ConversationWorkflowRepository;
+import io.prometheus.client.Counter;
+import io.vavr.control.Option;
+import org.hibernate.exception.ConstraintViolationException;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import javax.transaction.Transactional;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.slf4j.LoggerFactory.getLogger;
+
+/**
+ * Trusted: Authorization is assumed to be checked prior to calling this service
+ */
+public class TrustedConversationWorkflowService {
+
+<span class="fc" id="L39">    private static Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+<span class="fc" id="L41">    private static final Counter ARCHIVED_COUNTER = Counter.build()</span>
+<span class="fc" id="L42">            .name(&quot;pkb_phr_conversation_workflow_archived&quot;)</span>
+<span class="fc" id="L43">            .help(&quot;Number of times a conversation got archived&quot;)</span>
+<span class="fc" id="L44">            .register();</span>
+
+<span class="fc" id="L46">    private static final Counter UNARCHIVED_COUNTER = Counter.build()</span>
+<span class="fc" id="L47">            .name(&quot;pkb_phr_conversation_workflow_unarchived&quot;)</span>
+<span class="fc" id="L48">            .help(&quot;Number of times an archived conversation got unarchived&quot;)</span>
+<span class="fc" id="L49">            .register();</span>
+
+<span class="fc" id="L51">    private static final Counter ASSIGNED_COUNTER = Counter.build()</span>
+<span class="fc" id="L52">            .name(&quot;pkb_phr_conversation_workflow_assigned&quot;)</span>
+<span class="fc" id="L53">            .help(&quot;Number of times a conversation got assigned&quot;)</span>
+<span class="fc" id="L54">            .register();</span>
+
+<span class="fc" id="L56">    private static final Counter UNASSIGNED_COUNTER = Counter.build()</span>
+<span class="fc" id="L57">            .name(&quot;pkb_phr_conversation_workflow_unassigned&quot;)</span>
+<span class="fc" id="L58">            .help(&quot;Number of times an assigned conversation got unassigned&quot;)</span>
+<span class="fc" id="L59">            .register();</span>
+
+    private final PhrConfig config;
+    private final ConversationWorkflowRepository repository;
+    private final ConversationWorkflowMapper mapper;
+    private final DateTimeService dateTimeService;
+
+    public TrustedConversationWorkflowService(PhrConfig config,
+                                              ConversationWorkflowRepository repository,
+                                              ConversationWorkflowMapper mapper,
+<span class="fc" id="L69">                                              DateTimeService dateTimeService) {</span>
+<span class="fc" id="L70">        this.config = config;</span>
+<span class="fc" id="L71">        this.repository = repository;</span>
+<span class="fc" id="L72">        this.mapper = mapper;</span>
+<span class="fc" id="L73">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L74">    }</span>
+
+    /**
+     * Archives a conversation.
+     *
+     * @param conversationId        the conversation to archive
+     * @param teamId                the team for which to archive the conversation
+     * @param loggedInPersonId      the Id of the logged in PkbPerson
+     * @param optimisticLockVersion the last known lock version, or OptionalInt.EMPTY if no existing record
+     * @return Optional of the persisted ConversationWorkflow object. If the feature is not enabled
+     * this will return Optional.empty().
+     * @throws ConstraintViolationException              if two or more users attempt this simultaneously and both try to create a new record
+     * @throws javax.persistence.OptimisticLockException if two or more users attempt this simulatenously with an existing record
+     */
+    @Transactional
+    public Optional&lt;ConversationWorkflowExisting&gt; archiveConversation(UUID conversationId, long teamId, long loggedInPersonId, OptionalInt optimisticLockVersion) {
+<span class="fc" id="L90">        return archiveFeatureSwitch(() -&gt; {</span>
+
+<span class="fc" id="L92">            ConversationWorkflow cw = fetchOrCreateNew(conversationId, teamId, loggedInPersonId, optimisticLockVersion);</span>
+<span class="fc" id="L93">            ConversationWorkflow update = null;</span>
+
+<span class="pc bpc" id="L95" title="1 of 4 branches missed.">            if (!cw.isArchived() &amp;&amp; optimisticLockVersion.isPresent()) {</span>
+<span class="fc" id="L96">                update = ImmutableConversationWorkflowExisting.copyOf((ConversationWorkflowExisting) cw)</span>
+<span class="fc" id="L97">                        .withOptimisticLockVersion(optimisticLockVersion.getAsInt())</span>
+<span class="fc" id="L98">                        .withArchived(true)</span>
+<span class="fc" id="L99">                        .withArchiveChangeDate(dateTimeService.now());</span>
+            }
+
+<span class="fc bfc" id="L102" title="All 2 branches covered.">            if (!optimisticLockVersion.isPresent()) {</span>
+<span class="fc" id="L103">                update = ImmutableConversationWorkflowNew.copyOf((ConversationWorkflowNew) cw)</span>
+<span class="fc" id="L104">                        .withArchived(true)</span>
+<span class="fc" id="L105">                        .withArchiveChangeDate(dateTimeService.now());</span>
+            }
+
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">            if (update != null) {</span>
+<span class="fc" id="L109">                ConversationWorkflowExisting result = saveAndFlush(update);</span>
+<span class="fc" id="L110">                ARCHIVED_COUNTER.inc();</span>
+<span class="fc" id="L111">                LOGGER.info(&quot;archiveConversation performed by personId: {} on conversationId: {}, for teamId: {}&quot;, loggedInPersonId, conversationId, teamId);</span>
+<span class="fc" id="L112">                return Optional.of(result);</span>
+            }
+
+<span class="nc" id="L115">            return Optional.of((ConversationWorkflowExisting) cw);</span>
+<span class="fc" id="L116">        }, Optional.empty());</span>
+    }
+
+    /**
+     * Flush required to synchronize with db, otherwise the returned entity doesn't have an incremented version field
+     */
+    private ConversationWorkflowExisting saveAndFlush(ConversationWorkflow cw) {
+<span class="fc" id="L123">        PublicConversationWorkflow saved = repository.saveAndFlush(mapper.dataModelToEntity(cw));</span>
+<span class="fc" id="L124">        return mapper.entityToDataModel(saved);</span>
+    }
+
+    private ConversationWorkflow fetchOrCreateNew(UUID conversationId, long teamId, long loggedInPersonId, OptionalInt optimisticLockVersion) {
+<span class="fc bfc" id="L128" title="All 2 branches covered.">        if (optimisticLockVersion.isPresent()) {</span>
+<span class="fc" id="L129">            return repository.findOptionalByConversationIdAndTeamId(conversationId, teamId)</span>
+<span class="fc" id="L130">                    .map(mapper::entityToDataModel)</span>
+<span class="fc" id="L131">                    .orElseThrow(missingWorkflowRecordExceptionSupplier(conversationId, teamId, loggedInPersonId, optimisticLockVersion));</span>
+        }
+<span class="fc" id="L133">        return createEmptyConversationWorkflow(conversationId, teamId);</span>
+    }
+
+    @NotNull
+    private Supplier&lt;IllegalStateException&gt; missingWorkflowRecordExceptionSupplier(UUID conversationId, long teamId, long loggedInPersonId, OptionalInt optimisticLockVersion) {
+<span class="pc" id="L138">        return () -&gt; new IllegalStateException(format(&quot;Workflow expected: personId %s conversation %s team %s lockVersion %s&quot;,</span>
+<span class="nc" id="L139">                loggedInPersonId, conversationId, teamId, optimisticLockVersion));</span>
+    }
+
+    /**
+     * For now in some cases (unarchiving/unassigning) we'll just treat a missing optimisticLockVersion as an illegal state.
+     * We could just create a record anyway, but it'll just have the default values.
+     */
+    @NotNull
+    private Supplier&lt;IllegalStateException&gt; missingWorkflowVersionExceptionSupplier(UUID conversationId, long teamId, long loggedInPersonId, OptionalInt optimisticLockVersion) {
+<span class="pc" id="L148">        return () -&gt; new IllegalStateException(format(&quot;lockVersion expected: personId %s conversation %s team %s lockVersion %s&quot;,</span>
+<span class="nc" id="L149">                loggedInPersonId, conversationId, teamId, optimisticLockVersion));</span>
+    }
+
+    private ConversationWorkflow createEmptyConversationWorkflow(UUID conversationId, long teamId) {
+<span class="fc" id="L153">        return ImmutableConversationWorkflowNew.builder()</span>
+<span class="fc" id="L154">                .conversationId(conversationId)</span>
+<span class="fc" id="L155">                .teamId(teamId)</span>
+<span class="fc" id="L156">                .archived(false)</span>
+<span class="fc" id="L157">                .build();</span>
+    }
+
+    /**
+     * Unarchives a conversation
+     *
+     * @param conversationId        the conversation to unarchive
+     * @param teamId                the team for which to unarchive the conversation
+     * @param loggedInPersonId      the Id of the logged in PkbPerson
+     * @param optimisticLockVersion the last known lock version, or OptionalInt.EMPTY if no existing record
+     * @return Optional of the persisted ConversationWorkflow object. If the feature is not enabled
+     * this will return Optional.empty().
+     * @throws javax.persistence.OptimisticLockException if two or more users attempt this simulatenously with an existing record
+     */
+    @Transactional
+    public Optional&lt;ConversationWorkflowExisting&gt; unarchiveConversation(UUID conversationId, long teamId, long loggedInPersonId, OptionalInt optimisticLockVersion) {
+<span class="fc" id="L173">        return archiveFeatureSwitch(() -&gt; {</span>
+
+<span class="fc" id="L175">            int providedLockVersion = optimisticLockVersion.orElseThrow(missingWorkflowVersionExceptionSupplier(conversationId, teamId, loggedInPersonId, optimisticLockVersion));</span>
+
+<span class="fc" id="L177">            Optional&lt;ConversationWorkflowExisting&gt; ocw = repository.findOptionalByConversationIdAndTeamId(conversationId, teamId).map(mapper::entityToDataModel);</span>
+<span class="fc" id="L178">            return ocw.map(cw -&gt; {</span>
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">                if (cw.isArchived()) {</span>
+<span class="fc" id="L180">                    ConversationWorkflowExisting update = ImmutableConversationWorkflowExisting.copyOf(cw)</span>
+<span class="fc" id="L181">                            .withOptimisticLockVersion(providedLockVersion)</span>
+<span class="fc" id="L182">                            .withArchived(false)</span>
+<span class="fc" id="L183">                            .withArchiveChangeDate(dateTimeService.now());</span>
+
+<span class="fc" id="L185">                    ConversationWorkflowExisting saved = saveAndFlush(update);</span>
+<span class="fc" id="L186">                    UNARCHIVED_COUNTER.inc();</span>
+<span class="fc" id="L187">                    LOGGER.info(&quot;unarchiveConversation performed by personId: {} on conversationId: {}, for teamId: {}&quot;, loggedInPersonId, conversationId, teamId);</span>
+<span class="fc" id="L188">                    return Optional.of(saved);</span>
+                }
+<span class="nc" id="L190">                return Optional.of(cw);</span>
+<span class="fc" id="L191">            }).orElse(Optional.empty());</span>
+<span class="fc" id="L192">        }, Optional.empty());</span>
+    }
+
+    /**
+     * Unarchives a conversation across all teams without verifiying locks.
+     * Useful e.g. when a patient adds a new message to an archived conversation.
+     *
+     * @param conversationId   the conversation to unarchive
+     * @param loggedInPersonId the Id of the logged in PkbPerson
+     * @return int the count of records updated
+     */
+    @Transactional
+    public int forceUnarchiveConversationForAllTeams(UUID conversationId, long loggedInPersonId) {
+<span class="fc" id="L205">        return archiveFeatureSwitch(() -&gt; {</span>
+<span class="fc" id="L206">            int count = repository.forceUnarchiveConversation(conversationId, dateTimeService.now());</span>
+<span class="fc" id="L207">            UNARCHIVED_COUNTER.inc(count);</span>
+<span class="fc" id="L208">            LOGGER.info(&quot;unarchiveConversation called by personId: {} unarchived {} for conversationId: {}&quot;, loggedInPersonId, count, conversationId);</span>
+<span class="fc" id="L209">            return count;</span>
+<span class="fc" id="L210">        }, 0);</span>
+    }
+
+    /**
+     * Assignes a person to a conversation
+     *
+     * @param conversationId        the conversation to assign
+     * @param teamId                the team for which to assign the conversation
+     * @param personId              the person id to assign
+     * @param optimisticLockVersion the last known lock version, or OptionalInt.EMPTY if no existing record
+     * @return Optional of the persisted ConversationWorkflow object. If the feature is not enabled
+     * then this will return Optional.empty().
+     * @throws ConstraintViolationException              if two or more users attempt this simultaneously and both try to create a new record
+     * @throws javax.persistence.OptimisticLockException if two or more users attempt this simulatenously with an existing record
+     */
+    @Transactional
+    public Optional&lt;ConversationWorkflowExisting&gt; assignConversationToPersonId(
+            UUID conversationId, long teamId, long personId, OptionalInt optimisticLockVersion) {
+<span class="fc" id="L228">        return assignFeatureSwitch(() -&gt; {</span>
+
+<span class="fc" id="L230">            ConversationWorkflow cw = fetchOrCreateNew(conversationId, teamId, personId, optimisticLockVersion);</span>
+<span class="fc" id="L231">            ConversationWorkflow update = null;</span>
+
+<span class="pc bpc" id="L233" title="1 of 4 branches missed.">            if (cw.getAssignedPersonId().filter(p -&gt; p.equals(personId)).isEmpty() &amp;&amp; optimisticLockVersion.isPresent()) {</span>
+<span class="fc" id="L234">                update = ImmutableConversationWorkflowExisting.copyOf((ConversationWorkflowExisting) cw)</span>
+<span class="fc" id="L235">                        .withOptimisticLockVersion(optimisticLockVersion.getAsInt())</span>
+<span class="fc" id="L236">                        .withAssignedPersonId(personId)</span>
+<span class="fc" id="L237">                        .withAssignChangeDate(dateTimeService.now());</span>
+            }
+
+<span class="fc bfc" id="L240" title="All 2 branches covered.">            if (!optimisticLockVersion.isPresent()) {</span>
+<span class="fc" id="L241">                update = ImmutableConversationWorkflowNew.copyOf((ConversationWorkflowNew) cw)</span>
+<span class="fc" id="L242">                        .withAssignedPersonId(personId)</span>
+<span class="fc" id="L243">                        .withAssignChangeDate(dateTimeService.now());</span>
+            }
+
+<span class="pc bpc" id="L246" title="1 of 2 branches missed.">            if (update != null) {</span>
+<span class="fc" id="L247">                ConversationWorkflowExisting saved = saveAndFlush(update);</span>
+<span class="fc" id="L248">                ASSIGNED_COUNTER.inc();</span>
+<span class="fc" id="L249">                LOGGER.info(&quot;assignConversationToPersonId performed by personId: {} on conversationId: {}, for teamId: {}&quot;, personId, conversationId, teamId);</span>
+<span class="fc" id="L250">                return Optional.of(saved);</span>
+            }
+
+<span class="nc" id="L253">            return Optional.of((ConversationWorkflowExisting) cw);</span>
+<span class="fc" id="L254">        }, Optional.empty());</span>
+    }
+
+    /**
+     * Unassigns the assigned person from a conversation
+     *
+     * @param conversationId        the conversation to assign
+     * @param teamId                the team for which to assign the conversation
+     * @param loggedInPersonId      the Id of the logged in PkbPerson
+     * @param optimisticLockVersion the last known lock version, or OptionalInt.EMPTY if no existing record
+     * @return Optional of the persisted ConversationWorkflow object. If the feature is not enabled
+     * this will return Optional.empty().
+     * @throws javax.persistence.OptimisticLockException if two or more users attempt this simulatenously with an existing record
+     */
+    @Transactional
+    public Optional&lt;ConversationWorkflowExisting&gt; unassignConversation(UUID conversationId, long teamId, long loggedInPersonId, OptionalInt optimisticLockVersion) {
+<span class="fc" id="L270">        return assignFeatureSwitch(() -&gt; {</span>
+
+<span class="fc" id="L272">            int providedLockVersion = optimisticLockVersion.orElseThrow(</span>
+<span class="fc" id="L273">                    missingWorkflowVersionExceptionSupplier(conversationId, teamId, loggedInPersonId, optimisticLockVersion));</span>
+
+<span class="fc" id="L275">            Optional&lt;ConversationWorkflowExisting&gt; ocw = repository.findOptionalByConversationIdAndTeamId(conversationId, teamId)</span>
+<span class="fc" id="L276">                    .map(mapper::entityToDataModel);</span>
+<span class="fc" id="L277">            return ocw.map(cw -&gt; {</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">                if (cw.getAssignedPersonId().isDefined()) {</span>
+<span class="fc" id="L279">                    ConversationWorkflowExisting update = ImmutableConversationWorkflowExisting.copyOf(cw)</span>
+<span class="fc" id="L280">                            .withOptimisticLockVersion(providedLockVersion)</span>
+<span class="fc" id="L281">                            .withAssignedPersonId(Option.none())</span>
+<span class="fc" id="L282">                            .withAssignChangeDate(dateTimeService.now());</span>
+
+<span class="fc" id="L284">                    ConversationWorkflowExisting saved = saveAndFlush(update);</span>
+<span class="fc" id="L285">                    UNASSIGNED_COUNTER.inc();</span>
+<span class="fc" id="L286">                    LOGGER.info(&quot;unassignConversation performed by personId: {} on conversationId: {}, for teamId: {}&quot;, loggedInPersonId, conversationId, teamId);</span>
+<span class="fc" id="L287">                    return Optional.of(saved);</span>
+                }
+<span class="nc" id="L289">                return Optional.of(cw);</span>
+<span class="fc" id="L290">            }).orElse(Optional.empty());</span>
+<span class="fc" id="L291">        }, Optional.empty());</span>
+    }
+
+    /**
+     * Unassigns this person from any/all conversations without verifiying lock
+     *
+     * @param personId         the person to unassign
+     * @param loggedInPersonId the Id of the logged in PkbPerson
+     * @return int The count of records unassigned
+     */
+    @Transactional
+    public int forceUnassignAllConversationsFromPersonId(long personId, long loggedInPersonId) {
+<span class="fc" id="L303">        return assignFeatureSwitch(() -&gt; {</span>
+<span class="fc" id="L304">            int count = repository.forceUnassignAllConversationsFromPersonId(personId, dateTimeService.now());</span>
+<span class="fc" id="L305">            UNASSIGNED_COUNTER.inc(count);</span>
+<span class="fc" id="L306">            LOGGER.info(&quot;unassignConversation performed by personId {} unassigned {} for personId: {}&quot;, loggedInPersonId, count, personId);</span>
+<span class="fc" id="L307">            return count;</span>
+<span class="fc" id="L308">        }, 0);</span>
+    }
+
+    /**
+     * Unassigns this person from a specific conversation without verifiying lock
+     *
+     * @param conversationId   the conversation to unassign
+     * @param personId         the person to unassign
+     * @param loggedInPersonId the Id of the logged in PkbPerson
+     * @return int The count of records unassigned
+     */
+    @Transactional
+    public int forceUnassignConversationFromPersonId(UUID conversationId, long personId, long loggedInPersonId) {
+<span class="fc" id="L321">        return assignFeatureSwitch(() -&gt; {</span>
+<span class="fc" id="L322">            int count = repository.forceUnassignConversationFromPersonId(conversationId, personId, dateTimeService.now());</span>
+<span class="fc" id="L323">            UNASSIGNED_COUNTER.inc(count);</span>
+<span class="fc" id="L324">            LOGGER.info(&quot;unassignConversation performed by personId {} unassigned {} for personId: {}&quot;, loggedInPersonId, count, personId);</span>
+<span class="fc" id="L325">            return count;</span>
+<span class="fc" id="L326">        }, 0);</span>
+    }
+
+    public Optional&lt;ConversationWorkflowExisting&gt; findConversationWorkflow(UUID conversationId, long teamId) {
+<span class="fc" id="L330">        return archiveOrAssignFeatureSwitch(() -&gt; repository.findOptionalByConversationIdAndTeamId(conversationId, teamId).map(mapper::entityToDataModel), Optional.empty());</span>
+    }
+
+    public Map&lt;UUID, ConversationWorkflowExisting&gt; findConversationWorkflows(Collection&lt;UUID&gt; conversationIds, long teamId) {
+<span class="fc" id="L334">        return archiveOrAssignFeatureSwitch(() -&gt; {</span>
+<span class="fc bfc" id="L335" title="All 2 branches covered.">            if (conversationIds.isEmpty()) {</span>
+<span class="fc" id="L336">                return Collections.emptyMap();</span>
+            }
+
+<span class="fc" id="L339">            return repository.findMultiple(conversationIds, teamId).stream()</span>
+<span class="fc" id="L340">                    .map(mapper::entityToDataModel)</span>
+<span class="fc" id="L341">                    .collect(Collectors.toMap(ConversationWorkflow::getConversationId, Function.identity()));</span>
+<span class="fc" id="L342">        }, Collections.emptyMap());</span>
+    }
+
+    private &lt;T&gt; T archiveFeatureSwitch(Supplier&lt;T&gt; function, T orElse) {
+<span class="fc" id="L346">        return featureSwitch(config.isConversationArchiveEnabled(), &quot;conversation archive&quot;, function, orElse);</span>
+    }
+
+    private &lt;T&gt; T assignFeatureSwitch(Supplier&lt;T&gt; function, T orElse) {
+<span class="fc" id="L350">        return featureSwitch(config.isConversationAssignEnabled(), &quot;conversation assign&quot;, function, orElse);</span>
+    }
+
+    private &lt;T&gt; T archiveOrAssignFeatureSwitch(Supplier&lt;T&gt; function, T orElse) {
+<span class="pc bpc" id="L354" title="3 of 4 branches missed.">        return featureSwitch(config.isConversationArchiveEnabled() || config.isConversationAssignEnabled(),</span>
+                &quot;conversation archive and assign&quot;, function, orElse);
+    }
+
+    private &lt;T&gt; T featureSwitch(boolean featureEnabled, String featureName, Supplier&lt;T&gt; function, T orElse) {
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">        if (featureEnabled) {</span>
+            try {
+<span class="fc" id="L361">                return function.get();</span>
+<span class="nc" id="L362">            } catch (Exception e) {</span>
+<span class="nc" id="L363">                LOGGER.error(&quot;PHRZ-730 Workflow action {} failed! Reason: &quot;, featureName, e);</span>
+<span class="nc" id="L364">                throw e;</span>
+            }
+        } else {
+<span class="nc" id="L367">            LOGGER.info(&quot;The {} feature is disabled. This method will do nothing.&quot;, featureName);</span>
+<span class="nc" id="L368">            return orElse;</span>
+        }
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OrgMigrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration.migrators</a> &gt; <span class="el_source">OrgMigrator.java</span></div><h1>OrgMigrator.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration.migrators;
+
+import com.pkb.entities.enums.FhirStoreSyncSourceTable;
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.entities.pub.PublicOrg;
+import com.pkb.entities.pub.PublicOrgExternalId;
+import com.pkb.fhir.common.exception.MigrationEntityNotFoundException;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import com.pkb.fhir.migration.service.OrgExternalIdService;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.ResourceType;
+import org.hl7.fhir.r4.model.codesystems.OrganizationType;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.List;
+import java.util.Optional;
+
+import static com.pkb.entities.enums.FhirStoreSyncSourceTable.ORG;
+import static com.pkb.entities.enums.FhirStoreSyncSourceTable.ORGEXTERNALID;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.CREATE_OR_UPDATE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.DELETE;
+import static io.vavr.control.Either.right;
+
+public class OrgMigrator extends BaseFhirMigrator {
+
+    //See https://dev.patientsknowbest.com/home/fhir-api/identifier-systems
+    private static final String ORG_CODE_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/org-code&quot;;
+    private static final String ORG_WEBMD_CODE_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/org-webmd-code&quot;;
+    private static final String ORG_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/org-legacy-identifier&quot;;
+    private static final String ORGEXTERNALID_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/orgexternalid-legacy-identifier&quot;;
+
+    // See https://dev.patientsknowbest.com/home/fhir-api/structuredefinition
+    private static final String ORG_COUNTRY_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-country&quot;;
+    private static final String ORG_CRMLINK_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-crmlink&quot;;
+    private static final String ORG_DATA_UPLOAD_IP_WHITELIST_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-data-upload-ip-whitelist&quot;;
+    private static final String ORG_EMAIL_IMAGE_FOOTER_FILENAME_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-email-image-footer-filename&quot;;
+    private static final String ORG_EMAIL_FOOTER_TEXT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-email-footer-text&quot;;
+    private static final String ORG_HL7_AUTO_CREATE_RECORDS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-hl7-auto-create-records&quot;;
+    private static final String ORG_HL7_CHECK_NHS_NUMBERS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-hl7-check-nhs_numbers&quot;;
+    private static final String ORG_HL7_NEW_PATIENT_TEAM_CODE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-hl7-new-patient-team-code&quot;;
+    private static final String ORG_HL7_UPLOAD_SOURCE_WHITELIST_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-hl7-upload-source-whitelist&quot;;
+    private static final String ORG_HL7_UPLOAD_VALIDATE_PID_LIST_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-hl7-validate-pid-list&quot;;
+    private static final String ORG_LOGO_FILE_NAME_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-logo-file-name&quot;;
+    private static final String ORG_ACCOUNT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-account&quot;;
+    private static final String ORG_PATIENT_VIEW_SUSPENDED_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-patient-view-suspended&quot;;
+    private static final String ORG_EXTERNAL_ID_TYPE = &quot;http://fhir.patientsknowbest.com/structuredefinition/org-external-id-type&quot;;
+
+    private final OrgExternalIdService orgExternalIdService;
+
+    public OrgMigrator(PersonService personService, TeamService teamService, OrgService orgService,
+                       Hl7PartnerService hl7PartnerService, OrgExternalIdService orgExternalIdService) {
+<span class="fc" id="L63">        super(personService, teamService, orgService, hl7PartnerService);</span>
+<span class="fc" id="L64">        this.orgExternalIdService = orgExternalIdService;</span>
+<span class="fc" id="L65">    }</span>
+
+    @Override
+    Either&lt;MigrationException, List&lt;ResourceAndOperation&gt;&gt; migrate(@NotNull PublicFhirStoreSync fhirStoreSync) {
+<span class="fc bfc" id="L69" title="All 4 branches covered.">        if (fhirStoreSync.isDeleteOperation() &amp;&amp; fhirStoreSync.getSyncDetails().getSourceTable() == ORG) {</span>
+<span class="fc" id="L70">            Organization toDelete = new Organization();</span>
+<span class="fc" id="L71">            IdType idType = new IdType(ResourceType.Organization.name(),</span>
+<span class="fc" id="L72">                    String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()));</span>
+<span class="fc" id="L73">            toDelete.setId(idType);</span>
+<span class="fc" id="L74">            return right(ResourceAndOperation.all(List.of(toDelete), DELETE));</span>
+        }
+
+<span class="fc" id="L77">        return Option.ofOptional(getPublicOrg(fhirStoreSync))</span>
+<span class="pc" id="L78">            .toEither(() -&gt; (MigrationException)new MigrationEntityNotFoundException(&quot;Failed to sync org to fhir store for source table &quot;</span>
+<span class="nc" id="L79">                    + fhirStoreSync.getSyncDetails().getSourceTable() +</span>
+<span class="nc" id="L80">                    &quot; and source id &quot; + fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="fc" id="L81">            .map(org -&gt; ResourceAndOperation.all(List.of(transformOrgToFhir(org)), CREATE_OR_UPDATE));</span>
+    }
+
+    @NotNull
+    private Optional&lt;PublicOrg&gt; getPublicOrg(@NotNull PublicFhirStoreSync fhirStoreSync) {
+<span class="fc" id="L86">        FhirStoreSyncSourceTable sourceTable = fhirStoreSync.getSyncDetails().getSourceTable();</span>
+<span class="fc bfc" id="L87" title="All 2 branches covered.">        if (sourceTable == ORG) {</span>
+<span class="fc" id="L88">            return orgService.findOptionalByIdFetchOrgAccount(fhirStoreSync.getSyncDetails().getSourceTableId());</span>
+        }
+<span class="pc bpc" id="L90" title="1 of 2 branches missed.">        else if (sourceTable == ORGEXTERNALID) {</span>
+            //Sub-element within the org
+<span class="fc" id="L92">            return orgService.findOptionalByIdFetchOrgAccount(fhirStoreSync.getSyncDetails().getSourceTableParentId());</span>
+        }
+        else  {
+<span class="nc" id="L95">            throw new MigrationException(&quot;Trying to process unexpected source table [&quot; + sourceTable + &quot;] within the Org migrator&quot;);</span>
+        }
+    }
+
+    private Organization transformOrgToFhir(@NotNull PublicOrg org) {
+<span class="fc" id="L100">        Organization organization = new Organization();</span>
+<span class="fc" id="L101">        organization.setId(String.valueOf(org.getPublicId()));</span>
+
+<span class="fc" id="L103">        Optional.ofNullable(org.getName()).filter(StringUtils::isNotBlank).ifPresent(organization::setName);</span>
+
+        //Various org identififers
+<span class="fc" id="L106">        Optional.ofNullable(org.getCode())</span>
+<span class="fc" id="L107">                .map(orgCode -&gt; {</span>
+<span class="fc" id="L108">                    Identifier identifier = new Identifier();</span>
+<span class="fc" id="L109">                    identifier.setSystem(ORG_CODE_SYSTEM_URL);</span>
+<span class="fc" id="L110">                    identifier.setValue(org.getCode());</span>
+<span class="fc" id="L111">                    return identifier;</span>
+<span class="fc" id="L112">                }).ifPresent(organization::addIdentifier);</span>
+
+<span class="fc" id="L114">        organization.addIdentifier(getPkbIdentifier(org.getId(), ORG_LEGACY_PRIMARY_KEY_SYSTEM_URL));</span>
+
+<span class="fc" id="L116">        orgExternalIdService.findByOrgId(org.getId())</span>
+<span class="fc" id="L117">                .forEach(externalId -&gt;  {</span>
+<span class="fc" id="L118">                    Identifier identifier = new Identifier();</span>
+<span class="fc" id="L119">                    identifier.setSystem(getSystemForOrgExternalId(externalId));</span>
+<span class="fc" id="L120">                    identifier.setValue(externalId.getIdValue());</span>
+<span class="fc" id="L121">                    addExtension(externalId.getId(), ORGEXTERNALID_LEGACY_PRIMARY_KEY_SYSTEM_URL, identifier);</span>
+<span class="fc" id="L122">                    organization.addIdentifier(identifier);</span>
+<span class="fc" id="L123">                });</span>
+
+        //We're now going to actually populate this information on the database!
+<span class="fc" id="L126">        organization.setActive(org.isActive());</span>
+
+        //We need to differentiate orgs from teams, they will both be Organization resources. Teams have a nice category,
+        // orgs don't really: they're not all healthcare providers, which is the most obvious one.
+        // Business and success are categorising these on UK prod at least. Fall back on OTHER where this isn't done
+<span class="fc" id="L131">        String orgTypeCode = org.getOrgType();</span>
+<span class="fc" id="L132">        Coding coding = new Coding();</span>
+<span class="fc" id="L133">        coding.setSystem(&quot;http://hl7.org/fhir/organization-type&quot;);</span>
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">        coding.setCode(orgTypeCode == null ? OrganizationType.OTHER.toCode() : orgTypeCode);</span>
+<span class="fc" id="L135">        CodeableConcept organizationType = new CodeableConcept();</span>
+<span class="fc" id="L136">        organizationType.setCoding(List.of(coding));</span>
+
+<span class="fc" id="L138">        organization.addType(organizationType);</span>
+
+<span class="fc" id="L140">        addExtensions(org, organization);</span>
+<span class="fc" id="L141">        return organization;</span>
+    }
+
+    private String getSystemForOrgExternalId(PublicOrgExternalId externalId) {
+
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">        switch (externalId.getIdType()) {</span>
+            case ODS:
+<span class="fc" id="L148">                return &quot;https://fhir.nhs.uk/Id/ods-organization-code&quot;;</span>
+            default:
+<span class="nc" id="L150">                throw new RuntimeException(&quot;Unexpected OrgExternalId type &quot; + externalId.getIdType());</span>
+        }
+    }
+
+    private void addExtensions(PublicOrg org, Organization organization) {
+<span class="fc" id="L155">        addExtension(org.getCountry(), ORG_COUNTRY_EXTENSION_URL, organization);</span>
+<span class="fc" id="L156">        addExtension(org.getCrmLink(), ORG_CRMLINK_EXTENSION_URL, organization);</span>
+<span class="fc" id="L157">        addExtension(org.getDataUploadIpWhitelist(), ORG_DATA_UPLOAD_IP_WHITELIST_EXTENSION_URL, organization);</span>
+<span class="fc" id="L158">        addExtension(org.getEmailFooterImageFilename(), ORG_EMAIL_IMAGE_FOOTER_FILENAME_EXTENSION_URL, organization);</span>
+<span class="fc" id="L159">        addExtension(org.getEmailFooterText(), ORG_EMAIL_FOOTER_TEXT_EXTENSION_URL, organization);</span>
+<span class="fc" id="L160">        addExtension(org.isHl7AutoCreateRecords(), ORG_HL7_AUTO_CREATE_RECORDS_EXTENSION_URL, organization);</span>
+<span class="fc" id="L161">        addExtension(org.isHl7CheckNhsNumberStatus(), ORG_HL7_CHECK_NHS_NUMBERS_EXTENSION_URL, organization);</span>
+<span class="fc" id="L162">        addExtension(org.getHl7NewPatientTeamCode(), ORG_HL7_NEW_PATIENT_TEAM_CODE_EXTENSION_URL, organization);</span>
+<span class="fc" id="L163">        addExtension(org.getHl7UploadSourceWhitelist(), ORG_HL7_UPLOAD_SOURCE_WHITELIST_EXTENSION_URL, organization);</span>
+<span class="fc" id="L164">        addExtension(org.getHl7UploadValidatePidList(), ORG_HL7_UPLOAD_VALIDATE_PID_LIST_EXTENSION_URL, organization);</span>
+<span class="fc" id="L165">        addExtension(org.getLogoFileName(), ORG_LOGO_FILE_NAME_EXTENSION_URL, organization);</span>
+
+<span class="fc" id="L167">        organization.addExtension(getExtensionWithReferenceIdentifier(ORG_ACCOUNT_EXTENSION_URL, org.getOrgAccount().getPublicId()));</span>
+
+<span class="fc" id="L169">        addExtension(org.isPatientViewSuspended(), ORG_PATIENT_VIEW_SUSPENDED_EXTENSION_URL, organization);</span>
+<span class="fc" id="L170">        addExtension(org.getTimeZoneId(), TIME_ZONE_ID_EXTENSION_URL, organization);</span>
+<span class="fc" id="L171">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

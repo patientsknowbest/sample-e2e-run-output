@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FileManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.file</a> &gt; <span class="el_source">FileManager.java</span></div><h1>FileManager.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//------------------------------------------------------------------------------
+package com.pkb.service.file;
+
+
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.document.Document;
+import com.pkb.crypto.document.PlaintextDocument;
+import com.pkb.data.EHRRemote;
+import com.pkb.document.entity.Attachment;
+import com.pkb.exception.PKBException;
+import com.pkb.file.FileDtoType;
+import com.pkb.file.entity.FileDTO;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
+
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.util.EncryptedDocumentMapperHelper.MEDIA_TYPE_PROVIDER;
+import static java.lang.String.format;
+
+public class FileManager extends TransactionManager {
+<span class="fc" id="L45">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final UserManager userManager;
+    private final ChunkedDocManager chunkedDocManager;
+    private final DocumentManager documentManager;
+    private final PatientConsentManager consentManager;
+
+    public FileManager(PhrConfig config,
+                       TolvenBeanFactory beanFactory,
+                       DateTimeService dateTimeService,
+                       UUIDProvider uuidProvider,
+                       UserManager userManager,
+                       @Lazy ChunkedDocManager chunkedDocManager,
+                       DocumentManager documentManager,
+                       PatientConsentManager consentManager) {
+<span class="fc" id="L60">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L61">        this.userManager = userManager;</span>
+<span class="fc" id="L62">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L63">        this.documentManager = documentManager;</span>
+<span class="fc" id="L64">        this.consentManager = consentManager;</span>
+<span class="fc" id="L65">    }</span>
+
+    /**
+     * Save a new file to the user's default account. The new fileId is set in
+     * the FileDTO object after it's persisted.
+     *
+     * @param file
+     */
+    public void addFile(EHRRequestContext requestContext, FileDTO file, long userId, FileDtoType fileDtoType) {
+<span class="fc" id="L74">        Long accountId = userManager.getDefaultAccountId(userId);</span>
+        try {
+<span class="fc" id="L76">            Long fileId = doSaveFile(requestContext, file, accountId, fileDtoType);</span>
+<span class="fc" id="L77">            file.setId(fileId);</span>
+<span class="nc" id="L78">        } catch (Exception e) {</span>
+<span class="nc" id="L79">            throw new PKBException(&quot;error adding file for user &quot; + userId, e);</span>
+<span class="fc" id="L80">        }</span>
+<span class="fc" id="L81">    }</span>
+
+    /**
+     * If fetchContent is false, the content and mediaType fields are not set.
+     *
+     * @param id
+     * @param fetchContent
+     * @return
+     */
+    public Optional&lt;FileDTO&gt; getFile(@NotNull LoggedInEHRRequestContext requestContext, long id, boolean fetchContent) {
+        try {
+<span class="fc" id="L92">            return doGetFile(requestContext, id, fetchContent);</span>
+<span class="nc" id="L93">        } catch (Exception e) {</span>
+<span class="nc" id="L94">            throw new PKBException(&quot;error getting file &quot; + id, e);</span>
+        }
+    }
+
+    /**
+     * Update the editable fields (Notes and Date) of an existing file. Content
+     * is ignored (it's not editable after the initial upload).
+     *
+     * @param file
+     * @param accountId
+     */
+    //    @Override
+    //    public long saveFile(FileDTO file, long accountId) {
+    //        return saveFile(file, accountId, FileDtoType.FILE);
+    //    }
+    public long saveFile(EHRRequestContext requestContext, FileDTO file, long accountId, FileDtoType fileDtoType) {
+        // used to save changes to NOTES field only (for now DATE field is not editable)
+        try {
+<span class="fc" id="L112">            return doSaveFile(requestContext, file, accountId, fileDtoType);</span>
+<span class="nc" id="L113">        } catch (Exception e) {</span>
+<span class="nc" id="L114">            throw new PKBException(&quot;error saving file &quot; + file + &quot; and acct &quot; + accountId, e);</span>
+        }
+    }
+
+    public List&lt;FileDTO&gt; getFileList(@NotNull LoggedInEHRRequestContext requestContext, long userId, int pageSize, int offset,
+                                     FileDtoType fileDtoType) {
+<span class="fc" id="L120">        Long accountId = userManager.getDefaultAccountId(userId);</span>
+<span class="pc bpc" id="L121" title="1 of 2 branches missed.">        if (accountId == null) {</span>
+<span class="nc" id="L122">            throw new PKBException(&quot;No default account id found for user &quot; + userId);</span>
+        }
+        try {
+<span class="fc" id="L125">            return doGetFiles(requestContext, accountId, pageSize, offset, fileDtoType);</span>
+<span class="nc" id="L126">        } catch (Exception e) {</span>
+<span class="nc" id="L127">            throw new PKBException(&quot;failed getting files for user &quot; + userId, e);</span>
+        }
+    }
+
+    private List&lt;FileDTO&gt; doGetFiles(@NotNull LoggedInEHRRequestContext requestContext, long accountId, int pageSize, int offset,
+                                     FileDtoType fileDtoType) {
+<span class="fc" id="L133">        return beanFactory.getEhrRemote().queryAndDecryptTypedData(</span>
+<span class="fc" id="L134">                new EHRSearch&lt;&gt;(accountId, FileDTO.class, fileDtoType.getType())</span>
+<span class="fc" id="L135">                        .setResultsMaxReturned(pageSize)</span>
+<span class="fc" id="L136">                        .setOrderBy(&quot;date01&quot;, EHRSearch.OrderByDirection.Desc)</span>
+<span class="fc" id="L137">                        .setResultsStartPosition(offset),</span>
+                requestContext);
+    }
+
+    public long getFileCount(@NotNull LoggedInEHRRequestContext requestContext, long accountId, FileDtoType fileDtoType) {
+        try {
+<span class="fc" id="L143">            return doGetFileCount(requestContext, accountId, fileDtoType);</span>
+<span class="nc" id="L144">        } catch (Exception e) {</span>
+<span class="nc" id="L145">            throw new PKBException(&quot;failed getting file count for account: &quot; + accountId, e);</span>
+        }
+    }
+
+    private long doGetFileCount(@NotNull LoggedInEHRRequestContext context, long accountId, FileDtoType fileDtoType) {
+<span class="fc" id="L150">        simplePermissionsCheck(accountId, context);</span>
+<span class="fc" id="L151">        return beanFactory.getEhrRemote().countEHRData(new EHRSearch&lt;&gt;(accountId, FileDTO.class, fileDtoType.getType()), context);</span>
+    }
+
+    /**
+     * Deletes the document (with the file contents) and the menu_data records
+     * referring to it from the database (real delete! This doesn't use the
+     * Tolven API which would just mark as &quot;deleted&quot;).
+     *
+     * @param deleteId
+     * @return
+     */
+    public boolean deleteFile(@NotNull LoggedInEHRRequestContext requestContext, long deleteId) {
+        try {
+<span class="fc" id="L164">            return doDeleteFile(requestContext, deleteId);</span>
+<span class="nc" id="L165">        } catch (Exception e) {</span>
+<span class="nc" id="L166">            throw new PKBException(&quot;error deleting file &quot; + deleteId, e);</span>
+        }
+    }
+
+    private boolean doDeleteFile(@NotNull LoggedInEHRRequestContext requestContext, long fileId) {
+<span class="fc" id="L171">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L172">        EHRData d = ehrBean.findEHRData(fileId, requestContext);</span>
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">        if (d == null) {</span>
+<span class="nc" id="L174">            return false;</span>
+        }
+<span class="fc" id="L176">        simplePermissionsCheck(d.getAccountId(), requestContext);</span>
+        // no need to delete attachments as simple non-chunked files never have attachments
+<span class="fc" id="L178">        return ehrBean.deleteEHRData(d.getId());</span>
+    }
+
+    private void simplePermissionsCheck(long accountId, @NotNull LoggedInEHRRequestContext context) {
+<span class="fc" id="L182">        long userId = userManager.getAccountOwner(accountId).getId();</span>
+<span class="pc bpc" id="L183" title="1 of 4 branches missed.">        if (userId != context.getAccessingUserId() &amp;&amp; !consentManager.hasConsent(context, userId)) {</span>
+<span class="nc" id="L184">            throw new RuntimeException(format(&quot;User %d does not have consent to access account %d&quot;, context.getAccessingUserId(), accountId));</span>
+        }
+<span class="fc" id="L186">    }</span>
+
+    public List&lt;Attachment&gt; copyFilesForDiscussion(@NotNull LoggedInEHRRequestContext requestContext, long userId, List&lt;Long&gt; fileDocIds) {
+        try {
+<span class="fc" id="L190">            return copyAttachmentsForDiscussion(requestContext, userId, fileDocIds);</span>
+<span class="nc" id="L191">        } catch (Exception e) {</span>
+<span class="nc" id="L192">            throw new PKBException(&quot;Error while copying file(s) &quot; + fileDocIds, e);</span>
+        }
+    }
+
+    private long doSaveFile(EHRRequestContext requestContext, FileDTO file, long accountId, FileDtoType fileDtoType) {
+<span class="fc" id="L197">        return transactional(() -&gt; {</span>
+<span class="fc" id="L198">            EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L199">            EHRData ehrData = ehrBean.populateEHRData(file, accountId, fileDtoType.getType(), requestContext);</span>
+<span class="fc" id="L200">            long fileMDId = ehrBean.saveEHRData(requestContext, ehrData);</span>
+<span class="fc" id="L201">            chunkedDocManager.deleteUploadInProgress(file.getDocumentMetadataId());</span>
+<span class="fc" id="L202">            return fileMDId;</span>
+        });
+    }
+
+    private Optional&lt;FileDTO&gt; doGetFile(@NotNull LoggedInEHRRequestContext requestContext, long fileId, boolean fetchContent) {
+<span class="fc" id="L207">        EHRRemote ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L208">        FileDTO file = ehrBean.findAndDecryptTypedData(requestContext, fileId, FileDTO.class);</span>
+<span class="fc bfc" id="L209" title="All 2 branches covered.">        if (file == null) {</span>
+<span class="fc" id="L210">            return Optional.empty();</span>
+        }
+<span class="fc bfc" id="L212" title="All 2 branches covered.">        if (fetchContent) {</span>
+<span class="fc" id="L213">            UUID documentId = file.getDocumentMetadataId();</span>
+<span class="fc" id="L214">            Document mainDocument = documentManager.retrieveOrThrow(documentId);</span>
+<span class="fc" id="L215">            PlaintextDocument plaintextDocument = ehrBean.decryptDoc(mainDocument, requestContext);</span>
+<span class="fc" id="L216">            file.setContent(plaintextDocument.plainText());</span>
+<span class="fc" id="L217">            file.setMediaType(MEDIA_TYPE_PROVIDER.apply(mainDocument));</span>
+        }
+<span class="fc" id="L219">        return Optional.of(file);</span>
+    }
+
+    private List&lt;Attachment&gt; copyAttachmentsForDiscussion(@NotNull LoggedInEHRRequestContext requestContext, long targetUserId,
+                                                          List&lt;Long&gt; documentIds) {
+<span class="fc" id="L224">        return transactional(() -&gt; {</span>
+            UUID docIdOfCopy;
+<span class="fc" id="L226">            Long accountId = beanFactory.getPKBPersonBean().getDefaultAccountId(targetUserId);</span>
+<span class="fc" id="L227">            List&lt;Attachment&gt; copiedAttachments = new ArrayList&lt;&gt;();</span>
+            Attachment copy;
+<span class="fc bfc" id="L229" title="All 2 branches covered.">            for (Long docId : documentIds) {</span>
+<span class="fc" id="L230">                Optional&lt;FileDTO&gt; optionalFileDTO = doGetFile(requestContext, docId, false/* fetchContent */);</span>
+<span class="pc bpc" id="L231" title="1 of 2 branches missed.">                if (optionalFileDTO.isPresent()) {</span>
+<span class="fc" id="L232">                    FileDTO fileDTO = optionalFileDTO.get();</span>
+<span class="fc" id="L233">                    docIdOfCopy = chunkedDocManager.copyDocument(requestContext, fileDTO.getDocumentMetadataId(), targetUserId, accountId);</span>
+<span class="fc" id="L234">                    copy = new Attachment();</span>
+<span class="fc" id="L235">                    copy.setDocMetadataId(docIdOfCopy);</span>
+<span class="fc" id="L236">                    copy.setMediaType(fileDTO.getMediaType());</span>
+<span class="fc" id="L237">                    copy.setUserId(targetUserId);</span>
+<span class="fc" id="L238">                    copy.setFilename(fileDTO.getFileName());</span>
+<span class="fc" id="L239">                    copy.setUploadTime(Date.from(dateTimeService.now()));</span>
+<span class="fc" id="L240">                    copiedAttachments.add(copy);</span>
+<span class="fc" id="L241">                } else {</span>
+<span class="nc" id="L242">                    LOGGER.error(&quot;Failed to retrieve and copy attachment for requestContext {} and docId {}&quot;, requestContext, docId);</span>
+                }
+<span class="fc" id="L244">            }</span>
+<span class="fc" id="L245">            return copiedAttachments;</span>
+        });
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

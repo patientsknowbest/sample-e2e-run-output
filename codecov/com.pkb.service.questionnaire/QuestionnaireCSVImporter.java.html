@@ -1,0 +1,197 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>QuestionnaireCSVImporter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.questionnaire</a> &gt; <span class="el_source">QuestionnaireCSVImporter.java</span></div><h1>QuestionnaireCSVImporter.java</h1><pre class="source lang-java linenums">package com.pkb.service.questionnaire;
+
+import com.google.common.collect.Iterators;
+import com.pkb.app.PrivacyFlagsToPrivacyFlagConverter;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.institute.entity.Team;
+import com.pkb.questionnaireservice.modelv2.Questionnaire;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireComponent;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireComponentType;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireTeam;
+import com.pkb.questionnaireservice.modelv2.QuestionnaireTeamImpl;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.API;
+import io.vavr.control.Either;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVParser;
+import org.apache.commons.csv.CSVRecord;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.Reader;
+import java.io.StringReader;
+import java.io.UncheckedIOException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import static com.pkb.service.questionnaire.TooLongQuestionnaireAnswerTextException.MAX_QUESTIONNAIRE_ANSWER_LENGTH;
+import static com.pkb.service.questionnaire.TooLongQuestionnaireNameException.MAX_QUESTIONNAIRE_NAME_LENGTH;
+import static java.util.Objects.requireNonNull;
+
+public class QuestionnaireCSVImporter {
+    private final String questionnaireName;
+
+    private final Team team;
+
+    private final PKBPerson creatorPerson;
+
+<span class="fc" id="L43">    private QuestionnaireComponentToStringMapper qsTypeToStringMapper = new QuestionnaireComponentToStringMapper();</span>
+
+    QuestionnaireCSVImporter(
+            @NotNull String questionnaireName,
+            @NotNull Team team,
+<span class="fc" id="L48">            @NotNull PKBPerson creatorPerson) {</span>
+<span class="fc" id="L49">        this.questionnaireName = requireNonNull(questionnaireName, &quot;questionnaireName cannot be null&quot;);</span>
+<span class="fc" id="L50">        this.team = requireNonNull(team, &quot;team cannot be null&quot;);</span>
+<span class="fc" id="L51">        this.creatorPerson = requireNonNull(creatorPerson, &quot;creatorPerson cannot be null&quot;);</span>
+<span class="fc" id="L52">    }</span>
+
+    /**
+     * Since the apache CSVParser cannot handle \r as a line terminator, we read the CSV
+     * line by line, and concatenate the lines with \n before feeding them to the CSVParser
+     */
+    private String readToString(Reader reader) throws IOException {
+<span class="fc" id="L59">        BufferedReader br = new BufferedReader(reader);</span>
+<span class="fc" id="L60">        StringBuilder sb = new StringBuilder();</span>
+        String line;
+<span class="fc bfc" id="L62" title="All 2 branches covered.">        while ((line = br.readLine()) != null) {</span>
+<span class="fc" id="L63">            sb.append(line);</span>
+<span class="fc" id="L64">            sb.append(&quot;\n&quot;);</span>
+        }
+<span class="fc" id="L66">        return sb.toString();</span>
+    }
+
+    /**
+     * Note this function tries to return _all_ the possible validation errors in one go
+     */
+    Either&lt;List&lt;QuestionnaireException&gt;, QuestionnaireTeam&gt; importFrom(Reader csv, Instant creationDate) {
+<span class="fc" id="L73">        var importErrors = API.&lt;QuestionnaireException&gt;Seq();</span>
+<span class="fc" id="L74">        var components = API.&lt;QuestionnaireComponent&gt;Seq();</span>
+        try {
+<span class="fc" id="L76">            Reader csvReader = new StringReader(readToString(csv));</span>
+<span class="fc bfc" id="L77" title="All 2 branches covered.">            if (questionnaireName.length() &gt; MAX_QUESTIONNAIRE_NAME_LENGTH) {</span>
+<span class="fc" id="L78">                importErrors = importErrors.append(new TooLongQuestionnaireNameException(questionnaireName));</span>
+            }
+            
+<span class="fc" id="L81">            CSVParser parser = new CSVParser(csvReader, CSVFormat.DEFAULT);</span>
+<span class="fc" id="L82">            var questionsOrErrors = Either.sequence(</span>
+<span class="fc" id="L83">                    parser.stream().map(this::makeQuestion).collect(Collectors.toList())</span>
+            );
+<span class="fc bfc" id="L85" title="All 2 branches covered.">            if (questionsOrErrors.isLeft()) {</span>
+<span class="fc" id="L86">                importErrors = importErrors.appendAll(questionsOrErrors.getLeft().flatMap(Function.identity()));</span>
+            } else {
+<span class="fc" id="L88">                components = questionsOrErrors.get();</span>
+            }
+            
+<span class="fc" id="L91">            PrivacyFlag teamPrivacyFlag = PrivacyFlagsToPrivacyFlagConverter.findPrivacyFlag(</span>
+<span class="fc" id="L92">                    team.getPrivacyFlags().getRequireGeneral(),</span>
+<span class="fc" id="L93">                    team.getPrivacyFlags().getRequireMentalHealth(),</span>
+<span class="fc" id="L94">                    team.getPrivacyFlags().getRequireSexualHealth(),</span>
+<span class="pc" id="L95">                    team.getRequireSocialCare()).orElseThrow(() -&gt; new RuntimeException(&quot;Team with public id&quot; + team.getPublicId() + &quot; has no privacy flag set&quot;));</span>
+
+<span class="fc bfc" id="L97" title="All 2 branches covered.">            if (importErrors.isEmpty()) {</span>
+<span class="fc" id="L98">                return Either.right(new QuestionnaireTeamImpl(team.getPublicId(),</span>
+<span class="fc" id="L99">                        Questionnaire.createQuestionnaire(questionnaireName, creatorPerson.getPublicId(), creationDate, teamPrivacyFlag, components.asJava()),</span>
+                        false,
+                        creationDate));
+            } else {
+<span class="fc" id="L103">                return Either.left(importErrors.asJava());</span>
+            }
+<span class="nc" id="L105">        } catch (IOException e) {</span>
+<span class="nc" id="L106">            throw new UncheckedIOException(e);</span>
+        } finally {
+<span class="fc" id="L108">            close(csv);</span>
+        }
+    }
+
+    private void close(Reader csv) {
+        try {
+<span class="fc" id="L114">            csv.close();</span>
+<span class="nc" id="L115">        } catch (IOException e) {</span>
+<span class="nc" id="L116">            throw new UncheckedIOException(e);</span>
+<span class="fc" id="L117">        }</span>
+<span class="fc" id="L118">    }</span>
+
+    private Either&lt;List&lt;QuestionnaireException&gt;, QuestionnaireComponent&gt; makeQuestion(CSVRecord record) {
+<span class="fc" id="L121">        var it = record.stream().iterator();</span>
+        // blank lines are ignored by the parser so there is always a next
+        // if there is no char before the separator then the questionText is just &quot;&quot;
+<span class="fc" id="L124">        String questionText = it.next();</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        if (questionText.isBlank()){</span>
+<span class="fc" id="L126">            return Either.left(List.of(new NoQuestionTextException()));</span>
+        }
+
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        if (!it.hasNext()) {</span>
+<span class="fc" id="L130">            return Either.left(List.of(new NoQuestionTypeException(questionText)));</span>
+        }
+<span class="fc" id="L132">        String componentTypeStr = it.next();</span>
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        if (componentTypeStr.isBlank()){</span>
+<span class="fc" id="L134">            return Either.left(List.of(new NoQuestionTypeException(questionText)));</span>
+        }
+        
+<span class="fc" id="L137">        var errs = API.&lt;QuestionnaireException&gt;List();</span>
+        
+<span class="fc" id="L139">        Optional&lt;QuestionnaireComponentType&gt; maybeQuestionnaireComponentType = qsTypeToStringMapper.map(componentTypeStr);</span>
+<span class="fc" id="L140">        var mandatory = false;</span>
+<span class="fc" id="L141">        List&lt;String&gt; answers = new ArrayList&lt;&gt;();</span>
+        
+        // Make sure question type exists
+<span class="fc bfc" id="L144" title="All 2 branches covered.">        if (maybeQuestionnaireComponentType.isEmpty()) {</span>
+<span class="fc" id="L145">            errs = errs.append(new InvalidQuestionTypeException(questionText, componentTypeStr));</span>
+        }
+        else {
+<span class="fc" id="L148">            var componentType = maybeQuestionnaireComponentType.get();</span>
+<span class="fc bfc" id="L149" title="All 2 branches covered.">            if (componentType.isQuestion()){</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">                if(it.hasNext()){</span>
+                    // if we have a 'mandatory' field, parse it (it is already set to false which is the default otherwise)
+<span class="fc" id="L152">                    Either&lt;IncorrectMandatoryFieldException, Boolean&gt; maybeMandatoryValue = getMandatoryBooleanOrException(questionText, it.next());</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">                    if (maybeMandatoryValue.isRight()){</span>
+<span class="fc" id="L154">                        mandatory = maybeMandatoryValue.get();</span>
+                    } else {
+<span class="fc" id="L156">                        errs = errs.append(maybeMandatoryValue.getLeft());</span>
+                    }
+                }
+            }
+<span class="fc" id="L160">            Iterators.addAll(answers, it);</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">            answers = answers.stream().map(String::trim).filter(answer -&gt; !answer.isBlank()).collect(Collectors.toList());</span>
+            
+<span class="fc bfc" id="L163" title="All 4 branches covered.">            if (componentType.isMultiChoice() &amp;&amp; answers.isEmpty()) {</span>
+<span class="fc" id="L164">                errs = errs.append(new InvalidMultiAnswerQuestionException(questionText, componentTypeStr));</span>
+            }
+            
+            // Make sure answer lengths are valid
+<span class="fc" id="L168">            var tooLongAnswers = answers.stream()</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">                    .filter(answer -&gt; answer.length() &gt; MAX_QUESTIONNAIRE_ANSWER_LENGTH)</span>
+<span class="fc" id="L170">                    .collect(Collectors.toList());</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">            if (!tooLongAnswers.isEmpty()) {</span>
+<span class="fc" id="L172">                errs = errs.appendAll(tooLongAnswers.stream().map(TooLongQuestionnaireAnswerTextException::new)</span>
+<span class="fc" id="L173">                        .collect(Collectors.toList()));</span>
+            }
+        }
+        
+<span class="fc bfc" id="L177" title="All 2 branches covered.">        if (errs.isEmpty()) {</span>
+            // Code inspector isn't quite smart enough to figure out this list will always be non-empty
+            // if the optional isn't present.
+            //noinspection OptionalGetWithoutIsPresent
+<span class="fc" id="L181">            return Either.right(qsTypeToStringMapper.createQuestionnaireComponent(maybeQuestionnaireComponentType.get(), questionText, mandatory, answers));</span>
+        } else {
+<span class="fc" id="L183">            return Either.left(errs.asJava());</span>
+        }
+    }
+    
+    private Either&lt;IncorrectMandatoryFieldException, Boolean&gt; getMandatoryBooleanOrException(String questionText, String mandatory){
+<span class="fc bfc" id="L188" title="All 2 branches covered.">        if (&quot;true&quot;.equalsIgnoreCase(mandatory)){</span>
+<span class="fc" id="L189">            return Either.right(true);</span>
+        }
+<span class="pc bpc" id="L191" title="1 of 4 branches missed.">        if (&quot;false&quot;.equalsIgnoreCase(mandatory)|| &quot;&quot;.equals(mandatory)){</span>
+<span class="fc" id="L192">            return Either.right(false);</span>
+        }
+<span class="fc" id="L194">        return Either.left(new IncorrectMandatoryFieldException(questionText, mandatory));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

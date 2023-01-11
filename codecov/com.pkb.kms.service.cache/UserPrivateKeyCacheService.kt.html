@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UserPrivateKeyCacheService.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.kms.service.cache</a> &gt; <span class="el_source">UserPrivateKeyCacheService.kt</span></div><h1>UserPrivateKeyCacheService.kt</h1><pre class="source lang-java linenums">package com.pkb.kms.service.cache
+
+import com.google.common.annotations.VisibleForTesting
+import com.pkb.common.ClearableInternalState
+import com.pkb.common.util.FrameFilter
+import com.pkb.crypto.CryptoConstants
+import com.pkb.crypto.CryptoHelper
+import com.pkb.crypto.EncryptedUserPrivateKey
+import com.pkb.crypto.ImmutableEncryptedBytesAndNonce.encryptedBytesAndNonce
+import com.pkb.crypto.PKBKeyStore
+import com.pkb.crypto.SSOCryptoHelper
+import com.pkb.crypto.SSOCryptoHelper.SSOCryptoWrapper
+import com.pkb.crypto.SymmetricKey.symmetricKey
+import com.pkb.crypto.UserPrivateKey
+import com.pkb.crypto.UserPrivateKey.userPrivateKey
+import com.pkb.entities.enums.SSOType
+import com.pkb.entities.pub.PublicSSOAuthRecord
+import com.pkb.kms.service.MetricsHelper
+import com.pkb.kms.service.NhsLoginService
+import com.pkb.kms.service.decodeBase64
+import com.pkb.kms.service.entity.KmsNhsLoginCredentials
+import com.pkb.kms.service.extension.sha256
+import com.pkb.kms.service.projection.PersonIds
+import com.pkb.kms.service.projection.UserIdAndPKCS12
+import com.pkb.kms.service.repository.SSOAuthRecordRepository
+import com.pkb.kms.shared.KMS_CACHE_PREFIX
+import com.pkb.kms.shared.representation.KmsError
+import com.pkb.kms.shared.representation.KmsError.Companion.ssoDecryptionFailed
+import com.pkb.kms.shared.representation.KmsError.Companion.userPrivateKeyDecryptionFailed
+import com.pkb.kms.shared.representation.PersonPublicId
+import io.micrometer.core.instrument.Metrics.counter
+import io.vavr.control.Either
+import io.vavr.control.Option
+import io.vavr.kotlin.Try
+import io.vavr.kotlin.left
+import io.vavr.kotlin.right
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.cache.annotation.CacheEvict
+import org.springframework.cache.annotation.CachePut
+import org.springframework.cache.annotation.Cacheable
+import org.springframework.stereotype.Service
+import java.lang.invoke.MethodHandles
+import java.security.GeneralSecurityException
+import java.util.Arrays
+import java.util.Objects.isNull
+
+<span class="fc" id="L48">@Service</span>
+<span class="fc" id="L49">class UserPrivateKeyCacheService(private val userCache: UserCacheService,</span>
+<span class="fc" id="L50">                                 private val nhsLoginService: NhsLoginService,</span>
+                                 metrics: MetricsHelper,
+<span class="fc" id="L52">                                 private val ssoAuthRecordRepository: SSOAuthRecordRepository,</span>
+<span class="fc" id="L53">                                 private val ssoCryptoHelper: SSOCryptoHelper</span>
+) : ClearableInternalState {
+
+<span class="fc" id="L56">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+<span class="fc" id="L57">    private val incorrectPasswordCounter = counter(&quot;incorrect.password.count&quot;)</span>
+<span class="fc" id="L58">    private val nhsCredentialHashErrorCounter = { outcome: String, type: String -&gt;</span>
+<span class="fc" id="L59">        counter(&quot;nhs.credential.comparison.count&quot;, &quot;outcome&quot;, outcome, &quot;type&quot;, type) }</span>
+
+<span class="fc" id="L61">    private val keyProcessors: Map&lt;SSOType, (String, PublicSSOAuthRecord) -&gt; SSOCryptoWrapper&gt; = mapOf(</span>
+<span class="fc" id="L62">            SSOType.EMIS to { key, record -&gt; ssoCryptoHelper.getCryptoWrapper(record.salt, record.iterationCount, key, record.pkbKey) },</span>
+<span class="fc" id="L63">            SSOType.SYSTMONE to { key, record -&gt; ssoCryptoHelper.getCryptoWrapper(record.salt, record.iterationCount, key) }</span>
+    )
+
+<span class="fc" id="L66">    init {</span>
+<span class="fc" id="L67">        metrics.registerCaches(USER_PRIVATE_KEY_CACHE_NAME)</span>
+<span class="fc" id="L68">    }</span>
+
+    /**
+     * Finds user credentials for the given person and attempts to decrypt the user key with the give password
+     *
+     * This method will always execute - authc is never cached. However, a successful login will put the user
+     * private key in a cache for access by other methods
+     */
+    @CachePut(USER_PRIVATE_KEY_CACHE_NAME, key = &quot;#personPublicId&quot;, unless = &quot;#result.isLeft()&quot;)
+    fun findUserPrivateKeyWithPassword(personPublicId: PersonPublicId,
+                                       password: CharArray,
+                                       forceVerify: Boolean): Either&lt;KmsError, UserPrivateKey&gt; =
+<span class="fc" id="L80">            userCache.findPerson(personPublicId) // @formatter:off</span>
+<span class="fc" id="L81">                    .flatMap { person -&gt; findCredentials(person, forceVerify) }</span>
+<span class="fc" id="L82">                    .flatMap { credential -&gt; credential.loadKeyStore(password, personPublicId) }</span>
+<span class="fc" id="L83">                    .map     { keyStore -&gt; userPrivateKey(keyStore, password) }</span>
+<span class="fc" id="L84">                    .peek    {</span>
+<span class="fc" id="L85">                        log.trace(&quot;Decrypted user private key for {}&quot;, personPublicId)</span>
+<span class="fc" id="L86">                    }</span>
+                    // @formatter:on
+
+    @CachePut(USER_PRIVATE_KEY_CACHE_NAME, key = &quot;#personPublicId&quot;, unless = &quot;#result.isLeft()&quot;)
+    fun findUserPrivateKeyWithSSOKey(personPublicId: PersonPublicId, keyString: String, ssoType: SSOType) : Either&lt;KmsError, UserPrivateKey&gt; =
+<span class="fc" id="L91">        userCache.findPerson(personPublicId)</span>
+<span class="fc" id="L92">            .flatMap { findSSOAuthRecord(personPublicId, ssoType) }</span>
+<span class="fc" id="L93">            .flatMap { decryptUserPrivateKeyFromSSOAuthRecord(it, keyString) }</span>
+
+    private fun findSSOAuthRecord(personPublicId: PersonPublicId, ssoType: SSOType): Either&lt;KmsError, PublicSSOAuthRecord&gt; =
+<span class="pc" id="L96">        Option.ofOptional(ssoAuthRecordRepository.getByPersonPublicIdAndSsoType(personPublicId, ssoType)).toEither { KmsError.ssoAuthRecordNotFound(personPublicId) }</span>
+
+
+    private fun decryptUserPrivateKeyFromSSOAuthRecord(authRecord: PublicSSOAuthRecord, keyString: String): Either&lt;KmsError, UserPrivateKey&gt; =
+<span class="fc" id="L100">        Try {</span>
+<span class="fc" id="L101">            keyProcessors[authRecord.ssoType]!!</span>
+<span class="fc" id="L102">                .invoke(keyString, authRecord)</span>
+<span class="fc" id="L103">                .decryptPrivateKey(EncryptedUserPrivateKey.encryptedUserPrivateKey(authRecord.encryptedPrivateKey, &quot;RSA&quot;))</span>
+        }
+<span class="fc" id="L105">            .toEither { KmsError.ssoDecryptionFailed(authRecord.personPublicId) }</span>
+
+    /**
+     * Finds user credentials for the given person and attempts to decrypt the user key with the NHS Login secret data
+     */
+    @CachePut(USER_PRIVATE_KEY_CACHE_NAME, key = &quot;#personPublicId&quot;, unless = &quot;#result.isLeft()&quot;)
+    fun findUserPrivateKeyWithNhsLogin(personPublicId: PersonPublicId,
+                                       nhsLoginSecret: ByteArray): Either&lt;KmsError, UserPrivateKey&gt; =
+<span class="fc" id="L113">            nhsLoginService.findCredentialsByPersonPublicId(personPublicId)</span>
+<span class="fc" id="L114">                    .map { credentials -&gt; decryptUserPrivateKey(credentials, nhsLoginSecret) }</span>
+<span class="fc" id="L115">                    .getOrElse(left(KmsError(</span>
+<span class="fc" id="L116">                            &quot;nhslogin.credentials.not.found&quot;,</span>
+<span class="fc" id="L117">                            &quot;NHS Login credentials not found for $personPublicId&quot;,</span>
+<span class="fc" id="L118">                            KmsError.Type.NOT_FOUND)))</span>
+
+    private fun decryptUserPrivateKey(credentials: KmsNhsLoginCredentials,
+                                      nhsLoginSecret: ByteArray): Either&lt;KmsError, UserPrivateKey&gt; {
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">        return if (credentials.secretKeyAlgorithm == CryptoConstants.AES_SHORT_NAME) {</span>
+<span class="fc" id="L123">            val hashComparisonResult = compareHashes(credentials.credentialsHash, nhsLoginSecret)</span>
+<span class="fc" id="L124">            Try {</span>
+<span class="fc" id="L125">                val userPrivateKeyBytes = symmetricKey(nhsLoginSecret, CryptoConstants.AES_SHORT_NAME)</span>
+<span class="fc" id="L126">                        .decrypt(encryptedBytesAndNonce(credentials.encryptedUserPrivateKey, credentials.nonce))</span>
+
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">                val hashInfo = if (isNull(credentials.credentialsHash)) {</span>
+<span class="nc" id="L129">                    credentials.credentialsHash = nhsLoginSecret.sha256()</span>
+<span class="nc" id="L130">                    nhsLoginService.saveCredentials(credentials)</span>
+<span class="nc" id="L131">                    CredentialHashResult.BACKFILLED</span>
+                } else {
+<span class="fc" id="L133">                    hashComparisonResult</span>
+                }
+<span class="fc" id="L135">                nhsCredentialHashErrorCounter(&quot;success&quot;, hashInfo.name).increment()</span>
+<span class="fc" id="L136">                right&lt;KmsError, UserPrivateKey&gt;(userPrivateKey(userPrivateKeyBytes, credentials.privateKeyAlgorithm))</span>
+            }
+<span class="fc" id="L138">            .recover(GeneralSecurityException::class.java) {</span>
+<span class="fc" id="L139">                log.error(&quot;Failed to decrypt private key with NHS credentials for person {}. Hash comparison result: {}&quot;,</span>
+<span class="fc" id="L140">                        credentials.personPublicId, hashComparisonResult.message(), it)</span>
+<span class="fc" id="L141">                nhsCredentialHashErrorCounter(&quot;fail&quot;, hashComparisonResult.name).increment()</span>
+<span class="fc" id="L142">                left(KmsError.userPrivateKeyDecryptionFailed(credentials.personPublicId))</span>
+            }
+<span class="fc" id="L144">            .get()</span>
+        } else {
+<span class="nc" id="L146">            left(KmsError(&quot;unsupported&quot;, &quot;unsupported secret key algorithm&quot;, KmsError.Type.UNEXPECTED))</span>
+        }
+    }
+
+    enum class CredentialHashResult {
+<span class="fc" id="L151">        BACKFILLED {</span>
+<span class="nc" id="L152">            override fun message() = &quot;backfilled&quot;</span>
+        },
+<span class="fc" id="L154">        NONE_STORED {</span>
+<span class="nc" id="L155">            override fun message() = &quot;no hash stored, comparison not possible&quot;</span>
+        },
+<span class="fc" id="L157">        EQUAL {</span>
+<span class="nc" id="L158">            override fun message() = &quot;provided credential hash matches stored hash&quot;</span>
+        },
+<span class="fc" id="L160">        NOT_EQUAL {</span>
+<span class="fc" id="L161">            override fun message() = &quot;provided credential hash does not match stored hash&quot;</span>
+        };
+
+        abstract fun message(): String
+    }
+
+    @VisibleForTesting
+<span class="fc" id="L168">    fun compareHashes(credentialsHash: ByteArray?, nhsLoginSecret: ByteArray): CredentialHashResult = when {</span>
+<span class="pc bpc" id="L169" title="1 of 2 branches missed.">        isNull(credentialsHash)                                 -&gt; CredentialHashResult.NONE_STORED</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        Arrays.equals(credentialsHash, nhsLoginSecret.sha256()) -&gt; CredentialHashResult.EQUAL</span>
+<span class="fc" id="L171">        else                                                    -&gt; CredentialHashResult.NOT_EQUAL</span>
+<span class="fc" id="L172">    }</span>
+
+    /**
+     * Gets user private key for the given person if it is cached. If not cached, execution will proceed to the
+     * method body, which simply returns an error
+     */
+    @Cacheable(USER_PRIVATE_KEY_CACHE_NAME, key = &quot;#personPublicId&quot;, unless = &quot;#result.isLeft()&quot;)
+    fun getCachedUserPrivateKey(personPublicId: PersonPublicId): Either&lt;KmsError, UserPrivateKey&gt; =
+<span class="fc" id="L180">            left(KmsError.userPrivateKeyNotCached(personPublicId))</span>
+
+    /**
+     * Removes all cached user private keys
+     */
+    @CacheEvict(cacheNames = [USER_PRIVATE_KEY_CACHE_NAME], allEntries = true)
+    override fun clearState() {
+<span class="fc" id="L187">        log.warn(&quot;Cache cleared&quot;)</span>
+<span class="fc" id="L188">    }</span>
+
+    /**
+     * Removes the cached user private key for [personPublicId]
+     */
+    @CacheEvict(cacheNames = [USER_PRIVATE_KEY_CACHE_NAME], key = &quot;#personPublicId&quot;)
+    fun evictUserPrivateKey(personPublicId: PersonPublicId) {
+<span class="fc" id="L195">        log.debug(&quot;Evicted user key for person {} from cache&quot;, personPublicId)</span>
+<span class="fc" id="L196">    }</span>
+
+    private fun findCredentials(personIds: PersonIds, forceVerify: Boolean) =
+<span class="fc bfc" id="L199" title="All 2 branches covered.">            if (forceVerify) {</span>
+<span class="fc" id="L200">                userCache.findCredentialsNoCache(personIds)</span>
+            } else {
+<span class="fc" id="L202">                userCache.findCredentials(personIds)</span>
+<span class="fc" id="L203">            }</span>
+
+    private fun UserIdAndPKCS12.loadKeyStore(password: CharArray, personPublicId: PersonPublicId) =
+<span class="fc" id="L206">            try {</span>
+<span class="fc" id="L207">                CryptoHelper.loadKeyStore(decodeBase64(pkcs12Base64), password)</span>
+<span class="fc" id="L208">                        .mapLeft {</span>
+<span class="fc" id="L209">                            incorrectPasswordCounter.increment()</span>
+<span class="fc" id="L210">                            log.debug(&quot;Incorrect user key decryption password for person $personPublicId: $it&quot;)</span>
+<span class="fc" id="L211">                            KmsError.userPrivateKeyDecryptionFailed(personPublicId)</span>
+                        }
+<span class="nc" id="L213">            } catch (ex: Exception) {</span>
+<span class="nc" id="L214">                log.error(&quot;Could not decrypt KeyStore for person $personPublicId&quot;, FrameFilter.filter(ex))</span>
+<span class="pc" id="L215">                left&lt;KmsError, PKBKeyStore&gt;(KmsError.userPrivateKeyDecryptionFailed(personPublicId))</span>
+<span class="fc" id="L216">            }</span>
+
+
+
+
+    companion object {
+        const val USER_PRIVATE_KEY_CACHE_NAME = &quot;${KMS_CACHE_PREFIX}_userPrivateKey&quot;
+    }
+}
+
+<span class="nc" id="L226">fun KmsError.Companion.ssoAuthRecordNotFound(personPublicId: PersonPublicId) = KmsError(</span>
+<span class="nc" id="L227">    &quot;sso.auth.record.not.found&quot;,</span>
+<span class="nc" id="L228">    &quot;SSO record for personPublicId $personPublicId not found&quot;,</span>
+<span class="nc" id="L229">    KmsError.Type.NOT_FOUND)</span>
+
+<span class="fc" id="L231">fun KmsError.Companion.userPrivateKeyNotCached(personPublicId: PersonPublicId) = KmsError(</span>
+<span class="fc" id="L232">    &quot;user.private.key.unavailable&quot;,</span>
+<span class="fc" id="L233">    &quot;Private key not currently available for person $personPublicId&quot;,</span>
+<span class="fc" id="L234">    KmsError.Type.NOT_AUTHORISED)</span>
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

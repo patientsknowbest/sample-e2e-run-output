@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AddParticipantTask.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.encounter.impl.tolven</a> &gt; <span class="el_source">AddParticipantTask.java</span></div><h1>AddParticipantTask.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: CopyConversationThread.java Apr 12, 2013 2:24:31 PM pravinam$
+//
+//---------------------------------------------------------------------------
+package com.pkb.service.encounter.impl.tolven;
+
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.document.entity.DocumentsByIdAndAccount;
+import com.pkb.encounter.entity.Message;
+import com.pkb.exception.PKBException;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.user.entity.PKBPerson;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import io.prometheus.client.Counter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.List;
+import java.util.UUID;
+
+/**
+ * This class represents the task of copying the conversation and
+ * saving join message to a newly added participant. It also notifies the participant
+ *
+ * @author pravinam
+ */
+public class AddParticipantTask implements Runnable {
+
+    private static final String NOTIFICATION_TIMER_NAME = &quot;phr_add_participant_notification_timer&quot;;
+
+<span class="fc" id="L35">    private static final Timer NOTIFICATION_TIMER = Timer.builder(NOTIFICATION_TIMER_NAME)</span>
+<span class="fc" id="L36">            .description(&quot;Latencies of sending notifications to new recipients of a conversation&quot;)</span>
+<span class="fc" id="L37">            .publishPercentileHistogram()</span>
+<span class="fc" id="L38">            .publishPercentiles(0.5, 0.9, 0.95, 0.99)</span>
+<span class="fc" id="L39">            .register(Metrics.globalRegistry);</span>
+
+    private EncounterManager encounterManager;
+
+    private PKBEmailMessageManager pkbEmailMessageManager;
+
+    private AddParticipantThreadDTO addParticipantThreadDTO;
+
+    private final LoggedInEHRRequestContext requestContext;
+
+<span class="fc" id="L49">    protected static final Counter TASKS_FINISHED = Counter.build()</span>
+<span class="fc" id="L50">            .name(&quot;pkb_phr_add_participant_tasks&quot;)</span>
+<span class="fc" id="L51">            .labelNames(&quot;Success&quot;)</span>
+<span class="fc" id="L52">            .help(&quot;Total count of participants added asynchronously to conversations&quot;)</span>
+<span class="fc" id="L53">            .register();</span>
+
+<span class="fc" id="L55">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    AddParticipantTask(LoggedInEHRRequestContext requestContext,
+                       EncounterManager encounterManager,
+                       PKBEmailMessageManager pkbEmailMessageManager,
+<span class="fc" id="L60">                       AddParticipantThreadDTO addParticipantThreadDTO) {</span>
+<span class="fc" id="L61">        this.encounterManager = encounterManager;</span>
+<span class="fc" id="L62">        this.addParticipantThreadDTO = addParticipantThreadDTO;</span>
+<span class="fc" id="L63">        this.requestContext = requestContext;</span>
+<span class="fc" id="L64">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L65">    }</span>
+
+    @Override
+    public void run() {
+        try {
+<span class="fc" id="L70">            copyConversation();</span>
+<span class="fc" id="L71">            LOGGER.info(&quot;Adding participant-{} complete&quot;, addParticipantThreadDTO.getNewUserId());</span>
+<span class="fc" id="L72">            TASKS_FINISHED.labels(&quot;true&quot;).inc();</span>
+<span class="nc" id="L73">        } catch (Exception e) {</span>
+<span class="nc" id="L74">            LOGGER.error(&quot;PHRZ-667 caught exception when adding participant for message unique ID {}&quot;,</span>
+<span class="nc" id="L75">                    addParticipantThreadDTO.getExistingMessageUniqueId(), e);</span>
+<span class="nc" id="L76">            TASKS_FINISHED.labels(&quot;false&quot;).inc();</span>
+<span class="nc" id="L77">            throw e;</span>
+<span class="fc" id="L78">        }</span>
+<span class="fc" id="L79">    }</span>
+
+    private void copyConversation() {
+
+<span class="fc" id="L83">        UUID uniqueId = addParticipantThreadDTO.getExistingMessageUniqueId();</span>
+
+<span class="fc" id="L85">        LOGGER.info(&quot;Entered copyConversation for existing message unique ID {} &quot;, uniqueId);</span>
+
+<span class="fc" id="L87">        Long inviterId = addParticipantThreadDTO.getInviterId();</span>
+<span class="fc" id="L88">        Long newUserId = addParticipantThreadDTO.getNewUserId();</span>
+<span class="fc" id="L89">        Long newUserAccountId = addParticipantThreadDTO.getNewUserAccountId();</span>
+<span class="fc" id="L90">        List&lt;Message&gt; messages = addParticipantThreadDTO.getMessageList();</span>
+<span class="fc" id="L91">        DocumentsByIdAndAccount documentIdMap = addParticipantThreadDTO.getDocumentIdMap();</span>
+
+<span class="fc" id="L93">        encounterManager.transactional(() -&gt; {</span>
+            //delete if any previous messages in the conversation
+            //could be the case if the person is rejoining the conversation
+<span class="fc" id="L96">            encounterManager.deleteConversation(requestContext, newUserId, messages.get(0).getEncounterUniqueId());</span>
+<span class="fc" id="L97">            encounterManager.copyConversationToNewParticipant(requestContext.withoutAccessLog(), inviterId, addParticipantThreadDTO.getInviterAccountId(), newUserId, newUserAccountId, messages, documentIdMap);</span>
+<span class="fc" id="L98">        });</span>
+<span class="fc" id="L99">        Metrics.timer(NOTIFICATION_TIMER_NAME).record(() -&gt; sendNotification());</span>
+
+<span class="fc" id="L101">        LOGGER.info(&quot;Finished copyConversation for existing message unique ID {} &quot;, uniqueId);</span>
+<span class="fc" id="L102">    }</span>
+
+    private void sendNotification() {
+<span class="fc" id="L105">        PKBPerson recipient = addParticipantThreadDTO.getReceiver();</span>
+<span class="fc" id="L106">        PKBPerson patientReferredTo = addParticipantThreadDTO.getReferredPatient();</span>
+<span class="fc" id="L107">        PKBPerson composer = addParticipantThreadDTO.getComposer();</span>
+<span class="fc" id="L108">        UUID conversationId = addParticipantThreadDTO.getMessage().getEncounterUniqueId();</span>
+        try {
+<span class="fc bfc" id="L110" title="All 2 branches covered.">            if (!recipient.getId().equals(composer.getId())) {</span>
+                // if sender is not the new participant then send notification
+<span class="pc bpc" id="L112" title="1 of 4 branches missed.">                if (recipient.isPro()</span>
+                        &amp;&amp; (patientReferredTo != null)
+<span class="fc bfc" id="L114" title="All 2 branches covered.">                        &amp;&amp; (!composer.getId().equals(patientReferredTo.getId()))) {</span>
+<span class="fc" id="L115">                    pkbEmailMessageManager.notifyReceiverOnlyAboutPatient(composer, recipient,</span>
+                            patientReferredTo, conversationId);
+                } else {
+<span class="fc" id="L118">                    pkbEmailMessageManager.notifyReceiverOnly(composer, recipient,</span>
+                            conversationId);
+                }
+            }
+<span class="nc" id="L122">        } catch (PKBException e) {</span>
+<span class="nc" id="L123">            LOGGER.error(&quot;Exception while sending notification to receiver-{}&quot;, recipient.getId(), e);</span>
+<span class="fc" id="L124">        }</span>
+<span class="fc" id="L125">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

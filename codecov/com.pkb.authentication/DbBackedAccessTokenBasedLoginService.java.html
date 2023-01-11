@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DbBackedAccessTokenBasedLoginService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.authentication</a> &gt; <span class="el_source">DbBackedAccessTokenBasedLoginService.java</span></div><h1>DbBackedAccessTokenBasedLoginService.java</h1><pre class="source lang-java linenums">package com.pkb.authentication;
+
+import com.pkb.authentication.projection.AuthSessionAndCredentials;
+import com.pkb.authentication.repository.AuthnDataRepository;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.UserKeyPair;
+import com.pkb.datamodel.usertype.PatientType;
+import com.pkb.datamodel.usertype.PersonType;
+import com.pkb.datamodel.usertype.ProfessionalType;
+import com.pkb.datamodel.usertype.TeamCoordinatorType;
+import com.pkb.domain.repository.PersonRepository;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.internal.authentication.AccessTokenExpiredException;
+import com.pkb.internal.authentication.SessionExpiredException;
+import com.pkb.internal.crypto.CryptoService;
+import io.vavr.API;
+import io.vavr.collection.Traversable;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import io.vavr.control.Validation;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+
+import javax.crypto.SecretKey;
+import javax.security.auth.login.AccountException;
+import javax.security.auth.login.AccountNotFoundException;
+import javax.security.auth.login.LoginException;
+import java.lang.invoke.MethodHandles;
+import java.security.GeneralSecurityException;
+import java.time.Instant;
+import java.util.Base64;
+import java.util.Base64.Decoder;
+import java.util.Objects;
+import java.util.UUID;
+
+import static com.pkb.authentication.ImmutablePrimaryPrincipalProperties.primaryPrincipalProperties;
+import static com.pkb.entities.enums.UserType.INSTITUTE_ADMIN;
+import static com.pkb.entities.enums.UserType.PATIENT;
+import static com.pkb.entities.enums.UserType.REG_CLINICIAN;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.control.Either.left;
+import static java.lang.String.format;
+import static java.time.temporal.ChronoUnit.SECONDS;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class DbBackedAccessTokenBasedLoginService {
+<span class="fc" id="L51">    private static final Logger LOGGER = getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L52">    private static final Decoder BASE_64_DECODER = Base64.getDecoder();</span>
+
+    private final AuthenticatedIdentityService authenticatedIdentityService;
+    private final DateTimeService dateTimeService;
+    private final CryptoService cryptoService;
+    private final AuthnDataRepository authnDataRepository;
+    private final PersonRepository personRepository;
+
+    public DbBackedAccessTokenBasedLoginService(
+            AuthenticatedIdentityService authenticatedIdentityService,
+            DateTimeService dateTimeService,
+            CryptoService cryptoService,
+            AuthnDataRepository authnDataRepository,
+<span class="fc" id="L65">            PersonRepository personRepository) {</span>
+<span class="fc" id="L66">        this.authenticatedIdentityService = authenticatedIdentityService;</span>
+<span class="fc" id="L67">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L68">        this.cryptoService = cryptoService;</span>
+<span class="fc" id="L69">        this.authnDataRepository = authnDataRepository;</span>
+<span class="fc" id="L70">        this.personRepository = personRepository;</span>
+<span class="fc" id="L71">    }</span>
+
+    /**
+     * &lt;pre&gt;
+     * Given an access token we check:
+     *  1. if there is exactly one session for given token.
+     *  2. if the token has not yet expired (if expiry is enabled)
+     *  3. if token status is equal to TOKEN_ISSUED
+     *
+     * If all this conditions holds, then:
+     *  1. we attempt to decrypt user's (!) password using secret (taken for token).
+     *  2. if we managed to decrypt the users password, then we attempt to decrypt users {@literal Private Key}.
+     *  3. if we managed to decrypt the users Private Key then:
+     *   a.) we are authenticated as well as
+     *   b.) we attempt to decrypt Users Account Private Key (A.K.A.: Medical Record Private Key).
+     * &lt;/pre&gt;
+     *
+     * @param credentials
+     *            Access Token (non {@code null} nor empty string.
+     * @return
+     */
+    public Either&lt;LoginException, AuthenticatedIdentity&gt; authenticate(@NotNull AccessToken credentials) {
+<span class="fc" id="L93">        var session = authnDataRepository.fetchAuthnData(credentials.tokenAsString());</span>
+<span class="fc" id="L94">        return session.map(</span>
+<span class="fc" id="L95">                s -&gt; Option.ofOptional(personRepository.findById(s.getPersonId()))</span>
+<span class="fc" id="L96">                        .map(person -&gt; loadIdentityFromSession(s, credentials.secretAsString(), person)</span>
+<span class="fc" id="L97">                        ).getOrElse(left(new AccountNotFoundException(format(&quot;Could not find person to load for id=[%s]&quot;, s.getPersonId()))))</span>
+<span class="fc" id="L98">        ).getOrElse(left(new AccountNotFoundException(format(&quot;Could not find session for token=[%s]&quot;, new String(credentials.token())))));</span>
+    }
+    
+    private Either&lt;LoginException, AuthenticatedIdentity&gt; loadIdentityFromSession(AuthSessionAndCredentials session, String secret, PublicPKBPerson person) {
+<span class="fc" id="L102">        return Validation.combine(</span>
+<span class="fc" id="L103">                verifyTokenStatusEqualsToIssued(session.getStatus()),</span>
+<span class="fc" id="L104">                verifySessionIsNotExpired(session.getClient().getSessionExpirySeconds(), session.getAuthCodeIssued()),</span>
+<span class="fc" id="L105">                verifyTokenIsNotExpired(session.getClient().getTokenExpirySeconds(), session.getAccessTokenIssued()),</span>
+<span class="fc" id="L106">                collectPrivateCredentials(session, secret)).ap((v1, v2, v3, userKeyPair) -&gt; {</span>
+<span class="fc" id="L107">                    @SuppressWarnings(&quot;deprecation&quot;) PrimaryPrincipalProperties properties = primaryPrincipalProperties()</span>
+<span class="fc" id="L108">                            .internalPkbId(person.getId())</span>
+<span class="fc" id="L109">                            .publicPkbId(person.getPublicId())</span>
+<span class="fc" id="L110">                            .accountId(person.getDefaultAccountId())</span>
+<span class="fc bfc" id="L111" title="All 2 branches covered.">                            .isFrozen(person.getFrozenByTeamId() != null)</span>
+<span class="fc" id="L112">                            .primaryUserType(determineUserType(person.getUserType()))</span>
+<span class="fc" id="L113">                            .clientApiId(session.getClient().getApiId())</span>
+<span class="fc" id="L114">                            .clientApiScope(session.getClient().getScopeAllowed().toString())</span>
+<span class="fc" id="L115">                            .userKeyPair(userKeyPair)</span>
+<span class="fc" id="L116">                            .build()</span>
+<span class="fc" id="L117">                            .withHumanUuid(Option.of(person.getHumanUUID()).map(UUID::fromString));</span>
+<span class="fc" id="L118">                    return authenticatedIdentityService.getAuthenticatedIdentity(properties);</span>
+<span class="fc" id="L119">                }).mapError(Traversable::head) // Just the first error is fine</span>
+<span class="fc" id="L120">                .toEither();</span>
+
+    }
+
+    private Validation&lt;LoginException, Void&gt; verifySessionIsNotExpired(@Nullable Long sessionExpirySeconds,
+            @Nullable Instant issuedAt) {
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">        if (sessionExpirySeconds == null) {</span>
+<span class="nc" id="L127">            return Validation.valid(null);</span>
+        }
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        if (issuedAt == null) {</span>
+<span class="fc" id="L130">            return Validation.valid(null);</span>
+        }
+<span class="fc" id="L132">        Instant expiresAt = issuedAt.plus(sessionExpirySeconds, SECONDS);</span>
+<span class="fc bfc" id="L133" title="All 4 branches covered.">        if (sessionExpirySeconds &gt; 0L &amp;&amp; dateTimeService.now().isAfter(expiresAt)) {</span>
+<span class="fc" id="L134">            return Validation.invalid(new SessionExpiredException(expiresAt));</span>
+        }
+<span class="fc" id="L136">        return Validation.valid(null);</span>
+    }
+
+    private Validation&lt;LoginException, Void&gt; verifyTokenIsNotExpired(long tokenExpirySeconds, Instant issuedAt) {
+<span class="fc" id="L140">        Instant expiresAt = issuedAt.plus(tokenExpirySeconds, SECONDS);</span>
+<span class="fc bfc" id="L141" title="All 4 branches covered.">        if (tokenExpirySeconds &gt; 0L &amp;&amp; dateTimeService.now().isAfter(expiresAt)) {</span>
+<span class="fc" id="L142">            return Validation.invalid(new AccessTokenExpiredException(expiresAt));</span>
+        }
+<span class="fc" id="L144">        return Validation.valid(null);</span>
+    }
+
+    private Validation&lt;LoginException, Void&gt; verifyTokenStatusEqualsToIssued(String tokenStatus) {
+<span class="fc bfc" id="L148" title="All 2 branches covered.">        if (!Objects.equals(&quot;TOKEN_ISSUED&quot;, tokenStatus.toUpperCase())) {</span>
+<span class="fc" id="L149">            String message = format(&quot;Access token status mismatch. Expected to be 'TOKEN_ISSUED', but was: '%s'&quot;, tokenStatus);</span>
+<span class="fc" id="L150">            return Validation.invalid(new AccountException(message));</span>
+        }
+<span class="fc" id="L152">        return Validation.valid(null);</span>
+    }
+
+    private Class&lt;? extends PersonType&gt; determineUserType(UserType dbUserType) {
+<span class="fc" id="L156">        return Match(dbUserType).of(</span>
+<span class="fc" id="L157">                Case($(PATIENT), PatientType.class),</span>
+<span class="fc" id="L158">                Case($(REG_CLINICIAN), ProfessionalType.class),</span>
+<span class="fc" id="L159">                Case($(INSTITUTE_ADMIN), TeamCoordinatorType.class));</span>
+    }
+
+    private Validation&lt;LoginException, UserKeyPair&gt; collectPrivateCredentials(AuthSessionAndCredentials session,
+            String secret) {
+<span class="fc" id="L164">        byte[] encryptedPassword = session.getEncryptedPasswordInline();</span>
+<span class="fc" id="L165">        byte[] salt = session.getSaltInline();</span>
+<span class="fc" id="L166">        int iterationCount = session.getIterationCount();</span>
+<span class="fc" id="L167">        String base64EncodedPkcs12 = session.getPkcs12Base64();</span>
+
+<span class="pc bpc" id="L169" title="1 of 2 branches missed.">        if (encryptedPassword == null) {</span>
+<span class="nc" id="L170">            return Validation.invalid(new LoginException(&quot;encryptedPassword is null&quot;));</span>
+        }
+<span class="fc" id="L172">        SecretKey secretKey = cryptoService.secretKey(secret);</span>
+<span class="fc" id="L173">        Option&lt;char[]&gt; password = API.Try(() -&gt; Option.of(cryptoService.decryptPassword(encryptedPassword, salt, iterationCount, secretKey)))</span>
+<span class="fc" id="L174">                .recover(GeneralSecurityException.class, Option.none())</span>
+<span class="fc" id="L175">                .toValidation()</span>
+<span class="fc" id="L176">                .get();</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">        if (password.isEmpty()) {</span>
+<span class="fc" id="L178">            return Validation.invalid(new LoginException(&quot;encryptedPassword is null&quot;));</span>
+        }
+
+<span class="fc" id="L181">        long internalPkbId = session.getPersonId();</span>
+<span class="fc" id="L182">        return decryptKeyPair(password.get(), base64EncodedPkcs12, internalPkbId)</span>
+<span class="pc" id="L183">                .mapLeft(error -&gt; new LoginException(&quot;Cannot decrypt user (id: &quot; + internalPkbId + &quot;) private key with provided credentials! Reason: &quot; + error))</span>
+<span class="fc" id="L184">                .toValidation();</span>
+    }
+
+    private Either&lt;String, UserKeyPair&gt; decryptKeyPair(char[] password,
+            String base64EncodedPkcs12,
+            long internalPkbId) {
+<span class="fc" id="L190">        return cryptoService.loadKeyStore(BASE_64_DECODER.decode(base64EncodedPkcs12), password)</span>
+<span class="pc" id="L191">                .flatMap(keyStore -&gt; keyStore.getAlias(aliases -&gt; LOGGER.warn(&quot;PHR-5284 Multiple aliases for id: {} in keystore: {}&quot;, internalPkbId, aliases))</span>
+<span class="fc" id="L192">                        .flatMap(alias -&gt; keyStore.getKeyPair(alias, password)));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,241 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisIntegrationService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2</a> &gt; <span class="el_source">EmisIntegrationService.java</span></div><h1>EmisIntegrationService.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.dataupload.emis.esv2.EmisEsBatchState;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutableVerifiedEmisFileSetLists;
+import com.pkb.service.dataupload.emis.esv2.model.VerifiedEmisFileSetLists;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
+import name.neuhalfen.projects.crypto.bouncycastle.openpgp.keys.keyrings.KeyringConfig;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.LocalDate;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
+
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singletonList;
+import static java.util.Comparator.comparingInt;
+
+public class EmisIntegrationService {
+
+<span class="fc" id="L32">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String TAG_SOURCE = &quot;source&quot;;
+    private static final String TAG_PHASE = &quot;phase&quot;;
+    private static final String INTEGRATION_TIMER_NAME = &quot;pkb_phr_integration_emis_csv_timings&quot;;
+<span class="fc" id="L37">    private static final Timer INTEGRATION_TIMER = Timer.builder(INTEGRATION_TIMER_NAME)</span>
+<span class="fc" id="L38">            .tags(TAG_SOURCE, &quot;&quot;, TAG_PHASE, &quot;&quot;)</span>
+<span class="fc" id="L39">            .description(&quot;Time needed to finish EMIS ES integration steps&quot;)</span>
+<span class="fc" id="L40">            .publishPercentiles(0.5, 0.95)</span>
+<span class="fc" id="L41">            .publishPercentileHistogram()</span>
+<span class="fc" id="L42">            .percentilePrecision(2)</span>
+<span class="fc" id="L43">            .register(Metrics.globalRegistry);</span>
+
+    private static final String SOURCE_RESULT_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_source_results&quot;;
+    private static final String SOURCE_DOWNLOAD_RESULT_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_source_download_results&quot;;
+    private static final String TAG_RESULT = &quot;result&quot;;
+<span class="fc" id="L48">    private static final Counter SOURCE_RESULT_COUNTER = Counter.builder(SOURCE_RESULT_COUNTER_NAME)</span>
+<span class="fc" id="L49">            .tags(TAG_SOURCE, &quot;&quot;, TAG_RESULT, &quot;&quot;)</span>
+<span class="fc" id="L50">            .description(&quot;Emis ES source results&quot;)</span>
+<span class="fc" id="L51">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L53">    private static final EmisInternalResult EMPTY_FAILED_RESULT = ImmutableEmisInternalResult.of(ImmutableVerifiedEmisFileSetLists.of(emptyList(), emptyList()), EmisStepResult.FAILED);</span>
+
+    private final EmisDownloader emisDownloaderService;
+    private final EmisBatchVerifier emisBatchVerifier;
+    private final EmisProcessor emisProcessor;
+    private final EmisConfigurationUtils emisConfigurationUtils;
+    private final EmisEsBatchStateService emisEsBatchStateService;
+    private final EmisEsMissingCodeHelper missingCodeHelper;
+    private final EmisEsManager emisEsManager;
+    private final EmisEsStatusService emisEsStatusService;
+    private final EmisOrgHelper emisOrgHelper;
+    private final EmisPersonStatHelper emisPersonStatHelper;
+
+    public EmisIntegrationService(@NotNull EmisDownloader emisDownloaderService,
+                                  @NotNull EmisBatchVerifier emisBatchVerifier,
+                                  @NotNull EmisProcessor emisProcessor,
+                                  @NotNull EmisConfigurationUtils emisConfigurationUtils,
+                                  @NotNull EmisEsBatchStateService emisEsBatchStateService,
+                                  @NotNull EmisEsMissingCodeHelper missingCodeHelper,
+                                  @NotNull EmisEsManager emisEsManager,
+                                  @NotNull EmisEsStatusService emisEsStatusService,
+                                  EmisOrgHelper emisOrgHelper,
+<span class="fc" id="L75">                                  EmisPersonStatHelper emisPersonStatHelper) {</span>
+<span class="fc" id="L76">        this.emisDownloaderService = emisDownloaderService;</span>
+<span class="fc" id="L77">        this.emisBatchVerifier = emisBatchVerifier;</span>
+<span class="fc" id="L78">        this.emisProcessor = emisProcessor;</span>
+<span class="fc" id="L79">        this.emisConfigurationUtils = emisConfigurationUtils;</span>
+<span class="fc" id="L80">        this.emisEsBatchStateService = emisEsBatchStateService;</span>
+<span class="fc" id="L81">        this.missingCodeHelper = missingCodeHelper;</span>
+<span class="fc" id="L82">        this.emisEsManager = emisEsManager;</span>
+<span class="fc" id="L83">        this.emisEsStatusService = emisEsStatusService;</span>
+<span class="fc" id="L84">        this.emisOrgHelper = emisOrgHelper;</span>
+<span class="fc" id="L85">        this.emisPersonStatHelper = emisPersonStatHelper;</span>
+<span class="fc" id="L86">    }</span>
+
+    public EmisStepResult run(long jobId, boolean downloadOnly) {
+        try {
+<span class="fc" id="L90">            emisEsStatusService.reportStart();</span>
+<span class="fc" id="L91">            Path localDirectory = emisConfigurationUtils.getLocalDownloadDirectory();</span>
+<span class="fc bfc" id="L92" title="All 2 branches covered.">            LOGGER.info(&quot;EMIS integration service for job id:{} started for {}.&quot;, jobId, downloadOnly ? &quot;download only&quot; : &quot;full processing&quot; );</span>
+
+<span class="fc" id="L94">            List&lt;? extends ConnectionData&gt; emisSftpConfiguration = emisConfigurationUtils.getEmisConnectionConfiguration();</span>
+<span class="fc" id="L95">            emisEsStatusService.reportUniqueTags(emisSftpConfiguration.size());</span>
+
+<span class="fc" id="L97">            Map&lt;String, EmisEsBatchState&gt; batchStateBySftpTag = initializeBatchStateBySftpTag(jobId, emisSftpConfiguration);</span>
+
+<span class="fc" id="L99">            Map&lt;String, EmisStepResult&gt; downloadResults = emisSftpConfiguration.stream()</span>
+<span class="fc" id="L100">                    .collect(Collectors.toMap(ConnectionData::uniqueTag,</span>
+<span class="fc" id="L101">                            s -&gt; downloadFromServer(s, localDirectory, batchStateBySftpTag.get(s.uniqueTag()).getLastProcessedBatchDatestamp(), jobId)));</span>
+
+<span class="fc bfc" id="L103" title="All 2 branches covered.">            var verifiedBatches = downloadOnly ? EMPTY_FAILED_RESULT : verifyBatches(localDirectory, jobId, batchStateBySftpTag);</span>
+
+<span class="fc bfc" id="L105" title="All 2 branches covered.">            EmisStepResult processingResult = downloadOnly ?  EmisStepResult.FAILED : processBatches(verifiedBatches, jobId, batchStateBySftpTag);</span>
+
+<span class="fc" id="L107">            List&lt;EmisStepResult&gt; stepResults = List.of(getFinalResultOfSteps(downloadResults.values()), verifiedBatches.getStepResult(), processingResult);</span>
+
+<span class="fc" id="L109">            EmisStepResult result = stepResults.stream()</span>
+<span class="fc" id="L110">                    .min(comparingInt(EmisStepResult::getValue))</span>
+<span class="fc" id="L111">                    .orElse(EmisStepResult.FAILED);</span>
+
+
+<span class="fc bfc" id="L114" title="All 2 branches covered.">            LOGGER.info(&quot;EMIS integration service for job id:{}, executing: {} finished with result: {}, \nfull results: {}&quot;, jobId, downloadOnly ? &quot;download only&quot; : &quot;full processing&quot;, result, stepResults);</span>
+<span class="fc" id="L115">            emisEsStatusService.reportServerResult(result);</span>
+
+<span class="fc" id="L117">            return result;</span>
+        } finally {
+            try {
+                //make sure we always clear down any caches between runs
+<span class="fc" id="L121">                missingCodeHelper.logAnyEmisCodeProblemsAndThenClearCaches(jobId);</span>
+<span class="fc" id="L122">                emisOrgHelper.jobFinished(jobId);</span>
+<span class="fc" id="L123">                emisPersonStatHelper.reportJobFinished();</span>
+            } finally {
+<span class="fc" id="L125">                emisEsManager.clearState();</span>
+<span class="fc" id="L126">                emisEsStatusService.clearState();</span>
+<span class="fc" id="L127">                emisOrgHelper.clearState();</span>
+<span class="fc" id="L128">                emisPersonStatHelper.clearState();</span>
+            }
+        }
+    }
+
+    private Map&lt;String, EmisEsBatchState&gt; initializeBatchStateBySftpTag(long jobId, List&lt;? extends ConnectionData&gt; emisSftpConfiguration){
+<span class="fc" id="L134">        Map&lt;String, EmisEsBatchState&gt; batchStateBySftpTag = emisEsBatchStateService.findByJob(singletonList(jobId)).getOrDefault(jobId, new HashMap&lt;&gt;());</span>
+<span class="fc" id="L135">        return emisSftpConfiguration.stream()</span>
+<span class="fc" id="L136">                .collect(Collectors.toMap(ConnectionData::uniqueTag,</span>
+                        s -&gt; {
+<span class="fc" id="L138">                            EmisEsBatchState currentBatchState = batchStateBySftpTag.get(s.uniqueTag());</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">                            if (currentBatchState == null) {</span>
+<span class="fc" id="L140">                                currentBatchState = emisEsBatchStateService.createDefault(jobId, s.uniqueTag());</span>
+<span class="fc" id="L141">                                batchStateBySftpTag.put(s.uniqueTag(), currentBatchState);</span>
+                            }
+<span class="fc" id="L143">                            return currentBatchState;</span>
+                        }));
+    }
+
+    private EmisStepResult downloadFromServer(ConnectionData connection, Path localDirectory, LocalDate lastProcessedBatchDatestamp, long jobId) {
+<span class="fc" id="L148">        LOGGER.info(&quot;EMIS download for job {} for server: {} started.&quot;, jobId, connection.uniqueTag());</span>
+<span class="fc" id="L149">        Path serverDownloadDir = localDirectory.resolve(connection.uniqueTag());</span>
+<span class="fc" id="L150">        createDirectory(serverDownloadDir);</span>
+
+<span class="fc" id="L152">        emisEsStatusService.reportCurrentUniqueTag(connection.uniqueTag());</span>
+
+<span class="fc" id="L154">        EmisStepResult result = downloadBatches(connection, serverDownloadDir, lastProcessedBatchDatestamp, jobId);</span>
+
+
+<span class="fc" id="L157">        LOGGER.info(&quot;EMIS download for job {} and server: {} finished with result: {}&quot;, jobId, connection.uniqueTag(), result);</span>
+
+<span class="fc" id="L159">        incrementDownloadCounter(connection.uniqueTag(), result);</span>
+<span class="fc" id="L160">        return result;</span>
+    }
+
+    private EmisInternalResult&lt;VerifiedEmisFileSetLists&gt; verifyBatches(Path localDirectory, long jobId , Map&lt;String, EmisEsBatchState&gt; batchStateBySftpTag) {
+<span class="fc" id="L164">        LOGGER.info(&quot;EMIS verify for job {} started.&quot;, jobId);</span>
+<span class="fc" id="L165">        EmisInternalResult&lt;VerifiedEmisFileSetLists&gt; verifiedBatches = EMPTY_FAILED_RESULT;</span>
+
+        try {
+<span class="fc" id="L168">            KeyringConfig keyringConfig = emisConfigurationUtils.getDecryptionKey();</span>
+<span class="fc" id="L169">            verifiedBatches = recordTime(&quot;emisVerify&quot;, &quot;allServers&quot;, () -&gt; emisBatchVerifier.verifyBatches(localDirectory, keyringConfig, batchStateBySftpTag));</span>
+
+<span class="nc" id="L171">        } catch (Exception e) {</span>
+<span class="nc" id="L172">            LOGGER.error(&quot;Error during running EMIS verify for job {} , Reason:&quot;, jobId, e);</span>
+        } finally {
+<span class="fc" id="L174">            emisEsManager.clearStatelessAdminPatientOverrides();</span>
+        }
+
+<span class="fc" id="L177">        LOGGER.info(&quot;EMIS verify for job {} finished with result: {}&quot;, jobId, verifiedBatches.getStepResult());</span>
+<span class="fc" id="L178">        return verifiedBatches;</span>
+    }
+
+
+    private EmisStepResult processBatches(EmisInternalResult&lt;VerifiedEmisFileSetLists&gt; verifiedBatches, long jobId, Map&lt;String, EmisEsBatchState&gt; batchStateBySftpTag ) {
+<span class="fc" id="L183">        LOGGER.info(&quot;EMIS process for job {} started.&quot;, jobId);</span>
+<span class="fc" id="L184">        EmisStepResult processResult = EmisStepResult.FAILED;</span>
+        try {
+<span class="fc" id="L186">            KeyringConfig keyringConfig = emisConfigurationUtils.getDecryptionKey();</span>
+<span class="fc" id="L187">            EmisInternalResult&lt;Map&lt;String, EmisEsBatchState&gt;&gt; processInternalResult = recordTime(&quot;emisProcessing&quot;, &quot;allServers&quot;, () -&gt; emisProcessor.processBatches(verifiedBatches.getContent(), keyringConfig, batchStateBySftpTag));</span>
+<span class="fc" id="L188">            processResult = processInternalResult.getStepResult();</span>
+
+<span class="nc" id="L190">        } catch (Exception e) {</span>
+<span class="nc" id="L191">            LOGGER.error(&quot;Error during running EMIS process for job {}. Reason:&quot;, jobId, e);</span>
+        } finally {
+<span class="fc" id="L193">            emisEsManager.clearStatelessAdminPatientOverrides();</span>
+        }
+
+<span class="fc" id="L196">        EmisStepResult finalResult = getFinalResultOfSteps(List.of(verifiedBatches.getStepResult(), processResult));</span>
+
+<span class="fc" id="L198">        LOGGER.info(&quot;EMIS process for job {} finished with result: {}&quot;, jobId, finalResult);</span>
+<span class="fc" id="L199">        return finalResult;</span>
+    }
+
+    private EmisStepResult downloadBatches(ConnectionData connection, Path serverDownloadDir, LocalDate lastProcessedBatchDatestamp, long jobId) {
+<span class="fc" id="L203">        EmisStepResult downloadResult = EmisStepResult.FAILED;</span>
+        try {
+<span class="fc" id="L205">            downloadResult = recordTime(&quot;emisDownload&quot;, connection.uniqueTag(), () -&gt; emisDownloaderService.startDownload(connection, lastProcessedBatchDatestamp, serverDownloadDir));</span>
+<span class="nc" id="L206">        } catch (Exception e) {</span>
+<span class="nc" id="L207">            LOGGER.error(&quot;Error during running EMIS download job {} for connection: {}, Reason:&quot;, jobId, connection.uniqueTag(), e);</span>
+<span class="fc" id="L208">        }</span>
+<span class="fc" id="L209">        return downloadResult;</span>
+    }
+
+
+
+    private Path createDirectory(Path input) {
+        try {
+<span class="fc" id="L216">            return Files.createDirectories(input);</span>
+<span class="nc" id="L217">        } catch (IOException e) {</span>
+<span class="nc" id="L218">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    @VisibleForTesting
+    EmisStepResult getFinalResultOfSteps(Collection&lt;EmisStepResult&gt; stepResults) {
+        // FINISHED is the highest value
+<span class="fc" id="L225">        return stepResults.stream().min(comparingInt(EmisStepResult::getValue)).orElse(EmisStepResult.FAILED);</span>
+    }
+
+    private &lt;T&gt; T recordTime(String phase, String emisConnectionUniqueTag, Callable&lt;T&gt; toMeasure) {
+        try {
+<span class="fc" id="L230">            return Metrics.timer(INTEGRATION_TIMER_NAME, TAG_SOURCE, emisConnectionUniqueTag, TAG_PHASE, phase).recordCallable(toMeasure);</span>
+<span class="nc" id="L231">        } catch (Exception e) {</span>
+<span class="nc" id="L232">            throw new RuntimeException(e);</span>
+        }
+    }
+
+    private static &lt;T&gt; void incrementDownloadCounter(String emisConnectionUniqueTag, EmisStepResult result) {
+<span class="fc" id="L237">        Metrics.counter(SOURCE_DOWNLOAD_RESULT_COUNTER_NAME, TAG_SOURCE, emisConnectionUniqueTag, TAG_RESULT, result.toString()).increment();</span>
+<span class="fc" id="L238">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

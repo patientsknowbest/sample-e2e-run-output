@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DeletedTestResultTaskExecutor.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.backgroundtasks.service.taskexecutors</a> &gt; <span class="el_source">DeletedTestResultTaskExecutor.kt</span></div><h1>DeletedTestResultTaskExecutor.kt</h1><pre class="source lang-java linenums">package com.pkb.backgroundtasks.service.taskexecutors
+
+import com.pkb.backgroundtasks.AccountPublicId
+import com.pkb.backgroundtasks.entity.AccountTaskDetails
+import com.pkb.backgroundtasks.entity.AccountTaskPending
+import com.pkb.backgroundtasks.entity.AccountTaskType
+import com.pkb.backgroundtasks.repository.AppMenuDataRepository
+import com.pkb.crypto.decryptionhelper.DecryptionHelperAppMenuData
+import com.pkb.crypto.dto.AccountKeysDTO
+import com.pkb.crypto.encryptionhelper.EncryptionHelperAppMenuData
+import com.pkb.entities.app.AppMenuData
+import com.pkb.entities.enums.Route
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.stereotype.Component
+import java.lang.invoke.MethodHandles
+import java.util.UUID
+
+/**
+ * Prior to a change made in mid-2021, when we deleted loincTestResult EHRData records,
+ * we created a new row in menu_data and marked it as &quot;deleted&quot; and saved it with the same uniqueid,
+ * but we didn't copy any of the encrypted fields from the previous version. This makes subsequent operations
+ * (like undelete) much harder because the most recent row doesn't necessarily contain all of the data.
+ *
+ * This migrator fixes this by stepping through the history of a test result that has deleted versions, checking
+ * for versions that are missing encrypted data and re-populating it from the most recently preceding row which does.
+ *
+ * This process is somewhat more complicated than it ought to be because we can in theory receive updates to a deleted
+ * row (meaning that there are several versions in sequence all missing the required data), and also because
+ * not *all* rows marked as deleted have this problem. When we +update* a test result, we insert a new version but
+ * also mark the previous version as deleted. These &quot;deleted&quot; rows have useful data that shouldn't be overwritten.
+ */
+@Component
+<span class="fc" id="L34">class DeletedTestResultTaskExecutor(</span>
+<span class="fc" id="L35">    private val menuDataRepo: AppMenuDataRepository,</span>
+<span class="fc" id="L36">    private val decryptionHelper: DecryptionHelperAppMenuData,</span>
+<span class="fc" id="L37">    private val encryptionHelper: EncryptionHelperAppMenuData</span>
+<span class="fc" id="L38">) : AccountTaskExecutor&lt;DeletedTestResultTaskExecutor, DeletedTestResultTaskDetails&gt;(DeletedTestResultTaskDetails::class.java) {</span>
+
+    /**
+     * SCISTORE uses an alternative non-versioned deletion path that isn't affected by this
+     * problem. We can ignore delete test results with Route.SCISTORE when searching for
+     * ones that need fixing.
+     */
+<span class="fc" id="L45">    private val excludedRoutes = listOf(Route.SCISTORE)</span>
+
+<span class="fc" id="L47">    private val log: Logger = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())</span>
+
+    override fun getSkippableTasks(accountsToProcess: List&lt;AccountTaskPending&gt;, accountIdLookup: Map&lt;UUID, Long&gt;): Set&lt;AccountTaskPending&gt; {
+<span class="nc" id="L50">        val accountsWithResults = menuDataRepo.findAccountsWithDeletedTestResultsExcludingRoutes(accountIdLookup.values, excludedRoutes)</span>
+<span class="nc bnc" id="L51" title="All 2 branches missed.">        return accountsToProcess.filter { !accountsWithResults.contains(accountIdLookup[it.accountPublicId]) }.toSet()</span>
+    }
+
+    override fun performTask(accountPublicId: AccountPublicId, accountKeysDTO: AccountKeysDTO, accountPrivateId: Long, taskDetails: DeletedTestResultTaskDetails): Boolean {
+<span class="nc" id="L55">        log.debug(&quot;Fixing deleted test results for account {}&quot;, accountPublicId)</span>
+<span class="nc" id="L56">        return menuDataRepo.getDeletedTestResultsUniqueIds(accountPrivateId)</span>
+<span class="nc" id="L57">            .map { fixTestHistory(it, accountKeysDTO) }</span>
+<span class="nc" id="L58">            .all { it }</span>
+    }
+
+    private fun fixTestHistory(uniqueId: UUID, accountKeysDTO: AccountKeysDTO): Boolean =
+<span class="nc" id="L62">        menuDataRepo.getByBaseFieldsUniqueIdOrderByBaseFieldsPersistedDate(uniqueId)</span>
+<span class="nc" id="L63">            .map { decrypt(it, accountKeysDTO) }</span>
+<span class="nc" id="L64">            .runningReduce(this::checkAndFixVersion)</span>
+<span class="nc" id="L65">            .fold(true, this::validateAndLogErrors)</span>
+
+    private fun decrypt(menuData: AppMenuData, accountKeysDTO: AccountKeysDTO): MenuDataWithDecryptedFields =
+<span class="nc" id="L68">            MenuDataWithDecryptedFields(menuData, decryptionHelper.decryptAndDeserializeAppMenuDataWithAccountKeys(menuData, accountKeysDTO), accountKeysDTO)</span>
+
+    private fun checkAndFixVersion(previous: MenuDataWithDecryptedFields, current: MenuDataWithDecryptedFields): MenuDataWithDecryptedFields =
+<span class="nc bnc" id="L71" title="All 2 branches missed.">            if (current.hasEncryptedData()) current else current.withDecryptedDataFrom(previous).apply {</span>
+<span class="nc bnc" id="L72" title="All 2 branches missed.">                if (this.hasEncryptedData()) {</span>
+<span class="nc" id="L73">                    menuDataRepo.save(this.encrypt(encryptionHelper))</span>
+                }
+<span class="nc" id="L75">            }</span>
+
+    private fun validateAndLogErrors(okSoFar: Boolean, dataWithFields: MenuDataWithDecryptedFields): Boolean =
+<span class="nc bnc" id="L78" title="All 4 branches missed.">            okSoFar &amp;&amp; dataWithFields.validateAndLogErrorIfMissingData(log)</span>
+
+<span class="nc" id="L80">    data class MenuDataWithDecryptedFields(private val menuData: AppMenuData, private val decryptedFields: DecryptedFields, private val accountKeysDTO: AccountKeysDTO) {</span>
+
+        /**
+         * All test results should have at least one of loincTestId or loincMappingId. The private id values get stored
+         * in the encrypted fields as well as being transformed into pseuds and stored on the query fields. Any record
+         * that has at least one of these in the encrypted field map is a record that has been populated properly, not
+         * one that was created by the broken delete process.
+         */
+        fun hasEncryptedData() =
+<span class="nc bnc" id="L89" title="All 4 branches missed.">                decryptedFields.keys.any { field -&gt; field == &quot;loincTestId&quot; || field == &quot;loincMappingId&quot; }</span>
+
+        fun validateAndLogErrorIfMissingData(log: Logger) =
+<span class="nc bnc" id="L92" title="All 2 branches missed.">                hasEncryptedData().also { if (!it) log.error(&quot;Deleted test result is missing encrypted data but has no previous non-deleted version to copy it from: {}&quot;, menuData.id) }</span>
+
+<span class="nc" id="L94">        fun withDecryptedDataFrom(previous: MenuDataWithDecryptedFields) = copy(decryptedFields = previous.decryptedFields)</span>
+
+        fun encrypt(encryptionHelper: EncryptionHelperAppMenuData): AppMenuData {
+<span class="nc" id="L97">            return encryptionHelper.encryptAppMenuData(menuData, decryptedFields, accountKeysDTO)</span>
+        }
+    }
+}
+
+typealias DecryptedFields = Map&lt;String, Any&gt;
+
+<span class="fc" id="L104">class DeletedTestResultTaskDetails : AccountTaskDetails&lt;DeletedTestResultTaskDetails&gt;(AccountTaskType.FIX_DELETED_TEST_RESULTS) {</span>
+<span class="nc" id="L105">    override fun getSelf(): DeletedTestResultTaskDetails = this</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

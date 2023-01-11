@@ -1,0 +1,441 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReplyMessageAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.message</a> &gt; <span class="el_source">ReplyMessageAction.java</span></div><h1>ReplyMessageAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: ReplyMessageAction.java Jun 2, 2009 1:14:43 AM mahendera$
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action.message;
+
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.bean.IUserWebBean;
+import com.pkb.encounter.entity.Message;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.messaging.MessageStatus;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.PKBConstants;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.StringEscapeUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.util.List;
+import java.util.UUID;
+
+import static com.pkb.encounter.entity.InlineContentTypes.MSG_INLINE_CALL;
+import static com.pkb.encounter.entity.InlineContentTypes.MSG_INLINE_MED;
+import static com.pkb.encounter.entity.InlineContentTypes.MSG_INLINE_MED_APPROVED;
+import static com.pkb.encounter.entity.InlineContentTypes.MSG_INLINE_MED_FOR_APPROVAL;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.text.MessageFormat.format;
+import static java.util.function.Function.identity;
+
+/**
+ * Sends reply to clinician message using conversation coversation id
+ */
+<span class="fc" id="L44">public class ReplyMessageAction extends MessageBaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+
+    private String message;
+
+    private String toAddress;
+
+    private UUID conversationId;
+
+    //private IMessageWebBean messageWebBean;
+
+    private String json;
+
+    private String recipientId;
+
+    private boolean privateMessage;
+
+    private String subject;
+
+    private String patientId;
+
+    private List&lt;PKBPerson&gt; acceptedClinicians;
+
+    private IUserWebBean userWebBean;
+
+    private boolean messageRequired;
+
+    private boolean invalidMessageLength;
+
+    private String fileUploadErrorMessage;
+
+    private String inlineContentId;
+
+    private String contentType;
+
+    private boolean handover;
+
+    private boolean addParticipant;
+
+    /**
+     * message id of current draft
+     */
+    private String messageId;
+
+    private InputStream autoSaveResult;
+
+    @Autowired
+    private ReplyFeasibilityService replyFeasibilityService;
+
+<span class="fc" id="L94">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    @Override
+    public String execute() {
+<span class="fc" id="L98">        LOGGER.info(&quot;Entering execute&quot;);</span>
+<span class="fc" id="L99">        String result = Action.SUCCESS;</span>
+<span class="fc" id="L100">        loggedinContext = getLoggedInEHRRequestContext();</span>
+
+<span class="fc bfc" id="L102" title="All 2 branches covered.">        if (!attemptReply(conversationId)) {</span>
+<span class="fc" id="L103">            LOGGER.warn(&quot;Attempt to reply in a conversation that is not feasible to be replied - {}&quot;, conversationId);</span>
+<span class="fc" id="L104">            return ERROR;</span>
+        }
+
+        try {
+<span class="fc bfc" id="L108" title="All 2 branches covered.">            if (handover) {</span>
+<span class="pc bpc" id="L109" title="1 of 2 branches missed.">                if (privateMessage) {</span>
+<span class="nc" id="L110">                    throw new RuntimeException(</span>
+                            &quot;Attempting to handover a discussion despite privateMessage flag. The message has not been sent.&quot;);
+                }
+<span class="fc" id="L113">                return &quot;handover&quot;;</span>
+<span class="fc bfc" id="L114" title="All 2 branches covered.">            } else if (addParticipant) {</span>
+<span class="pc bpc" id="L115" title="3 of 4 branches missed.">                if (privateMessage &amp;&amp; !loggedinContext.isUserInOwnAccount()) {</span>
+<span class="nc" id="L116">                    throw new RuntimeException(</span>
+                            &quot;Attempting to bring in a new user despite privateMessage flag and not being the patient. The message has not been sent.&quot;);
+                }
+<span class="fc" id="L119">                return &quot;addParticipant&quot;;</span>
+            } else {
+<span class="pc bpc" id="L121" title="1 of 2 branches missed.">                if (validateInputs(loggedinContext)) {</span>
+
+<span class="fc bfc" id="L123" title="All 2 branches covered.">                    if (StringUtils.isNotBlank(inlineContentId) &amp;&amp;</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">                            (MSG_INLINE_MED.equals(contentType)</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">                                    || MSG_INLINE_MED_APPROVED.equals(contentType)</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">                                    || MSG_INLINE_MED_FOR_APPROVAL.equals(contentType))) {</span>
+<span class="fc" id="L127">                        message = message + &quot;\n[MED=&quot; + inlineContentId + &quot;]&quot;;</span>
+                    }
+
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">                    if (MSG_INLINE_CALL.equals(contentType)) {</span>
+<span class="nc" id="L131">                        message = message + &quot;\n[CALL=#]&quot;;</span>
+                    }
+
+<span class="fc" id="L134">                    attachments = generateAttachmentsFromInputs();</span>
+
+<span class="fc" id="L136">                    Long msgId = null;</span>
+<span class="pc bpc" id="L137" title="1 of 4 branches missed.">                    if ((messageId != null) &amp;&amp; !messageId.isEmpty()) {</span>
+<span class="fc" id="L138">                        msgId = Long.parseLong(messageId);</span>
+                    }
+<span class="fc" id="L140">                    Message messageObject = buildMessage(loggedinContext, msgId, MessageStatus.UNREAD);</span>
+
+<span class="fc" id="L142">                    sendReplyMessage(messageObject, attachments, conversationId);</span>
+                    // success msg for the user
+<span class="fc" id="L144">                    addActionMessage(getText(&quot;replyMessageAction.txt.message_sent&quot;));</span>
+                    //clear the message contents if any
+<span class="fc" id="L146">                    message = &quot;&quot;;</span>
+<span class="fc" id="L147">                } else {</span>
+<span class="nc" id="L148">                    result = Action.INPUT;</span>
+                }
+            }
+<span class="nc" id="L151">        } catch (Exception exception) {</span>
+<span class="nc" id="L152">            addActionError(getText(&quot;replyMessageAction.err.could_not_save&quot;));</span>
+<span class="nc" id="L153">            LOGGER.error(&quot;Error while sending reply &quot;, exception);</span>
+<span class="nc" id="L154">            result = ERROR;</span>
+<span class="fc" id="L155">        }</span>
+<span class="fc" id="L156">        LOGGER.info(&quot;Exiting execute result : {}&quot;, result);</span>
+<span class="fc" id="L157">        return result;</span>
+    }
+
+    public String reload() {
+<span class="nc" id="L161">        attachments = generateAttachmentsFromInputs();</span>
+<span class="nc" id="L162">        return Action.SUCCESS;</span>
+    }
+
+    private boolean validateInputs(@NotNull LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L166">        boolean flag = true;</span>
+
+<span class="fc" id="L168">        String errorMessage = &quot;&quot;;</span>
+<span class="pc bpc" id="L169" title="2 of 4 branches missed.">        if ((this.message == null) || (this.message.trim().length() &lt; 1)</span>
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">                || TYPE_MESSAGE_HERE.equals(this.message.trim())) {</span>
+<span class="nc" id="L171">            this.messageRequired = true;</span>
+<span class="nc" id="L172">            errorMessage = getText(&quot;error.empty.message&quot;);</span>
+<span class="nc" id="L173">            flag = false;</span>
+        }
+
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">        if ((this.message == null)</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">                || (this.message.trim().length() &gt; PKBConstants.MSG_CONTENT_CHAR_LIMIT)) {</span>
+<span class="nc" id="L178">            this.invalidMessageLength = true;</span>
+<span class="nc" id="L179">            flag = false;</span>
+<span class="nc bnc" id="L180" title="All 4 branches missed.">            if ((this.message == null) || this.message.isEmpty()) {</span>
+<span class="nc" id="L181">                errorMessage = getText(&quot;error.empty.message&quot;);</span>
+            } else {
+<span class="nc" id="L183">                errorMessage = getText(&quot;message.too.long&quot;);</span>
+            }
+        }
+
+        // NOTE : Error message had to be handled this way because this action redirects to
+        // showConversation which will lose the action &amp; fields errors chain action will not work either
+        // and neither does message interceptor to store the and retrieve the errors message
+        // because it causes session to be null in showConversation action which fails the flow
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">        if (!errorMessage.isEmpty()) {</span>
+<span class="nc" id="L192">            session.put(&quot;errorMessage&quot;, errorMessage);</span>
+        }
+
+<span class="fc" id="L195">        long composerId = loggedInUserUtil.getLoggedInUserId();</span>
+        try {
+            long accountId;
+<span class="fc bfc" id="L198" title="All 2 branches covered.">            if (contextUserUtil.getContextUser() != null) {</span>
+<span class="fc" id="L199">                accountId = messageWebBean.getDefaultAccountId(contextUserUtil.getContextUserId());</span>
+            } else {
+<span class="fc" id="L201">                accountId = messageWebBean.getDefaultAccountId(composerId);</span>
+            }
+<span class="fc" id="L203">            var conversation = encounterManager.getOptionalConversation(requestContext.withoutAccessLog(),</span>
+                    conversationId,
+                    composerId,
+                    accountId)
+<span class="pc" id="L207">                    .orElseThrow(() -&gt; new IllegalStateException(format(&quot;Unable to find conversation uuid=%s&quot;, conversationId)));</span>
+            // If the latest message in the conversation is in INDRAFT
+            // check for participants
+<span class="fc" id="L210">            Message latestMessage = conversation.getLatestMessage();</span>
+<span class="fc bfc" id="L211" title="All 2 branches covered.">            if (latestMessage.getMessageStatus() == MessageStatus.INDRAFT) {</span>
+<span class="fc" id="L212">                List&lt;String&gt; fullParticipants = conversation.getParticipants();</span>
+<span class="pc bpc" id="L213" title="2 of 4 branches missed.">                if ((fullParticipants == null) || fullParticipants.isEmpty()</span>
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">                        || (fullParticipants.size() == 1 /*sender himself*/)) {</span>
+<span class="nc" id="L215">                    flag = false;</span>
+<span class="nc" id="L216">                    addActionError(getText(&quot;replyMessageAction.err.select_recipient&quot;));</span>
+                }
+            }
+<span class="nc" id="L219">        } catch (RuntimeException e) {</span>
+<span class="nc" id="L220">            flag = false;</span>
+<span class="nc" id="L221">            LOGGER.error(&quot;Error while validating no of participants while replying to message&quot;, e);</span>
+<span class="fc" id="L222">        }</span>
+
+<span class="fc" id="L224">        return flag;</span>
+    }
+
+    public String autoSaveMessageReply() {
+<span class="fc" id="L228">        LOGGER.info(&quot;autoSaveMessageReply:start&quot;);</span>
+        try {
+<span class="fc" id="L230">            loggedinContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L231">            MessageAutoSaveModel model = MESSAGE_PATCH_READER.readValue(json);</span>
+
+<span class="fc bfc" id="L233" title="All 2 branches covered.">            if (!attemptReply(model.getEncounterUniqueId())) {</span>
+<span class="fc" id="L234">                LOGGER.warn(&quot;Attempt to auto-save reply in a conversation that is not feasible to be replied - {}&quot;, model.getEncounterUniqueId());</span>
+<span class="fc" id="L235">                return ERROR;</span>
+            }
+
+<span class="fc" id="L238">            return autoSaveService.prepareMessageForAutoSave(loggedinContext, model)</span>
+<span class="fc" id="L239">                    .map(jsonMessage -&gt; {</span>
+<span class="fc" id="L240">                        LOGGER.info(&quot;messageId={}; conversationId={}&quot;, jsonMessage.getId(), jsonMessage.getEncounterUniqueId());</span>
+<span class="fc" id="L241">                        jsonMessage.getSource().init(loggedinContext);</span>
+<span class="fc" id="L242">                        Long messageId = sendReplyMessage(jsonMessage, null/*no attachments*/, jsonMessage.getEncounterUniqueId());</span>
+                        // conversation id will not be null but messageId cannot always have a value in reply screen
+<span class="fc" id="L244">                        byte[] resultArray = (&quot;&quot; + jsonMessage.getEncounterUniqueId() + &quot;,&quot; + messageId).getBytes(UTF_8);</span>
+<span class="fc" id="L245">                        autoSaveResult = new ByteArrayInputStream(resultArray);</span>
+<span class="fc" id="L246">                        return Action.SUCCESS;</span>
+                    })
+<span class="fc" id="L248">                    .mapLeft(error -&gt; {</span>
+<span class="nc" id="L249">                        LOGGER.error(&quot;problem with JSON autosave for {} , error: {}&quot;, loggedInUserUtil.getLoggedInUserId(), error);</span>
+<span class="nc" id="L250">                        autoSaveResult = new ByteArrayInputStream(ERROR.getBytes(UTF_8));</span>
+<span class="nc" id="L251">                        return ERROR;</span>
+                    })
+<span class="fc" id="L253">                    .fold(identity(), identity());</span>
+<span class="nc" id="L254">        } catch (Exception e) {</span>
+<span class="nc" id="L255">            LOGGER.error(&quot;problem with JSON autosave for {}&quot;, loggedInUserUtil.getLoggedInUserId(), e);</span>
+<span class="nc" id="L256">            autoSaveResult = new ByteArrayInputStream(ERROR.getBytes(UTF_8));</span>
+<span class="nc" id="L257">            return ERROR;</span>
+        } finally {
+<span class="fc" id="L259">            LOGGER.info(&quot;autoSaveMessageReply:end&quot;);</span>
+        }
+    }
+
+    public String showConfirmDiscardDraft() {
+<span class="fc" id="L264">        return &quot;discardDraft&quot;;</span>
+    }
+
+    public String discardDraftDirectly() {
+<span class="fc" id="L268">        return discardDraft(Long.valueOf(messageId), conversationId);</span>
+    }
+
+    private Message buildMessage(EHRRequestContext requestContext, Long messageId, MessageStatus messageStatus) {
+<span class="fc" id="L272">        Message messageObj = encounterManager.createMessage(patientId,</span>
+                conversationId,
+                false,
+                null,
+<span class="fc" id="L276">                StringEscapeUtils.unescapeHtml4(subject),</span>
+                message,
+                PrivacyFlag.GENERAL,
+                requestContext);
+<span class="fc" id="L280">        messageObj.setPrivateMessage(privateMessage);</span>
+<span class="fc" id="L281">        messageObj.setId(messageId);</span>
+<span class="fc" id="L282">        messageObj.setMessageStatus(messageStatus);</span>
+
+<span class="fc" id="L284">        return messageObj;</span>
+    }
+
+    private boolean attemptReply(UUID conversationId) {
+<span class="fc" id="L288">        return replyFeasibilityService.isFeasibleToBeReplied(loggedinContext.withoutAccessLog(), conversationId)</span>
+<span class="pc" id="L289">                .fold(e -&gt; false, identity());</span>
+    }
+
+    public String getToAddress() {
+<span class="nc" id="L293">        return toAddress;</span>
+    }
+
+    public void setToAddress(String toAddress) {
+<span class="nc" id="L297">        this.toAddress = toAddress;</span>
+<span class="nc" id="L298">    }</span>
+
+    public UUID getConversationId() {
+<span class="fc" id="L301">        return conversationId;</span>
+    }
+
+    public void setConversationId(UUID conversationId) {
+<span class="fc" id="L305">        this.conversationId = conversationId;</span>
+<span class="fc" id="L306">    }</span>
+
+    public List&lt;PKBPerson&gt; getAcceptedClinicians() {
+<span class="nc" id="L309">        return acceptedClinicians;</span>
+    }
+
+    public void setAcceptedClinicians(List&lt;PKBPerson&gt; acceptedClinicians) {
+<span class="nc" id="L313">        this.acceptedClinicians = acceptedClinicians;</span>
+<span class="nc" id="L314">    }</span>
+
+    public IUserWebBean getUserWebBean() {
+<span class="nc" id="L317">        return userWebBean;</span>
+    }
+
+    public void setUserWebBean(IUserWebBean userWebBean) {
+<span class="fc" id="L321">        this.userWebBean = userWebBean;</span>
+<span class="fc" id="L322">    }</span>
+
+    public String getMessage() {
+<span class="nc" id="L325">        return message;</span>
+    }
+
+    public boolean isAddParticipant() {
+<span class="nc" id="L329">        return addParticipant;</span>
+    }
+
+    public void setAddParticipant(boolean addParticipant) {
+<span class="fc" id="L333">        this.addParticipant = addParticipant;</span>
+<span class="fc" id="L334">    }</span>
+
+    public void setMessage(String message) {
+<span class="fc" id="L337">        this.message = message;</span>
+<span class="fc" id="L338">    }</span>
+
+    public boolean isMessageRequired() {
+<span class="nc" id="L341">        return messageRequired;</span>
+    }
+
+    public void setMessageRequired(boolean messageRequired) {
+<span class="nc" id="L345">        this.messageRequired = messageRequired;</span>
+<span class="nc" id="L346">    }</span>
+
+    public boolean isInvalidMessageLength() {
+<span class="nc" id="L349">        return invalidMessageLength;</span>
+    }
+
+    public void setInvalidMessageLength(boolean invalidMessageLength) {
+<span class="nc" id="L353">        this.invalidMessageLength = invalidMessageLength;</span>
+<span class="nc" id="L354">    }</span>
+
+    public String getFileUploadErrorMessage() {
+<span class="nc" id="L357">        return fileUploadErrorMessage;</span>
+    }
+
+    public void setFileUploadErrorMessage(String fileUploadErrorMessage) {
+<span class="nc" id="L361">        this.fileUploadErrorMessage = fileUploadErrorMessage;</span>
+<span class="nc" id="L362">    }</span>
+
+    public String getSubject() {
+<span class="nc" id="L365">        return subject;</span>
+    }
+
+    public void setSubject(String subject) {
+<span class="fc" id="L369">        this.subject = subject;</span>
+<span class="fc" id="L370">    }</span>
+
+    public String getRecipientId() {
+<span class="nc" id="L373">        return recipientId;</span>
+    }
+
+    public void setRecipientId(String recipientId) {
+<span class="fc" id="L377">        this.recipientId = recipientId;</span>
+<span class="fc" id="L378">    }</span>
+
+    public String getInlineContentId() {
+<span class="nc" id="L381">        return inlineContentId;</span>
+    }
+
+    public void setInlineContentId(String inlineContentId) {
+<span class="fc" id="L385">        this.inlineContentId = inlineContentId;</span>
+<span class="fc" id="L386">    }</span>
+
+    public String getContentType() {
+<span class="nc" id="L389">        return contentType;</span>
+    }
+
+    public void setContentType(String contentType) {
+<span class="fc" id="L393">        this.contentType = contentType;</span>
+<span class="fc" id="L394">    }</span>
+
+    public boolean isHandover() {
+<span class="nc" id="L397">        return handover;</span>
+    }
+
+    public void setHandover(boolean handover) {
+<span class="fc" id="L401">        this.handover = handover;</span>
+<span class="fc" id="L402">    }</span>
+
+    public String getMessageId() {
+<span class="fc" id="L405">        return messageId;</span>
+    }
+
+    public void setMessageId(String messageId) {
+<span class="fc" id="L409">        this.messageId = messageId;</span>
+<span class="fc" id="L410">    }</span>
+
+    public InputStream getAutoSaveResult() {
+<span class="fc" id="L413">        return autoSaveResult;</span>
+    }
+
+    public void setAutoSaveResult(InputStream autoSaveResult) {
+<span class="nc" id="L417">        this.autoSaveResult = autoSaveResult;</span>
+<span class="nc" id="L418">    }</span>
+
+    public void setJson(String json) {
+<span class="fc" id="L421">        this.json = json;</span>
+<span class="fc" id="L422">    }</span>
+
+    public String getPatientId() {
+<span class="nc" id="L425">        return patientId;</span>
+    }
+
+    public void setPatientId(String patientId) {
+<span class="fc" id="L429">        this.patientId = patientId;</span>
+<span class="fc" id="L430">    }</span>
+
+    public boolean isPrivateMessage() {
+<span class="nc" id="L433">        return privateMessage;</span>
+    }
+
+    public void setPrivateMessage(boolean privateMessage) {
+<span class="fc" id="L437">        this.privateMessage = privateMessage;</span>
+<span class="fc" id="L438">    }</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

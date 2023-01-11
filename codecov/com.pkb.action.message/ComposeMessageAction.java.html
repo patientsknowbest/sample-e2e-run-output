@@ -1,0 +1,926 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ComposeMessageAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.message</a> &gt; <span class="el_source">ComposeMessageAction.java</span></div><h1>ComposeMessageAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.message;
+
+import com.google.common.collect.ImmutableMap;
+import com.opensymphony.xwork2.Action;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.document.entity.Attachment;
+import com.pkb.dto.PersonDto;
+import com.pkb.dto.TeamDTO;
+import com.pkb.encounter.entity.Message;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.messaging.MessageStatus;
+import com.pkb.institute.entity.InstituteUserEntity.ContactOptions;
+import com.pkb.institute.entity.Team;
+import com.pkb.phplan.entity.PHPlan;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.phplan.PlanManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.Constants;
+import com.pkb.util.PKBConstants;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.function.Function.identity;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+<span class="fc" id="L40">public class ComposeMessageAction extends MessageBaseAction {</span>
+
+    private static final String AUTO_SAVE_RESET = &quot;reset&quot;;
+    private static final String REPLY_MESSAGE = &quot;replyMessage&quot;;
+
+    private static final String TOPIC_CONSULT_TEAM = &quot;consultTeam&quot;;
+
+    public static final String TOPIC_ALLERGIES = &quot;topicAllergies&quot;;
+    public static final String TOPIC_AUDIO = &quot;topicAudio&quot;;
+    public static final String TOPIC_DIAGNOSES = &quot;topicDiagnoses&quot;;
+    public static final String TOPIC_DIARY_ENTRIES = &quot;topicDiaryEntries&quot;;
+    public static final String TOPIC_FILES = &quot;topicFiles&quot;;
+    // GeneticsAction is an extension of MyFilesAction. As such, this topic value is set in the redirect
+    // (see struts-file.xml) rather than being set programmatically by the action.
+    public static final String TOPIC_GENETICS = &quot;topicGenetics&quot;;
+    public static final String TOPIC_IMAGING = &quot;topicImaging&quot;;
+    public static final String TOPIC_LIBRARY_ENTRIES = &quot;topicLibraryEntries&quot;;
+    public static final String TOPIC_MEASUREMENTS = &quot;topicMeasurements&quot;;
+    public static final String TOPIC_MEDICATIONS = &quot;topicMedications&quot;;
+    public static final String TOPIC_PHPLAN = &quot;topicPlans&quot;;
+    public static final String TOPIC_TEST_RESULTS = &quot;topicTests&quot;;
+
+<span class="fc" id="L62">    private static final Map&lt;String, String&gt; TOPIC_REDIRECTS = ImmutableMap.&lt;String, String&gt;builder()</span>
+<span class="fc" id="L63">            .put(TOPIC_CONSULT_TEAM, &quot;consultTeam&quot;)</span>
+            // &quot;Discuss&quot; workflows
+<span class="fc" id="L65">            .put(TOPIC_ALLERGIES, &quot;discussAllergies&quot;)</span>
+<span class="fc" id="L66">            .put(TOPIC_AUDIO, &quot;discussAudio&quot;)</span>
+<span class="fc" id="L67">            .put(TOPIC_DIAGNOSES, &quot;discussDiagnoses&quot;)</span>
+<span class="fc" id="L68">            .put(TOPIC_DIARY_ENTRIES, &quot;discussDiaryEntries&quot;)</span>
+<span class="fc" id="L69">            .put(TOPIC_FILES, &quot;discussFiles&quot;)</span>
+<span class="fc" id="L70">            .put(TOPIC_GENETICS, &quot;discussGenetics&quot;)</span>
+<span class="fc" id="L71">            .put(TOPIC_IMAGING, &quot;discussImaging&quot;)</span>
+<span class="fc" id="L72">            .put(TOPIC_LIBRARY_ENTRIES, &quot;discussLibraryEntry&quot;)</span>
+<span class="fc" id="L73">            .put(TOPIC_MEASUREMENTS, &quot;discussMeasurementResults&quot;)</span>
+<span class="fc" id="L74">            .put(TOPIC_MEDICATIONS, &quot;discussMedications&quot;)</span>
+<span class="fc" id="L75">            .put(TOPIC_PHPLAN, &quot;discussPHPlan&quot;)</span>
+<span class="fc" id="L76">            .put(TOPIC_TEST_RESULTS, &quot;discussTests&quot;)</span>
+<span class="fc" id="L77">            .build();</span>
+
+    private static final long serialVersionUID = 1L;
+<span class="fc" id="L80">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L82">    private final String subTab = &quot;startDiscussion&quot;;</span>
+<span class="fc" id="L83">    private final String tab = &quot;messages&quot;;</span>
+    private String json; // used for autosave
+
+    private Long patientId;
+
+    private Long careeId;
+
+    private PKBPerson patient;
+
+    private PKBPerson caree;
+
+    private PKBPerson carer;
+
+    private List&lt;String&gt; recipientId;
+
+    private int columnSize;
+
+    private NationalIdType teamNationalIdType;
+
+    private boolean privateMessage;
+
+<span class="fc" id="L104">    private String subject = &quot;&quot;;</span>
+
+    private String message;
+
+    private String action;
+
+    private String ContentType;
+
+    private String FileName;
+
+    private Long originalContextUser;
+
+    private PlanManager planManager;
+
+    private String send;
+
+    private UUID conversationId;
+
+    private String fromAction;
+
+    private String cancel;
+
+<span class="fc" id="L126">    private String fileUploadErrorMessage = &quot;&quot;;</span>
+
+    private String discussTopic;
+
+    private String discussMessage;
+
+    private List&lt;Attachment&gt; discussAttachments;
+
+    private PKBPerson instituteAdmin;
+
+    private Long selectedId;
+
+    private UUID selectedPlanUniqueId;
+    private Long selectedPlanVersion;
+
+    // this is for non institute clinician
+    private boolean nonInstituteClinician;
+    private PatientConsentManager patientConsentManager;
+
+    private List&lt;PersonDto&gt; carerList;
+
+    private InputStream autoSaveResult;
+
+    private Long messageId;
+
+    private Long referredPatientId;
+
+    // For consultTeam - same as pkb institute id
+    private Long consultTeamId;
+
+    private TeamDTO consultTeam;
+
+    private Long colleagueId;
+
+    private PKBPerson colleague;
+
+    private TeamManager teamManager;
+
+    private PKBPerson referredPatient;
+
+    private ParticipantSelectorParams participantSelectorParams;
+
+    @Override
+    public String execute() {
+
+<span class="fc" id="L171">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+
+        String result;
+        try {
+
+<span class="fc bfc" id="L176" title="All 2 branches covered.">            boolean isCaregiver = (contextUserUtil.getContextUserId() != null)</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">                    &amp;&amp; loggedInEHRRequestContext.isPatient();</span>
+<span class="fc" id="L178">            long userId = loggedInUserUtil.getLoggedInUserId();</span>
+
+            // check if non-institute clinician
+<span class="fc bfc" id="L181" title="All 2 branches covered.">            nonInstituteClinician = !(teamUserManager.isTeamUser(userId))</span>
+<span class="pc bpc" id="L182" title="1 of 2 branches missed.">                    &amp;&amp; loggedInEHRRequestContext.isPro();</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">            if (validateInputs()) {</span>
+
+                // If the user is discussing a PHPlan embed a reference to it at the
+                // end of the message, and make sure that every recipient has their own
+                // copy
+
+<span class="fc bfc" id="L189" title="All 2 branches covered.">                if (TOPIC_PHPLAN.equals(discussTopic)) {</span>
+<span class="fc" id="L190">                    message = message + &quot;[PLAN=&quot; + selectedPlanUniqueId + &quot;,&quot; + selectedPlanVersion + &quot;]&quot;;</span>
+
+<span class="fc" id="L192">                    long patientId = contextUserUtil.getContextOrLoggedInUserId();</span>
+<span class="fc" id="L193">                    long patientAccountId = userManager.getDefaultAccountId(patientId);</span>
+<span class="fc" id="L194">                    PHPlan pHPlan = planManager.getPHPlanForAccountId(selectedPlanUniqueId, loggedInEHRRequestContext, patientAccountId, false/*includeDeleted*/);</span>
+
+                    // VITALLY IMPORTANT to clear the ids, otherwise planManager will try to overwrite the
+                    // original objects with the new person's encryption key, causing no end of confusion
+
+<span class="fc" id="L199">                    Long thisPlanId = pHPlan.getId();</span>
+<span class="fc" id="L200">                    pHPlan.setId(null);</span>
+
+<span class="fc bfc" id="L202" title="All 2 branches covered.">                    if (recipientId != null) {</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">                        for (String recId : recipientId) {</span>
+<span class="fc" id="L204">                            long receiverId = Long.parseLong(recId);</span>
+<span class="fc" id="L205">                            Long recAccountId = userManager.getDefaultAccountId(receiverId);</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">                            if (!planManager.userHasPlan(getEHRRequestContext(), receiverId, pHPlan.getBaseFields().getUniqueId())) {</span>
+<span class="fc" id="L207">                                Long recPlanId = planManager.savePHPlan(getEHRRequestContext(), recAccountId, pHPlan);</span>
+<span class="fc" id="L208">                                planManager.copyAttachments(loggedInEHRRequestContext, userId, thisPlanId, receiverId, recPlanId);</span>
+                            }
+<span class="fc" id="L210">                        }</span>
+                    }
+                }
+
+<span class="fc" id="L214">                attachments = generateAttachmentsFromInputs();</span>
+                // Add the patient id as well
+<span class="pc bpc" id="L216" title="1 of 4 branches missed.">                if ((recipientId == null) || recipientId.isEmpty()) {</span>
+<span class="fc" id="L217">                    recipientId = new ArrayList&lt;&gt;();</span>
+                }
+<span class="fc bfc" id="L219" title="All 2 branches covered.">                if (patientId != null) {</span>
+<span class="fc" id="L220">                    recipientId.add(patientId.toString());</span>
+                }
+<span class="fc bfc" id="L222" title="All 2 branches covered.">                if (colleagueId != null) {</span>
+<span class="fc" id="L223">                    recipientId.add(colleagueId.toString());</span>
+                }
+<span class="fc" id="L225">                PKBPerson user = userManager.getPKBPerson(userId);</span>
+<span class="fc" id="L226">                recipientId.add(user.getId().toString());</span>
+
+<span class="fc" id="L228">                Long onBehalfAuthorId = null;</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">                if (isCaregiver) {</span>
+<span class="fc" id="L230">                    onBehalfAuthorId = loggedInUserUtil.getLoggedInUserId();</span>
+                }
+<span class="fc" id="L232">                Message messageObj = buildMessage(onBehalfAuthorId, recipientId);</span>
+
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">                messageObj.initializeUniqueIds(conversationId == null);</span>
+
+<span class="fc" id="L236">                encounterManager.saveMessage(loggedInEHRRequestContext, loggedInUserUtil.getLoggedInUserId(),</span>
+<span class="fc" id="L237">                        messageObj, attachments, contextUserUtil.getContextUserId(), true);</span>
+
+<span class="fc" id="L239">                tbmSelectedTeam</span>
+<span class="fc" id="L240">                        .forEach(teamId -&gt; TBM_SELECTED_TEAMS.labels(teamId).inc());</span>
+
+                // success msg for the user
+<span class="fc" id="L243">                addActionMessage(getText(&quot;composeMessageAction.txt.message_sent&quot;));</span>
+<span class="fc" id="L244">                result = TOPIC_REDIRECTS.getOrDefault(discussTopic, Action.SUCCESS);</span>
+<span class="fc" id="L245">            } else {</span>
+<span class="fc" id="L246">                result = INPUT;</span>
+                // save the uploaded files because else call to input will wipe it out
+
+<span class="fc" id="L249">                List&lt;Attachment&gt; uploadedFiles = generateAttachmentsFromInputs();</span>
+<span class="fc" id="L250">                input();</span>
+<span class="fc" id="L251">                attachments = uploadedFiles;</span>
+
+            }
+<span class="nc" id="L254">        } catch (Exception ex) {</span>
+<span class="nc" id="L255">            result = ERROR;</span>
+<span class="nc" id="L256">            addActionError(getText(&quot;composeMessageAction.err.could_not_save&quot;));</span>
+<span class="nc" id="L257">            LOGGER.error(&quot;Unable to send/save message &quot;, ex);</span>
+<span class="fc" id="L258">        }</span>
+
+<span class="fc" id="L260">        LOGGER.info(&quot;Exiting execute&quot;);</span>
+<span class="fc" id="L261">        return result;</span>
+    }
+
+    private boolean validateInputs() {
+<span class="fc" id="L265">        boolean flag = true;</span>
+
+<span class="fc bfc" id="L267" title="All 2 branches covered.">        if (isEmptyStrutsInput(recipientId)) {</span>
+<span class="fc" id="L268">            recipientId = null;</span>
+        }
+
+<span class="pc bpc" id="L271" title="1 of 8 branches missed.">        if (((recipientId == null) || recipientId.isEmpty()) &amp;&amp; (patientId == null) &amp;&amp; (colleagueId == null)) {</span>
+<span class="fc" id="L272">            flag = false;</span>
+<span class="fc" id="L273">            addFieldError(&quot;recipientId&quot;, getText(&quot;composeMessageAction.err.select_recipient&quot;));</span>
+        }
+
+<span class="pc bpc" id="L276" title="1 of 4 branches missed.">        if ((this.subject == null) || (this.subject.trim().length() &lt; 1)) {</span>
+<span class="fc" id="L277">            flag = false;</span>
+<span class="fc" id="L278">            addFieldError(&quot;subject&quot;,</span>
+<span class="fc" id="L279">                    getText(&quot;composeMessageAction.err.invalid_subject_length&quot;));</span>
+        }
+
+<span class="pc bpc" id="L282" title="1 of 4 branches missed.">        if ((this.message == null) || (this.message.trim().length() &lt; 1)) {</span>
+<span class="fc" id="L283">            flag = false;</span>
+<span class="fc" id="L284">            addFieldError(&quot;message&quot;,</span>
+<span class="fc" id="L285">                    getText(&quot;composeMessageAction.err.invalid_message_length&quot;));</span>
+        }
+
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">        if ((this.message == null)</span>
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">                || (this.message.trim().length() &gt; PKBConstants.MSG_CONTENT_CHAR_LIMIT)) {</span>
+<span class="nc" id="L290">            flag = false;</span>
+<span class="nc" id="L291">            addFieldError(&quot;message&quot;,</span>
+<span class="nc" id="L292">                    getText(&quot;composeMessageAction.err.message_too_long&quot;));</span>
+        }
+
+<span class="fc bfc" id="L295" title="All 2 branches covered.">        if (nonInstituteClinician) {</span>
+<span class="fc" id="L296">            flag = validateChosenClinicians();</span>
+        }
+
+<span class="fc" id="L299">        return flag;</span>
+    }
+
+    public String autoSaveMessage() {
+
+<span class="fc" id="L304">        LOGGER.info(&quot;autoSaveMessage:start&quot;);</span>
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">        if (json == null) {</span>
+<span class="nc" id="L306">            LOGGER.info(&quot;autoSaveMessage: json data null. nothing to save. exiting&quot;);</span>
+<span class="nc" id="L307">            autoSaveResult = new ByteArrayInputStream(AUTO_SAVE_RESET.getBytes(UTF_8));</span>
+<span class="nc" id="L308">            return Action.SUCCESS;</span>
+        }
+
+<span class="fc" id="L311">        String composerId = Long.toString(loggedInUserUtil.getLoggedInUserId());</span>
+
+        try {
+<span class="fc" id="L314">            MessageAutoSaveModel model = MESSAGE_PATCH_READER.readValue(json);</span>
+
+<span class="fc" id="L316">            return autoSaveService.prepareMessageForAutoSave(getLoggedInEHRRequestContext(), model)</span>
+<span class="fc" id="L317">                    .map(message -&gt; {</span>
+<span class="fc" id="L318">                        message.setSenderId(composerId);</span>
+
+                        // force draft status, and conversationId (if there isn't one already)
+<span class="fc" id="L321">                        message.setMessageStatus(MessageStatus.INDRAFT);</span>
+
+                        // the JavaScript puts patientId and clinicianIds into the &quot;participants&quot; list in the message
+<span class="fc" id="L324">                        List&lt;String&gt; participantIds = message.getParticipants();</span>
+<span class="fc" id="L325">                        participantIds.add(composerId);</span>
+
+<span class="pc bpc" id="L327" title="1 of 2 branches missed.">                        if (!message.getSource().isPopulated()) {</span>
+<span class="nc" id="L328">                            message.getSource().init(getEHRRequestContext());</span>
+                        }
+
+<span class="fc" id="L331">                        message.getBaseFields().setDefaultGeneralConsentIfNoneSet();</span>
+
+<span class="fc" id="L333">                        autoSaveResult = encounterManager.transactional(() -&gt; {</span>
+<span class="fc" id="L334">                            Long msgId = encounterManager.saveMessageNewConversation(getLoggedInEHRRequestContext(), message, null /*attachments*/);</span>
+<span class="fc" id="L335">                            byte[] resultArray = (&quot;&quot; + message.getEncounterUniqueId() + &quot;,&quot; + msgId).getBytes(UTF_8);</span>
+<span class="fc" id="L336">                            return new ByteArrayInputStream(resultArray);</span>
+                        });
+<span class="fc" id="L338">                        return Action.SUCCESS;</span>
+                    })
+<span class="fc" id="L340">                    .mapLeft(error -&gt; {</span>
+<span class="fc" id="L341">                        autoSaveResult = new ByteArrayInputStream(&quot;error&quot;.getBytes());</span>
+<span class="fc" id="L342">                        return Action.ERROR;</span>
+                    })
+<span class="fc" id="L344">                    .fold(identity(), identity());</span>
+
+<span class="nc" id="L346">        } catch (Exception e) {</span>
+<span class="nc" id="L347">            LOGGER.error(&quot;problem with JSON autosave for {}&quot;, composerId, e);</span>
+<span class="nc" id="L348">            autoSaveResult = new ByteArrayInputStream(Action.ERROR.getBytes(UTF_8));</span>
+        }
+<span class="nc" id="L350">        LOGGER.info(&quot;autoSaveMessage:end&quot;);</span>
+<span class="nc" id="L351">        return Action.SUCCESS;</span>
+    }
+
+    private Message buildMessage(Long onBehalfAuthorId, List&lt;String&gt; participants) {
+<span class="fc" id="L355">        Long referredPatient = null;</span>
+
+<span class="fc bfc" id="L357" title="All 2 branches covered.">        if (patientId != null) {</span>
+            // clinician is sending message to patient
+<span class="fc" id="L359">            referredPatient = patientId;</span>
+        }
+<span class="fc bfc" id="L361" title="All 2 branches covered.">        boolean isCaregiver = (contextUserUtil.getContextUserId() != null)</span>
+<span class="fc bfc" id="L362" title="All 2 branches covered.">                &amp;&amp; getLoggedInEHRRequestContext().isPatient();</span>
+<span class="fc" id="L363">        Long composerId = loggedInUserUtil.getLoggedInUserId();</span>
+        // patient is logged in and sending the message
+<span class="fc bfc" id="L365" title="All 2 branches covered.">        if (getLoggedInEHRRequestContext().isPatient()) {</span>
+<span class="fc" id="L366">            referredPatient = composerId;</span>
+<span class="pc bpc" id="L367" title="1 of 2 branches missed.">            if (referredPatientId != null) {</span>
+<span class="fc" id="L368">                referredPatient = referredPatientId;</span>
+            }
+        }
+<span class="fc bfc" id="L371" title="All 2 branches covered.">        if (isCaregiver) {</span>
+            // patient referred in the conversation is the context user
+<span class="fc" id="L373">            referredPatient = contextUserUtil.getContextUserId();</span>
+        }
+
+<span class="fc bfc" id="L376" title="All 2 branches covered.">        if (messageId == null) {</span>
+<span class="fc" id="L377">            conversationId = UUID.randomUUID();</span>
+        }
+
+<span class="fc bfc" id="L380" title="All 2 branches covered.">        Message messageObject = encounterManager.createMessage(Objects.toString(referredPatient, null),</span>
+                conversationId,
+                messageId == null,
+                &quot;&quot; + composerId,
+                subject,
+                message,
+                PrivacyFlag.GENERAL,
+<span class="fc" id="L387">                getEHRRequestContext());</span>
+<span class="fc" id="L388">        messageObject.setId(messageId);</span>
+<span class="fc" id="L389">        messageObject.setPrivateMessage(privateMessage);</span>
+
+<span class="fc" id="L391">        messageObject.setOnBehalfAuthorId(Objects.toString(onBehalfAuthorId, null));</span>
+
+<span class="fc" id="L393">        List&lt;String&gt; serializableList = new LinkedList&lt;&gt;();</span>
+        // Struts own list doesn't unserialize!
+<span class="fc" id="L395">        serializableList.addAll(participants);</span>
+<span class="fc" id="L396">        messageObject.setParticipants(serializableList);</span>
+
+        // Save consent on the message. This will be copied into the Encounter
+        // object on subsequent loads by EHREncounterBean.populateConversation
+<span class="fc" id="L400">        fillPrivacyFlagIn(messageObject);</span>
+
+<span class="fc" id="L402">        return messageObject;</span>
+    }
+
+    private boolean validateChosenClinicians() {
+<span class="fc" id="L406">        List&lt;PKBPerson&gt; careTeam = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L407">        boolean valid = true;</span>
+        // if no clinicians chosen ; no validation required
+<span class="pc bpc" id="L409" title="3 of 4 branches missed.">        if ((recipientId == null) || recipientId.isEmpty()) {</span>
+<span class="fc" id="L410">            return valid;</span>
+        }
+<span class="nc" id="L412">        PKBPerson patient = userManager.getPKBPerson(patientId);</span>
+<span class="nc" id="L413">        List&lt;PKBPerson&gt; clinicians = teamUserManager.getCliniciansWithIndivAccess(patientId,</span>
+                ContactOptions.Messages_Only);
+<span class="nc" id="L415">        careTeam.addAll(clinicians);</span>
+<span class="nc" id="L416">        List&lt;PKBPerson&gt; carers = patientConsentManager.getCaregivers(patientId);</span>
+<span class="nc" id="L417">        careTeam.addAll(carers);</span>
+
+        //Pravina : Why is this check required for a NI Clinician ?
+<span class="nc bnc" id="L420" title="All 2 branches missed.">        for (String chosenId : recipientId) {</span>
+<span class="nc" id="L421">            valid = false;</span>
+<span class="nc bnc" id="L422" title="All 2 branches missed.">            for (PKBPerson clinician : careTeam) {</span>
+                // Check if the recipient belongs to patient
+<span class="nc bnc" id="L424" title="All 2 branches missed.">                if (chosenId.equals(clinician.getIdString())) {</span>
+<span class="nc" id="L425">                    valid = true;</span>
+<span class="nc" id="L426">                    break;</span>
+                }
+<span class="nc" id="L428">            }</span>
+<span class="nc bnc" id="L429" title="All 2 branches missed.">            if (!valid) {</span>
+                // Chosen clinician is not assigned to patient
+<span class="nc" id="L431">                PKBPerson clinician = userManager.getPKBPerson(Long.parseLong(chosenId));</span>
+                // Throw error message
+<span class="nc" id="L433">                List&lt;Object&gt; args = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L434">                args.add(0, patient.getTitle() + &quot; &quot; + patient.getFirstName() + &quot; &quot; + patient.getLastName());</span>
+<span class="nc" id="L435">                String errClinicianName = clinician.getTitle() + &quot; &quot; + clinician.getFirstName() + &quot; &quot; + clinician.getLastName();</span>
+<span class="nc" id="L436">                args.add(1, errClinicianName);</span>
+<span class="nc" id="L437">                args.add(2, errClinicianName);</span>
+<span class="nc" id="L438">                addFieldError(&quot;recipientId&quot;,</span>
+<span class="nc" id="L439">                        getText(&quot;composeMessage.invalid.clinician.for.patient&quot;, args));</span>
+<span class="nc" id="L440">                break;</span>
+            }
+<span class="nc" id="L442">        }</span>
+<span class="nc" id="L443">        return valid;</span>
+    }
+
+    @Override
+    public String input() {
+        // if another feature is passing attachments to this form, display them
+<span class="fc bfc" id="L449" title="All 2 branches covered.">        if (isNotBlank(getDiscussTopic())) {</span>
+<span class="fc" id="L450">            message = discussMessage;</span>
+<span class="fc" id="L451">            attachments = discussAttachments;</span>
+        }
+
+        // if selectedId was passed in, merge that into our recipientId and patientId here
+        // the struts tags in the JSP will auto-check the boxes based on what's in recipientId and (possibly) patientId
+<span class="pc bpc" id="L456" title="1 of 2 branches missed.">        if (getSelectedId() != null) {</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">            if (recipientId == null) {</span>
+<span class="nc" id="L458">                recipientId = new ArrayList&lt;&gt;();</span>
+            }
+<span class="nc" id="L460">            recipientId.add(getSelectedId().toString());</span>
+<span class="nc" id="L461">            patientId = getSelectedId();</span>
+        }
+
+        // Add the colleague id in the recipient list
+<span class="fc bfc" id="L465" title="All 2 branches covered.">        if (getColleagueId() != null) {</span>
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">            if (recipientId == null) {</span>
+<span class="fc" id="L467">                recipientId = new ArrayList&lt;&gt;();</span>
+            }
+<span class="fc" id="L469">            recipientId.add(getColleagueId().toString());</span>
+        }
+
+        // if patient is logged in and sending the message
+<span class="fc bfc" id="L473" title="All 2 branches covered.">        if (getLoggedInEHRRequestContext().isPatient()) {</span>
+<span class="fc" id="L474">            referredPatientId = loggedInUserUtil.getLoggedInUserId();</span>
+<span class="fc" id="L475">            referredPatient = loggedInUserUtil.getLoggedInUser(PKBPerson.Lazy.PROPERTIES);</span>
+        } else {
+<span class="fc" id="L477">            teamNationalIdType = teamUserManager.findPrimaryTeam(getEHRRequestContext(), loggedInUserUtil.getLoggedInUserId()).map(Team::getCountry)</span>
+<span class="fc" id="L478">                    .flatMap(NationalIdType::getPrimaryNationalIdTypeFromCountryCode).orElse(null);</span>
+
+        }
+        // Get the recipient id from the session
+        // TODO: For messaging refacor: We're currently using multiple variables (contextRecipientId, carerId, patientId) to get the recipient.
+        //  This should always use contextUserId in the future, and we should use getContextAndLoggedInUsers()
+<span class="fc" id="L484">        Long contextRecipientId = sessionUtil.getContextRecipientId();</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">        if (contextRecipientId != null) {</span>
+<span class="fc" id="L486">            patientId = contextRecipientId;</span>
+            //referred patient is the context user
+<span class="fc" id="L488">            referredPatientId = patientId;</span>
+            // Remove the recipient id from the session
+<span class="fc" id="L490">            sessionUtil.clearContextRecipientId();</span>
+        }
+
+<span class="fc bfc" id="L493" title="All 2 branches covered.">        if (patientId != null) {</span>
+<span class="fc" id="L494">            patient = userManager.getPKBPerson(patientId, PKBPerson.Lazy.PROPERTIES);</span>
+<span class="fc" id="L495">            referredPatientId = patientId;</span>
+<span class="fc" id="L496">            referredPatient = patient;</span>
+        }
+
+<span class="pc bpc" id="L499" title="1 of 2 branches missed.">        if (careeId != null) {</span>
+<span class="nc" id="L500">            caree = userManager.getPKBPerson(careeId, PKBPerson.Lazy.PROPERTIES);</span>
+<span class="nc" id="L501">            referredPatientId = careeId;</span>
+<span class="nc" id="L502">            referredPatient = caree;</span>
+<span class="nc" id="L503">            patientId = careeId;</span>
+<span class="nc" id="L504">            patient = caree;</span>
+
+        }
+
+<span class="fc bfc" id="L508" title="All 2 branches covered.">        if (colleagueId != null) {</span>
+<span class="fc" id="L509">            colleague = userManager.getPKBPerson(colleagueId, PKBPerson.Lazy.PROPERTIES);</span>
+        }
+<span class="fc" id="L511">        setDefaultFlag();</span>
+        // setup lists and so on:
+<span class="fc" id="L513">        return reloadForm();</span>
+    }
+
+    @Override
+    public String reloadForm() {
+        // New flattened processing logic!!
+        //
+        // If we have a patient -- context user, or we're sending a message about a patient, or current user is patient: let's show:
+        //   patient's clinicians grouped by team
+        //   then non-team clinicians
+        //   then carers
+        // Special case: current user is the patient: show dependents
+        //
+        // Temporary tweak: current team isn't migrated? Team clinician? Also show all clinicians on the current team (as colleagues)
+        //
+        // special case: if consultTeamId is set, populate that list &amp; display it
+        //
+        // If we DON'T have a patient (clinician to clinician message), let's show:
+        //    just colleagues (others on same team)
+
+<span class="fc" id="L533">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+
+<span class="fc" id="L535">        columnSize = getConfig().getRecipientColumnSize();</span>
+        //attachments may be already populated if passed in for a discussion
+<span class="fc bfc" id="L537" title="All 2 branches covered.">        if (attachments == null) {</span>
+<span class="fc" id="L538">            attachments = generateAttachmentsFromInputs();</span>
+        }
+
+<span class="fc" id="L541">        PKBPerson currentUser = loggedInUserUtil.getLoggedInUser(PKBPerson.Lazy.PROPERTIES);</span>
+<span class="fc" id="L542">        LoggedInEHRRequestContext ehrRequestContextSingleAccess = null;</span>
+<span class="fc" id="L543">        Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam(getEHRRequestContext());</span>
+<span class="fc bfc" id="L544" title="All 4 branches covered.">        if (!currentUser.isPatient() &amp;&amp; referredPatient != null) {</span>
+<span class="fc" id="L545">            ehrRequestContextSingleAccess = getEHRRequestContextSingleAccess(referredPatient.getId(), team);</span>
+        }
+
+        try {
+<span class="fc" id="L549">            ZoneId zoneId = loggedInUserUtil.getLoggedInUserZoneId();</span>
+<span class="pc bpc" id="L550" title="1 of 2 branches missed.">            zoneId = zoneId == null ? Constants.APPLICATION_TZ : zoneId;</span>
+<span class="fc" id="L551">            participantSelectorParams = participantSelectorService.setupParticipantSelectorParams(TOPIC_CONSULT_TEAM.equals(discussTopic), consultTeamId,</span>
+<span class="fc" id="L552">                    currentUser, referredPatient, isLoggedInUserProfessional(), ContactOptions.Messages_Only, team,</span>
+                    loggedInEHRRequestContext, ehrRequestContextSingleAccess,
+<span class="fc" id="L554">                    DateTimeFormatter.ofPattern(&quot;dd MMM yy&quot;).withLocale(getLocale()).withZone(zoneId));</span>
+<span class="fc" id="L555">            consultTeam = participantSelectorParams.getConsultTeam();</span>
+<span class="fc" id="L556">            carerList = participantSelectorParams.getCarerList();</span>
+<span class="nc" id="L557">        } catch (Exception e) {</span>
+<span class="nc" id="L558">            LOGGER.error(&quot;unable to load accepted cliniciants for {}&quot;, referredPatientId, e);</span>
+<span class="nc" id="L559">            addActionError(getText(&quot;error.load.accepted.clinicians&quot;));</span>
+<span class="fc" id="L560">        }</span>
+
+<span class="fc" id="L562">        return INPUT;</span>
+    }
+
+    public String cancelMessage() {
+<span class="pc bpc" id="L566" title="1 of 2 branches missed.">        if (originalContextUser != null) {</span>
+<span class="nc" id="L567">            contextUserUtil.setContextUserInSession(originalContextUser);</span>
+        }
+        // redirect depends on topic
+<span class="fc" id="L570">        return CANCEL;</span>
+    }
+
+    public boolean showForm() {
+<span class="pc bpc" id="L574" title="1 of 6 branches missed.">        return patientId != null || careeId != null || participantSelectorParams.potentialRecipientExists();</span>
+    }
+
+    public String getAction() {
+<span class="nc" id="L578">        return action;</span>
+    }
+
+    public void setAction(String action) {
+<span class="nc" id="L582">        this.action = action;</span>
+<span class="nc" id="L583">    }</span>
+
+    public String getSubject() {
+<span class="fc" id="L586">        return subject;</span>
+    }
+
+    public void setSubject(String subject) {
+<span class="fc" id="L590">        this.subject = subject;</span>
+<span class="fc" id="L591">    }</span>
+
+    public String getMessage() {
+<span class="fc" id="L594">        return message;</span>
+    }
+
+    public void setMessage(String message) {
+<span class="fc" id="L598">        this.message = message;</span>
+<span class="fc" id="L599">    }</span>
+
+    public Long getConsultTeamId() {
+<span class="nc" id="L602">        return consultTeamId;</span>
+    }
+
+    public void setConsultTeamId(Long consultTeamId) {
+<span class="nc" id="L606">        this.consultTeamId = consultTeamId;</span>
+<span class="nc" id="L607">    }</span>
+
+    public TeamDTO getConsultTeam() {
+<span class="nc" id="L610">        return consultTeam;</span>
+    }
+
+    public String getContentType() {
+<span class="nc" id="L614">        return ContentType;</span>
+    }
+
+    public void setContentType(String contentType) {
+<span class="nc" id="L618">        ContentType = contentType;</span>
+<span class="nc" id="L619">    }</span>
+
+    public String getFileName() {
+<span class="nc" id="L622">        return FileName;</span>
+    }
+
+    public void setFileName(String fileName) {
+<span class="nc" id="L626">        FileName = fileName;</span>
+<span class="nc" id="L627">    }</span>
+
+    public String getSend() {
+<span class="nc" id="L630">        return send;</span>
+    }
+
+    public void setSend(String send) {
+<span class="nc" id="L634">        this.send = send;</span>
+<span class="nc" id="L635">    }</span>
+
+    public UUID getConversationId() {
+<span class="fc" id="L638">        return conversationId;</span>
+    }
+
+    public void setConversationId(UUID conversationId) {
+<span class="fc" id="L642">        this.conversationId = conversationId;</span>
+<span class="fc" id="L643">    }</span>
+
+    public String getFromAction() {
+<span class="nc" id="L646">        return fromAction;</span>
+    }
+
+    public void setFromAction(String fromAction) {
+<span class="nc" id="L650">        this.fromAction = fromAction;</span>
+<span class="nc" id="L651">    }</span>
+
+    public String getCancel() {
+<span class="nc" id="L654">        return cancel;</span>
+    }
+
+    public void setCancel(String cancel) {
+<span class="nc" id="L658">        this.cancel = cancel;</span>
+<span class="nc" id="L659">    }</span>
+
+    public String getFileUploadErrorMessage() {
+<span class="nc" id="L662">        return fileUploadErrorMessage;</span>
+    }
+
+    public void setFileUploadErrorMessage(String fileUploadErrorMessage) {
+<span class="fc" id="L666">        this.fileUploadErrorMessage = fileUploadErrorMessage;</span>
+<span class="fc" id="L667">    }</span>
+
+    public List&lt;String&gt; getRecipientId() {
+<span class="fc" id="L670">        return recipientId;</span>
+    }
+
+    public void setRecipientId(List&lt;String&gt; recipientId) {
+<span class="fc" id="L674">        this.recipientId = recipientId;</span>
+<span class="fc" id="L675">    }</span>
+
+    public String getDiscussTopic() {
+<span class="fc" id="L678">        return discussTopic;</span>
+    }
+
+    public void setDiscussTopic(String discussTopic) {
+<span class="fc" id="L682">        this.discussTopic = discussTopic;</span>
+<span class="fc" id="L683">    }</span>
+
+    public String getDiscussMessage() {
+<span class="fc" id="L686">        return discussMessage;</span>
+    }
+
+    public void setDiscussMessage(String discussMessage) {
+<span class="fc" id="L690">        this.discussMessage = discussMessage;</span>
+<span class="fc" id="L691">    }</span>
+
+    public List&lt;Attachment&gt; getDiscussAttachments() {
+<span class="nc" id="L694">        return discussAttachments;</span>
+    }
+
+    public void setDiscussAttachments(List&lt;Attachment&gt; discussAttachments) {
+<span class="fc" id="L698">        this.discussAttachments = discussAttachments;</span>
+<span class="fc" id="L699">    }</span>
+
+    /*
+     * public List&lt;String&gt; getColleagueId() { return colleagueId; } public void
+     * setColleagueId(List&lt;String&gt; colleagueIds) { this.colleagueId =
+     * colleagueIds; }
+     */
+
+    public PKBPerson getInstituteAdmin() {
+<span class="nc" id="L708">        return instituteAdmin;</span>
+    }
+
+    public void setInstituteAdmin(PKBPerson instituteAdmin) {
+<span class="nc" id="L712">        this.instituteAdmin = instituteAdmin;</span>
+<span class="nc" id="L713">    }</span>
+
+    public int getColumnSize() {
+<span class="nc" id="L716">        return columnSize;</span>
+    }
+
+    public void setColumnSize(int columnSize) {
+<span class="nc" id="L720">        this.columnSize = columnSize;</span>
+<span class="nc" id="L721">    }</span>
+
+    public Long getSelectedId() {
+<span class="fc" id="L724">        return selectedId;</span>
+    }
+
+    public void setSelectedId(Long selectedId) {
+<span class="nc" id="L728">        this.selectedId = selectedId;</span>
+<span class="nc" id="L729">    }</span>
+
+    public Long getPatientId() {
+<span class="fc" id="L732">        return patientId;</span>
+    }
+
+    public void setPatientId(Long patientId) {
+<span class="fc" id="L736">        this.patientId = patientId;</span>
+<span class="fc" id="L737">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L740">        return tab;</span>
+    }
+
+    public String getSubTab() {
+<span class="fc" id="L744">        return subTab;</span>
+    }
+
+    public UUID getSelectedPlanUniqueId() {
+<span class="fc" id="L748">        return selectedPlanUniqueId;</span>
+    }
+
+    public void setSelectedPlanUniqueId(UUID selectedPlanUniqueId) {
+<span class="fc" id="L752">        this.selectedPlanUniqueId = selectedPlanUniqueId;</span>
+<span class="fc" id="L753">    }</span>
+
+    public PlanManager getPlanManager() {
+<span class="nc" id="L756">        return planManager;</span>
+    }
+
+    public void setPlanManager(PlanManager planManager) {
+<span class="fc" id="L760">        this.planManager = planManager;</span>
+<span class="fc" id="L761">    }</span>
+
+    public boolean isNonInstituteClinician() {
+<span class="nc" id="L764">        return nonInstituteClinician;</span>
+    }
+
+    public void setNonInstituteClinician(boolean nonInstituteClinician) {
+<span class="nc" id="L768">        this.nonInstituteClinician = nonInstituteClinician;</span>
+<span class="nc" id="L769">    }</span>
+
+    public PKBPerson getPatient() {
+<span class="fc" id="L772">        return patient;</span>
+    }
+
+    public void setPatient(PKBPerson patient) {
+<span class="fc" id="L776">        this.patient = patient;</span>
+<span class="fc" id="L777">    }</span>
+
+    public PKBPerson getCarer() {
+<span class="nc" id="L780">        return carer;</span>
+    }
+
+    public void setCarer(PKBPerson carer) {
+<span class="nc" id="L784">        this.carer = carer;</span>
+<span class="nc" id="L785">    }</span>
+
+
+    public void setPatientConsentManager(PatientConsentManager patientConsentManager) {
+<span class="fc" id="L789">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L790">    }</span>
+
+    public List&lt;PersonDto&gt; getCarerList() {
+<span class="fc" id="L793">        return carerList;</span>
+    }
+
+    public void setCarerList(List&lt;PersonDto&gt; carerList) {
+<span class="nc" id="L797">        this.carerList = carerList;</span>
+<span class="nc" id="L798">    }</span>
+
+    public InputStream getAutoSaveResult() {
+<span class="fc" id="L801">        return autoSaveResult;</span>
+    }
+
+    public void setAutoSaveResult(InputStream autoSaveResult) {
+<span class="fc" id="L805">        this.autoSaveResult = autoSaveResult;</span>
+<span class="fc" id="L806">    }</span>
+
+    public Long getMessageId() {
+<span class="fc" id="L809">        return messageId;</span>
+    }
+
+    public void setMessageId(Long messageId) {
+<span class="fc" id="L813">        this.messageId = messageId;</span>
+<span class="fc" id="L814">    }</span>
+
+    public void setJson(String json) {
+<span class="fc" id="L817">        this.json = json;</span>
+<span class="fc" id="L818">    }</span>
+
+    public Long getReferredPatientId() {
+<span class="fc" id="L821">        return referredPatientId;</span>
+    }
+
+    public void setReferredPatientId(Long referredPatientId) {
+<span class="fc" id="L825">        this.referredPatientId = referredPatientId;</span>
+<span class="fc" id="L826">    }</span>
+
+    public TeamManager getTeamManager() {
+<span class="nc" id="L829">        return teamManager;</span>
+    }
+
+    public void setTeamManager(TeamManager teamManager) {
+<span class="fc" id="L833">        this.teamManager = teamManager;</span>
+<span class="fc" id="L834">    }</span>
+
+    public Long getSelectedPlanVersion() {
+<span class="fc" id="L837">        return selectedPlanVersion;</span>
+    }
+
+    public void setSelectedPlanVersion(Long selectedPlanVersion) {
+<span class="fc" id="L841">        this.selectedPlanVersion = selectedPlanVersion;</span>
+<span class="fc" id="L842">    }</span>
+
+    public Long getColleagueId() {
+<span class="fc" id="L845">        return colleagueId;</span>
+    }
+
+    public void setColleagueId(Long colleagueId) {
+<span class="fc" id="L849">        this.colleagueId = colleagueId;</span>
+<span class="fc" id="L850">    }</span>
+
+    public PKBPerson getColleague() {
+<span class="fc" id="L853">        return colleague;</span>
+    }
+
+    public void setColleague(PKBPerson colleague) {
+<span class="nc" id="L857">        this.colleague = colleague;</span>
+<span class="nc" id="L858">    }</span>
+
+    public NationalIdType getTeamNationalIdType() {
+<span class="fc" id="L861">        return teamNationalIdType;</span>
+    }
+
+    public void setTeamNationalIdType(NationalIdType teamNationalIdType) {
+<span class="nc" id="L865">        this.teamNationalIdType = teamNationalIdType;</span>
+<span class="nc" id="L866">    }</span>
+
+    public Long getCareeId() {
+<span class="fc" id="L869">        return careeId;</span>
+    }
+
+    public void setCareeId(Long careeId) {
+<span class="fc" id="L873">        this.careeId = careeId;</span>
+<span class="fc" id="L874">    }</span>
+
+    public PKBPerson getCaree() {
+<span class="nc" id="L877">        return caree;</span>
+    }
+
+    public void setCaree(PKBPerson caree) {
+<span class="nc" id="L881">        this.caree = caree;</span>
+<span class="nc" id="L882">    }</span>
+
+    public PKBPerson getReferredPatient() {
+<span class="nc" id="L885">        return referredPatient;</span>
+    }
+
+    public void setReferredPatient(PKBPerson referredPatient) {
+<span class="nc" id="L889">        this.referredPatient = referredPatient;</span>
+<span class="nc" id="L890">    }</span>
+
+    public boolean isPrivateMessage() {
+<span class="nc" id="L893">        return privateMessage;</span>
+    }
+
+    public void setPrivateMessage(boolean privateMessage) {
+<span class="nc" id="L897">        this.privateMessage = privateMessage;</span>
+<span class="nc" id="L898">    }</span>
+
+    public Long getOriginalContextUser() {
+<span class="fc" id="L901">        return originalContextUser;</span>
+    }
+
+    public void setOriginalContextUser(Long originalContextUser) {
+<span class="fc" id="L905">        this.originalContextUser = originalContextUser;</span>
+<span class="fc" id="L906">    }</span>
+
+    public ParticipantSelectorParams getParticipantSelectorParams() {
+<span class="fc" id="L909">        return participantSelectorParams;</span>
+    }
+
+    public void setParticipantSelectorParams(ParticipantSelectorParams participantSelectorParams) {
+<span class="nc" id="L913">        this.participantSelectorParams = participantSelectorParams;</span>
+<span class="nc" id="L914">    }</span>
+
+    @Override
+    public long getUploadMaxFileSize() {
+<span class="fc" id="L918">        return getConfig().getComposeMessageMaxFileSize();</span>
+    }
+
+    @Override
+    public String getUploadMaxFileTextGB() {
+<span class="fc" id="L923">        return getConfig().getComposeMessageFileSizeTextGB();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

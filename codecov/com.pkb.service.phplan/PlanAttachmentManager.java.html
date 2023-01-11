@@ -1,0 +1,272 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PlanAttachmentManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.phplan</a> &gt; <span class="el_source">PlanAttachmentManager.java</span></div><h1>PlanAttachmentManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.phplan;
+
+import com.google.common.collect.ArrayTable;
+import com.google.common.collect.ImmutableTable;
+import com.google.common.collect.Table;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PKBFilter;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.document.entity.Attachment;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.exception.PKBPluginException;
+import com.pkb.model.RecordWithId;
+import com.pkb.phplan.entity.PHPlanAttachment;
+import com.pkb.service.document.DocumentManager;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
+
+import java.lang.invoke.MethodHandles;
+import java.util.Collection;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Predicate;
+
+import static com.pkb.util.EncryptedDocumentMapperHelper.ACCOUNT_ID_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.AUTHOR_PERSON_ID_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.MEDIA_TYPE_PROVIDER;
+import static com.pkb.util.EncryptedDocumentMapperHelper.genericMetadata;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singleton;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+public class PlanAttachmentManager extends TransactionManager {
+
+<span class="fc" id="L46">    private enum AttachmentNatureQualifier {</span>
+<span class="fc" id="L47">        REAL_ATTACHMENT, PLAN_MAIN_CONTENT</span>
+    }
+
+    private static final String PLAN_ATTACHMENT = &quot;planAttachment&quot;;
+
+    private final ChunkedDocManager chunkedDocManager;
+    private final DocumentManager documentManager;
+
+    public PlanAttachmentManager(PhrConfig config,
+                                 TolvenBeanFactory beanFactory,
+                                 DateTimeService dateTimeService,
+                                 UUIDProvider uuidProvider,
+                                 @Lazy ChunkedDocManager chunkedDocManager,
+                                 DocumentManager documentManager) {
+<span class="fc" id="L61">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L62">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L63">        this.documentManager = documentManager;</span>
+<span class="fc" id="L64">    }</span>
+
+<span class="fc" id="L66">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    public List&lt;PHPlanAttachment&gt; getAttachments(Long planId, @NotNull LoggedInEHRRequestContext requestContext, Long accountId) {
+<span class="fc" id="L69">        var result = getRealAttachments(singleton(planId), requestContext, singleton(accountId)).get(planId, accountId);</span>
+<span class="fc bfc" id="L70" title="All 2 branches covered.">        if (result == null) {</span>
+<span class="fc" id="L71">            return emptyList();</span>
+        }
+<span class="fc" id="L73">        return result;</span>
+    }
+
+    public Long addAttachment(EHRRequestContext context, Long planEhrDataId, PHPlanAttachment planAttachment) {
+<span class="fc" id="L77">        var attachmentId = planAttachment.getAttachmentId();</span>
+<span class="fc bfc" id="L78" title="All 2 branches covered.">        if (attachmentId == null) {</span>
+            //new attachment; save the attachment and make the plan refer to new ID
+<span class="fc" id="L80">            attachmentId = createAttachment(context, planEhrDataId, planAttachment);</span>
+        } else {
+<span class="fc" id="L82">            attachmentId = createAttachmentReference(planEhrDataId, planAttachment);</span>
+        }
+        // make sure these fields are set in the PhPlanAttachment:
+<span class="fc" id="L85">        planAttachment.setPlanId(planEhrDataId);</span>
+<span class="fc" id="L86">        planAttachment.setAttachmentId(attachmentId);</span>
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">        if (!planAttachment.getSource().isPopulated()) {</span>
+<span class="nc" id="L88">            throw new IllegalStateException(&quot;PHRZ-105,PHRZ-104: Source is null for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+        }
+<span class="fc" id="L90">        var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L91">        var ed = ehrBean.populateEHRData(planAttachment, planAttachment.getAccountId(), MenuDataType.phPlanAttachment, context);</span>
+<span class="fc" id="L92">        ed.setDocumentMetadataId(planAttachment.getDocMetadataId());</span>
+<span class="fc" id="L93">        ed.generateNewRandomUniqueId();</span>
+<span class="fc" id="L94">        ehrBean.saveEHRData(context, ed);</span>
+<span class="fc" id="L95">        return attachmentId;</span>
+
+    }
+
+    /**
+     * Remove an attachment
+     */
+    void deleteAttachment(Long attachmentId) {
+<span class="nc" id="L103">        chunkedDocManager.deleteAttachmentDetails(attachmentId);</span>
+<span class="nc" id="L104">    }</span>
+
+    private long createAttachment(EHRRequestContext requestContext, Long planId, PHPlanAttachment planAttachment) {
+        try {
+<span class="fc" id="L108">            var docId = planAttachment.getAttachment().getDocMetadataId();</span>
+<span class="fc" id="L109">            var userId = planAttachment.getUserId();</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">            if (docId == null) {</span>
+                // this pathway is for saving attachments to a plan where the attachment hasn't been uploaded async. eg saving a template attachment
+<span class="fc" id="L112">                var doc = beanFactory.getEhrRemote().createDocument(</span>
+                        requestContext,
+<span class="fc" id="L114">                        planAttachment.getContent(),</span>
+<span class="fc" id="L115">                        planAttachment.getAccountId(),</span>
+<span class="fc" id="L116">                        genericMetadata(</span>
+<span class="fc" id="L117">                                planAttachment.getMediaType(),</span>
+                                userId,
+<span class="fc" id="L119">                                PLAN_ATTACHMENT).toJavaMap());</span>
+<span class="fc" id="L120">                docId = documentManager.create(doc);</span>
+            }
+<span class="fc" id="L122">            var docAttachmentId = chunkedDocManager.createAttachment(planId, docId, planAttachment.getAttachment(), userId, planAttachment.getAccountId());</span>
+            // set this so it's accessible in the caller...
+<span class="fc" id="L124">            planAttachment.getAttachment().setDocMetadataId(docId);</span>
+<span class="fc" id="L125">            return docAttachmentId;</span>
+<span class="nc" id="L126">        } catch (Exception e) {</span>
+            //noinspection deprecation
+<span class="nc" id="L128">            throw new PKBPluginException(&quot;Exception while adding attachment to plan-&quot; + planId, e);</span>
+        }
+    }
+
+    private long createAttachmentReference(Long planId, PHPlanAttachment planAttachment) {
+<span class="fc" id="L133">        var docAttach = chunkedDocManager.getAttachmentDetails(planAttachment.getAttachmentId())</span>
+<span class="pc" id="L134">                .orElseThrow(() -&gt; new IllegalStateException(&quot;Unable to create attachment reference due to missing attachment details with id &quot; + planAttachment.getAttachmentId()));</span>
+<span class="fc" id="L135">        var attachedDocumentId = docAttach.getAttachedDocumentMetadataId();</span>
+        // create a new DocAttachment row
+<span class="fc" id="L137">        var docAttachmentId = chunkedDocManager.createAttachment(planId,</span>
+                attachedDocumentId,
+<span class="fc" id="L139">                planAttachment.getAttachment(),</span>
+<span class="fc" id="L140">                planAttachment.getUserId(),</span>
+<span class="fc" id="L141">                planAttachment.getAccountId());</span>
+        // set this so it's accessible in the caller...
+<span class="fc" id="L143">        planAttachment.getAttachment().setDocMetadataId(attachedDocumentId);</span>
+<span class="fc" id="L144">        return docAttachmentId;</span>
+    }
+
+    @Nullable
+    public PHPlanAttachment getAttachmentContent(@NotNull LoggedInEHRRequestContext context, Long attachmentId) {
+        try {
+<span class="fc" id="L150">            var maybeDocAtt = chunkedDocManager.getAttachmentDetails(attachmentId);</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">            if (maybeDocAtt.isEmpty()) {</span>
+<span class="nc" id="L152">                return null;</span>
+            }
+<span class="fc" id="L154">            var docAtt = maybeDocAtt.get();</span>
+<span class="fc" id="L155">            var attachedDocumentId = docAtt.getAttachedDocumentMetadataId();</span>
+<span class="fc" id="L156">            var doc = documentManager.retrieveOrThrow(attachedDocumentId);</span>
+            // decryption will fail unless we use the accountId of the document and the logged-in user id
+            // user must also have access to that account
+<span class="fc" id="L159">            long accountIdOfDoc = ACCOUNT_ID_PROVIDER.apply(doc);</span>
+            // throws DecryptionFailedException if that fails
+<span class="fc" id="L161">            byte[] content = beanFactory.getEhrRemote().decryptDoc(doc, context).plainText();</span>
+<span class="fc" id="L162">            var planAttachmentData = getPKBAttachmentData(context, accountIdOfDoc, attachmentId);</span>
+<span class="fc" id="L163">            var attachment = new Attachment();</span>
+<span class="fc" id="L164">            attachment.setAccountId(accountIdOfDoc);</span>
+
+<span class="fc" id="L166">            AUTHOR_PERSON_ID_PROVIDER.apply(doc).ifPresent(attachment::setUserId);</span>
+<span class="fc" id="L167">            attachment.setId(attachmentId);</span>
+<span class="fc" id="L168">            attachment.setDocMetadataId(docAtt.getAttachedDocumentMetadataId());</span>
+<span class="fc" id="L169">            attachment.setFilename(docAtt.getDescription());</span>
+<span class="fc" id="L170">            attachment.setMediaType(MEDIA_TYPE_PROVIDER.apply(doc));</span>
+<span class="fc" id="L171">            attachment.setContent(content);</span>
+<span class="fc" id="L172">            Optional.ofNullable(planAttachmentData).ifPresent(planAttachment -&gt; planAttachment.setAttachment(attachment));</span>
+<span class="fc" id="L173">            return planAttachmentData;</span>
+<span class="nc" id="L174">        } catch (Exception exception) {</span>
+<span class="nc" id="L175">            throw new RuntimeException(&quot;Exception while geting the contents for attachment id-&quot; + attachmentId, exception);</span>
+        }
+    }
+
+    public Table&lt;Long, Long, List&lt;PHPlanAttachment&gt;&gt; getActionPlanContent(Collection&lt;Long&gt; planIds, @NotNull LoggedInEHRRequestContext context, Collection&lt;Long&gt; accountIds) {
+<span class="fc" id="L180">        return getAttachments(planIds, context, accountIds, AttachmentNatureQualifier.PLAN_MAIN_CONTENT);</span>
+    }
+
+    public Table&lt;Long, Long, List&lt;PHPlanAttachment&gt;&gt; getAttachments(Collection&lt;Long&gt; planIds, @NotNull LoggedInEHRRequestContext context, Collection&lt;Long&gt; accountIds) {
+<span class="fc" id="L184">        return getRealAttachments(planIds, context, accountIds);</span>
+    }
+
+    private Table&lt;Long, Long, List&lt;PHPlanAttachment&gt;&gt; getRealAttachments(Collection&lt;Long&gt; planIds, @NotNull LoggedInEHRRequestContext context, Collection&lt;Long&gt; accountIds) {
+<span class="fc" id="L188">        return getAttachments(planIds, context, accountIds, AttachmentNatureQualifier.REAL_ATTACHMENT);</span>
+    }
+
+    private Table&lt;Long, Long, List&lt;PHPlanAttachment&gt;&gt; getAttachments(Collection&lt;Long&gt; planIds, @NotNull LoggedInEHRRequestContext context, Collection&lt;Long&gt; accountIds, AttachmentNatureQualifier attachmentNatureQualifier) {
+<span class="pc bpc" id="L192" title="1 of 4 branches missed.">        if (isEmpty(planIds) || isEmpty(accountIds)) {</span>
+<span class="fc" id="L193">            return ImmutableTable.of();</span>
+        }
+        try {
+<span class="fc" id="L196">            var attachmentsByPlanId = chunkedDocManager.findAttachmentsAsAttachment(planIds);</span>
+<span class="fc" id="L197">            var attachmentByAttachmentIdAndAccountId = getAttachmentMap(planIds, context, accountIds, attachmentNatureQualifier);</span>
+<span class="fc" id="L198">            Table&lt;Long, Long, List&lt;PHPlanAttachment&gt;&gt; result = ArrayTable.create(planIds, accountIds);</span>
+
+<span class="fc" id="L200">            attachmentsByPlanId.forEach((planId, value) -&gt;</span>
+<span class="fc" id="L201">                    value.forEach(attachment -&gt; {</span>
+<span class="fc" id="L202">                        PHPlanAttachment planAttachment = attachmentByAttachmentIdAndAccountId.get(attachment.getId(), attachment.getAccountId());</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">                        if (planAttachment == null) {</span>
+<span class="fc" id="L204">                            LOGGER.warn(&quot;Unable to find attachment corresponding to id-{} accountid-{} for planId={}&quot;, attachment.getId(), attachment.getAccountId(), planId);</span>
+                            // Pravina : this is by error in saving the plan due to an earlier  bug
+                            // we choose to skip it instead of letting the whole plan load crash
+                        } else {
+<span class="fc" id="L208">                            planAttachment.setAttachment(attachment);</span>
+<span class="fc" id="L209">                            List&lt;PHPlanAttachment&gt; attachments = result.get(planId, attachment.getAccountId());</span>
+<span class="fc bfc" id="L210" title="All 2 branches covered.">                            if (attachments == null) {</span>
+<span class="fc" id="L211">                                attachments = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L212">                                result.put(planId, attachment.getAccountId(), attachments);</span>
+                            }
+<span class="fc" id="L214">                            attachments.add(planAttachment);</span>
+                        }
+<span class="fc" id="L216">                    }));</span>
+<span class="fc" id="L217">            return result;</span>
+<span class="nc" id="L218">        } catch (Exception e) {</span>
+            //noinspection deprecation
+<span class="nc" id="L220">            throw new PKBPluginException(&quot;Exception while getting PH plan list&quot;, e);</span>
+        }
+    }
+
+    private Table&lt;Long, Long, PHPlanAttachment&gt; getAttachmentMap(Collection&lt;Long&gt; planIds, @NotNull LoggedInEHRRequestContext context, Collection&lt;Long&gt; accountIds, AttachmentNatureQualifier attachmentNatureQualifier) {
+<span class="pc bpc" id="L225" title="2 of 4 branches missed.">        if (isEmpty(planIds) || isEmpty(accountIds)) {</span>
+<span class="nc" id="L226">            return ImmutableTable.of();</span>
+        }
+<span class="fc" id="L228">        EHRSearch&lt;PHPlanAttachment&gt; search = new EHRSearch&lt;&gt;(accountIds, PHPlanAttachment.class, PHPlanAttachment.MS_PATH);</span>
+<span class="fc" id="L229">        search.addFilter(new PKBFilter(PHPlanAttachment.ATTACHMENT_PLAN_ID, PKBFilter.Operator.IN, planIds));</span>
+<span class="fc" id="L230">        var planAttachments = beanFactory.getEhrRemote().queryDecryptAndPopulateDataByAccountId(search, context);</span>
+<span class="fc" id="L231">        Predicate&lt;RecordWithId&lt;Long, PHPlanAttachment&gt;&gt; filterResults = null;</span>
+<span class="pc bpc" id="L232" title="1 of 3 branches missed.">        switch (attachmentNatureQualifier) {</span>
+            case REAL_ATTACHMENT:
+<span class="fc bfc" id="L234" title="All 2 branches covered.">                filterResults = p -&gt; !p.record().getCarePlanMainContent();</span>
+<span class="fc" id="L235">                break;</span>
+            case PLAN_MAIN_CONTENT:
+<span class="fc" id="L237">                filterResults = p -&gt; p.record().getCarePlanMainContent();</span>
+<span class="fc" id="L238">                break;</span>
+            default:
+<span class="nc" id="L240">                throw new IllegalArgumentException(String.format(&quot;Unknown attachment nature qualifier: %s&quot;, attachmentNatureQualifier));</span>
+        }
+<span class="fc" id="L242">        var attachmentIds = planAttachments.stream()</span>
+<span class="fc" id="L243">                .filter(filterResults)</span>
+<span class="fc" id="L244">                .map(r -&gt; r.record().getAttachmentId())</span>
+<span class="fc" id="L245">                .collect(toSet());</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">        if (isEmpty(attachmentIds)) {</span>
+<span class="fc" id="L247">            return ImmutableTable.of();</span>
+        }
+<span class="fc" id="L249">        Table&lt;Long, Long, PHPlanAttachment&gt; result = ArrayTable.create(attachmentIds, accountIds);</span>
+<span class="fc" id="L250">        planAttachments.stream()</span>
+<span class="fc" id="L251">                .filter(filterResults)</span>
+<span class="fc" id="L252">                .forEach(r -&gt; result.put(r.record().getAttachmentId(), r.id(), r.record()));</span>
+<span class="fc" id="L253">        return result;</span>
+    }
+
+    private @Nullable PHPlanAttachment getPKBAttachmentData(@NotNull LoggedInEHRRequestContext context, long accountId, Long attachmentId) {
+<span class="fc" id="L257">        var search = new EHRSearch&lt;&gt;(accountId, PHPlanAttachment.class, PHPlanAttachment.MS_PATH);</span>
+<span class="fc" id="L258">        search.addFilter(new PKBFilter(PHPlanAttachment.ATTACHMENT_ID, PKBFilter.Operator.EQUAL, attachmentId));</span>
+<span class="fc" id="L259">        var planAttList = beanFactory.getEhrRemote().queryAndDecryptTypedData(search, context);</span>
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">        if (planAttList.size() == 1) {</span>
+            // set the ID as *not* the ehrData.id, but the attachmentID (DocAttach.id)
+<span class="fc" id="L262">            var planAtt = planAttList.get(0);</span>
+<span class="fc" id="L263">            planAtt.setId(planAtt.getAttachmentId());</span>
+<span class="fc" id="L264">            return planAtt;</span>
+<span class="nc bnc" id="L265" title="All 2 branches missed.">        } else if (planAttList.isEmpty()) {</span>
+<span class="nc" id="L266">            return null;</span>
+        } else {
+<span class="nc" id="L268">            throw new PKBPluginException(&quot;More than 1 attachment with same Id-&quot; + attachmentId);</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

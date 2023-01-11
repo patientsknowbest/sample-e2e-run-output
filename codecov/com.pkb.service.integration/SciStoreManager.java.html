@@ -1,0 +1,826 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SciStoreManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.integration</a> &gt; <span class="el_source">SciStoreManager.java</span></div><h1>SciStoreManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.integration;
+
+import com.google.common.base.Joiner;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRRequestContext.AccountLinkType;
+import com.pkb.app.entity.ImmutableLoggedOutEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.common.ClearableInternalState;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.dataupload.entity.UploadedData.Destination;
+import com.pkb.dataupload.entity.UploadedData.Format;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.domain.SciStoreService;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.entities.pub.PublicSciStorePatientCredentials.Status;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.integration.sciStore.ISciStoreClient;
+import com.pkb.integration.sciStore.SciStoreMismatch;
+import com.pkb.integration.sciStore.SciStoreModelUtils;
+import com.pkb.integration.sciStore.SciStoreNotification;
+import com.pkb.integration.sciStore.SciStoreTestSummary;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.test.LoincManager;
+import com.pkb.service.test.TestManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.test.entity.LoincMapping;
+import com.pkb.test.entity.LoincTest;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.test.entity.TestResultType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.PersonAmbiguityHandler;
+import com.pkb.util.StringUtil;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.prometheus.client.Counter;
+import io.prometheus.client.Summary;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.control.Either;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import uk.nhs.scot.show.isd.general.ArrayOfTESTRESULTTYPE;
+import uk.nhs.scot.show.isd.general.CLINICALCIRCUMSTANCETYPE;
+import uk.nhs.scot.show.isd.general.CLINICALCODETYPE;
+import uk.nhs.scot.show.isd.general.CLINICALINFORMATIONTYPE;
+import uk.nhs.scot.show.isd.general.INTERPRETATIONTYPE;
+import uk.nhs.scot.show.isd.general.QUANTIFIABLERESULTTYPE;
+import uk.nhs.scot.show.isd.general.QUANTITYTYPE;
+import uk.nhs.scot.show.isd.general.RANGETYPE;
+import uk.nhs.scot.show.isd.general.REFERENCELIMITTYPE;
+import uk.nhs.scot.show.isd.general.SAMPLETYPE;
+import uk.nhs.scot.show.isd.general.TESTRESULTTYPE;
+import uk.nhs.scot.show.isd.general.TESTSETRESULTTYPE;
+import uk.nhs.scot.show.isd.general.TESTTYPE;
+import uk.nhs.scot.show.isd.general.VALUECOMPARATORTYPE;
+import uk.nhs.scot.show.isd.scistore.ArrayOfTESTSETRESULTTYPE;
+import uk.nhs.scot.show.isd.scistore.FindPatientItem;
+import uk.nhs.scot.show.isd.scistore.InvestigationReportMessageType;
+import uk.nhs.scot.show.isd.scistore.ResultSuite;
+
+import java.math.BigDecimal;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.chrono.ChronoZonedDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.TimeZone;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.consent.model.AbstractConsentStatus.noConsentRequired;
+import static com.pkb.entities.pub.PublicSciStorePatientCredentials.CHI_NUMBER_UNKNOWN;
+import static com.pkb.entities.pub.PublicSciStorePatientCredentials.SUBSCR_ID_MISMATCHED;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toSet;
+
+public class SciStoreManager extends TransactionManager implements ClearableInternalState {
+
+<span class="fc" id="L105">    private static Summary fullPatientSyncStatistics = Summary.build()</span>
+<span class="fc" id="L106">            .name(&quot;pkb_integrations_scistore_syncnewpatients&quot;)</span>
+<span class="fc" id="L107">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L108">            .quantile(0.95, 0.01)</span>
+<span class="fc" id="L109">            .help(&quot;Scistore full patient sync seconds&quot;)</span>
+<span class="fc" id="L110">            .register();</span>
+
+<span class="fc" id="L112">    private static Summary fetchBatchesStatistics = Summary.build()</span>
+<span class="fc" id="L113">            .name(&quot;pkb_integrations_scistore_syncpatientfetch&quot;)</span>
+<span class="fc" id="L114">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L115">            .quantile(0.95, 0.01)</span>
+<span class="fc" id="L116">            .help(&quot;Scistore fetch patient data batch seconds&quot;)</span>
+<span class="fc" id="L117">            .register();</span>
+
+<span class="fc" id="L119">    private static Summary saveTestResultsStatistics = Summary.build()</span>
+<span class="fc" id="L120">            .name(&quot;pkb_integrations_scistore_savetestresults&quot;)</span>
+<span class="fc" id="L121">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L122">            .quantile(0.95, 0.01)</span>
+<span class="fc" id="L123">            .help(&quot;Scistore save patient data batch seconds&quot;)</span>
+<span class="fc" id="L124">            .register();</span>
+
+<span class="fc" id="L126">    private static Summary parseTestResultsStatistics = Summary.build()</span>
+<span class="fc" id="L127">            .name(&quot;pkb_integrations_scistore_parsetestresults&quot;)</span>
+<span class="fc" id="L128">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L129">            .quantile(0.95, 0.01)</span>
+<span class="fc" id="L130">            .help(&quot;Scistore parse patient data batch seconds&quot;)</span>
+<span class="fc" id="L131">            .register();</span>
+
+<span class="fc" id="L133">    private static Counter testResultCountStatistics = Counter.build()</span>
+<span class="fc" id="L134">            .name(&quot;pkb_integrations_testresults&quot;)</span>
+<span class="fc" id="L135">            .help(&quot;Parsed SciStore test results&quot;)</span>
+<span class="fc" id="L136">            .register();</span>
+
+<span class="fc" id="L138">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    public static final String SCISTORE_SOURCE_TEXT = &quot;SciStore&quot;;
+    private final ISciStoreClient sciStoreClient;
+    private final UserManager userManager;
+    private final DataUploadManager dataUploadManager;
+    private final TestManager testManager;
+    private final TeamUserManager teamUserManager;
+    private final INotificationManager notificationManager;
+    private final SciStoreService sciStoreService;
+    private final LoincManager loincManager;
+
+    public SciStoreManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, ISciStoreClient sciStoreClient,
+                           UserManager userManager, DataUploadManager dataUploadManager, TestManager testManager, TeamUserManager teamUserManager, INotificationManager notificationManager,
+                           SciStoreService sciStoreService, LoincManager loincManager) {
+<span class="fc" id="L152">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L153">        this.sciStoreClient = sciStoreClient;</span>
+<span class="fc" id="L154">        this.userManager = userManager;</span>
+<span class="fc" id="L155">        this.dataUploadManager = dataUploadManager;</span>
+<span class="fc" id="L156">        this.testManager = testManager;</span>
+<span class="fc" id="L157">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L158">        this.notificationManager = notificationManager;</span>
+<span class="fc" id="L159">        this.sciStoreService = sciStoreService;</span>
+<span class="fc" id="L160">        this.loincManager = loincManager;</span>
+<span class="fc" id="L161">    }</span>
+
+<span class="fc" id="L163">    protected enum RangeQualifier {</span>
+        // order is impt: we loop through this list in order when checking for matches
+<span class="fc" id="L165">        LESS_OR_EQUAL(&quot;&lt;=&quot;),</span>
+<span class="fc" id="L166">        GREATER_OR_EQUAL(&quot;&gt;=&quot;),</span>
+<span class="fc" id="L167">        LESS(&quot;&lt;&quot;),</span>
+<span class="fc" id="L168">        GREATER(&quot;&gt;&quot;);</span>
+
+        public final String value;
+
+<span class="fc" id="L172">        RangeQualifier(String value) {</span>
+<span class="fc" id="L173">            this.value = value;</span>
+<span class="fc" id="L174">        }</span>
+
+        protected String getValue() {
+<span class="nc" id="L177">            return value;</span>
+        }
+
+    }
+
+    private static final int RETRY_LIMIT = 100;
+
+    //
+    // Regular actions, called by Quartz with no session
+    //
+
+    public void syncNewPatients() {
+<span class="fc" id="L189">        int maxPatients = config.getSciStoreNewPatientLimit();</span>
+
+<span class="fc" id="L191">        List&lt;PKBPerson&gt; unsyncedPatients = userManager.findUnsyncedSciStorePatients(maxPatients);</span>
+<span class="fc" id="L192">        LOGGER.info(&quot;Syncing {} new patients with SciStore (max requested: {})&quot;, unsyncedPatients.size(), maxPatients);</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">        if (!unsyncedPatients.isEmpty()) {</span>
+<span class="fc" id="L194">            EHRRequestContext requestContext = buildRequestContext();</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">            for (PKBPerson patient : unsyncedPatients) {</span>
+<span class="fc" id="L196">                Summary.Timer fullPatientSyncTimer = fullPatientSyncStatistics.labels().startTimer();</span>
+                try {
+<span class="fc" id="L198">                    syncPatient(requestContext, patient, MatchType.MUST_MATCH);</span>
+<span class="nc" id="L199">                } catch (Exception e) {</span>
+<span class="nc" id="L200">                    LOGGER.error(&quot;Error while syncing new patient-{} with SciStore&quot;, patient.getId(), e);</span>
+                } finally {
+<span class="fc" id="L202">                    fullPatientSyncTimer.observeDuration();</span>
+                }
+<span class="fc" id="L204">            }</span>
+
+        }
+<span class="fc" id="L207">    }</span>
+
+    private EHRRequestContext buildRequestContext() {
+<span class="fc" id="L210">        return ImmutableLoggedOutEHRRequestContext.of(AccountLinkType.NO_LINK, Route.SCISTORE, noConsentRequired(), UUID.randomUUID());</span>
+    }
+
+    public void pollForNotifications() {
+        List&lt;SciStoreNotification&gt; notifications;
+<span class="fc" id="L215">        EHRRequestContext requestContext = buildRequestContext();</span>
+<span class="fc" id="L216">        int tries = 0;</span>
+        do {
+<span class="fc" id="L218">            notifications = sciStoreClient.getNotifications();</span>
+<span class="fc" id="L219">            LOGGER.info(&quot;Received {} notifications from SciStore&quot;, notifications.size());</span>
+<span class="fc bfc" id="L220" title="All 2 branches covered.">            if (!notifications.isEmpty()) {</span>
+
+<span class="fc" id="L222">                var validatedNotifications = notifications.stream()</span>
+<span class="fc" id="L223">                        .map(sn -&gt; Tuple.of(NationalIdType.CHI_NUMBER.getValidNationalIdAndType(sn.getCHINumber()), sn))</span>
+<span class="fc" id="L224">                        .peek(t -&gt; {</span>
+<span class="pc bpc" id="L225" title="1 of 2 branches missed.">                            if (t._1.isEmpty()) {</span>
+<span class="nc" id="L226">                                LOGGER.error(&quot;Received SciStore notification for invalid CHI-{}&quot;, t._2.getCHINumber());</span>
+                            }
+<span class="fc" id="L228">                        })</span>
+<span class="fc" id="L229">                        .filter(t -&gt; t._1.isPresent())</span>
+<span class="fc" id="L230">                        .map(t -&gt; Tuple.of(t._1.get(), t._2))</span>
+<span class="fc" id="L231">                        .collect(Collectors.toList());</span>
+
+<span class="fc" id="L233">                var nationalIds = validatedNotifications.stream().map(t -&gt; t._1).collect(toSet());</span>
+
+<span class="fc" id="L235">                var personsByNationalIdsMap = userManager.findPKBPersonByValidNationalIds(nationalIds);</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">                for (Tuple2&lt;ValidNationalId, SciStoreNotification&gt; notification : validatedNotifications) {</span>
+<span class="fc" id="L237">                    Either&lt;PKBPerson, List&lt;PKBPerson&gt;&gt; pkbPersonByNationalId = personsByNationalIdsMap.get(notification._1);</span>
+<span class="fc" id="L238">                    PersonAmbiguityHandler.getPersonOrNone(pkbPersonByNationalId, &quot;nationalId&quot;)</span>
+<span class="fc" id="L239">                            .peek(pkbPatient -&gt; {</span>
+                                try {
+<span class="fc" id="L241">                                    LOGGER.info(&quot;Fetching test results in batch {} for patient-{} from SciStore&quot;, notification._2.getRecordKey(), pkbPatient.getId());</span>
+<span class="fc" id="L242">                                    InvestigationReportMessageType testResultBatch = sciStoreClient.getResult(notification._2.getRecordKey() /*dumpXml*/);</span>
+                                    // TODO: this .size() is not accurate
+<span class="fc" id="L244">                                    LOGGER.info(&quot;Received {} results for patient-{} from SciStore&quot;, testResultBatch.getServiceResult().size(), pkbPatient.getId());</span>
+<span class="fc" id="L245">                                    transactional(() -&gt; {</span>
+<span class="fc" id="L246">                                        long savedResultsCount = saveResultBatches(requestContext, pkbPatient, List.of(testResultBatch));</span>
+<span class="fc" id="L247">                                        LOGGER.info(&quot;pollForNotifications:{}: completed; saved {} results&quot;, pkbPatient.getId(), savedResultsCount);</span>
+<span class="fc" id="L248">                                    });</span>
+<span class="nc" id="L249">                                } catch (Exception e) {</span>
+<span class="nc" id="L250">                                    LOGGER.error(&quot;Error while fetching test results for patient-{}&quot;, pkbPatient.getId(), e);</span>
+<span class="fc" id="L251">                                }</span>
+<span class="fc" id="L252">                            })</span>
+<span class="pc" id="L253">                            .onEmpty(() -&gt; LOGGER.error(&quot;Received SciStore notification for unknown patient with CHI-{}&quot;, notification._2.getCHINumber()));</span>
+<span class="fc" id="L254">                }</span>
+            }
+<span class="pc bpc" id="L256" title="1 of 4 branches missed.">        } while (!notifications.isEmpty() &amp;&amp; ++tries &lt; RETRY_LIMIT);</span>
+<span class="fc" id="L257">    }</span>
+
+    //
+    // Implementations
+    //
+
+    public void syncSinglePatient(EHRRequestContext requestContext, PKBPerson pkbPatient, MatchType matchType) {
+        try {
+<span class="fc" id="L265">            syncPatient(requestContext, pkbPatient, matchType);</span>
+<span class="nc" id="L266">        } catch (Exception e) {</span>
+<span class="nc" id="L267">            LOGGER.error(&quot;Error while syncing single new patient-{} with SciStore&quot;, pkbPatient.getId(), e);</span>
+<span class="fc" id="L268">        }</span>
+<span class="fc" id="L269">    }</span>
+
+    public void pullFullHistory(EHRRequestContext requestContext, PKBPerson pkbPatient) {
+        try {
+
+<span class="nc" id="L274">            String patientCHInumber = pkbPatient.getNationalIdByExactType(NationalIdType.CHI_NUMBER).orElseThrow(() -&gt; new RuntimeException(&quot;No national id by type &quot; + NationalIdType.CHI_NUMBER + &quot; for patient &quot; + pkbPatient.getId())).getValue();</span>
+<span class="nc" id="L275">            FindPatientItem sciStorePatient = sciStoreClient.findPatient(patientCHInumber)</span>
+<span class="nc" id="L276">                    .orElseThrow(() -&gt; new RuntimeException(&quot;No SciStore patient for CHI-&quot; + patientCHInumber));</span>
+
+            // TEMPORARILY dump downloaded xml for Glasgow dummy Patient One, Patient Two, and Patient Three
+<span class="nc bnc" id="L279" title="All 6 branches missed.">            boolean dumpXml = pkbPatient.getId() == 23193001 || pkbPatient.getId() == 23193180 || pkbPatient.getId() == 23193963;</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">            if (dumpXml) {</span>
+<span class="nc" id="L281">                LOGGER.info(&quot;*** SJG SciStore download for patient-{}&quot;, pkbPatient.getId());</span>
+            }
+<span class="nc" id="L283">            LOGGER.info(&quot;pullFullHistory:{}: starting remote pull&quot;, pkbPatient.getId());</span>
+<span class="nc" id="L284">            List&lt;InvestigationReportMessageType&gt; testResultBatches = findResultsByPatientId(sciStorePatient);</span>
+<span class="nc" id="L285">            transactional(() -&gt; {</span>
+<span class="nc" id="L286">                long savedResultsCount = saveResultBatches(requestContext, pkbPatient, testResultBatches);</span>
+<span class="nc" id="L287">                LOGGER.info(&quot;pullFullHistory:{}: completed; saved {} results&quot;, pkbPatient.getId(), savedResultsCount);</span>
+<span class="nc" id="L288">            });</span>
+<span class="nc" id="L289">        } catch (Exception e) {</span>
+<span class="nc" id="L290">            LOGGER.error(&quot;Error while pulling full history for single patient-{} with SciStore&quot;, pkbPatient.getId(), e);</span>
+<span class="nc" id="L291">        }</span>
+<span class="nc" id="L292">    }</span>
+
+    private List&lt;InvestigationReportMessageType&gt; findResultsByPatientId(FindPatientItem sciStorePatient) {
+
+<span class="fc" id="L296">        return sciStoreClient</span>
+<span class="fc" id="L297">                .findResults(sciStorePatient.getPatientID())</span>
+<span class="fc" id="L298">                .stream()</span>
+<span class="fc" id="L299">                .map(SciStoreTestSummary::getTestReportId)</span>
+<span class="fc" id="L300">                .map(sciStoreClient::getResult)</span>
+<span class="fc" id="L301">                .collect(Collectors.toList());</span>
+    }
+
+    private void syncPatient(EHRRequestContext requestContext, PKBPerson pkbPatient, MatchType matchType)
+            throws Exception {
+<span class="fc" id="L306">        String patientCHInumber = pkbPatient.getNationalIdByExactType(NationalIdType.CHI_NUMBER)</span>
+<span class="pc" id="L307">                .orElseThrow(() -&gt; new RuntimeException(&quot;No national id by type &quot; + NationalIdType.CHI_NUMBER + &quot; for patient &quot; + pkbPatient.getId())).getValue();</span>
+
+<span class="fc" id="L309">        sciStoreClient.findPatient(patientCHInumber).ifPresentOrElse(sciStorePatient -&gt; {</span>
+
+<span class="fc bfc" id="L311" title="All 2 branches covered.">                    if (matchType == MatchType.MUST_MATCH &amp;&amp;</span>
+<span class="fc bfc" id="L312" title="All 2 branches covered.">                            (!StringUtil.equalsApproximate(sciStorePatient.getFamilyName(), pkbPatient.getLastName()) ||</span>
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">                                    !sciStorePatient.getDateOfBirth().toXMLFormat().equals(pkbPatient.getDateOfBirthString()))) {</span>
+
+<span class="fc" id="L315">                        sciStoreService.createSciStorePatientCredentials(pkbPatient.getId(), sciStorePatient.getPatientID(),</span>
+                                SUBSCR_ID_MISMATCHED, Status.MISMATCHED);
+                    } else {
+<span class="fc" id="L318">                        Optional&lt;String&gt; sciStoreSubscriptionId = sciStoreClient.findSubscriptionForPatient(patientCHInumber);</span>
+<span class="fc" id="L319">                        sciStoreSubscriptionId.ifPresent(s -&gt; LOGGER.info(&quot;Reused existing SciStore subscription for patient-{}&quot;, pkbPatient.getId()));</span>
+<span class="pc" id="L320">                        String patientId = sciStoreSubscriptionId.orElseGet(() -&gt; sciStoreClient.addSubscription(patientCHInumber));</span>
+                        List&lt;InvestigationReportMessageType&gt; batches;
+<span class="fc" id="L322">                        Summary.Timer fetchBatchesTimer = fetchBatchesStatistics.startTimer();</span>
+                        try {
+<span class="fc" id="L324">                            batches = findResultsByPatientId(sciStorePatient);</span>
+                        } finally {
+<span class="fc" id="L326">                            fetchBatchesTimer.observeDuration();</span>
+                        }
+<span class="fc" id="L328">                        transactional(() -&gt; {</span>
+<span class="fc" id="L329">                            saveResultBatches(requestContext, pkbPatient, batches);</span>
+
+<span class="fc" id="L331">                            sciStoreService.findPublicSciStorePatientCredentialsByPkbPatientId(pkbPatient.getId())</span>
+<span class="fc" id="L332">                                    .ifPresentOrElse(existingCreds -&gt; sciStoreService.updateSciStorePatientCredentials(existingCreds.getPkbPatientId(),</span>
+<span class="fc" id="L333">                                                    sciStorePatient.getPatientID(), patientId, Status.ACTIVE),</span>
+<span class="fc" id="L334">                                            () -&gt; sciStoreService.createSciStorePatientCredentials(pkbPatient.getId(),</span>
+<span class="fc" id="L335">                                                    sciStorePatient.getPatientID(), patientId, Status.ACTIVE));</span>
+<span class="fc" id="L336">                        });</span>
+                    }
+<span class="fc" id="L338">                },</span>
+
+<span class="fc" id="L340">                () -&gt; transactional(() -&gt; sciStoreService.createSciStorePatientCredentials(pkbPatient.getId(), &quot;UNKNOWN&quot;,</span>
+                        CHI_NUMBER_UNKNOWN, Status.CHI_NUMBER_UNKNOWN)));
+<span class="fc" id="L342">    }</span>
+
+    public Optional&lt;FindPatientItem&gt; findPatient(String chiNumber) {
+<span class="nc" id="L345">        return sciStoreClient.findPatient(chiNumber);</span>
+    }
+
+    private long saveResultBatches(@NotNull EHRRequestContext requestContext, PKBPerson pkbPatient,
+                                   List&lt;InvestigationReportMessageType&gt; testResultBatches) {
+
+<span class="fc" id="L351">        List&lt;Team&gt; teamList = teamUserManager</span>
+<span class="fc" id="L352">                .getUserTeams(requestContext, pkbPatient.getId(), true/*activeOnly*/); // TODO: should always be SciStore team</span>
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">        if (teamList.isEmpty()) {</span>
+<span class="nc" id="L354">            LOGGER.warn(&quot;Downloaded Sci Store results for patient-{} who is not active in any team; NOT SAVING&quot;, pkbPatient.getId());</span>
+
+            // short circuit!
+<span class="nc" id="L357">            return 0;</span>
+        }
+
+<span class="fc" id="L360">        Team team = teamList.get(0);</span>
+<span class="fc" id="L361">        Org org = team.getOrg(); // TODO: should always be SciStore org</span>
+
+<span class="fc" id="L363">        long savedResultCount = 0;</span>
+
+        // prep mappings first, then clear out old versions and upload new ones in bulk
+<span class="fc" id="L366">        List&lt;Long&gt; previousUploadedDataIds = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L367">        List&lt;TestResultDTO&gt; pkbTestResults = new LinkedList&lt;&gt;();</span>
+
+<span class="fc" id="L369">        Summary.Timer parseTestResultsTimer = parseTestResultsStatistics.startTimer();</span>
+        try {
+<span class="fc bfc" id="L371" title="All 2 branches covered.">            for (InvestigationReportMessageType testResultBatch : testResultBatches) {</span>
+
+<span class="fc" id="L373">                Optional&lt;Long&gt; previousUploadedDataId = dataUploadManager.findPreviousDataUploadId(Destination.TEST_RESULT,</span>
+<span class="fc" id="L374">                        Format.XML_SCISTORE, pkbPatient.getId(), SciStoreModelUtils.getUID(testResultBatch));</span>
+<span class="fc" id="L375">                previousUploadedDataId.ifPresent(previousUploadedDataIds::add);</span>
+
+<span class="fc" id="L377">                UploadedDataDTO dto = new UploadedDataDTO();</span>
+<span class="fc" id="L378">                dto.setSourceOrg(null);</span>
+<span class="fc" id="L379">                dto.setConnectingOrg(null);</span>
+<span class="fc" id="L380">                dto.setHl7PartnerId(null);</span>
+<span class="fc" id="L381">                dto.setSourceTeam(null);</span>
+<span class="fc" id="L382">                dto.setData(&quot;&quot;); // we don't have the raw data and we don't really need it</span>
+<span class="fc" id="L383">                dto.setEmbeddedId(SciStoreModelUtils.getUID(testResultBatch));</span>
+<span class="fc" id="L384">                dto.setDestination(Destination.TEST_RESULT);</span>
+<span class="fc" id="L385">                dto.setFormat(Format.XML_SCISTORE);</span>
+<span class="fc" id="L386">                dto.setStatus(UploadedData.Status.COMPLETED);</span>
+<span class="fc" id="L387">                previousUploadedDataId.ifPresent(dto::setUpdateTo);</span>
+
+<span class="fc" id="L389">                Long uploadedDataId = dataUploadManager.addUploadedData(dto, pkbPatient, requestContext).getId();</span>
+<span class="fc" id="L390">                pkbTestResults.addAll(parseTestBatch(org, team, uploadedDataId, testResultBatch));</span>
+<span class="fc" id="L391">            }</span>
+        } finally {
+<span class="fc" id="L393">            parseTestResultsTimer.observeDuration();</span>
+        }
+
+        // flag deleted all old versions of this same data
+<span class="fc" id="L397">        deleteUploadedTestResults(requestContext, pkbPatient.getId(), previousUploadedDataIds);</span>
+
+        // save all results from all batches
+<span class="fc" id="L400">        Summary.Timer saveTestResultsTimer = saveTestResultsStatistics.startTimer();</span>
+        try {
+<span class="fc" id="L402">            testManager.saveTestResultsNoUpdates(requestContext, pkbTestResults, pkbPatient.getId());</span>
+        } finally {
+<span class="fc" id="L404">            saveTestResultsTimer.observeDuration();</span>
+        }
+
+<span class="fc" id="L407">        savedResultCount = pkbTestResults.size();</span>
+
+        // Temporary kludge - do not notify Glasgow patients of results that will be hidden from them
+
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">        if (anyTestVisibleToGlasgowPatients(pkbTestResults)) {</span>
+
+            // send single activity notification
+<span class="fc" id="L414">            Activity activity = new Activity(dateTimeService.now(), Activity.Action.UPLOADED_LAB_RESULTS, org.getId());</span>
+<span class="fc" id="L415">            activity.setTargetId(pkbPatient.getId());</span>
+<span class="fc" id="L416">            activity.setActorId(null);</span>
+
+            //make one notification for each separate type of consent level
+            //as of time of writing - the SciStoreManager is hardcoding all DTOs to be GENERAL consent!
+            //NOTE: This code assumes we will only be dealing with support for one of four consent options (eg not BOTH genreal AND sexual) or with data that has no consent level - this is a good assumption at time of writing
+            //but is not enforced in code.
+
+<span class="pc bpc" id="L423" title="7 of 8 branches missed.">            pkbTestResults.stream().filter(t -&gt; !t.getRequireGeneral() &amp;&amp; !t.getRequireMentalHealth() &amp;&amp; !t.getRequireSexualHealth() &amp;&amp; !t.getRequireSocialCare()).findFirst()</span>
+<span class="pc" id="L424">                    .ifPresent(testResult -&gt; notificationManager.notifyUserAboutActivityByOtherUser(requestContext, activity, true/*sendAsync*/, testResult));</span>
+
+<span class="fc" id="L426">            pkbTestResults.stream().filter(TestResultDTO::getRequireGeneral).findFirst()</span>
+<span class="fc" id="L427">                    .ifPresent(testResult -&gt; notificationManager.notifyUserAboutActivityByOtherUser(requestContext, activity, true/*sendAsync*/, testResult));</span>
+
+<span class="fc" id="L429">            pkbTestResults.stream().filter(TestResultDTO::getRequireMentalHealth).findFirst()</span>
+<span class="pc" id="L430">                    .ifPresent(testResult -&gt; notificationManager.notifyUserAboutActivityByOtherUser(requestContext, activity, true/*sendAsync*/, testResult));</span>
+
+<span class="fc" id="L432">            pkbTestResults.stream().filter(TestResultDTO::getRequireSexualHealth).findFirst()</span>
+<span class="pc" id="L433">                    .ifPresent(testResult -&gt; notificationManager.notifyUserAboutActivityByOtherUser(requestContext, activity, true/*sendAsync*/, testResult));</span>
+
+<span class="fc" id="L435">            pkbTestResults.stream().filter(TestResultDTO::getRequireSocialCare).findFirst()</span>
+<span class="pc" id="L436">                    .ifPresent(testResult -&gt; notificationManager.notifyUserAboutActivityByOtherUser(requestContext, activity, true/*sendAsync*/, testResult));</span>
+        }
+
+<span class="fc" id="L439">        return savedResultCount;</span>
+    }
+
+    /**
+     * Mark UploadedData record OBSOLETE and flag deleted all lab results from this upload
+     *
+     * @param requestContext
+     * @param patientId
+     * @param uploadedDataIds
+     */
+    private void deleteUploadedTestResults(EHRRequestContext requestContext, long patientId, List&lt;
+            Long&gt; uploadedDataIds) {
+        try {
+<span class="fc" id="L452">            loincManager.deleteUploadedTestResults(requestContext, patientId, uploadedDataIds);</span>
+<span class="fc" id="L453">            dataUploadManager.updateUploadedDataStatus(uploadedDataIds, UploadedData.Status.OBSOLETE);</span>
+<span class="nc" id="L454">        } catch (Exception e) {</span>
+<span class="nc" id="L455">            throw new PKBException(&quot;failed deleting test results for patient-&quot; + patientId + &quot; with uploadedDataIds-&quot; + uploadedDataIds, e);</span>
+<span class="fc" id="L456">        }</span>
+<span class="fc" id="L457">    }</span>
+
+    private boolean anyTestVisibleToGlasgowPatients(List&lt;TestResultDTO&gt; pkbTestResults) {
+
+<span class="fc" id="L461">        var loincTestIds = pkbTestResults.stream()</span>
+<span class="fc" id="L462">                .map(TestResultDTO::getLoincTestId)</span>
+<span class="fc" id="L463">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L464">                .collect(toSet());</span>
+
+<span class="fc" id="L466">        Map&lt;Long, LoincTest&gt; loincTests = loincManager.getLoincTestsByIds(loincTestIds, Collectors.toMap(LoincTest::getId, identity()));</span>
+
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">        for (TestResultDTO dto : pkbTestResults) {</span>
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">            if (dto.getLoincTestId() != null) {</span>
+<span class="fc" id="L470">                LoincTest loincTest = loincTests.get(dto.getLoincTestId());</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">                if (!TestManager.isLoincHiddenFromGlasgowPatients(loincTest.getLoinc())) {</span>
+<span class="fc" id="L472">                    return true;</span>
+                }
+<span class="nc bnc" id="L474" title="All 2 branches missed.">            } else if (dto.getLoincMappingId() != null) {</span>
+<span class="nc" id="L475">                Optional&lt;LoincMapping&gt; lm = loincManager.getLoincMappingById(dto.getLoincMappingId());</span>
+<span class="nc bnc" id="L476" title="All 4 branches missed.">                if (lm.isPresent() &amp;&amp; lm.get().getLoincTest() != null) {</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                    if (!TestManager.isLoincHiddenFromGlasgowPatients(lm.get().getLoincTest().getLoinc())) {</span>
+<span class="nc" id="L478">                        return true;</span>
+                    }
+                }
+            }
+<span class="nc" id="L482">        }</span>
+<span class="nc" id="L483">        return false;</span>
+    }
+
+<span class="fc" id="L486">    private Cache&lt;String, TestResultType&gt; testResultTypeCache = CacheBuilder.newBuilder().maximumSize(10000L)</span>
+<span class="fc" id="L487">            .expireAfterAccess(120, TimeUnit.SECONDS).build();</span>
+
+<span class="fc" id="L489">    private Joiner joiner = Joiner.on(&quot;;&quot;).useForNull(&quot;NULL&quot;);</span>
+
+    public List&lt;TestResultDTO&gt; parseTestBatch(Org org, Team team, Long uploadedDataId,
+                                              InvestigationReportMessageType testResultBatch) {
+<span class="fc" id="L493">        List&lt;TestResultDTO&gt; pkbTestResults = new LinkedList&lt;&gt;();</span>
+
+<span class="fc" id="L495">        ZonedDateTime dateEntered = extractDateEntered(testResultBatch);</span>
+<span class="fc bfc" id="L496" title="All 2 branches covered.">        for (ResultSuite serviceResult : testResultBatch.getServiceResult()) {</span>
+
+<span class="fc" id="L498">            Optional&lt;ZonedDateTime&gt; dateTimeSampled = extractDateTimeSampled(serviceResult.getSampleDetails());</span>
+            // serviceResult.getTestResultSets() is nullable...
+<span class="fc" id="L500">            List&lt;TESTSETRESULTTYPE&gt; testResultSetList = Optional.ofNullable(serviceResult.getTestResultSets())</span>
+<span class="fc" id="L501">                    .map(ArrayOfTESTSETRESULTTYPE::getTestResultSet)</span>
+<span class="fc" id="L502">                    .orElse(Collections.emptyList());</span>
+<span class="fc bfc" id="L503" title="All 2 branches covered.">            for (TESTSETRESULTTYPE testResultSet : testResultSetList) {</span>
+
+<span class="fc" id="L505">                String setLevelComments = SciStoreModelUtils.paragraph(testResultSet.getComment());</span>
+<span class="fc" id="L506">                String serviceName = extractServiceName(testResultSet.getTestSetDetails()).orElse(null);</span>
+
+<span class="fc" id="L508">                List&lt;TESTRESULTTYPE&gt; testResultList = Optional.ofNullable(testResultSet.getTestResults())</span>
+<span class="fc" id="L509">                        .map(ArrayOfTESTRESULTTYPE::getTestResult)</span>
+<span class="fc" id="L510">                        .orElse(Collections.emptyList());</span>
+<span class="fc bfc" id="L511" title="All 2 branches covered.">                for (TESTRESULTTYPE testResult : testResultList) {</span>
+
+<span class="fc" id="L513">                    TESTTYPE testPerformed = testResult.getTestPerformed();</span>
+<span class="pc bpc" id="L514" title="1 of 2 branches missed.">                    if (testPerformed.getTestName().size() &gt; 1) {</span>
+<span class="fc" id="L515">                        LOGGER.warn(</span>
+                                &quot;SciStore has multiple &lt;TestName&gt; fields in a single &lt;TestPerformed&gt; - taking the first until we can handle multiple codes&quot;);
+                    }
+
+<span class="fc" id="L519">                    String testInterpretation = extractTestInterpretation(testResult).orElse(null);</span>
+<span class="fc" id="L520">                    String testLevelComments = SciStoreModelUtils.paragraph(testResult.getComment());</span>
+
+<span class="fc" id="L522">                    CLINICALCIRCUMSTANCETYPE testName = testPerformed.getTestName().get(0);</span>
+<span class="fc" id="L523">                    CLINICALCODETYPE clinicalCode = testName.getClinicalInformation().getClinicalCode();</span>
+<span class="pc bpc" id="L524" title="1 of 2 branches missed.">                    if (clinicalCode.getClinicalCodeValue().size() &gt; 1) {</span>
+<span class="nc" id="L525">                        LOGGER.error(&quot;SciStore has multiple &lt;ClinicalCodeValue&gt; fields in a single &lt;ClinicalCode&gt;&quot;);</span>
+<span class="nc" id="L526">                        continue;</span>
+                    }
+
+<span class="fc" id="L529">                    String code = clinicalCode.getClinicalCodeValue().get(0).trim();</span>
+<span class="fc" id="L530">                    String codeSystem = clinicalCode.getClinicalCodeScheme().getClinicalCodeSchemeId().trim();</span>
+<span class="fc" id="L531">                    String codeSystemVersion = clinicalCode.getClinicalCodeScheme().getClinicalCodeSchemeVersion().trim();</span>
+<span class="fc" id="L532">                    String codeDescription = Optional.ofNullable(testName.getClinicalInformation().getClinicalCodeDescription())</span>
+<span class="fc" id="L533">                            .map(String::trim).orElse(&quot;&quot;);</span>
+
+<span class="fc bfc" id="L535" title="All 2 branches covered.">                    for (QUANTIFIABLERESULTTYPE testMeasurement : testResult.getTestMeasurement()) {</span>
+
+<span class="fc" id="L537">                        Double value = extractValue(testMeasurement).orElse(null);</span>
+<span class="fc" id="L538">                        String textValue = extractTextValue(testMeasurement).orElse(null);</span>
+<span class="fc" id="L539">                        String units = extractUnits(testMeasurement).orElse(null);</span>
+
+<span class="pc bpc" id="L541" title="1 of 2 branches missed.">                        if (textValue == null) {</span>
+<span class="fc" id="L542">                            textValue = testInterpretation;</span>
+                        }
+
+<span class="pc bpc" id="L545" title="3 of 4 branches missed.">                        if (value == null &amp;&amp; textValue == null) {</span>
+<span class="nc" id="L546">                            LOGGER.error(</span>
+                                    &quot;SciStore &lt;TestResult&gt; does not contain &lt;TestInterpretation&gt; and &lt;TestMeasurement&gt; does not contain &lt;MeasurementNumeric&gt; or &lt;MeasurementDescription&gt;&quot;);
+<span class="nc" id="L548">                            continue;</span>
+                        }
+
+<span class="fc" id="L551">                        Double rangeHighValue = extractRangeValue(RANGETYPE::getRangeHighValue, testMeasurement.getReferenceLimit())</span>
+<span class="fc" id="L552">                                .orElse(null);</span>
+<span class="fc" id="L553">                        RangeQualifier rangeHighQualifier = extractRangeQualifier(RANGETYPE::getRangeHighValue,</span>
+<span class="fc" id="L554">                                testMeasurement.getReferenceLimit()).orElse(null);</span>
+<span class="fc" id="L555">                        Double rangeLowValue = extractRangeValue(RANGETYPE::getRangeLowValue, testMeasurement.getReferenceLimit())</span>
+<span class="fc" id="L556">                                .orElse(null);</span>
+<span class="fc" id="L557">                        RangeQualifier rangeLowQualifier = extractRangeQualifier(RANGETYPE::getRangeLowValue,</span>
+<span class="fc" id="L558">                                testMeasurement.getReferenceLimit()).orElse(null);</span>
+<span class="fc" id="L559">                        String rangeUnits = extractRangeValueString(RANGETYPE::getRangeUnit, testMeasurement.getReferenceLimit())</span>
+<span class="fc" id="L560">                                .orElse(null);</span>
+
+<span class="pc bpc" id="L562" title="2 of 4 branches missed.">                        if (StringUtils.isNotEmpty(rangeUnits) &amp;&amp; !rangeUnits.equals(units)) {</span>
+<span class="nc" id="L563">                            LOGGER.error(&quot;ValueUnits = {} but RangeUnits={}&quot;, units, rangeUnits);</span>
+<span class="nc" id="L564">                            continue;</span>
+                        }
+
+<span class="fc" id="L567">                        String comments = combineComments(setLevelComments, testLevelComments);</span>
+
+                        // TODO later - make this a proper builder
+<span class="fc" id="L570">                        pkbTestResults.add(</span>
+<span class="fc" id="L571">                                buildTestResultDTO(org, team, uploadedDataId, dateEntered,</span>
+                                        dateTimeSampled,
+                                        serviceName, code, codeSystem, codeDescription, value, textValue, units, rangeHighValue,
+                                        rangeHighQualifier,
+                                        rangeLowValue, rangeLowQualifier, comments));
+<span class="fc" id="L576">                    }</span>
+
+                    // no TestMeasurement(s), just a TestInterpretation
+<span class="pc bpc" id="L579" title="3 of 4 branches missed.">                    if (testResult.getTestMeasurement().isEmpty() &amp;&amp; testResult.getTestInterpretation() != null) {</span>
+<span class="nc" id="L580">                        Double value = null;</span>
+<span class="nc" id="L581">                        String units = null;</span>
+<span class="nc" id="L582">                        Double nullRange = null;</span>
+<span class="nc" id="L583">                        RangeQualifier nullRangeQualifier = null;</span>
+<span class="nc" id="L584">                        String comments = combineComments(setLevelComments, testLevelComments);</span>
+
+<span class="nc" id="L586">                        pkbTestResults.add(</span>
+<span class="nc" id="L587">                                buildTestResultDTO(org, team, uploadedDataId, dateEntered, dateTimeSampled,</span>
+                                        serviceName, code, codeSystem, codeDescription, value, testInterpretation, units, nullRange,
+                                        nullRangeQualifier,
+                                        nullRange, nullRangeQualifier, comments));
+
+                    }
+<span class="fc" id="L593">                }</span>
+<span class="fc" id="L594">            }</span>
+<span class="fc" id="L595">        }</span>
+<span class="fc" id="L596">        testResultCountStatistics.inc(pkbTestResults.size());</span>
+<span class="fc" id="L597">        return pkbTestResults;</span>
+    }
+
+    private ZonedDateTime extractDateEntered(InvestigationReportMessageType testResultBatch) {
+<span class="fc" id="L601">        ZonedDateTime dateOnly = testResultBatch.getReportDate().toGregorianCalendar(TimeZone.getTimeZone(&quot;UTC&quot;), null, null).toZonedDateTime();</span>
+<span class="fc" id="L602">        int hourOfDay = 0, minute = 0, second = 0;</span>
+<span class="pc bpc" id="L603" title="1 of 2 branches missed.">        if (testResultBatch.getReportTime() != null) {</span>
+<span class="fc" id="L604">            ZonedDateTime timeOnly = testResultBatch.getReportTime().toGregorianCalendar(TimeZone.getTimeZone(&quot;UTC&quot;), null, null).toZonedDateTime();</span>
+<span class="fc" id="L605">            hourOfDay = timeOnly.getHour();</span>
+<span class="fc" id="L606">            minute = timeOnly.getMinute();</span>
+<span class="fc" id="L607">            second = timeOnly.getSecond();</span>
+        }
+<span class="fc" id="L609">        ZonedDateTime result = ZonedDateTime.of(dateOnly.getYear(), dateOnly.getMonthValue(), dateOnly.getDayOfMonth(), hourOfDay, minute, second, 0, ZoneId.of(&quot;UTC&quot;));</span>
+<span class="fc" id="L610">        return result;</span>
+    }
+
+    private Optional&lt;ZonedDateTime&gt; extractDateTimeSampled(@Nullable SAMPLETYPE sampleDetails) {
+<span class="fc" id="L614">        return Optional.ofNullable(sampleDetails)</span>
+<span class="fc" id="L615">                .map(SAMPLETYPE::getDateTimeSampled)</span>
+<span class="fc" id="L616">                .map(xmlCal -&gt; xmlCal.toGregorianCalendar(TimeZone.getTimeZone(&quot;UTC&quot;), null, null).toZonedDateTime());</span>
+
+    }
+
+    private Optional&lt;String&gt; extractServiceName(@Nullable TESTTYPE testSetDetails) {
+<span class="fc" id="L621">        Optional&lt;CLINICALCIRCUMSTANCETYPE&gt; clinicalcircumstance = Optional.ofNullable(testSetDetails)</span>
+                // TODO GDE-764 (utamas): is this safe to pick the first???
+<span class="pc" id="L623">                .map(testType -&gt; testType.getTestName().stream().findFirst().orElseThrow(() -&gt; new IllegalStateException(&quot;Expected to find at least one test name&quot;)));</span>
+<span class="fc" id="L624">        Optional&lt;String&gt; serviceName = clinicalcircumstance</span>
+<span class="fc" id="L625">                .map(CLINICALCIRCUMSTANCETYPE::getClinicalInformation)</span>
+<span class="fc" id="L626">                .map(CLINICALINFORMATIONTYPE::getClinicalCodeDescription)</span>
+<span class="fc" id="L627">                .map(String::trim);</span>
+<span class="pc bpc" id="L628" title="1 of 2 branches missed.">        return serviceName.isPresent()</span>
+<span class="fc" id="L629">                ? serviceName</span>
+                : clinicalcircumstance
+<span class="nc" id="L631">                .map(CLINICALCIRCUMSTANCETYPE::getClinicalCircumstanceDescription)</span>
+<span class="nc" id="L632">                .map(String::trim);</span>
+    }
+
+    private Optional&lt;String&gt; extractTestInterpretation(@NotNull TESTRESULTTYPE testResult) {
+<span class="fc" id="L636">        return Optional</span>
+<span class="fc" id="L637">                .ofNullable(testResult.getTestInterpretation())</span>
+<span class="fc" id="L638">                .map(INTERPRETATIONTYPE::getInterpretation)</span>
+<span class="fc" id="L639">                .map(String::trim);</span>
+    }
+
+    private Optional&lt;String&gt; extractRangeValueString(Function&lt;RANGETYPE, String&gt; propertySelector,
+                                                     @Nullable REFERENCELIMITTYPE referenceLimit) {
+<span class="fc" id="L644">        return Optional</span>
+<span class="fc" id="L645">                .ofNullable(referenceLimit)</span>
+<span class="fc" id="L646">                .map(REFERENCELIMITTYPE::getReferenceLimitNumeric)</span>
+<span class="fc" id="L647">                .map(propertySelector)</span>
+<span class="fc" id="L648">                .map(String::trim);</span>
+    }
+
+    private Optional&lt;Double&gt; extractRangeValue
+            (Function&lt;RANGETYPE, String&gt; propertySelector, @Nullable REFERENCELIMITTYPE referenceLimit) {
+<span class="fc" id="L653">        return extractRangeValueString(propertySelector, referenceLimit)</span>
+<span class="fc" id="L654">                .map(s -&gt; s.replaceAll(</span>
+                        &quot;^(&quot; +
+<span class="fc" id="L656">                                Arrays.stream(RangeQualifier.values())</span>
+<span class="fc" id="L657">                                        .map(rangeQualifier -&gt; rangeQualifier.value)</span>
+<span class="fc" id="L658">                                        .collect(Collectors.joining(&quot;|&quot;))</span>
+                                + &quot;)&quot;,
+                        &quot;&quot;))
+<span class="fc" id="L661">                .map(Double::parseDouble);</span>
+    }
+
+    private Optional&lt;RangeQualifier&gt; extractRangeQualifier(Function&lt;RANGETYPE, String&gt; propertySelector,
+                                                           @Nullable REFERENCELIMITTYPE referencelimit) {
+<span class="fc" id="L666">        Optional&lt;String&gt; rangeOrEmpty = extractRangeValueString(propertySelector, referencelimit);</span>
+<span class="pc bpc" id="L667" title="1 of 2 branches missed.">        if (rangeOrEmpty.isPresent()) {</span>
+<span class="fc" id="L668">            String rangeString = rangeOrEmpty.get();</span>
+<span class="fc" id="L669">            return Arrays.stream(RangeQualifier.values())</span>
+<span class="pc bpc" id="L670" title="1 of 2 branches missed.">                    .map(e -&gt; rangeString.contains(e.value) ? e : null)</span>
+<span class="fc" id="L671">                    .filter(Objects::nonNull)</span>
+<span class="fc" id="L672">                    .findFirst();</span>
+        } else {
+<span class="nc" id="L674">            return Optional.empty();</span>
+        }
+
+    }
+
+    private Optional&lt;Double&gt; extractQuantityValue(@NotNull QUANTIFIABLERESULTTYPE testMeasurement) {
+<span class="fc" id="L680">        return Optional.ofNullable(testMeasurement.getMeasurementNumeric())</span>
+<span class="fc" id="L681">                .map(VALUECOMPARATORTYPE::getResult)</span>
+<span class="fc" id="L682">                .map(QUANTITYTYPE::getQuantityValue)</span>
+<span class="fc" id="L683">                .map(BigDecimal::doubleValue);</span>
+    }
+
+    private boolean hasSignificantComparator(@NotNull QUANTIFIABLERESULTTYPE testMeasurement) {
+<span class="fc" id="L687">        return Optional</span>
+<span class="fc" id="L688">                .ofNullable(testMeasurement.getMeasurementNumeric())</span>
+<span class="fc" id="L689">                .map(VALUECOMPARATORTYPE::getArithmeticComparator)</span>
+<span class="pc bnc" id="L690" title="All 2 branches missed.">                .map(comparator -&gt; !comparator.equals(&quot;=&quot;))</span>
+<span class="fc" id="L691">                .isPresent();</span>
+    }
+
+    private Optional&lt;Double&gt; extractValue(@NotNull QUANTIFIABLERESULTTYPE testMeasurement) {
+<span class="pc bpc" id="L695" title="1 of 2 branches missed.">        return hasSignificantComparator(testMeasurement) ? Optional.empty() : extractQuantityValue(testMeasurement);</span>
+    }
+
+    private Optional&lt;String&gt; extractTextValue(@NotNull QUANTIFIABLERESULTTYPE testMeasurement) {
+<span class="fc" id="L699">        Optional&lt;String&gt; measurementText = Optional</span>
+<span class="fc" id="L700">                .ofNullable(testMeasurement.getMeasurementDescription())</span>
+<span class="fc" id="L701">                .map(String::trim);</span>
+<span class="pc bpc" id="L702" title="1 of 2 branches missed.">        if (measurementText.isPresent()) {</span>
+<span class="nc" id="L703">            return measurementText;</span>
+<span class="pc bpc" id="L704" title="1 of 2 branches missed.">        } else if (hasSignificantComparator(testMeasurement)) {</span>
+            //noinspection NewExceptionWithoutArguments
+<span class="nc" id="L706">            return Optional.of(testMeasurement.getMeasurementNumeric().getArithmeticComparator() +</span>
+<span class="nc" id="L707">                    extractQuantityValue(testMeasurement).orElseThrow(RuntimeException::new));</span>
+        } else {
+<span class="fc" id="L709">            return Optional.empty();</span>
+        }
+    }
+
+    private Optional&lt;String&gt; extractUnits(@NotNull QUANTIFIABLERESULTTYPE testMeasurement) {
+<span class="fc" id="L714">        return Optional</span>
+<span class="fc" id="L715">                .ofNullable(testMeasurement.getMeasurementNumeric())</span>
+<span class="fc" id="L716">                .map(VALUECOMPARATORTYPE::getResult)</span>
+<span class="fc" id="L717">                .map(QUANTITYTYPE::getQuantityUnit)</span>
+<span class="fc" id="L718">                .map(String::trim);</span>
+    }
+
+    private String combineComments(@NotNull String setLevelComments, @NotNull String testLevelComments) {
+<span class="pc bpc" id="L722" title="1 of 2 branches missed.">        return Stream.of(setLevelComments, testLevelComments).filter(comment -&gt; !comment.isEmpty()).collect(Collectors.joining(&quot;\n&quot;));</span>
+    }
+
+    private TestResultDTO buildTestResultDTO(Org org, Team team, Long uploadedDataId, ZonedDateTime
+            dateEntered,
+                                             Optional&lt;ZonedDateTime&gt; dateTimeSampled,
+                                             String serviceName, String code, String codeSystem, String codeDescription, Double value, String
+                                                     textValue, String units,
+                                             Double rangeHighValue, RangeQualifier rangeHighComparator,
+                                             Double rangeLowValue, RangeQualifier rangeLowComparator,
+                                             String comments) {
+
+<span class="fc" id="L734">        var sourceDetails = new SourceDetails();</span>
+<span class="fc" id="L735">        sourceDetails.init(null, null, null, SCISTORE_SOURCE_TEXT, Route.SCISTORE, null);</span>
+<span class="fc" id="L736">        TestResultDTO resultDTO = new TestResultDTO(sourceDetails);</span>
+<span class="fc" id="L737">        resultDTO.setLabOrderId(null); // NO - fetch</span>
+
+        // sampleDate may be null; fallback to dateEntered (documented for SCIStore)
+<span class="fc" id="L740">        resultDTO.setTestDate(dateTimeSampled.map(ChronoZonedDateTime::toInstant).orElse(dateEntered.toInstant()));</span>
+<span class="fc" id="L741">        resultDTO.setServiceNameFromSource(serviceName);</span>
+
+<span class="fc" id="L743">        String testResultTypeCacheKey = joiner.join(org.getId(), team.getId(), code, codeSystem, units);</span>
+<span class="fc" id="L744">        TestResultType type = testResultTypeCache.getIfPresent(testResultTypeCacheKey);</span>
+
+<span class="pc bpc" id="L746" title="1 of 2 branches missed.">        if (type == null) {</span>
+<span class="fc" id="L747">            type = loincManager.getTestResultType(org.getId(), code, codeSystem, units);</span>
+<span class="fc bfc" id="L748" title="All 2 branches covered.">            if (type != null) {</span>
+<span class="fc" id="L749">                testResultTypeCache.put(testResultTypeCacheKey, type);</span>
+            }
+        }
+
+<span class="fc bfc" id="L753" title="All 2 branches covered.">        if (type instanceof LoincTest) {</span>
+<span class="fc" id="L754">            resultDTO.setLoincTestId(type.getId());</span>
+<span class="pc bpc" id="L755" title="1 of 2 branches missed.">        } else if (type instanceof LoincMapping) {</span>
+<span class="nc" id="L756">            LoincMapping lm = (LoincMapping) type;</span>
+<span class="nc" id="L757">            resultDTO.setLoincMappingId(lm.getId());</span>
+<span class="nc bnc" id="L758" title="All 2 branches missed.">            if (lm.getLoincTest() != null) {</span>
+<span class="nc" id="L759">                resultDTO.setLoincTestId(lm.getLoincTest().getId());</span>
+            }
+<span class="nc" id="L761">        }</span>
+        // else it's null -- no mapping yet!
+        else {
+<span class="fc" id="L764">            LoincMapping lm = new LoincMapping();</span>
+<span class="fc" id="L765">            lm.setOrg(org);</span>
+<span class="fc" id="L766">            lm.setTeam(team);</span>
+<span class="fc" id="L767">            lm.setServiceName(serviceName);</span>
+<span class="fc" id="L768">            lm.setTestCodingSystem(codeSystem);</span>
+<span class="fc" id="L769">            lm.setTestCode(code);</span>
+<span class="fc" id="L770">            lm.setName(codeDescription);</span>
+<span class="fc" id="L771">            lm.setUnit(units);</span>
+
+<span class="fc" id="L773">            Long newMappingId = loincManager.addLoincMapping(lm); // lm is updated with new ID in the manager</span>
+<span class="fc" id="L774">            resultDTO.setLoincMappingId(newMappingId);</span>
+
+<span class="fc" id="L776">            testResultTypeCache.put(testResultTypeCacheKey, lm);</span>
+        }
+
+<span class="fc" id="L779">        resultDTO.setTextValue(textValue);</span>
+<span class="fc" id="L780">        resultDTO.setValue(value);</span>
+<span class="fc" id="L781">        resultDTO.setRangeHigh(rangeHighValue);</span>
+<span class="pc bpc" id="L782" title="1 of 2 branches missed.">        resultDTO.setRangeHighInclusive(RangeQualifier.LESS != rangeHighComparator);</span>
+<span class="fc" id="L783">        resultDTO.setRangeLow(rangeLowValue);</span>
+<span class="pc bpc" id="L784" title="1 of 2 branches missed.">        resultDTO.setRangeLowInclusive(RangeQualifier.GREATER != rangeLowComparator);</span>
+
+<span class="fc" id="L786">        resultDTO.setComments(comments);</span>
+
+<span class="fc" id="L788">        resultDTO.getBaseFields().setEnteredDate(Date.from(dateEntered.toInstant()));</span>
+<span class="fc" id="L789">        resultDTO.getBaseFields().setUploadedDataId(uploadedDataId);</span>
+<span class="fc" id="L790">        resultDTO.getBaseFields().setPrivacyFlag(PrivacyFlag.GENERAL);</span>
+
+<span class="fc" id="L792">        return resultDTO;</span>
+    }
+
+    /* (non-Javadoc)
+     * @see com.pkb.integration.sciStore.ISciStoreClient#getMismatchedPatients(java.lang.String, java.util.List)
+     */
+    public List&lt;SciStoreMismatch&gt; getMismatchedPatients(List&lt;PKBPerson&gt; mismatchedPKBPatients) {
+
+<span class="fc" id="L800">        List&lt;SciStoreMismatch&gt; mismatchedPatients = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L802" title="All 2 branches covered.">        for (PKBPerson patient : mismatchedPKBPatients) {</span>
+<span class="pc" id="L803">            String chiNumber = patient.getNationalIdByExactType(NationalIdType.CHI_NUMBER).orElseThrow(() -&gt; new RuntimeException(&quot;No national id by type &quot; + NationalIdType.CHI_NUMBER + &quot; for patient &quot; + patient.getId())).getValue();</span>
+<span class="fc" id="L804">            SciStoreMismatch mismatchedPatient = new SciStoreMismatch();</span>
+<span class="fc" id="L805">            mismatchedPatient.setCHINumber(chiNumber);</span>
+<span class="fc" id="L806">            mismatchedPatient.setPkbPatient(patient);</span>
+<span class="fc" id="L807">            FindPatientItem sciStorePatient = sciStoreClient.findPatient(chiNumber)</span>
+<span class="pc" id="L808">                    .orElseThrow(() -&gt; new NullPointerException(&quot;failed fetching patient for CHI number &quot; + chiNumber));</span>
+<span class="fc" id="L809">            mismatchedPatient.setSciStorePatient(sciStorePatient); // Always get latest remote data</span>
+<span class="fc" id="L810">            mismatchedPatients.add(mismatchedPatient);</span>
+<span class="fc" id="L811">        }</span>
+
+<span class="fc" id="L813">        return mismatchedPatients;</span>
+    }
+
+    @Override
+    public void clearState() {
+<span class="fc" id="L818">        testResultTypeCache.invalidateAll();</span>
+<span class="fc" id="L819">        LOGGER.info(&quot;Cleared internal states&quot;);</span>
+<span class="fc" id="L820">    }</span>
+
+<span class="fc" id="L822">    public enum MatchType {</span>
+<span class="fc" id="L823">        PREAPPROVED, MUST_MATCH</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

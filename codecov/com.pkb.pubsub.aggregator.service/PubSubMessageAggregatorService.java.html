@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PubSubMessageAggregatorService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.pubsub.aggregator.service</a> &gt; <span class="el_source">PubSubMessageAggregatorService.java</span></div><h1>PubSubMessageAggregatorService.java</h1><pre class="source lang-java linenums">package com.pkb.pubsub.aggregator.service;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.common.testcontrol.camel.route.AbstractNamespaceAwareRouteBuilder;
+import com.pkb.common.testcontrol.services.PubSubNamespaceService;
+import com.pkb.pubsub.aggregator.entity.PublicAggregatableRequest;
+import com.pkb.pubsub.aggregator.entity.PublicAggregatableResponse;
+import com.pkb.pubsub.aggregator.models.AggregatableRequest;
+import com.pkb.pubsub.aggregator.models.AggregatableResponse;
+import com.pkb.pubsub.aggregator.models.AggregateResponse;
+import com.pkb.pubsub.aggregator.models.AggregationDefinition;
+import com.pkb.pubsub.aggregator.repository.AggregatableRequestRepository;
+import org.apache.camel.Processor;
+import org.apache.camel.ProducerTemplate;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.BiConsumer;
+import java.util.stream.Collectors;
+
+import static com.pkb.pubsub.aggregator.models.AggregateResponse.Status.INCOMPLETE;
+import static java.lang.invoke.MethodHandles.lookup;
+
+/**
+ * This service helps to aggregate responses to camel/pubsub messages when several services may need to respond.
+ * It listens for responses on a given pubsub topic, and saves them to the database. When responses have been
+ * received from all the required services, it issues an aggregate response to a specified camel endpoint (usually
+ * another pubsub topic)
+ *
+ * To use this service, you need some sort of request message that implements the AggregatableRequest interface,
+ * and then the responses that are returned from processing services should implement AggregatableResponse. Finally,
+ * there should be an AggregatedResponse class that corresponds to the AggregatableResponse class. These are then
+*  all wired together using the AggregationDefinition objects, which define the classes, topics and subscriptions that
+ *  are used for each set of messages.
+ *
+ *  This module is an auto-configuring Spring Boot module. You should just include it in a Spring Boot app and define
+ *  the AggregationDefinition objects as beans in your context and it will Just Work.
+ *
+ *  Note that this class (via PublicAggregationRequest/Response) relies on the prior creation of the relevant database
+ *  tables. Eventually I might incorporate some automatic LB scripts that will run when this module is included, but for
+ *  the time being these need to be created independently.
+ */
+@Service
+public class PubSubMessageAggregatorService extends AbstractNamespaceAwareRouteBuilder  {
+
+<span class="fc" id="L56">    private static final Logger LOGGER = LoggerFactory.getLogger(lookup().lookupClass());</span>
+    private final ProducerTemplate pubSubProducer;
+    private final List&lt;AggregationDefinition&lt;?,?,?&gt;&gt; aggregationDefinitions;
+    private final ObjectMapper objectMapper;
+
+    private final AggregatableRequestRepository aggregatableRequestRepository;
+
+    private final PubSubNamespaceService pubSubNamespaceService;
+
+    private final DateTimeService dateTimeService;
+    private final TransactionTemplate transactionTemplate;
+
+    private final ThreadPoolTaskScheduler timeoutExecutor;
+
+    public PubSubMessageAggregatorService(
+            ProducerTemplate pubSubProducer,
+            List&lt;AggregationDefinition&lt;?,?,?&gt;&gt; aggregationDefinitions,
+            ObjectMapper objectMapper,
+            AggregatableRequestRepository aggregatableRequestRepository,
+            PubSubNamespaceService pubSubNamespaceService,
+            DateTimeService dateTimeService,
+            PlatformTransactionManager platformTransactionManager,
+            ThreadPoolTaskScheduler timeoutExecutor
+
+<span class="fc" id="L80">    ) {</span>
+<span class="fc" id="L81">        this.pubSubProducer = pubSubProducer;</span>
+<span class="fc" id="L82">        this.aggregationDefinitions = aggregationDefinitions;</span>
+<span class="fc" id="L83">        this.objectMapper = objectMapper;</span>
+<span class="fc" id="L84">        this.aggregatableRequestRepository = aggregatableRequestRepository;</span>
+<span class="fc" id="L85">        this.pubSubNamespaceService = pubSubNamespaceService;</span>
+<span class="fc" id="L86">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L87">        this.transactionTemplate = new TransactionTemplate(platformTransactionManager);</span>
+<span class="fc" id="L88">        this.timeoutExecutor = timeoutExecutor;</span>
+<span class="fc" id="L89">    }</span>
+
+
+    @SuppressWarnings(&quot;unchecked&quot;)
+    @Override
+    public void configure() {
+<span class="fc" id="L95">        aggregationDefinitions.forEach(definition -&gt; makeProcessor(definition).registerRoutes());</span>
+<span class="fc" id="L96">    }</span>
+
+    @Override
+    public @NotNull PubSubNamespaceService camelNamespaceService() {
+<span class="nc" id="L100">        return pubSubNamespaceService;</span>
+    }
+
+    @Override
+    public boolean throwExceptionForNamespaceMismatch() {
+<span class="nc" id="L105">        return true;</span>
+    }
+
+    /**
+     * This inner class encapsulates all the processing that needs to be done for a specific AggregationDefinition.
+     * It sets up the required Camel routes, and handles processing both the request and response messages.
+     */
+    private class AggregatableProcessorImpl&lt;R extends AggregatableResponse&lt;R, AR&gt;, AR extends AggregateResponse&lt;AR, R&gt;, Req extends AggregatableRequest&lt;AR, R&gt;&gt;   {
+
+        private final AggregationDefinition&lt;R, AR, Req&gt; aggregationDefinition;
+<span class="fc" id="L115">        private AggregatableProcessorImpl(AggregationDefinition&lt;R, AR, Req&gt; aggregationDefinition) {</span>
+<span class="fc" id="L116">            this.aggregationDefinition = aggregationDefinition;</span>
+<span class="fc" id="L117">        }</span>
+
+        private void registerRoutes() {
+<span class="fc" id="L120">            from(aggregationDefinition.getInboundResponseEndpoint()).process(getProcessor(aggregationDefinition.getResponseSerialisationClass(), this::handleResponse));</span>
+<span class="fc" id="L121">            from(aggregationDefinition.getInboundRequestEndpoint()).process(getProcessor(aggregationDefinition.getRequestSerialisationClass(), this::handleRequest));</span>
+<span class="fc" id="L122">        }</span>
+
+
+        private &lt;U&gt; Processor getProcessor(Class&lt;U&gt; serialisationClass, BiConsumer&lt;U, String&gt; handlerMethod) {
+<span class="fc" id="L126">            return exchange -&gt; {</span>
+<span class="fc" id="L127">               U message =  exchange.getMessage().getBody(serialisationClass);</span>
+<span class="fc" id="L128">                LOGGER.debug(&quot;Received message: {}&quot;, message);</span>
+<span class="fc" id="L129">                String json = objectMapper.writerFor(serialisationClass).writeValueAsString(message);</span>
+<span class="fc" id="L130">                handlerMethod.accept(message, json);</span>
+<span class="fc" id="L131">            };</span>
+        }
+
+        private void handleRequest(Req message, String json)  {
+<span class="fc" id="L135">            doWithRequestLock(message.getAggregatableRequestId(), () -&gt; {</span>
+<span class="fc" id="L136">                aggregatableRequestRepository.insertAggregatableRequest(message.getAggregatableRequestId(), json, dateTimeService.now());</span>
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">                if (!checkCompletionAndSendAggregateResponse(message.getAggregatableRequestId(), false)) {</span>
+<span class="fc" id="L138">                    registerTimeout(message);</span>
+                }
+<span class="fc" id="L140">            });</span>
+<span class="fc" id="L141">            LOGGER.debug(&quot;Request object written for request id: {}&quot;, message.getAggregatableRequestId());</span>
+<span class="fc" id="L142">        }</span>
+
+        private void handleResponse(R message, String json) {
+<span class="fc" id="L145">            LOGGER.debug(&quot;Saving response for request {} responding service: {}. Message json: {} &quot;, message.getAggregatableRequestId(), message.getRespondingService(), json);</span>
+
+
+<span class="fc" id="L148">            doWithRequestLock(message.getAggregatableRequestId(), () -&gt; {</span>
+<span class="fc" id="L149">                aggregatableRequestRepository.insertAggregatableResponse(message.getAggregatableRequestId(), message.getRespondingService(), json, dateTimeService.now());</span>
+<span class="fc" id="L150">                LOGGER.debug(&quot;Searching for Request object for request id: {}&quot;, message.getAggregatableRequestId());</span>
+<span class="fc" id="L151">                checkCompletionAndSendAggregateResponse(message.getAggregatableRequestId(), false);</span>
+<span class="fc" id="L152">            });</span>
+<span class="fc" id="L153">            LOGGER.debug(&quot;Response save transaction committed for message: {} &quot;, message);</span>
+
+<span class="fc" id="L155">        }</span>
+
+        private AR getAggregateResponse(PublicAggregatableRequest dbMessageRecord, boolean timesUp) {
+<span class="fc" id="L158">            Req request = extractOriginalMessage(dbMessageRecord);</span>
+<span class="fc" id="L159">            return request.getAggregateResponse(dbMessageRecord.getResponses().stream().map(this::extractOriginalMessage).collect(Collectors.toList()), aggregationDefinition.getRequiredServiceNames(), timesUp);</span>
+        }
+
+
+        private boolean checkCompletionAndSendAggregateResponse(UUID requestId, boolean timesUp) {
+<span class="fc" id="L164">            return aggregatableRequestRepository.findById(requestId)</span>
+<span class="fc" id="L165">                    .map(dbMessageRecord -&gt; {</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">                        if (dbMessageRecord.getStatus() != INCOMPLETE) {</span>
+<span class="fc" id="L167">                            LOGGER.debug(&quot;Request {} is already marked as: {}, not bothering to check further&quot;, requestId, dbMessageRecord.getStatus());</span>
+<span class="fc" id="L168">                            return true;</span>
+                        }
+
+<span class="fc" id="L171">                        AR aggregate = getAggregateResponse(dbMessageRecord, timesUp);</span>
+<span class="fc" id="L172">                        LOGGER.debug(&quot;Aggregate response: {}&quot;, aggregate);</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">                        if(aggregate.getStatus() != INCOMPLETE) {</span>
+<span class="fc" id="L174">                            dbMessageRecord.setStatus(aggregate.getStatus());</span>
+<span class="fc" id="L175">                            LOGGER.info(&quot;Aggregate message complete or timed out, sending to pubsub: {}&quot;,  aggregate);</span>
+<span class="fc" id="L176">                            pubSubProducer.sendBody(aggregationDefinition.getAggregateResponseEndpoint(), aggregate);</span>
+                        }
+
+<span class="fc bfc" id="L179" title="All 2 branches covered.">                        return dbMessageRecord.getStatus() != INCOMPLETE;</span>
+<span class="fc" id="L180">                    }).orElseGet(() -&gt; {</span>
+<span class="fc" id="L181">                        LOGGER.debug(&quot;Request not found {}&quot;, requestId);</span>
+<span class="fc" id="L182">                        return false;</span>
+                    });
+        }
+
+        // The advisory lock ensures that we get a consistent view of the list of services that have responded (no lost updates)
+        private void doWithRequestLock(UUID requestId, Runnable action) {
+<span class="fc" id="L188">            transactionTemplate.executeWithoutResult(status -&gt; {</span>
+<span class="fc" id="L189">                aggregatableRequestRepository.acquireLock(requestId.hashCode());</span>
+<span class="fc" id="L190">                action.run();</span>
+<span class="fc" id="L191">            });</span>
+<span class="fc" id="L192">        }</span>
+
+        private R extractOriginalMessage(PublicAggregatableResponse dbMessageRecord) {
+            try {
+<span class="fc" id="L196">                return objectMapper.readValue(dbMessageRecord.getMessageJson(), aggregationDefinition.getResponseSerialisationClass());</span>
+<span class="nc" id="L197">            } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L198">                throw new RuntimeException(e);</span>
+            }
+        }
+
+        private Req extractOriginalMessage(PublicAggregatableRequest dbMessageRecord) {
+            try {
+<span class="fc" id="L204">                return objectMapper.readValue(dbMessageRecord.getMessageJson(), aggregationDefinition.getRequestSerialisationClass());</span>
+<span class="nc" id="L205">            } catch (JsonProcessingException e) {</span>
+<span class="nc" id="L206">                throw new RuntimeException(e);</span>
+            }
+        }
+
+        private void registerTimeout(Req request) {
+<span class="fc" id="L211">            var requestId = request.getAggregatableRequestId();</span>
+<span class="fc" id="L212">            timeoutExecutor.schedule(() -&gt;</span>
+            {
+<span class="fc" id="L214">                LOGGER.debug(&quot;Executing timeout handler for request {}&quot;, requestId);</span>
+<span class="fc" id="L215">                doWithRequestLock(requestId, () -&gt; checkCompletionAndSendAggregateResponse(requestId, true));</span>
+<span class="fc" id="L216">            }, Instant.now().plus(aggregationDefinition.getTimeoutCalculator().apply(request)));</span>
+<span class="fc" id="L217">        }</span>
+    }
+
+
+
+    private &lt;R extends AggregatableResponse&lt;R, AR&gt;, AR extends AggregateResponse&lt;AR, R&gt;, Req extends AggregatableRequest&lt;AR, R&gt;&gt; AggregatableProcessorImpl&lt;R, AR, Req&gt; makeProcessor(AggregationDefinition&lt;R, AR, Req&gt; definition) {
+<span class="fc" id="L223">        return new AggregatableProcessorImpl&lt;&gt;(definition);</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

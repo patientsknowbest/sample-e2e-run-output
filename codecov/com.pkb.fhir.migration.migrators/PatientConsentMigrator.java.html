@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PatientConsentMigrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration.migrators</a> &gt; <span class="el_source">PatientConsentMigrator.java</span></div><h1>PatientConsentMigrator.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration.migrators;
+
+import com.pkb.entities.enums.FhirStoreSyncSourceTable;
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.entities.pub.PublicPatientConsent;
+import com.pkb.entities.pub.PublicTeam;
+import com.pkb.fhir.common.exception.MigrationEntityNotFoundException;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.migration.service.ConsentService;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.Consent;
+import org.hl7.fhir.r4.model.DomainResource;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Practitioner;
+import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.ResourceType;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.entities.enums.FhirConsentSource.PATIENTCONSENT;
+import static com.pkb.entities.enums.PrivacyFlag.GENERAL;
+import static com.pkb.entities.enums.PrivacyFlag.MENTAL_HEALTH;
+import static com.pkb.entities.enums.PrivacyFlag.SEXUAL_HEALTH;
+import static com.pkb.entities.enums.PrivacyFlag.SOCIAL_CARE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.CREATE_OR_UPDATE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.DELETE;
+import static io.vavr.control.Either.right;
+import static java.util.Collections.singletonList;
+
+/**
+ * PatientConsents become Consent entities, easy enough.
+ * The default policy assumption for PKB consent is that it is opt IN. Therefore, a Consent, by default, allows
+ * the target actor of the Consent to see nothing at all. If a Patient has granted various types of privacy label access,
+ * these are recorded as security labels on the provision of the Consent.
+ *
+ * If the policy is inactive, the target actor similarly does not have the right to see anything.
+ *
+ * See https://pkbdev.atlassian.net/wiki/spaces/TECHNOLOGY/pages/136118372/Consent for futher information in the older
+ * STU3 context, and https://pkbdev.atlassian.net/wiki/spaces/TECHNOLOGY/pages/3265921029/Consent+in+R4+FHIR for
+ * R4-specific discussions.
+ */
+public class PatientConsentMigrator extends BaseFhirMigrator {
+
+    //See https://dev.patientsknowbest.com/home/fhir-api/identifier-systems
+    private static final String PATIENTCONSENT_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/patientconsent-legacy-identifier&quot;;
+
+    //See https://dev.patientsknowbest.com/home/fhir-api/structuredefinition
+    private static final String CONSENT_ADDED_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/consent-added&quot;;
+    //This one is confusing. Essentially it means &quot;only a professional may edit the sharing of this patient, not the carer&quot;
+    private static final String PRO_EDIT_ONLY_FOR_CHILD_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/only-professionals-may-edit&quot;;
+
+    private ConsentService consentService;
+
+    public PatientConsentMigrator(PersonService personService, TeamService teamService, OrgService orgService,
+                                  Hl7PartnerService hl7PartnerService, ConsentService consentService) {
+<span class="fc" id="L70">        super(personService, teamService, orgService, hl7PartnerService);</span>
+<span class="fc" id="L71">        this.consentService = consentService;</span>
+<span class="fc" id="L72">    }</span>
+
+    @Override
+    Either&lt;MigrationException, List&lt;ResourceAndOperation&gt;&gt; migrate(@NotNull PublicFhirStoreSync fhirStoreSync) {
+<span class="fc bfc" id="L76" title="All 2 branches covered.">        if (fhirStoreSync.isDeleteOperation()) {</span>
+<span class="fc" id="L77">            String consentResourceUuid = getResourceUuidFromTableSource(String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()),</span>
+<span class="fc" id="L78">                    fhirStoreSync.getSyncDetails().getSourceTable());</span>
+<span class="fc" id="L79">            DomainResource toDelete = new Consent();</span>
+<span class="fc" id="L80">            IdType idTypeConsent = new IdType(ResourceType.Consent.name(), consentResourceUuid);</span>
+<span class="fc" id="L81">            toDelete.setId(idTypeConsent);</span>
+<span class="fc" id="L82">            return right(ResourceAndOperation.all(List.of(toDelete), DELETE));</span>
+        }
+
+<span class="fc" id="L85">        return Option.ofOptional(consentService.findOptionalByIdFetchLazies(fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="pc" id="L86">            .toEither(() -&gt; (MigrationException)new MigrationEntityNotFoundException(&quot;Failed to sync patientconsent to fhir store for source id &quot;</span>
+<span class="nc" id="L87">                                                                                             + fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="fc" id="L88">            .map(patientConsent -&gt; ResourceAndOperation.all(List.of(transformPatientConsentToFhir(patientConsent)), CREATE_OR_UPDATE));</span>
+    }
+
+    @NotNull
+    private Consent transformPatientConsentToFhir(@NotNull PublicPatientConsent patientConsent) {
+<span class="fc" id="L93">        Consent consent = new Consent();</span>
+<span class="fc" id="L94">        consent.setId(getResourceUuidFromTableSource(String.valueOf(patientConsent.getUniqueId()), FhirStoreSyncSourceTable.PATIENTCONSENT));</span>
+<span class="fc" id="L95">        consent.addIdentifier(getPkbIdentifier(patientConsent.getId(), PATIENTCONSENT_LEGACY_PRIMARY_KEY_SYSTEM_URL));</span>
+<span class="fc" id="L96">        Consent.ConsentPolicyComponent policyComponent = new Consent.ConsentPolicyComponent();</span>
+<span class="fc" id="L97">        policyComponent.setAuthority(&quot;http://www.patientsknowbest.com&quot;); //As per current specs</span>
+<span class="fc" id="L98">        consent.addPolicy(policyComponent);</span>
+
+        //There's a lot of bad data around in this field
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">        if (!isNegativeInfinity(patientConsent.getUpdated())) {</span>
+<span class="fc" id="L102">            setMeta(patientConsent.getUpdated(), consent);</span>
+        }
+
+<span class="fc" id="L105">        addConsentScope(consent);</span>
+
+<span class="fc" id="L107">        consent.setPatient(new Reference(new Patient().setId(String.valueOf(patientConsent.getPatient().getPublicId()))));</span>
+<span class="fc bfc" id="L108" title="All 2 branches covered.">        consent.setStatus(patientConsent.isDischarged() ? Consent.ConsentState.INACTIVE : Consent.ConsentState.ACTIVE);</span>
+
+<span class="fc" id="L110">        Coding coding = new Coding();</span>
+<span class="fc" id="L111">        coding.setSystem(CONSENT_CATEGORY_URL);</span>
+<span class="fc" id="L112">        coding.setCode(PATIENTCONSENT.name());</span>
+<span class="fc" id="L113">        CodeableConcept consentCategory = new CodeableConcept();</span>
+<span class="fc" id="L114">        consentCategory.setCoding(List.of(coding));</span>
+<span class="fc" id="L115">        consent.setCategory(List.of(consentCategory));</span>
+
+        // A Consent has a provision, which defines the constraints to the base policy. This includes the link to the
+        // consented entity, as well as, in our case, security labels defining the scope of the provision.
+        // Our base policy is to deny access to everything, then the provision allows for specific viewing of certain
+        // security categories.
+<span class="fc" id="L121">        Consent.provisionComponent provisionComponent = new Consent.provisionComponent();</span>
+<span class="fc" id="L122">        provisionComponent.setType(Consent.ConsentProvisionType.PERMIT); //Because these security labels are OPT IN.</span>
+<span class="fc" id="L123">        consent.setProvision(provisionComponent);</span>
+
+        // A Consent points at a team, individual or carer. Team is an Organization, individual is a Patient or Practitioner,
+        // and a carer is a RelatedPerson.
+<span class="fc" id="L127">        Consent.provisionActorComponent actorComponent = new Consent.provisionActorComponent();</span>
+<span class="fc" id="L128">        actorComponent.setRole(getRoleForConsentActor());</span>
+<span class="fc" id="L129">        actorComponent.setReference(getReferenceForConsentActor(patientConsent));</span>
+
+<span class="fc" id="L131">        provisionComponent.addActor(actorComponent);</span>
+
+        // Security labels align very well with our privacy labels. These represent categories of data the Consent
+        // allows the consented entity (actor reference) to see.
+<span class="fc" id="L135">        addSecurityLabelComponents(patientConsent, consent);</span>
+
+<span class="fc" id="L137">        addExtension(patientConsent.isProEditOnlyForChild(), PRO_EDIT_ONLY_FOR_CHILD_EXTENSION_URL, consent);</span>
+
+        //There's a lot of bad data around in this field as well
+<span class="fc bfc" id="L140" title="All 2 branches covered.">        if (!isNegativeInfinity(patientConsent.getAdded())) {</span>
+<span class="fc" id="L141">            addExtension(patientConsent.getAdded(), CONSENT_ADDED_EXTENSION_URL, consent);</span>
+        }
+
+<span class="fc" id="L144">        return consent;</span>
+    }
+
+    private CodeableConcept getRoleForConsentActor() {
+<span class="fc" id="L148">        Coding coding = new Coding();</span>
+<span class="fc" id="L149">        coding.setCode(&quot;CONSENTER&quot;);</span>
+<span class="fc" id="L150">        coding.setSystem(&quot;http://hl7.org/fhir/v3/RoleCode&quot;); //See https://www.hl7.org/fhir/STU3/v3/RoleCode/cs.html</span>
+
+<span class="fc" id="L152">        CodeableConcept codeableConcept = new CodeableConcept();</span>
+<span class="fc" id="L153">        codeableConcept.setCoding(singletonList(coding));</span>
+<span class="fc" id="L154">        return codeableConcept;</span>
+    }
+
+    private void addSecurityLabelComponents(@NotNull PublicPatientConsent patientConsent, Consent consent) {
+<span class="fc bfc" id="L158" title="All 2 branches covered.">        if (patientConsent.isGeneralHealthConsentGranted()) {</span>
+<span class="fc" id="L159">            addSecurityLabelComponent(consent, GENERAL);</span>
+        }
+<span class="fc bfc" id="L161" title="All 2 branches covered.">        if (patientConsent.isMentalHealthConsentGranted()) {</span>
+<span class="fc" id="L162">            addSecurityLabelComponent(consent, MENTAL_HEALTH);</span>
+        }
+<span class="fc bfc" id="L164" title="All 2 branches covered.">        if (patientConsent.isSexualHealthConsentGranted()) {</span>
+<span class="fc" id="L165">            addSecurityLabelComponent(consent, SEXUAL_HEALTH);</span>
+        }
+<span class="fc bfc" id="L167" title="All 2 branches covered.">        if (patientConsent.isSocialCareConsentGranted()) {</span>
+<span class="fc" id="L168">            addSecurityLabelComponent(consent, SOCIAL_CARE);</span>
+        }
+<span class="fc" id="L170">    }</span>
+
+    private void addSecurityLabelComponent(Consent consent, PrivacyFlag privacyFlag) {
+<span class="fc" id="L173">        Coding coding = new Coding();</span>
+<span class="fc" id="L174">        coding.setCode(privacyFlag.getExternalDesc());</span>
+
+        // We use our own system here to give us flexibility in the future, and also because there's no &quot;social care&quot;
+        // value in the set. Bit of a shame, but there you go.
+<span class="fc" id="L178">        coding.setSystem(PRIVACY_LABEL_CODESYSTEM_URL);</span>
+
+<span class="fc" id="L180">        consent.getProvision().addSecurityLabel(coding);</span>
+<span class="fc" id="L181">    }</span>
+
+    @NotNull
+    private Reference getReferenceForConsentActor(@NotNull PublicPatientConsent patientConsent) {
+<span class="pc bpc" id="L185" title="2 of 4 branches missed.">        switch (patientConsent.getAccessingEntityType()) {</span>
+            case TEAM:
+<span class="fc" id="L187">                return createActorReferenceForTeam(patientConsent);</span>
+            case INDIVIDUAL:
+<span class="fc" id="L189">                return createActorReferenceForPkbPerson(patientConsent, new Practitioner());</span>
+            case CARER:
+                //TODO (PHR-9694) - This requires carers migrating beforehand
+                //return createActorReferenceForPkbPerson(patientConsent, new RelatedPerson());
+<span class="nc" id="L193">                throw new MigrationException(&quot;Not migrating consent for carer yet. See PHR-9694&quot;);</span>
+            default:
+<span class="nc" id="L195">                throw new MigrationException(&quot;Unexpected accessingentitytype for patient consent [&quot; + patientConsent.getAccessingEntityType() + &quot;]&quot;);</span>
+        }
+    }
+
+    @NotNull
+    private Reference createActorReferenceForTeam(@NotNull PublicPatientConsent patientConsent) {
+<span class="fc" id="L201">        Organization team = new Organization();</span>
+<span class="fc" id="L202">        UUID teamPublicId = Optional.ofNullable(patientConsent.getAccessingTeam())</span>
+<span class="fc" id="L203">                .map(PublicTeam::getPublicId)</span>
+<span class="pc" id="L204">                .orElseThrow(() -&gt; new MigrationEntityNotFoundException(&quot;Patient consent &quot;</span>
+<span class="nc" id="L205">                        + patientConsent.getId() + &quot; of accessing entity type team, but no team for this id&quot;));</span>
+<span class="fc" id="L206">        IdType idTypeTeam = new IdType(ResourceType.Organization.name(), String.valueOf(teamPublicId));</span>
+<span class="fc" id="L207">        team.setId(idTypeTeam);</span>
+<span class="fc" id="L208">        return new Reference(team);</span>
+    }
+
+    @NotNull
+    private Reference createActorReferenceForPkbPerson(@NotNull PublicPatientConsent patientConsent, @NotNull DomainResource resource) {
+<span class="fc" id="L213">        UUID carerPublicId = Optional.ofNullable(patientConsent.getAccessingPerson())</span>
+<span class="fc" id="L214">                .map(PublicPKBPerson::getPublicId)</span>
+<span class="pc" id="L215">                .orElseThrow(() -&gt; new MigrationEntityNotFoundException(&quot;Patient consent &quot;</span>
+<span class="nc" id="L216">                        + patientConsent.getId() + &quot; of accessing entity type &quot; + patientConsent.getAccessingEntityType() + &quot;, but no linked entity for this id&quot;));</span>
+<span class="fc" id="L217">        IdType idTypeCarer = new IdType(resource.getResourceType().name(), String.valueOf(carerPublicId));</span>
+<span class="fc" id="L218">        resource.setId(idTypeCarer);</span>
+<span class="fc" id="L219">        return new Reference(resource);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

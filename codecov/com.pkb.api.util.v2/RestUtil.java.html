@@ -1,0 +1,519 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RestUtil.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.util.v2</a> &gt; <span class="el_source">RestUtil.java</span></div><h1>RestUtil.java</h1><pre class="source lang-java linenums">package com.pkb.api.util.v2;
+
+import com.google.common.collect.Sets;
+import com.google.common.primitives.Longs;
+import com.pkb.api.util.PKBCommonApiParams;
+import com.pkb.api.util.v2.exception.SharingDisabledException;
+import com.pkb.apiservice.BTGTokenService;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRRequestContext.AccountLinkType;
+import com.pkb.app.entity.ImmutableLoggedInUserEHRRequestContext;
+import com.pkb.app.entity.ImmutableLoggedOutEHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.consent.model.ConsentStatus;
+import com.pkb.datamodel.ApiAuthSession;
+import com.pkb.datamodel.RoleHolder;
+import com.pkb.datamodel.entity.mapper.UserTypeToScopeMapper;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.enums.api.ApiClientScope;
+import com.pkb.exception.PKBException;
+import com.pkb.exception.RestException;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.ehrrequestcontext.EHRRequestContextManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.PKBApplicationContext;
+import io.jsonwebtoken.JwtException;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.ws.rs.WebApplicationException;
+import javax.ws.rs.core.Response;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+
+import static com.pkb.consent.model.AbstractConsentStatus.noConsentRequired;
+import static com.pkb.entities.enums.api.ApiClientScope.CLINICIAN;
+import static com.pkb.entities.enums.api.ApiClientScope.CLINICIAN_OR_TEAMCOORD;
+import static com.pkb.entities.enums.api.ApiClientScope.PATIENT_OR_CLINICIAN;
+import static com.pkb.entities.enums.api.ApiClientScope.PATIENT_OR_CLINICIAN_OR_TEAMCOORD;
+import static com.pkb.entities.enums.api.ApiClientScope.PUBLIC;
+import static com.pkb.entities.enums.api.ApiClientScope.SITE;
+import static com.pkb.entities.enums.api.ApiClientScope.TEAMCOORD;
+import static java.util.Collections.emptyList;
+
+/**
+ * this class aids REST services by providing critical authentication functionality it has been refactored to be easily testable from a unit
+ * and integration test perspective
+ *
+ * @author vorekoya on 05/12/2015.
+ */
+@Component
+public class RestUtil {
+    static final String AUTH_SESSION_VAR = &quot;com.pkb.api.util.v2.AUTH_SESSION_VAR&quot;;
+
+<span class="fc" id="L70">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L72">    private static final ThreadLocal&lt;RoleHolder&gt; ROLE_HOLDER_THREAD_LOCAL = ThreadLocal.withInitial(RoleHolder::new);</span>
+
+<span class="fc" id="L74">    private static final Set&lt;UserType&gt; ALLOWED_TO_BREAK_THE_GLASS = Sets.immutableEnumSet(UserType.INSTITUTE_ADMIN,</span>
+            UserType.ORG_COORD);
+
+    public static List&lt;Long&gt; toIdList(String idList) {
+<span class="nc" id="L78">        String[] fragments = idList.split(&quot;,&quot;);</span>
+<span class="nc bnc" id="L79" title="All 6 branches missed.">        if ((fragments.length == 0) || ((fragments.length == 1) &amp;&amp; fragments[0].trim().isEmpty())) {</span>
+<span class="nc" id="L80">            return emptyList();</span>
+        }
+        try {
+<span class="nc" id="L83">            List&lt;Long&gt; rval = new ArrayList&lt;&gt;(fragments.length);</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">            for (String fragment : fragments) {</span>
+<span class="nc" id="L85">                rval.add(Long.valueOf(fragment.trim()));</span>
+            }
+<span class="nc" id="L87">            return rval;</span>
+<span class="nc" id="L88">        } catch (NumberFormatException e) {</span>
+<span class="nc" id="L89">            throw new RestException(e, &quot;invalid ID&quot;);</span>
+        }
+    }
+
+    private final EHRRequestContextManager requestContextManager;
+
+    private final UserManager userManager;
+
+    private final PatientConsentManager patientConsentManager;
+
+    private final BTGTokenService breakTheGlassService;
+
+    private UserTypeToScopeMapper userTypeToScopeMapper;
+
+    private final TeamUserManager teamUserManager;
+
+    @Autowired
+    public RestUtil(EHRRequestContextManager requestContextManager,
+                    UserManager userManager,
+                    PatientConsentManager patientConsentManager,
+                    BTGTokenService breakTheGlassService,
+                    UserTypeToScopeMapper userTypeToScopeMapper,
+<span class="fc" id="L111">                    TeamUserManager teamUserManager) {</span>
+<span class="fc" id="L112">        this.requestContextManager = requestContextManager;</span>
+<span class="fc" id="L113">        this.userManager = userManager;</span>
+<span class="fc" id="L114">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L115">        this.breakTheGlassService = breakTheGlassService;</span>
+<span class="fc" id="L116">        this.userTypeToScopeMapper = userTypeToScopeMapper;</span>
+<span class="fc" id="L117">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L118">    }</span>
+
+    /**
+     * get a thread-safe, request object from Spring
+     *
+     * @return returns HttpServlet request
+     */
+    public HttpServletRequest getRequest() {
+<span class="fc" id="L126">        return ((ServletRequestAttributes) RequestContextHolder.currentRequestAttributes())</span>
+<span class="fc" id="L127">                .getRequest();</span>
+    }
+
+    /**
+     * gets common params where the requesting user is also the target user this occurs most often in PATIENT-scoped scenarios
+     *
+     * @param authToken
+     *            authentication tokenHeader
+     * @return returns DTO for common params
+     */
+    public PKBCommonApiParams getCommonParams() {
+<span class="fc" id="L138">        return getCommonParams(null);</span>
+    }
+
+    /**
+     * todo: having 2 ops is confusing. consider removing one this replaces the aop implementation @AuthorizeUserWithScope(scope = ...) the
+     * main advantage is that it de-clutters the REST-API external interface it also deprecates some constraints around where particular
+     * values/variables must be placed e.g. authToken =&gt; last parameter and the use of forPatient
+     *
+     * @param subject
+     *            operation subject. if null, current user is assumed
+     * @return common parameters
+     */
+    public PKBCommonApiParams getCommonParams(String subject, boolean strict) {
+
+<span class="nc" id="L152">        Long patientId = Optional.ofNullable(subject).map(Longs::tryParse).orElse(null);</span>
+<span class="nc bnc" id="L153" title="All 4 branches missed.">        if ((patientId == null) &amp;&amp; strict) {</span>
+<span class="nc" id="L154">            LOGGER.error(&quot;patientId is required but was null&quot;);</span>
+<span class="nc" id="L155">            throw new WebApplicationException(Response.Status.BAD_REQUEST);</span>
+        }
+<span class="nc" id="L157">        return getCommonParams(patientId);</span>
+
+    }
+
+    public PKBCommonApiParams getCommonParams(String subject, boolean strict, boolean throwIfSharingDisabled) {
+
+<span class="nc" id="L163">        PKBCommonApiParams commonParams = getCommonParams(subject, strict);</span>
+
+<span class="nc" id="L165">        checkForSharingDisabled(commonParams, Longs.tryParse(subject), throwIfSharingDisabled);</span>
+
+<span class="nc" id="L167">        return commonParams;</span>
+    }
+
+    /**
+     * * todo: having 2 ops is confusing. consider removing one this replaces the aop implementation @AuthorizeUserWithScope(scope = ...)
+     * the main advantage is that it de-clutters the REST-API external interface it also deprecates some constraints around where particular
+     * values/variables must be placed e.g. authToken =&gt; last parameter and the use of forPatient
+     *
+     * @param authToken
+     *            authentication tokenHeader for current user
+     * @param subject
+     *            operation subject. if null, current user is assumed
+     * @return common parameters
+     */
+    public PKBCommonApiParams getCommonParams(Long subject) {
+
+<span class="fc" id="L183">        PKBCommonApiParams commonParams = retrieveCommonParams(subject);</span>
+
+<span class="fc" id="L185">        return commonParams;</span>
+
+    }
+
+    public PKBCommonApiParams getCommonParams(Long subject, boolean throwIfSharingDisabled) {
+
+<span class="fc" id="L191">        PKBCommonApiParams commonParams = getCommonParams(subject);</span>
+
+<span class="fc" id="L193">        checkForSharingDisabled(commonParams, subject, throwIfSharingDisabled);</span>
+
+<span class="fc" id="L195">        return commonParams;</span>
+
+    }
+
+    private void checkForSharingDisabled(PKBCommonApiParams commonParams, Long subjectUserId, boolean throwIfSharingDisabled)
+            throws SharingDisabledException {
+
+<span class="fc" id="L202">        long accessingUserId = commonParams.getRequestContext().getAccessingUserId();</span>
+<span class="pc bpc" id="L203" title="1 of 4 branches missed.">        boolean ownData = subjectUserId != null &amp;&amp; accessingUserId == subjectUserId;</span>
+
+<span class="pc bpc" id="L205" title="1 of 6 branches missed.">        if (throwIfSharingDisabled &amp;&amp; !commonParams.getRequestContext().isSharingEnabled() &amp;&amp; !ownData) {</span>
+<span class="fc" id="L206">            throw new SharingDisabledException(&quot;Sharing disabled&quot;);</span>
+        }
+
+<span class="fc" id="L209">    }</span>
+
+    /**
+     * encapsulates PKB Common parameters for a user session
+     *
+     * @param contextUserIdOrNull
+     *            user context =&gt; patientId retrieved from http request. if null we assume current user
+     * @return return common parameter DTO
+     * @throws WebApplicationException
+     *             if the person doesn't have access to the data of the person (eg. a
+     *             patient) denoted by {@code hideParams}
+     */
+    private PKBCommonApiParams retrieveCommonParams(Long contextUserIdOrNull) {
+
+<span class="fc" id="L223">        PKBCommonApiParams commonParams = new PKBCommonApiParams();</span>
+
+        try {
+
+            //fetch api auth session from the request
+<span class="fc" id="L228">            ApiAuthSession session = (ApiAuthSession) getRequest().getAttribute(AUTH_SESSION_VAR);</span>
+
+<span class="pc" id="L230">            PKBPerson currentUser = userManager.getPKBPerson(session.getPersonId().orElseThrow(() -&gt; new IllegalStateException(&quot;Current user is not in the session&quot;)));</span>
+<span class="pc" id="L231">            var pwd= session.getPassword().orElseThrow(() -&gt; new IllegalStateException(&quot;Password is missing from the session&quot;));</span>
+<span class="fc" id="L232">            currentUser.setPassword(pwd);</span>
+
+<span class="fc" id="L234">            PersonAuthInfo user = PersonAuthInfo.of(currentUser);</span>
+
+            // confirm user is in allowed scopes/roles
+<span class="fc" id="L237">            RoleHolder roleHolder = getRoleHolder();</span>
+
+            // assert current currentUser is in allowed roles. unless one of the
+            // specified roles is public
+<span class="pc bpc" id="L241" title="2 of 4 branches missed.">            if (!roleHolder.contains(PUBLIC) &amp;&amp; !roleHolder.isEmpty()) {</span>
+<span class="fc" id="L242">                assertUserIsInRoles(user.getUserType(), roleHolder, session);</span>
+            }
+
+<span class="fc" id="L245">            LoggedInEHRRequestContext requestContext = createEHRRequestContext(user, contextUserIdOrNull);</span>
+
+            // check if method call specified the 'all' keyword to indicate
+            // access to multiple patients
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">            if (isMultiplePatientsSpecified(getRequest())) {</span>
+<span class="nc" id="L250">                requestContext = requestContext.withAccountLinkType(AccountLinkType.ORG);</span>
+            }
+
+            // verify user access to subject record
+<span class="fc bfc" id="L254" title="All 2 branches covered.">            if (contextUserIdOrNull != null) {</span>
+
+<span class="fc bfc" id="L256" title="All 2 branches covered.">                if (!patientConsentManager.hasAccessToUser(requestContext, contextUserIdOrNull)) {</span>
+<span class="fc" id="L257">                    String message = String.format(</span>
+                            &quot;User %s does not appear to have access to the records of %s&quot;,
+<span class="fc" id="L259">                            requestContext.getAccessingUserId(), contextUserIdOrNull.toString());</span>
+
+<span class="fc" id="L261">                    WebApplicationException e = new WebApplicationException(message,</span>
+                            Response.Status.UNAUTHORIZED);
+
+<span class="fc" id="L264">                    LOGGER.warn(&quot;Access Error: {}&quot;, message, e);</span>
+<span class="fc" id="L265">                    throw e;</span>
+                }
+            }
+
+<span class="fc" id="L269">            commonParams.setPerson(currentUser);</span>
+<span class="fc" id="L270">            commonParams.setEHRRequestContext(requestContext);</span>
+
+<span class="nc" id="L272">        } catch (PKBException e) {</span>
+<span class="nc" id="L273">            throw new RuntimeException(e);</span>
+<span class="fc" id="L274">        }</span>
+
+<span class="fc" id="L276">        return commonParams;</span>
+    }
+
+    /**
+     * provides a safe way to access the proxy instance
+     *
+     * @return proxied RoleHolder
+     */
+    public RoleHolder getRoleHolder() {
+<span class="fc" id="L285">        return ROLE_HOLDER_THREAD_LOCAL.get();</span>
+    }
+
+    public void removeRoleHolder() {
+<span class="fc" id="L289">        ROLE_HOLDER_THREAD_LOCAL.remove();</span>
+<span class="fc" id="L290">    }</span>
+
+    /**
+     * if user type does not match at least one of the scopes required, thrown an error
+     *
+     * @param userType
+     *            type of user
+     * @param roleHolder
+     *            role holder DTO
+     */
+    ApiClientScope assertUserIsInRoles(UserType userType,
+                                                 RoleHolder roleHolder, ApiAuthSession authSession) {
+
+<span class="fc" id="L303">        ApiClientScope userScope = userTypeToScopeMapper.getScopeForUserType(userType);</span>
+
+        // allow everyone to pass if public is allowed. otherwise, check
+        // strictly
+<span class="pc bpc" id="L307" title="1 of 2 branches missed.">        if (!roleHolder.contains(PUBLIC)) {</span>
+
+            // // TODO: 17/02/2016 work-around allows a System Client ID user
+            // connecting via REST to access Clinician and Team Coord
+            // functionality. please remove this in favour of doing as the API
+            // docs say
+<span class="fc" id="L313">            fiddleRoles(roleHolder, userType, authSession);</span>
+
+<span class="fc bfc" id="L315" title="All 2 branches covered.">            if (!roleHolder.contains(userScope)) {</span>
+
+<span class="fc" id="L317">                StringBuilder allowedScopes = new StringBuilder();</span>
+
+<span class="fc bfc" id="L319" title="All 2 branches covered.">                for (ApiClientScope scope : roleHolder.getAllowedRoles()) {</span>
+<span class="fc" id="L320">                    allowedScopes.append(scope.name()).append(&quot; &quot;);</span>
+<span class="fc" id="L321">                }</span>
+
+<span class="fc" id="L323">                String message = String</span>
+<span class="fc" id="L324">                        .format(&quot;Method requires a user within scope(s) %s but current user is of UserType %s and is in scope %s&quot;,</span>
+<span class="fc" id="L325">                                allowedScopes.toString(), userType.name(), userScope.name());</span>
+
+<span class="fc" id="L327">                LOGGER.error(message);</span>
+<span class="fc" id="L328">                throw new WebApplicationException(message, Response.Status.UNAUTHORIZED);</span>
+            }
+
+<span class="fc" id="L331">            Set&lt;ApiClientScope&gt; scopesAllowed = authSession.getApiClient().getScopesAllowed(authSession.getScope());</span>
+<span class="pc bpc" id="L332" title="1 of 4 branches missed.">            if (!scopesAllowed.contains(SITE) &amp;&amp; roleHolder.hasNoneOf(scopesAllowed)) {</span>
+<span class="nc" id="L333">                String message = String.format(&quot;Authorized client missing required scope(s): %s, has scope(s): %s&quot;,</span>
+<span class="nc" id="L334">                        scopesAllowed.toString(), roleHolder.getAllowedRoles().toString());</span>
+<span class="nc" id="L335">                throw new WebApplicationException(message, Response.Status.UNAUTHORIZED);</span>
+            }
+
+        }
+<span class="fc" id="L339">        return userScope;</span>
+
+    }
+
+    /**
+     * if user type is Institute Admin AND the REST resource requires CLINICIAN, TEAM_COORD or SITE AND AuthSession Scope is SITE, then we
+     * automatically expand the advertised scope to include the team coord scope this is a workaround as it's not exposed to the API
+     * consumers
+     *
+     * @param roleHolder
+     *            role holder object
+     * @param userType
+     *            user type
+     * @param authSession
+     *            authentication session
+     * @return returns role holder object
+     */
+    RoleHolder fiddleRoles(RoleHolder roleHolder, UserType userType,
+            ApiAuthSession authSession) {
+
+        // check if user has SITE scope i.e. INSTITUTE_ADMIN and the resource
+        // requires one of the specified access levels
+<span class="fc bfc" id="L361" title="All 4 branches covered.">        if ((userType == UserType.INSTITUTE_ADMIN) &amp;&amp; authSession.getScope() == SITE</span>
+                &amp;&amp; (
+
+<span class="fc bfc" id="L364" title="All 2 branches covered.">                roleHolder.contains(CLINICIAN)</span>
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">                        || roleHolder.contains(CLINICIAN_OR_TEAMCOORD)</span>
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">                        || roleHolder.contains(PATIENT_OR_CLINICIAN)</span>
+<span class="pc bpc" id="L367" title="1 of 2 branches missed.">                        || roleHolder.contains(PATIENT_OR_CLINICIAN_OR_TEAMCOORD)</span>
+<span class="pc bpc" id="L368" title="1 of 2 branches missed.">                        || roleHolder.contains(SITE))) {</span>
+
+<span class="fc" id="L370">            roleHolder.getAllowedRoles().add(TEAMCOORD);</span>
+<span class="fc" id="L371">            LOGGER.warn(&quot;Scope Adjustment: Dynamically added team coordinator to advertised scope in order to facilitate resource access&quot;);</span>
+        }
+
+<span class="pc bpc" id="L374" title="1 of 4 branches missed.">        if ((userType == UserType.REG_CLINICIAN) &amp;&amp; (roleHolder.contains(CLINICIAN)</span>
+<span class="nc bnc" id="L375" title="All 2 branches missed.">                || roleHolder.contains(CLINICIAN_OR_TEAMCOORD)</span>
+<span class="nc bnc" id="L376" title="All 2 branches missed.">                || roleHolder.contains(PATIENT_OR_CLINICIAN))) {</span>
+            // This is extremely fiddly , but that's how some of the V1 services work
+<span class="fc" id="L378">            roleHolder.getAllowedRoles().add(CLINICIAN);</span>
+<span class="fc" id="L379">            LOGGER.warn(&quot;Scope Adjustment: Dynamical added clinician to advertised scope in order to facilitate resource access&quot;);</span>
+        }
+
+<span class="fc" id="L382">        return roleHolder;</span>
+    }
+
+    private static PhrConfig getConfig() {
+<span class="nc" id="L386">        return PKBApplicationContext.getBean(PhrConfig.class);</span>
+    }
+
+    // TODO WARNING this is (nearly) replicating ConsentInterceptor.createEHRRequestContext()
+    private LoggedInEHRRequestContext createEHRRequestContext(PersonAuthInfo loggedInUser, @Nullable Long contextUserId) {
+
+<span class="fc" id="L392">        Route route = Route.REST_API;</span>
+
+<span class="pc bpc" id="L394" title="1 of 2 branches missed.">        if (loggedInUser != null) {</span>
+<span class="fc" id="L395">            UUID correlationId = UUID.randomUUID();</span>
+<span class="pc bpc" id="L396" title="3 of 7 branches missed.">            switch (loggedInUser.getUserType()) {</span>
+            case PATIENT:
+<span class="pc bpc" id="L398" title="1 of 4 branches missed.">                if ((contextUserId == null) || contextUserId.equals(loggedInUser.getId())) {</span>
+                    // Patient's own account
+<span class="fc" id="L400">                    return requestContextManager.createEHRRequestContextForOwner(</span>
+                            loggedInUser, correlationId, route);
+                } else /* context user is set, and is not the logged-in user */ {
+                    // Carer
+<span class="nc" id="L404">                    return requestContextManager.createEHRRequestContextForCarer(</span>
+<span class="nc" id="L405">                            loggedInUser, contextUserId, correlationId, route);</span>
+                }
+            case REG_CLINICIAN: // fall through to institute admin
+            case INSTITUTE_ADMIN:
+<span class="fc" id="L409">                Team team = teamUserManager</span>
+<span class="fc" id="L410">                        .findPrimaryTeam(ImmutableLoggedOutEHRRequestContext.of(AccountLinkType.NO_LINK, Route.REST_API, noConsentRequired(), correlationId), loggedInUser.getId())</span>
+<span class="fc" id="L411">                        .orElse(null);</span>
+<span class="pc bpc" id="L412" title="1 of 2 branches missed.">                return (team == null)</span>
+<span class="nc" id="L413">                        ? requestContextManager.createEHRRequestContextForIndividualClinician(</span>
+                                loggedInUser, contextUserId, correlationId, route)
+                        : requestContextManager
+<span class="fc" id="L416">                                .createEHRRequestContextForTeamClinician(loggedInUser, team,</span>
+<span class="fc" id="L417">                                        contextUserId, correlationId, route, useBreakTheGlass(loggedInUser, contextUserId));</span>
+            case ORG_COORD:
+<span class="nc" id="L419">                return requestContextManager.createEHRRequestContextForOrgCoord(loggedInUser,</span>
+                        correlationId, route);
+
+            case SUPER_ADMIN:
+                // superadmin has decrypt access for employees, and potentially non-team clinicians to reset passwords.
+                // that's NYI
+<span class="nc" id="L425">                return requestContextManager.createEHRRequestContextForPkbAdmin(loggedInUser,</span>
+                        correlationId, route);
+            case PRIVACY_OFFICER:
+<span class="fc" id="L428">                return requestContextManager.createEHRRequestContextForPrivacyOfficer(</span>
+                        loggedInUser, correlationId, route);
+            case TECH_SUPPORT:
+            case EMPLOYEE:
+<span class="fc" id="L432">                return ImmutableLoggedInUserEHRRequestContext.of(</span>
+                        EHRRequestContext.AccountLinkType.NO_LINK, route,
+<span class="fc" id="L434">                        ConsentStatus.builder().required(true).build(),</span>
+                        correlationId,
+                        loggedInUser)
+<span class="fc" id="L437">                        .withCorrelationId(correlationId);</span>
+
+            default:
+<span class="nc" id="L440">                throw new RuntimeException(&quot;Unknown user type: &quot; + loggedInUser.getUserType());</span>
+            }
+        } else {
+<span class="nc" id="L443">            throw new RuntimeException(&quot;unknown user principal&quot;);</span>
+        }
+    }
+
+    /**
+     * if a btg header is not available, return false
+     * if a btg header is available, return true unless the header is invalid/expired/not for current context user; in which case we throw
+     * an exception
+     *
+     * @return returns true or false depending on whether the client is intending to break the glass and has provided a valid token to do so
+     */
+    private boolean useBreakTheGlass(PersonAuthInfo loggedInUser, Long contextUserId) {
+<span class="fc" id="L455">        boolean useBtg = false;</span>
+
+<span class="fc bfc" id="L457" title="All 2 branches covered.">        if (contextUserId == null) {</span>
+<span class="fc" id="L458">            LOGGER.warn(&quot;Break the glass cannot be applied if the contextUser is not known&quot;);</span>
+<span class="fc" id="L459">            return false;</span>
+        }
+<span class="pc bpc" id="L461" title="1 of 2 branches missed.">        if (loggedInUser == null) {</span>
+<span class="nc" id="L462">            LOGGER.warn(&quot;Break the glass cannot be applied if the logged in user is not known&quot;);</span>
+<span class="nc" id="L463">            return false;</span>
+        }
+<span class="fc" id="L465">        String btgHeader = getRequest().getHeader(&quot;breaktheglass&quot;);</span>
+
+<span class="fc bfc" id="L467" title="All 2 branches covered.">        if (StringUtils.isNotEmpty(btgHeader)) {</span>
+
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">            if (ALLOWED_TO_BREAK_THE_GLASS.contains(loggedInUser.getUserType())) {</span>
+                try {
+<span class="fc" id="L471">                    breakTheGlassService.validate(btgHeader, contextUserId);</span>
+<span class="fc" id="L472">                    useBtg = true;</span>
+<span class="nc" id="L473">                } catch (JwtException jwt) {</span>
+<span class="nc" id="L474">                    LOGGER.info(&quot;BTG Jwt token failed validation: {}&quot;, jwt.getMessage());</span>
+<span class="nc" id="L475">                    throw new WebApplicationException(jwt.getMessage(), jwt, Response.Status.UNAUTHORIZED);</span>
+<span class="fc" id="L476">                }</span>
+            } else {
+<span class="nc" id="L478">                throw new WebApplicationException(String.format(&quot;BTG is not available to users in role : %s&quot;, loggedInUser.getUserType()),</span>
+                        Response.Status.UNAUTHORIZED);
+            }
+        }
+
+<span class="fc" id="L483">        return useBtg;</span>
+    }
+
+    /**
+     * check if multiple patients was specified through the use of the magic string all
+     *
+     * @param httpRequest
+     *            http servlet request object
+     * @return returns true if multiple patients applies
+     */
+    private boolean isMultiplePatientsSpecified(HttpServletRequest httpRequest) {
+
+<span class="pc bpc" id="L495" title="1 of 2 branches missed.">        if (&quot;all&quot;.equalsIgnoreCase(httpRequest.getParameter(&quot;patientIdOrAll&quot;))) {</span>
+
+<span class="nc" id="L497">            return true;</span>
+
+        } else {
+
+<span class="fc" id="L501">            String[] urlParts = httpRequest.getRequestURI().split(&quot;/&quot;);</span>
+<span class="fc" id="L502">            int index = 0;</span>
+
+<span class="fc bfc" id="L504" title="All 2 branches covered.">            for (String part : urlParts) {</span>
+
+<span class="pc bpc" id="L506" title="1 of 4 branches missed.">                if (part.equals(&quot;forPatient&quot;) &amp;&amp; &quot;all&quot;.equalsIgnoreCase(urlParts[index + 1])) {</span>
+
+<span class="nc" id="L508">                    return true;</span>
+                }
+<span class="fc" id="L510">                index++;</span>
+            }
+
+        }
+
+<span class="fc" id="L515">        return false;</span>
+
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,1043 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UserApiHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.util</a> &gt; <span class="el_source">UserApiHelper.java</span></div><h1>UserApiHelper.java</h1><pre class="source lang-java linenums">package com.pkb.api.util;
+
+import com.google.common.base.Strings;
+import com.pkb.VersionDetails;
+import com.pkb.api.error.ApiAuthError;
+import com.pkb.api.error.ApiValidationError;
+import com.pkb.api.util.converter.v1.PersonContactToApiContactConverter;
+import com.pkb.api.util.converter.v1.PkbPersonToApiUserConverter;
+import com.pkb.api.v1.model.ApiContact;
+import com.pkb.api.v1.model.ApiNationalId;
+import com.pkb.api.v1.model.ApiOrgLevelId;
+import com.pkb.api.v1.model.ApiTeamLevelId;
+import com.pkb.api.v1.model.ApiUser;
+import com.pkb.api.v1.model.ApiUser.ApiUserType;
+import com.pkb.api.v1.model.ApiUserPublicId;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.bean.IMessageWebBean;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.crypto.util.RandomUtil;
+import com.pkb.datamodel.Email;
+import com.pkb.dto.InviteeDTO;
+import com.pkb.entities.enums.ContactType;
+import com.pkb.entities.enums.Gender;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.exception.ApiCallMalformedException;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.ImmutablePatientSearchOptionsDto;
+import com.pkb.institute.entity.InstituteUserEntity.ContactOptions;
+import com.pkb.institute.entity.Team;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.notification.entity.Activity;
+import com.pkb.notification.entity.Activity.Action;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamService;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.test.MeasurementManager;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.test.entity.MeasurementDTO;
+import com.pkb.test.entity.MeasurementHistoryDTO;
+import com.pkb.test.entity.MeasurementTypeId;
+import com.pkb.test.entity.PredefinedMeasurementType;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.OrgLevelIdType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonAndMetricsDTO;
+import com.pkb.user.entity.PersonContact;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.user.entity.TeamLevelIdType;
+import com.pkb.util.PKBConstants;
+import com.pkb.util.PKBServiceUtil;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import javax.annotation.Nullable;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.function.Function;
+
+import static com.pkb.datamodel.ImmutableDisclosingEmail.disclosingEmail;
+import static com.pkb.datamodel.ImmutableDisclosingPhone.disclosingPhone;
+import static com.pkb.user.entity.PersonContact.isActualContact;
+import static com.pkb.util.EmailUtil.Quantity.SINGULAR;
+import static io.vavr.API.None;
+import static java.util.Collections.emptyList;
+import static java.util.Comparator.comparing;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+@Component
+public class UserApiHelper {
+
+<span class="fc" id="L101">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final MeasurementManager measurementManager;
+
+    private final TeamUserManager teamUserManager;
+
+    private final UserManager userManager;
+
+    private final INotificationManager notificationManager;
+
+    private final TeamManager teamManager;
+
+    private final PersonContactManager personContactManager;
+
+    private final PKBEmailMessageManager pkbEmailMessageManager;
+
+    private final IMessageWebBean messageWebBean;
+
+    private final PkbPersonToApiUserConverter pkbPersonToApiUserConverter;
+
+    private final PersonContactToApiContactConverter personContactToApiContactConverter;
+
+    private final DateTimeService dateTimeService;
+
+    private final TeamService teamService;
+
+    private final PatientConsentManager patientConsentManager;
+
+
+    @Autowired
+    public UserApiHelper(MeasurementManager measurementManager, TeamUserManager teamUserManager,
+                         UserManager userManager,
+                         TeamManager teamManager,
+                         INotificationManager notificationManager, PersonContactManager personContactManager,
+                         PKBEmailMessageManager pkbEmailMessageManager, IMessageWebBean messageWebBean,
+                         PkbPersonToApiUserConverter pkbPersonToApiUserConverter,
+                         PersonContactToApiContactConverter personContactToApiContactConverter,
+                         @NotNull DateTimeService dateTimeService,
+<span class="fc" id="L139">                         TeamService teamService, PatientConsentManager patientConsentManager) {</span>
+
+<span class="fc" id="L141">        this.measurementManager = measurementManager;</span>
+<span class="fc" id="L142">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L143">        this.userManager = userManager;</span>
+<span class="fc" id="L144">        this.teamManager = teamManager;</span>
+<span class="fc" id="L145">        this.notificationManager = notificationManager;</span>
+<span class="fc" id="L146">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L147">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L148">        this.messageWebBean = messageWebBean;</span>
+<span class="fc" id="L149">        this.pkbPersonToApiUserConverter = pkbPersonToApiUserConverter;</span>
+<span class="fc" id="L150">        this.personContactToApiContactConverter = personContactToApiContactConverter;</span>
+<span class="fc" id="L151">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L152">        this.teamService = teamService;</span>
+<span class="fc" id="L153">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L154">    }</span>
+
+    /**
+     * Retrieves user information for a user specified by a PKB Id. If the
+     * specified user is a patient, weight and height information will also be
+     * retrieved.
+     * &lt;p/&gt;
+     * This private method does not perform an authorization check, so it is up
+     * to the caller to do so.
+     *
+     * @param userId The PKB Id of the user whose details should be returned.
+     * @return An {@ApiUser} object representing the details of
+     * userId.
+     */
+    private ApiUser getUser(LoggedInEHRRequestContext requestContext, long userId) {
+
+<span class="fc" id="L170">        Option&lt;MeasurementDTO&gt; heightDto = None();</span>
+<span class="fc" id="L171">        Option&lt;MeasurementDTO&gt; weightDto = None();</span>
+<span class="fc" id="L172">        Map&lt;String, Object&gt; session = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L174">        PKBPerson userWithIds = userManager.getPKBPerson(userId,</span>
+                PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);
+
+<span class="fc bfc" id="L177" title="All 2 branches covered.">        if (userWithIds.isPatient()) {</span>
+<span class="fc bfc" id="L178" title="All 4 branches covered.">            if (userWithIds.isSharingEnabled() || userWithIds.getId().equals(requestContext.getAccessingUserId())) {</span>
+<span class="fc" id="L179">                Option&lt;MeasurementHistoryDTO&gt; heightHist = measurementManager</span>
+<span class="fc" id="L180">                        .getMeasurementHistory(requestContext, PredefinedMeasurementType.HEIGHT.id(), userWithIds.getId(), 0, userWithIds);</span>
+<span class="fc" id="L181">                heightDto = heightHist.map(MeasurementHistoryDTO::getLatestMeasurement);</span>
+
+<span class="fc" id="L183">                Option&lt;MeasurementHistoryDTO&gt; weightHist = measurementManager</span>
+<span class="fc" id="L184">                        .getMeasurementHistory(requestContext, PredefinedMeasurementType.WEIGHT.id(), userWithIds.getId(), 0, userWithIds);</span>
+<span class="fc" id="L185">                weightDto = weightHist.map(MeasurementHistoryDTO::getLatestMeasurement);</span>
+            }
+        }
+
+<span class="fc" id="L189">        return convert(userWithIds, heightDto, weightDto);</span>
+    }
+
+    /**
+     * Retrieves user information for a user specified by a PKB Id. This public
+     * method performs the authorization check, and throws an
+     * {@code ApiAuthError} if it fails.
+     *
+     * @param userId       The PKB Id of the user whose details should be returned.
+     * @param loggedInUser The currently logged in user.
+     * @return An {@link ApiUser} object representing the details of
+     * userId.
+     */
+    public ApiUser getUser(LoggedInEHRRequestContext requestContext, long userId,
+                           PKBPerson loggedInUser) {
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">        if (!patientConsentManager.hasAccessToUser(requestContext, userId)) {</span>
+<span class="nc" id="L205">            String loggedInId = Option.of(loggedInUser).map(PKBPerson::getId).map(Object::toString).getOrElse(&quot;-&quot;);</span>
+<span class="nc" id="L206">            throw new ApiAuthError(&quot;current user &quot; + loggedInId + &quot; does not have&quot; +</span>
+                    &quot; access to user &quot; + userId);
+        }
+
+<span class="fc" id="L210">        return getUser(requestContext, userId);</span>
+    }
+
+    public List&lt;ApiUser&gt; getPatients(LoggedInEHRRequestContext requestContext, PKBPerson user,
+                                     boolean withMetrics, boolean registeredOnly) {
+<span class="fc" id="L215">        return getPatients(requestContext, user, withMetrics, pkbPersonToApiUserConverter::convert, this::convert, registeredOnly);</span>
+    }
+
+    /* This method is added to return an extended ApiUser with publicId - ApiUserPublicId.
+     * https://pkbdev.atlassian.net/browse/PHR-7653
+     */
+    public List&lt;ApiUserPublicId&gt; getPatientsWithPublicId(LoggedInEHRRequestContext requestContext, PKBPerson user,
+                                                         boolean withMetrics, boolean registeredOnly) {
+<span class="fc" id="L223">        return getPatients(requestContext, user, withMetrics, this::convertToPublicId, this::convertToPublicId, registeredOnly);</span>
+    }
+
+    private &lt;T extends ApiUser&gt; List&lt;T&gt; getPatients(LoggedInEHRRequestContext requestContext,
+                                                    PKBPerson user,
+                                                    boolean withMetrics,
+                                                    Function&lt;PKBPerson, T&gt; instAdminMap,
+                                                    Function&lt;PersonAndMetricsDTO, T&gt; clinicianMap,
+                                                    boolean registeredOnly) {
+<span class="fc" id="L232">        List&lt;T&gt; resultList = emptyList();</span>
+
+<span class="pc bpc" id="L234" title="1 of 3 branches missed.">        switch (user.getUserType()) {</span>
+            case INSTITUTE_ADMIN:
+<span class="fc" id="L236">                resultList = getRegisteredOnly(requestContext, user, instAdminMap, registeredOnly);</span>
+<span class="fc" id="L237">                break;</span>
+            case REG_CLINICIAN:
+<span class="fc bfc" id="L239" title="All 2 branches covered.">                resultList = registeredOnly</span>
+<span class="fc" id="L240">                        ? getRegisteredOnly(requestContext, user, instAdminMap, registeredOnly)</span>
+<span class="fc" id="L241">                        : getPatients(requestContext, user, withMetrics, clinicianMap);</span>
+                break;
+        }
+<span class="fc" id="L244">        return resultList;</span>
+    }
+
+    private &lt;T extends ApiUser&gt; List&lt;T&gt; getRegisteredOnly(LoggedInEHRRequestContext requestContext,
+                                                          PKBPerson user,
+                                                          Function&lt;PKBPerson, T&gt; instAdminMap,
+                                                          boolean registeredOnly) {
+<span class="fc" id="L251">        Team team = teamUserManager.getPrimaryTeam(requestContext, user.getId(), true/* activeOnly */);</span>
+<span class="fc" id="L252">        return teamUserManager.getTeamPatients(team.getId(), registeredOnly).map(instAdminMap).collect(toList());</span>
+    }
+
+    private &lt;T extends ApiUser&gt; List&lt;T&gt; getPatients(LoggedInEHRRequestContext requestContext,
+                                                    PKBPerson user,
+                                                    boolean withMetrics,
+                                                    Function&lt;PersonAndMetricsDTO, T&gt; clinicianMap) {
+<span class="fc" id="L259">        List&lt;PersonAndMetricsDTO&gt; patients = getAssignedPatientsWithMetrics(</span>
+<span class="fc" id="L260">                requestContext, user.getId(),</span>
+                withMetrics, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS_DEEP, PKBPerson.Lazy.CONTACTS);
+<span class="fc" id="L262">        return patients.stream().map(clinicianMap).collect(toList());</span>
+    }
+
+    public List&lt;PersonAndMetricsDTO&gt; getAssignedPatientsWithMetrics(@NotNull LoggedInEHRRequestContext requestContext,
+                                                                    long currentUserId,
+                                                                    boolean withMetrics,
+                                                                    PKBPerson.Lazy... fields) {
+        try {
+            // for this (clinician's) userId,
+<span class="fc" id="L271">            List&lt;PKBPerson&gt; patients = requestContext.getOrgId().map(orgId -&gt; {</span>
+<span class="fc" id="L272">                ImmutablePatientSearchOptionsDto.Builder optionsBuilder = ImmutablePatientSearchOptionsDto.searchParams();</span>
+<span class="fc" id="L273">                optionsBuilder.lazies(fields);</span>
+<span class="fc" id="L274">                return patientConsentManager.findConsentingPatientsForTeam(requestContext.getTeamId().orElseThrow(), optionsBuilder.build());</span>
+<span class="fc" id="L275">            }).orElse(teamUserManager.getAssignedPatients(currentUserId, fields));</span>
+
+<span class="fc" id="L277">            List&lt;PersonAndMetricsDTO&gt; returnValues = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L278">            Set&lt;Long&gt; userIds = new java.util.HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">            for (PKBPerson person : patients) {</span>
+
+                // we haven't got a DISTINCT in the query so we may have
+                // duplicate persons:
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">                if (userIds.contains(person.getId())) {</span>
+<span class="nc" id="L284">                    continue;</span>
+                }
+
+<span class="fc" id="L287">                userIds.add(person.getId());</span>
+<span class="fc" id="L288">                person.getContacts().size(); // so findEmail() works</span>
+<span class="fc" id="L289">                person.fetchLazies(fields);</span>
+
+<span class="pc bpc" id="L291" title="2 of 4 branches missed.">                if (withMetrics &amp;&amp; person.isSharingEnabled()) {</span>
+                    // get the latest result for each measurement:
+<span class="fc" id="L293">                    Map&lt;MeasurementTypeId, MeasurementDTO&gt; latestMeasurements = measurementManager.getLatestMeasurements(</span>
+<span class="fc" id="L294">                            requestContext, person.getId(), Arrays.asList(PredefinedMeasurementType.WEIGHT, PredefinedMeasurementType.HEIGHT));</span>
+<span class="fc" id="L295">                    returnValues.add(convertToPersonAndMetricDto(person, latestMeasurements));</span>
+<span class="fc" id="L296">                } else {</span>
+<span class="nc" id="L297">                    returnValues.add(convertToPersonAndMetricDto(person, null));</span>
+                }
+<span class="fc" id="L299">            }</span>
+<span class="fc" id="L300">            return returnValues;</span>
+
+<span class="nc" id="L302">        } catch (Exception e) {</span>
+<span class="nc" id="L303">            throw new RuntimeException(&quot;Exception while getting assigned patients and metrics for &quot; + currentUserId, e);</span>
+        }
+    }
+
+    private PersonAndMetricsDTO convertToPersonAndMetricDto(PKBPerson patient,
+                                                            Map&lt;MeasurementTypeId, MeasurementDTO&gt; latestMeasByTypeId) {
+<span class="fc" id="L309">        Double weightKg = null;</span>
+<span class="fc" id="L310">        Double heightCm = null;</span>
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">        if (latestMeasByTypeId != null) {</span>
+<span class="fc" id="L312">            MeasurementDTO weightDto = latestMeasByTypeId.get(PredefinedMeasurementType.WEIGHT.id());</span>
+<span class="fc" id="L313">            MeasurementDTO heightDto = latestMeasByTypeId.get(PredefinedMeasurementType.HEIGHT.id());</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">            if (weightDto != null) {</span>
+<span class="fc" id="L315">                weightKg = weightDto.getValue();</span>
+            }
+<span class="fc bfc" id="L317" title="All 2 branches covered.">            if (heightDto != null) {</span>
+<span class="fc" id="L318">                heightCm = heightDto.getValue();</span>
+            }
+        }
+<span class="fc" id="L321">        return new PersonAndMetricsDTO(patient, heightCm, weightKg);</span>
+    }
+
+    public List&lt;ApiUser&gt; getClinicians(EHRRequestContext requestContext, PKBPerson user, ContactOptions optionOrNull) {
+<span class="fc" id="L325">        return messageWebBean.getCliniciansForMigratedPatient(requestContext, user, optionOrNull)</span>
+<span class="fc" id="L326">                .stream()</span>
+<span class="fc" id="L327">                .map(pkbPersonToApiUserConverter::convert)</span>
+<span class="fc" id="L328">                .sorted(comparing(ApiUser::getId))</span>
+<span class="fc" id="L329">                .collect(toList());</span>
+    }
+
+    public List&lt;ApiUser&gt; getCarers(PKBPerson user) {
+<span class="nc" id="L333">        List&lt;ApiUser&gt; result = Collections.emptyList();</span>
+<span class="nc" id="L334">        List&lt;PKBPerson&gt; carers = patientConsentManager.getCaregivers(user</span>
+<span class="nc" id="L335">                .getId(), PKBPerson.Lazy.CONTACTS, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">        if (isNotEmpty(carers)) {</span>
+<span class="nc" id="L337">            result = carers.stream().map(pkbPersonToApiUserConverter::convert).collect(toList());</span>
+        }
+<span class="nc" id="L339">        return result;</span>
+    }
+
+    private ApiUserPublicId convertToPublicId(PersonAndMetricsDTO pmDto) {
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">        if (pmDto == null) {</span>
+<span class="nc" id="L344">            return null;</span>
+        }
+<span class="fc" id="L346">        ApiUser apiUser = convert(pmDto);</span>
+<span class="fc" id="L347">        ApiUserPublicId userPublicId = new ApiUserPublicId(apiUser);</span>
+<span class="fc" id="L348">        userPublicId.setPublicId(pmDto.getPerson().getPublicId());</span>
+<span class="fc" id="L349">        return userPublicId;</span>
+    }
+
+    private ApiUserPublicId convertToPublicId(PKBPerson person) {
+<span class="fc" id="L353">        ApiUser apiUser = pkbPersonToApiUserConverter.convert(person);</span>
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">        ApiUserPublicId userPublicId = apiUser == null ? new ApiUserPublicId() : new ApiUserPublicId(apiUser);</span>
+<span class="fc" id="L355">        userPublicId.setPublicId(person.getPublicId());</span>
+<span class="fc" id="L356">        return userPublicId;</span>
+    }
+
+    private ApiUser convert(PersonAndMetricsDTO user) {
+<span class="pc bpc" id="L360" title="1 of 2 branches missed.">        if (user == null) {</span>
+<span class="nc" id="L361">            return null;</span>
+        }
+
+<span class="fc" id="L364">        ApiUser a = new ApiUser();</span>
+<span class="fc" id="L365">        a.setId(user.getPerson().getId());</span>
+<span class="fc" id="L366">        a.setDob(user.getPerson().getDateOfBirthString());</span>
+<span class="fc" id="L367">        Email email = user.getPerson().getEmail();</span>
+<span class="fc bfc" id="L368" title="All 2 branches covered.">        if (email != null) {</span>
+<span class="fc" id="L369">            a.setEmail(email.address());</span>
+        }
+<span class="fc" id="L371">        a.setPhone(user.getPerson().getPhone());</span>
+<span class="fc" id="L372">        a.setFirstName(user.getPerson().getFirstName());</span>
+<span class="fc" id="L373">        a.setLastName(user.getPerson().getLastName());</span>
+<span class="fc bfc" id="L374" title="All 2 branches covered.">        a.setGenderMF(user.getPerson().getGender() == 0 ? &quot;f&quot; : &quot;m&quot;);</span>
+<span class="fc" id="L375">        a.setGender(Gender.toLetter(user.getPerson().getGender()));</span>
+<span class="fc" id="L376">        a.setTitle(user.getPerson().getTitle());</span>
+<span class="fc" id="L377">        a.setDateDeceased(user.getPerson().getDeathTimestamp());</span>
+<span class="fc" id="L378">        a.setAddress1(user.getPerson().getAddress1());</span>
+<span class="fc" id="L379">        a.setAddress2(user.getPerson().getAddress2());</span>
+<span class="fc" id="L380">        a.setCity(user.getPerson().getCity());</span>
+<span class="fc" id="L381">        a.setState(user.getPerson().getState());</span>
+<span class="fc" id="L382">        a.setPostalCode(user.getPerson().getPostalCode());</span>
+<span class="fc" id="L383">        a.setCountry(user.getPerson().getCountry());</span>
+
+<span class="fc" id="L385">        a.setPatient(user.getPerson().isPro());</span>
+
+<span class="fc" id="L387">        a.setJobTitle(user.getPerson().getJobTitle());</span>
+<span class="fc" id="L388">        a.setOrganizationName(user.getPerson().getOrganizationName());</span>
+<span class="fc" id="L389">        a.setTeamName(user.getPerson().getOrganizationUnit());</span>
+
+<span class="fc" id="L391">        a.setHeightValuesCm(user.getHeightCm());</span>
+<span class="fc" id="L392">        a.setWeightValuesKg(user.getWeightKg());</span>
+
+<span class="fc" id="L394">        List&lt;ApiContact&gt; contacts = user.getPerson().getContacts().stream().filter(PersonContact::isActualContact)</span>
+<span class="fc" id="L395">                .map(personContactToApiContactConverter::convert)</span>
+<span class="fc" id="L396">                .collect(toList());</span>
+<span class="fc" id="L397">        a.setContacts(contacts);</span>
+
+<span class="fc" id="L399">        return a;</span>
+    }
+
+    private PersonContact convert(ApiContact apiContact) {
+<span class="nc" id="L403">        PersonContact personContact = null;</span>
+        // We are not interested in linked people, just actual contact details
+<span class="nc" id="L405">        ContactType type = ContactType.valueOf(apiContact.getContactType());</span>
+<span class="nc bnc" id="L406" title="All 2 branches missed.">        if (isActualContact(type)) {</span>
+<span class="nc" id="L407">            personContact = new PersonContact();</span>
+<span class="nc" id="L408">            personContact.setPublicId(UUID.randomUUID());</span>
+<span class="nc bnc" id="L409" title="All 2 branches missed.">            personContact.setId((apiContact.getId() == null) ? null : Long.valueOf(apiContact.getId()));</span>
+<span class="nc bnc" id="L410" title="All 2 branches missed.">            if (type == ContactType.EMAIL) {</span>
+<span class="nc" id="L411">                personContact.setContactAsEmail(disclosingEmail(apiContact.getContactValue()));</span>
+<span class="nc bnc" id="L412" title="All 2 branches missed.">            } else if (type == ContactType.PHONE) {</span>
+<span class="nc" id="L413">                personContact.setContactAsPhone(disclosingPhone(apiContact.getContactValue()));</span>
+            } else {
+                // there's no meaningful way currently to communicate ref person via ApiContact
+                // therefore ContactType.ALSO_CONTACT is left unhandled (if interested, find me via git annotate)
+<span class="nc" id="L417">                throw new RuntimeException(&quot;Unhandled contact.&quot;);</span>
+            }
+
+<span class="nc" id="L420">            personContact.setPrimary(apiContact.isPrimary());</span>
+<span class="nc" id="L421">            personContact.setConfirmed(apiContact.isConfirmed());</span>
+        }
+<span class="nc" id="L423">        return personContact;</span>
+    }
+
+    private ApiUser convert(PKBPerson user, Option&lt;MeasurementDTO&gt; heightDto, Option&lt;MeasurementDTO&gt; weightDto) {
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">        if (user == null) {</span>
+<span class="nc" id="L428">            return null;</span>
+        }
+
+<span class="fc" id="L431">        ApiUser a = pkbPersonToApiUserConverter.convert(user);</span>
+<span class="fc" id="L432">        heightDto.forEach(dto -&gt; a.setHeightValuesCm(dto.getValue()));</span>
+<span class="fc" id="L433">        weightDto.forEach(dto -&gt; a.setWeightValuesKg(dto.getValue()));</span>
+
+<span class="fc" id="L435">        return a;</span>
+    }
+
+    public long updateUser(EHRRequestContext requestContext, PKBPerson loggedInUser, ApiUser user) {
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">        if (!patientConsentManager.hasAccessToUser(requestContext, user.getId())</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">                &amp;&amp; !loggedInUser.getId().equals(user.getId())) {</span>
+<span class="nc" id="L441">            throw new ApiAuthError(&quot;current user &quot; + loggedInUser.getId() + &quot; does not have&quot; +</span>
+<span class="nc" id="L442">                    &quot; access to update user &quot; + user.getId());</span>
+        }
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">        if (isBlank(user.getFirstName())) {</span>
+<span class="nc" id="L445">            throw new ApiValidationError(&quot;Please set first name&quot;);</span>
+        }
+<span class="pc bpc" id="L447" title="1 of 2 branches missed.">        if (isBlank(user.getLastName())) {</span>
+<span class="nc" id="L448">            throw new ApiValidationError(&quot;Please set last name&quot;);</span>
+        }
+<span class="pc bpc" id="L450" title="1 of 2 branches missed.">        if (user.getDob() == null) {</span>
+<span class="nc" id="L451">            throw new ApiValidationError(&quot;Please set DOB&quot;);</span>
+        }
+
+        try {
+<span class="fc" id="L455">            userManager.beginTransaction();</span>
+
+<span class="fc" id="L457">            PKBPerson toUpdate = userManager.getPKBPerson(user.getId(),</span>
+                    PKBPerson.Lazy.CONTACTS_DEEP);
+<span class="fc" id="L459">            convertForUpdate(user, toUpdate);</span>
+
+<span class="fc" id="L461">            Set&lt;PersonContact&gt; contacts = new HashSet&lt;&gt;();</span>
+<span class="pc bpc" id="L462" title="1 of 2 branches missed.">            boolean noContact = toUpdate.getStatus() == UserStatus.NOCONTACT</span>
+<span class="fc bfc" id="L463" title="All 2 branches covered.">                    || toUpdate.getStatus() == UserStatus.CREATED;</span>
+
+<span class="pc bpc" id="L465" title="1 of 2 branches missed.">            if (user.getContacts() != null) {</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">                for (ApiContact newContact : user.getContacts()) {</span>
+                    // For now, don't allow contacts to be updated...
+                    // ...but do allow email addresses to be added
+<span class="nc" id="L469">                    ContactType type = ContactType.valueOf(newContact.getContactType());</span>
+<span class="nc" id="L470">                    String value = newContact.getContactValue().trim().toLowerCase();</span>
+<span class="nc bnc" id="L471" title="All 2 branches missed.">                    if (type == ContactType.EMAIL) {</span>
+<span class="nc" id="L472">                        boolean found = false;</span>
+<span class="nc bnc" id="L473" title="All 2 branches missed.">                        for (PersonContact existingContact : toUpdate.getContacts()) {</span>
+<span class="nc" id="L474">                            String existingValue = existingContact.getContactIfEmail().map(Email::address).getOrNull();</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">                            if (existingValue != null) {</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">                                if (existingValue.equals(value)</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">                                        &amp;&amp; existingContact.getContactIfEmail().isDefined()) {</span>
+<span class="nc" id="L478">                                    found = true;</span>
+<span class="nc" id="L479">                                    break;</span>
+                                }
+                            }
+<span class="nc" id="L482">                        }</span>
+<span class="nc bnc" id="L483" title="All 2 branches missed.">                        if (!found) {</span>
+<span class="nc bnc" id="L484" title="All 2 branches missed.">                            if (noContact) {</span>
+                                // The REST API cannot be used to add an email
+                                // address to a
+                                // patient that has not already registered. In
+                                // the future, we could
+                                // send a registration email here instead.
+<span class="nc" id="L490">                                throw new ApiValidationError(</span>
+                                        &quot;The REST API cannot be used to add an email address to a NOCONTACT patient&quot;);
+                            } else {
+                                // Force new contacts to be unconfirmed and not
+                                // primary,
+                                // regardless of supplied details
+<span class="nc" id="L496">                                PersonContact c = convert(newContact);</span>
+<span class="nc bnc" id="L497" title="All 2 branches missed.">                                if (c.getId() != null) {</span>
+<span class="nc" id="L498">                                    throw new ApiValidationError(</span>
+                                            &quot;An id cannot be supplied for new contacts&quot;);
+                                }
+<span class="nc bnc" id="L501" title="All 2 branches missed.">                                if (c.isConfirmed()) {</span>
+<span class="nc" id="L502">                                    throw new ApiValidationError(</span>
+                                            &quot;New contacts cannot be set as confirmed&quot;);
+                                }
+<span class="nc bnc" id="L505" title="All 2 branches missed.">                                if (c.isPrimary()) {</span>
+<span class="nc" id="L506">                                    throw new ApiValidationError(</span>
+                                            &quot;New contacts cannot be set as primary&quot;);
+                                }
+<span class="nc" id="L509">                                c.setPerson(toUpdate);</span>
+<span class="nc" id="L510">                                contacts.add(c);</span>
+
+<span class="nc" id="L512">                                c = personContactManager.save(c, VersionDetails.of(requestContext, dateTimeService.now()));</span>
+
+                                try {
+<span class="nc" id="L515">                                    pkbEmailMessageManager.sendEmailToConfirmNewContact(c);</span>
+<span class="nc" id="L516">                                } catch (MailException me) {</span>
+                                    // just log &amp; continue... this shouldn't derail the whole update
+<span class="nc" id="L518">                                    LOGGER.error(&quot;failed notifying patient of newly-added email address&quot;, me);</span>
+<span class="nc" id="L519">                                }</span>
+                            }
+                        }
+                    }
+<span class="nc" id="L523">                }</span>
+            }
+<span class="fc" id="L525">            toUpdate.setContacts(contacts);</span>
+
+<span class="fc" id="L527">            userManager.updateUser(requestContext, toUpdate);</span>
+<span class="fc" id="L528">            userManager.commitTransaction();</span>
+
+            // Log activity and notify patient
+<span class="fc" id="L531">            Activity activity = new Activity(dateTimeService.now(), Action.UPDATED_PROFILE, requestContext.getOrgId().orElse(null));</span>
+<span class="fc" id="L532">            activity.setTargetId(user.getId());</span>
+<span class="fc" id="L533">            activity.setActorId(loggedInUser.getIdString());</span>
+<span class="fc bfc" id="L534" title="All 2 branches covered.">            if (!noContact) {</span>
+<span class="fc" id="L535">                notificationManager.notifyUserAboutActivityByOtherUser(requestContext, activity, new NoConsentsRequired());</span>
+            }
+        } finally {
+<span class="fc" id="L538">            userManager.rollbackIfNotCommitted();</span>
+        }
+
+<span class="fc" id="L541">        return user.getId();</span>
+    }
+
+    private void convertForUpdate(ApiUser user, PKBPerson existingPerson) {
+
+<span class="pc bpc" id="L546" title="3 of 4 branches missed.">        if (!Strings.isNullOrEmpty(user.getEmail()) &amp;&amp; !user.getEmail().equals(existingPerson.findEmail().map(Email::address).getOrNull())) {</span>
+<span class="nc" id="L547">            throw new ApiValidationError(&quot;Can't change primary email address&quot;);</span>
+        }
+<span class="pc bpc" id="L549" title="3 of 4 branches missed.">        if ((!Strings.isNullOrEmpty(user.getPhone()) &amp;&amp; !user.getPhone().equals(existingPerson.getPhone()))) {</span>
+<span class="nc" id="L550">            throw new ApiValidationError(&quot;Can't change phone number&quot;);</span>
+        }
+<span class="pc bpc" id="L552" title="3 of 4 branches missed.">        if ((!Strings.isNullOrEmpty(user.getCountry()) &amp;&amp; !user.getCountry().equals(existingPerson.getCountry()))) {</span>
+<span class="nc" id="L553">            throw new ApiValidationError(&quot;Can't change country&quot;);</span>
+        }
+
+<span class="pc bpc" id="L556" title="1 of 2 branches missed.">        if (user.getDob() != null) {</span>
+            try {
+<span class="fc" id="L558">                existingPerson.setDateOfBirthString(user.getDob());</span>
+<span class="nc" id="L559">            } catch (DateTimeParseException ignored) {</span>
+<span class="nc" id="L560">                throw new ApiValidationError(&quot;Invalid date of birth: &quot; + user.getDob());</span>
+<span class="fc" id="L561">            }</span>
+        }
+<span class="pc bpc" id="L563" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getFirstName())) {</span>
+<span class="fc" id="L564">            existingPerson.setFirstName(user.getFirstName());</span>
+        }
+<span class="pc bpc" id="L566" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getLastName())) {</span>
+<span class="fc" id="L567">            existingPerson.setLastName(user.getLastName());</span>
+        }
+<span class="pc bpc" id="L569" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getGenderMF())) {</span>
+<span class="pc bpc" id="L570" title="1 of 2 branches missed.">            existingPerson.setGender(user.getGenderMF().equals(&quot;f&quot;) ? 0 : 1);</span>
+        }
+        // If gender was provided, overwrite value from genderMF.
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getGender())) {</span>
+            try {
+<span class="fc" id="L575">                existingPerson.setGender(Gender.getByLetter(user.getGender()).getId());</span>
+<span class="nc" id="L576">            } catch (IllegalArgumentException iae) {</span>
+<span class="nc" id="L577">                throw new ApiValidationError(iae.getMessage());</span>
+<span class="fc" id="L578">            }</span>
+        }
+<span class="pc bpc" id="L580" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getTitle())) {</span>
+<span class="fc" id="L581">            existingPerson.setTitle(user.getTitle());</span>
+        }
+<span class="pc bpc" id="L583" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getAddress1())) {</span>
+<span class="nc" id="L584">            existingPerson.setAddress1(user.getAddress1());</span>
+        }
+<span class="pc bpc" id="L586" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getAddress2())) {</span>
+<span class="nc" id="L587">            existingPerson.setAddress2(user.getAddress2());</span>
+        }
+<span class="pc bpc" id="L589" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getCity())) {</span>
+<span class="nc" id="L590">            existingPerson.setCity(user.getCity());</span>
+        }
+<span class="pc bpc" id="L592" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getState())) {</span>
+<span class="nc" id="L593">            existingPerson.setState(user.getState());</span>
+        }
+<span class="pc bpc" id="L595" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getPostalCode())) {</span>
+<span class="nc" id="L596">            existingPerson.setPostalCode(user.getPostalCode());</span>
+        }
+
+<span class="pc bpc" id="L599" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(user.getCountry())) {</span>
+            // TODO I think this currently has to be a noop
+<span class="nc" id="L601">            existingPerson.setCountry(user.getCountry());</span>
+        }
+<span class="fc" id="L603">    }</span>
+
+    public boolean hasAccess(EHRRequestContext requestContext,
+                             long patientId) {
+<span class="fc" id="L607">        return patientConsentManager.hasAccessToUser(requestContext, patientId);</span>
+    }
+
+    /**
+     * Creates an account for the specified user. If an email address was
+     * provided, then they will receive a registration email.
+     *
+     * @param loggedInUser The user making the API call.
+     * @param newUser      The user to be created.
+     * @return The ID of the newly created user.
+     */
+    public long createUser(LoggedInEHRRequestContext requestContext, PKBPerson loggedInUser,
+                           ApiUser newUser) {
+        // These restrictions are also enforced in the GUI
+<span class="pc bpc" id="L621" title="1 of 2 branches missed.">        if (isBlank(newUser.getTitle())) {</span>
+<span class="nc" id="L622">            throw new ApiValidationError(&quot;title required to create new user&quot;);</span>
+        }
+<span class="pc bpc" id="L624" title="1 of 2 branches missed.">        if (isBlank(newUser.getFirstName())) {</span>
+<span class="nc" id="L625">            throw new ApiValidationError(&quot;first name required to create new user&quot;);</span>
+        }
+<span class="pc bpc" id="L627" title="1 of 2 branches missed.">        if (isBlank(newUser.getLastName())) {</span>
+<span class="nc" id="L628">            throw new ApiValidationError(&quot;last name required to create new user&quot;);</span>
+        }
+
+        // TODO: Remove duplication - this check is performed elsewhere, but we
+        // need to know the Team for the next part of this method
+<span class="fc" id="L633">        String teamName = newUser.getTeamName();</span>
+<span class="pc bpc" id="L634" title="1 of 2 branches missed.">        if (isBlank(teamName)) {</span>
+<span class="nc" id="L635">            throw new ApiValidationError(&quot;team code must be provided&quot;);</span>
+        }
+<span class="fc" id="L637">        Team team = teamManager.getTeamByCode(teamName);</span>
+<span class="pc bpc" id="L638" title="1 of 2 branches missed.">        if (team == null) {</span>
+            // Don't reveal whether the specified team exists, simply give a
+            // standard message
+<span class="nc" id="L641">            throw new ApiAuthError(&quot;current user is not a coordinator for the specified team&quot;);</span>
+        }
+
+        // For now, error if the corresponding org/team has more than 1 type of
+        // ID (because we wouldn't know which one the caller meant).
+        // TODO: Expand the API to accept some sort of type parameter
+<span class="fc" id="L647">        List&lt;ApiOrgLevelId&gt; aolids = newUser.getOrgLevelIds();</span>
+<span class="pc bpc" id="L648" title="3 of 4 branches missed.">        if ((aolids != null) &amp;&amp; !aolids.isEmpty()) {</span>
+<span class="nc bnc" id="L649" title="All 2 branches missed.">            if (team.getOrg().getOrgLevelIdTypes().size() &gt; 1) {</span>
+<span class="nc" id="L650">                throw new ApiCallMalformedException(</span>
+                        &quot;the REST API cannot currently be used to add an ID to an Organisation that has more than 1 type of local ID&quot;);
+            }
+        }
+<span class="fc" id="L654">        List&lt;ApiTeamLevelId&gt; atlids = newUser.getTeamLevelIds();</span>
+<span class="pc bpc" id="L655" title="3 of 4 branches missed.">        if ((atlids != null) &amp;&amp; !atlids.isEmpty()) {</span>
+<span class="nc bnc" id="L656" title="All 2 branches missed.">            if (team.getTeamLevelIdTypes().size() &gt; 1) {</span>
+<span class="nc" id="L657">                throw new ApiCallMalformedException(</span>
+                        &quot;the REST API cannot currently be used to add an ID to a Team that has more than 1 type of local ID&quot;);
+            }
+        }
+
+<span class="fc bfc" id="L662" title="All 2 branches covered.">        if (newUser.getUserType() == ApiUserType.PATIENT) {</span>
+<span class="fc" id="L663">            return createOrInvitePatient(requestContext, loggedInUser, newUser);</span>
+<span class="pc bpc" id="L664" title="1 of 2 branches missed.">        } else if (newUser.getUserType() == ApiUserType.REG_CLINICIAN) {</span>
+<span class="pc bpc" id="L665" title="1 of 2 branches missed.">            if (loggedInUser.isTeamCoordinator()) {</span>
+<span class="fc" id="L666">                return createNewClinician(requestContext, loggedInUser, newUser);</span>
+            } else {
+<span class="nc" id="L668">                throw new ApiValidationError(&quot;only team coords can create a new clinician&quot;);</span>
+            }
+        } else {
+<span class="nc" id="L671">            throw new ApiValidationError(&quot;invalid user type supplied: &quot;</span>
+<span class="nc" id="L672">                    + newUser.getUserType().name());</span>
+        }
+    }
+
+    /**
+     * Create a new clinician user, and then invite them to register.
+     *
+     * @param loggedInUser
+     * @param newClinician
+     * @return
+     */
+    private long createNewClinician(LoggedInEHRRequestContext requestContext, PKBPerson loggedInUser,
+                                    ApiUser newClinician) {
+
+<span class="fc" id="L686">        long userId = 0L;</span>
+
+        try {
+            // Retrieve the appropriate team and check loggedInUser is a
+            // coordinator for that team
+<span class="fc" id="L691">            String teamName = newClinician.getTeamName();</span>
+<span class="pc bpc" id="L692" title="1 of 2 branches missed.">            if (isBlank(teamName)) {</span>
+<span class="nc" id="L693">                throw new ApiValidationError(&quot;team code must be provided&quot;);</span>
+            }
+<span class="fc" id="L695">            Team team = teamManager.getTeamByCode(teamName);</span>
+<span class="pc bpc" id="L696" title="1 of 2 branches missed.">            if (team == null) {</span>
+                // Don't reveal whether the specified team exists, simply give a
+                // standard message
+<span class="nc" id="L699">                throw new ApiAuthError(&quot;current user is not a coordinator for the specified team&quot;);</span>
+            }
+
+<span class="fc" id="L702">            var loggedinId = loggedInUser.getId();</span>
+<span class="pc bpc" id="L703" title="1 of 2 branches missed.">            if (teamManager.getTeamCoord(team.getId()).stream().noneMatch(coord -&gt; coord.getId().equals(loggedinId))) {</span>
+<span class="nc" id="L704">                throw new ApiAuthError(&quot;current user is not a coordinator for the specified team&quot;);</span>
+            }
+
+<span class="fc" id="L707">            Email email = getClinicianEmail(newClinician);</span>
+
+<span class="fc" id="L709">            PKBPersonDTO clinicianDTO = new PKBPersonDTO();</span>
+<span class="fc" id="L710">            clinicianDTO.setTitle(newClinician.getTitle());</span>
+<span class="fc" id="L711">            clinicianDTO.setFirstName(newClinician.getFirstName());</span>
+<span class="fc" id="L712">            clinicianDTO.setLastName(newClinician.getLastName());</span>
+<span class="fc" id="L713">            clinicianDTO.setEmailId(email);</span>
+
+            //it is important that we set this otherwise the user might not be found
+<span class="fc" id="L716">            newClinician.setEmail(email.address());</span>
+
+            // Go! This is what we came for. Note - this method will also create
+            // the new PKBPerson entry.
+            // TODO: MULTIPLE-TEAMS try to resolve clinician for last param
+<span class="fc" id="L721">            teamUserManager.inviteClinician(requestContext, team, clinicianDTO, loggedInUser, null);</span>
+
+            // Check the account was made and note the user Id
+<span class="fc" id="L724">            PKBPerson newClinicianUser = searchForUser(requestContext, newClinician);</span>
+<span class="pc bpc" id="L725" title="1 of 2 branches missed.">            if (newClinicianUser == null) {</span>
+<span class="nc" id="L726">                throw new PKBException(&quot;could not find newly created clinician&quot;);</span>
+            }
+<span class="fc" id="L728">            userId = newClinicianUser.getId();</span>
+
+<span class="nc" id="L730">        } catch (MailException me) {</span>
+<span class="nc" id="L731">            throw new PKBException(me);</span>
+<span class="fc" id="L732">        }</span>
+
+<span class="fc" id="L734">        return userId;</span>
+    }
+
+    /**
+     * Retrieves the primary email address for the new clinician user. An
+     * ApiValidationError is thrown if one is not found.
+     *
+     * @param user Details of the new clinician.
+     * @return The primary email address of the new clinician.
+     */
+    private @NotNull Email getClinicianEmail(ApiUser user) {
+<span class="fc" id="L745">        List&lt;ApiContact&gt; contacts = user.getContacts();</span>
+<span class="pc bpc" id="L746" title="1 of 2 branches missed.">        if (contacts == null) {</span>
+<span class="nc" id="L747">            throw new ApiValidationError(</span>
+                    &quot;primary email address must be supplied to create new clinician&quot;);
+        }
+<span class="pc bpc" id="L750" title="1 of 2 branches missed.">        for (ApiContact contact : contacts) {</span>
+<span class="pc bpc" id="L751" title="1 of 2 branches missed.">            if (contact.getContactType().equals(ContactType.EMAIL.name())) {</span>
+<span class="pc bpc" id="L752" title="1 of 2 branches missed.">                if (StringUtils.isNotBlank(contact.getContactValue())) {</span>
+<span class="pc bpc" id="L753" title="1 of 2 branches missed.">                    if (contact.isPrimary()) {</span>
+<span class="fc" id="L754">                        return disclosingEmail(contact.getContactValue());</span>
+                    }
+                }
+            }
+<span class="nc" id="L758">        }</span>
+<span class="nc" id="L759">        throw new ApiValidationError(</span>
+                &quot;primary email address must be supplied to create new clinician&quot;);
+    }
+
+    /**
+     * Invites the specified user to the team for which {@code loggedInUser} is
+     * a coordinator.
+     *
+     * @param loggedInUser The currently logged in user.
+     * @param existingUser The existing user to invite.
+     * @return The ID of the existing user.
+     */
+    public long inviteUser(LoggedInEHRRequestContext requestContext, PKBPerson loggedInUser,
+                           ApiUser existingUser) {
+<span class="fc" id="L773">        return createOrInvitePatient(requestContext, loggedInUser, existingUser);</span>
+    }
+
+    /**
+     * Actually, inviting or creating can follow exactly the same code path. The
+     * user manager takes care of that for us.
+     *
+     * @param loggedInUser The currently logged in user.
+     * @param user         The user to be created or invited.
+     * @return The ID of the user.
+     */
+    private long createOrInvitePatient(LoggedInEHRRequestContext requestContext,
+                                       PKBPerson loggedInUser, ApiUser user) {
+
+        // Retrieve the appropriate team and check loggedInUser is a
+        // coordinator for that team
+<span class="fc" id="L789">        String teamName = user.getTeamName();</span>
+<span class="pc bpc" id="L790" title="1 of 2 branches missed.">        if (isBlank(teamName)) {</span>
+<span class="nc" id="L791">            throw new ApiValidationError(&quot;team code must be provided&quot;);</span>
+        }
+<span class="fc" id="L793">        Team team = teamManager.getTeamByCode(user.getTeamName());</span>
+<span class="pc bpc" id="L794" title="1 of 2 branches missed.">        if (team == null) {</span>
+            // Don't reveal whether the specified team exists, simply give a
+            // standard message
+<span class="nc" id="L797">            throw new ApiAuthError(&quot;current user is not a coordinator for the specified team&quot;);</span>
+        }
+
+<span class="fc" id="L800">        var loggedinId = loggedInUser.getId();</span>
+<span class="pc bpc" id="L801" title="1 of 2 branches missed.">        if (teamManager.getTeamCoord(team.getId()).stream().noneMatch(coord -&gt; coord.getId().equals(loggedinId))) {</span>
+<span class="nc" id="L802">            throw new ApiAuthError(&quot;current user is not a coordinator for the specified team&quot;);</span>
+        }
+
+
+        // Add and/or invite
+        // TODO: The DTO seems to accept multiple national IDs and email
+        // addresses, but the creation method only uses one. If others
+        // are provided, what should we do with them?
+<span class="fc" id="L810">        return teamUserManager.transactional(() -&gt; {</span>
+            try {
+<span class="fc" id="L812">                PKBPerson person = getOrCreatePatient(requestContext, team, user, loggedInUser);</span>
+<span class="fc" id="L813">                teamService.addToTeams(person, List.of(team), requestContext);</span>
+
+<span class="fc" id="L815">                return person.getId();</span>
+<span class="nc" id="L816">            } catch (MailException me) {</span>
+<span class="nc" id="L817">                throw new PKBException(me);</span>
+            }
+        });
+    }
+
+    private PKBPerson getOrCreatePatient(LoggedInEHRRequestContext requestContext, Team team, ApiUser user, PKBPerson coord)
+            throws MailException {
+
+
+        // Check for existing patient
+<span class="fc" id="L827">        InviteeDTO inviteeDTO = convertToInviteeDTO(user, team, requestContext);</span>
+<span class="fc" id="L828">        PKBPerson existingPatientOrNull = teamUserManager.searchForUser(inviteeDTO);</span>
+
+
+<span class="fc bfc" id="L831" title="All 2 branches covered.">        if (existingPatientOrNull != null) {</span>
+<span class="fc" id="L832">            return existingPatientOrNull;</span>
+        }
+        // Patient does not exist; Create the patient
+<span class="fc" id="L835">        Collection&lt;ValidNationalId&gt; validNationalIds = convertApiNationalIds(user.getNationalIds());</span>
+
+
+<span class="fc" id="L838">        PKBPersonDTO patientDTO = getPatientDTO(team, inviteeDTO);</span>
+<span class="fc" id="L839">        return teamUserManager.createPatientForCoord(requestContext, patientDTO, team, validNationalIds, inviteeDTO.getOrgLevelIds(), inviteeDTO.getTeamLevelIds(), coord,</span>
+                SINGULAR);
+    }
+
+    /**
+     * @param team
+     * @param inviteeDTO
+     * @return
+     */
+    private PKBPersonDTO getPatientDTO(Team team, InviteeDTO inviteeDTO) {
+<span class="fc" id="L849">        PKBPersonDTO patientDTO = new PKBPersonDTO();</span>
+<span class="fc" id="L850">        patientDTO.setTitle(inviteeDTO.getTitle());</span>
+<span class="fc" id="L851">        patientDTO.setFirstName(inviteeDTO.getFirstName());</span>
+<span class="fc" id="L852">        patientDTO.setLastName(inviteeDTO.getLastName());</span>
+<span class="fc" id="L853">        patientDTO.setEmailId(inviteeDTO.getEmailId());</span>
+<span class="fc" id="L854">        patientDTO.setUserType(UserType.PATIENT);</span>
+<span class="fc" id="L855">        patientDTO.setUserName(inviteeDTO.getEmailId());</span>
+<span class="fc" id="L856">        patientDTO.setGender(inviteeDTO.getGender());</span>
+<span class="fc" id="L857">        patientDTO.setDateOfBirthString(inviteeDTO.getDob());</span>
+
+<span class="fc" id="L859">        patientDTO.setPassword(RandomUtil.randomPassword(10));</span>
+        // fields that can't be null when setting up the auth keys &amp; LDAP record
+<span class="fc" id="L861">        patientDTO.setCountry(team.getCountry());</span>
+<span class="fc" id="L862">        patientDTO.setTimeZoneId(PKBConstants.DEFAULT_TIMEZONE_ID);</span>
+<span class="fc" id="L863">        return patientDTO;</span>
+    }
+
+    public void deactivateUser(EHRRequestContext requestContext, PKBPerson loggedInUser, PKBPerson user) {
+<span class="nc bnc" id="L867" title="All 2 branches missed.">        boolean needsNotification = user.getStatus() != UserStatus.NOCONTACT</span>
+<span class="nc bnc" id="L868" title="All 2 branches missed.">                &amp;&amp; user.getStatus() != UserStatus.CREATED;</span>
+
+<span class="nc" id="L870">        user.setStatus(UserStatus.INACTIVE, dateTimeService.now());</span>
+<span class="nc" id="L871">        userManager.updateUser(requestContext, user);</span>
+
+        // Log activity and notify user
+<span class="nc" id="L874">        Activity activity = new Activity(dateTimeService.now(), Action.ACCOUNT_DEACTIVATED, requestContext.getOrgId().orElse(null));</span>
+<span class="nc" id="L875">        activity.setTargetId(user.getId());</span>
+<span class="nc" id="L876">        activity.setActorId(loggedInUser.getIdString());</span>
+<span class="nc bnc" id="L877" title="All 2 branches missed.">        if (needsNotification) {</span>
+<span class="nc" id="L878">            notificationManager.notifyUserAboutActivityByOtherUser(requestContext, activity, new NoConsentsRequired());</span>
+        }
+<span class="nc" id="L880">    }</span>
+
+    /**
+     * Searches for an existing account using {@code TeamUserManager}.
+     *
+     * @param user The user to search for.
+     * @return The matching user - if found. null - otherwise.
+     */
+    public PKBPerson searchForUser(EHRRequestContext requestContext, ApiUser user) {
+        try {
+<span class="fc" id="L890">            return teamUserManager</span>
+<span class="fc" id="L891">                    .searchForUser(convertToInviteeDTO(user, null, requestContext));</span>
+<span class="nc" id="L892">        } catch (PKBException pe) {</span>
+<span class="nc" id="L893">            LOGGER.error(&quot;Error dusring search&quot;, pe);</span>
+<span class="nc" id="L894">            throw new ApiValidationError(</span>
+                    &quot;Error searching for user. Ambiguous information provided.&quot;);
+        }
+    }
+
+    /**
+     * Convenience method to convert from an {@code ApiUser} to an
+     * {@code InviteeDTO}.
+     *
+     * @param apiUser The {@code ApiUser} to convert.
+     * @param team    The team in which this user should be created.
+     * @return The converted object.
+     */
+    private InviteeDTO convertToInviteeDTO(ApiUser apiUser, Team team, EHRRequestContext requestContext) {
+<span class="fc" id="L908">        InviteeDTO dto = new InviteeDTO();</span>
+<span class="fc" id="L909">        dto.setId(apiUser.getId());</span>
+<span class="fc bfc" id="L910" title="All 2 branches covered.">        dto.setEmailId(apiUser.getEmail() == null ? null : disclosingEmail(apiUser.getEmail()));</span>
+<span class="pc bpc" id="L911" title="1 of 2 branches missed.">        dto.setFirstName(apiUser.getFirstName() == null ? &quot;&quot; : apiUser.getFirstName());</span>
+<span class="pc bpc" id="L912" title="1 of 2 branches missed.">        dto.setLastName(apiUser.getLastName() == null ? &quot;&quot; : apiUser.getLastName());</span>
+<span class="pc bpc" id="L913" title="1 of 2 branches missed.">        dto.setTitle(apiUser.getTitle() == null ? &quot;&quot; : apiUser.getTitle());</span>
+<span class="pc bpc" id="L914" title="1 of 2 branches missed.">        if (apiUser.getGenderMF() != null) {</span>
+<span class="pc bpc" id="L915" title="1 of 2 branches missed.">            dto.setGender(apiUser.getGenderMF().equals(&quot;f&quot;) ? 0 : 1);</span>
+        }
+        // Give priority to gender until genderMF has been removed
+<span class="pc bpc" id="L918" title="1 of 2 branches missed.">        if (StringUtils.isNotBlank(apiUser.getGender())) {</span>
+<span class="fc" id="L919">            dto.setGender(Gender.getByLetter(apiUser.getGender()).getId());</span>
+        }
+<span class="fc" id="L921">        dto.setDob(apiUser.getDob());</span>
+
+<span class="fc" id="L923">        List&lt;NationalId&gt; nationalIds = convertApiNationalIds(apiUser.getNationalIds()).stream().map(validNationalId -&gt; new NationalId(validNationalId, VersionDetails.of(requestContext))).collect(toList());</span>
+<span class="fc" id="L924">        dto.setNationalIds(nationalIds);</span>
+
+<span class="fc" id="L926">        List&lt;ApiOrgLevelId&gt; aolids = apiUser.getOrgLevelIds();</span>
+<span class="pc bpc" id="L927" title="3 of 4 branches missed.">        if ((aolids != null) &amp;&amp; (team != null)) {</span>
+            // Use the first type and assume this is safe. Prior validation
+            // should have errored if this is not true
+<span class="nc" id="L930">            SortedSet&lt;OrgLevelIdType&gt; olidts = team.getOrg().getOrgLevelIdTypes();</span>
+<span class="nc" id="L931">            OrgLevelIdType olidt = olidts.iterator().next();</span>
+
+<span class="nc" id="L933">            SortedSet&lt;OrgLevelId&gt; olids = new TreeSet&lt;&gt;();</span>
+<span class="nc bnc" id="L934" title="All 2 branches missed.">            for (ApiOrgLevelId aolid : aolids) {</span>
+<span class="nc" id="L935">                OrgLevelId olid = new OrgLevelId(VersionDetails.of(requestContext));</span>
+<span class="nc bnc" id="L936" title="All 2 branches missed.">                olid.setValue(aolid.getValue() == null ? &quot;&quot; : aolid.getValue());</span>
+<span class="nc" id="L937">                olid.setType(olidt);</span>
+<span class="nc" id="L938">                olid.setOrg(team.getOrg());</span>
+<span class="nc" id="L939">                olids.add(olid);</span>
+<span class="nc" id="L940">            }</span>
+<span class="nc" id="L941">            dto.setOrgLevelIds(olids);</span>
+        }
+
+<span class="fc" id="L944">        List&lt;ApiTeamLevelId&gt; atlids = apiUser.getTeamLevelIds();</span>
+<span class="pc bpc" id="L945" title="3 of 4 branches missed.">        if ((atlids != null) &amp;&amp; (team != null)) {</span>
+            // Use the first type and assume this is safe. Prior validation
+            // should have errored if this is not true
+<span class="nc" id="L948">            SortedSet&lt;TeamLevelIdType&gt; tlidts = team.getTeamLevelIdTypes();</span>
+<span class="nc" id="L949">            TeamLevelIdType tlidt = tlidts.iterator().next();</span>
+
+<span class="nc" id="L951">            SortedSet&lt;TeamLevelId&gt; teamLevelIds = new TreeSet&lt;&gt;();</span>
+<span class="nc bnc" id="L952" title="All 2 branches missed.">            for (ApiTeamLevelId apiTeamLevelId : atlids) {</span>
+<span class="nc" id="L953">                TeamLevelId tlid = new TeamLevelId(VersionDetails.of(requestContext));</span>
+<span class="nc bnc" id="L954" title="All 2 branches missed.">                tlid.setValue(apiTeamLevelId.getValue() == null ? &quot;&quot; : apiTeamLevelId.getValue());</span>
+<span class="nc" id="L955">                tlid.setType(tlidt);</span>
+<span class="nc" id="L956">                tlid.setTeam(team);</span>
+<span class="nc" id="L957">                teamLevelIds.add(tlid);</span>
+<span class="nc" id="L958">            }</span>
+<span class="nc" id="L959">            dto.setTeamLevelIds(teamLevelIds);</span>
+        }
+
+<span class="fc" id="L962">        List&lt;ApiContact&gt; apiContacts = apiUser.getContacts();</span>
+<span class="fc bfc" id="L963" title="All 2 branches covered.">        if (apiContacts != null) {</span>
+<span class="fc" id="L964">            List&lt;PersonContact&gt; contacts = new ArrayList&lt;&gt;(apiContacts.size());</span>
+<span class="fc bfc" id="L965" title="All 2 branches covered.">            for (ApiContact apiContact : apiContacts) {</span>
+<span class="fc" id="L966">                PersonContact pc = new PersonContact();</span>
+<span class="fc" id="L967">                pc.setPublicId(UUID.randomUUID());</span>
+<span class="fc" id="L968">                pc.setConfirmed(apiContact.isConfirmed());</span>
+
+<span class="fc" id="L970">                ContactType type = ContactType.valueOf(apiContact.getContactType());</span>
+<span class="fc bfc" id="L971" title="All 2 branches covered.">                if (type == ContactType.EMAIL) {</span>
+<span class="fc" id="L972">                    pc.setContactAsEmail(disclosingEmail(apiContact.getContactValue()));</span>
+<span class="fc bfc" id="L973" title="All 2 branches covered.">                } else if (type == ContactType.PHONE) {</span>
+<span class="nc" id="L974">                    pc.setContactAsPhone(disclosingPhone(apiContact.getContactValue()));</span>
+<span class="pc bpc" id="L975" title="2 of 4 branches missed.">                } else if (type == ContactType.ALSO_CONTACT &amp;&amp; isBlank(apiContact.getContactValue())) {</span>
+                    // TODO PHR-7969 is it even possible to have this case?
+<span class="fc" id="L977">                    pc.setToAlsoContact(null);</span>
+                } else {
+<span class="nc" id="L979">                    throw new RuntimeException(&quot;Unhandled contact.&quot;);</span>
+                }
+
+<span class="fc" id="L982">                pc.setPrimary(apiContact.isPrimary());</span>
+<span class="fc" id="L983">                contacts.add(pc);</span>
+<span class="fc" id="L984">            }</span>
+<span class="fc" id="L985">            dto.setContacts(contacts);</span>
+        }
+
+<span class="fc" id="L988">        return dto;</span>
+    }
+
+    @NotNull
+    private List&lt;ValidNationalId&gt; convertApiNationalIds(@Nullable List&lt;ApiNationalId&gt; maybeApiNationalIds) {
+<span class="fc" id="L993">        return Optional.ofNullable(maybeApiNationalIds)</span>
+<span class="fc" id="L994">                .map(apiNationalIds -&gt; apiNationalIds.stream()</span>
+<span class="fc" id="L995">                        .map(apiNationalId -&gt;</span>
+<span class="fc" id="L996">                                NationalIdType.getNationalIdTypeFromApiNationalIdName(apiNationalId.getName())</span>
+<span class="fc" id="L997">                                        .flatMap(n -&gt; n.getValidNationalIdAndType(apiNationalId.getValue()))</span>
+<span class="pc" id="L998">                                        .orElseThrow(() -&gt; new ApiValidationError(&quot;invalid national ID type: &quot; + apiNationalId.getName() + &quot; value: &quot; + apiNationalId.getValue()))</span>
+                        )
+<span class="fc" id="L1000">                        .collect(toList())</span>
+                )
+<span class="fc" id="L1002">                .orElse(emptyList());</span>
+    }
+
+    /**
+     * Checks whether all provided {@code ApiNationalId}s are valid. This will
+     * return true if, and only if, every provided national ID is valid for
+     * their declared type. Additionally, if {@code correctType} is supplied,
+     * false will be returned if a national ID is supplied of a different type.
+     * &lt;p/&gt;
+     * true is immediately returned if the list of national IDs is null.
+     *
+     * @param loggedInUser The currently authenticated user.
+     * @param natIds       The list of IDs to check.
+     * @return true, if and only if, all provided national IDs are valid.
+     */
+    public boolean checkNationalIds(EHRRequestContext requestContext, PKBPerson loggedInUser, List&lt;ApiNationalId&gt; natIds) {
+
+<span class="fc" id="L1019">        Team t = teamUserManager.getPrimaryTeam(requestContext, loggedInUser.getId(), true);</span>
+
+<span class="pc bpc" id="L1021" title="1 of 2 branches missed.">        if (natIds == null) {</span>
+            // Nicely handle null input
+<span class="nc" id="L1023">            return true;</span>
+        }
+<span class="fc bfc" id="L1025" title="All 2 branches covered.">        for (ApiNationalId natId : natIds) {</span>
+<span class="fc" id="L1026">            NationalIdType type = NationalIdType.getNationalIdTypeFromApiNationalIdName(natId.getName()).orElse(null);</span>
+<span class="pc bpc" id="L1027" title="1 of 2 branches missed.">            if (type == null) {</span>
+                // Could not find type. Fail.
+<span class="nc" id="L1029">                return false;</span>
+            }
+
+<span class="fc" id="L1032">            Optional&lt;ValidNationalId&gt; maybeValidNationalId = type.getValidNationalIdAndType(natId.getValue());</span>
+<span class="pc bpc" id="L1033" title="1 of 2 branches missed.">            if (maybeValidNationalId.isEmpty()) {</span>
+                // Value supplied is not valid for the specified type
+<span class="nc" id="L1035">                return false;</span>
+            }
+<span class="fc" id="L1037">            PKBServiceUtil.checkSandboxNationalID(t.getOrg(), maybeValidNationalId.get().type(), maybeValidNationalId.get().value());</span>
+<span class="fc" id="L1038">        }</span>
+        // No problems found, so must be OK
+<span class="fc" id="L1040">        return true;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

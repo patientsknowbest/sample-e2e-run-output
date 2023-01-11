@@ -1,0 +1,732 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ApiAuthorizeAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.action</a> &gt; <span class="el_source">ApiAuthorizeAction.java</span></div><h1>ApiAuthorizeAction.java</h1><pre class="source lang-java linenums">package com.pkb.api.action;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.action.twofactor.AbstractTwoFactorAction;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.crypto.util.RandomUtil;
+import com.pkb.datamodel.ApiAuthSession;
+import com.pkb.datamodel.ApiClient;
+import com.pkb.datamodel.Email;
+import com.pkb.datamodel.ModifiableApiAuthSession;
+import com.pkb.datamodel.entity.mapper.UserTypeToScopeMapper;
+import com.pkb.entities.enums.LoginAttemptLogResult;
+import com.pkb.entities.enums.UserStatus;
+import com.pkb.entities.enums.api.ApiClientScope;
+import com.pkb.institute.entity.Team;
+import com.pkb.institute.entity.TeamWithPKBPerson;
+import com.pkb.security.ApiAuthInfo;
+import com.pkb.security.ImmutableApiAuthInfo;
+import com.pkb.security.LoginAttemptAuditor;
+import com.pkb.security.PKBAuthenticationDetails;
+import com.pkb.security.PKBAuthenticationManager;
+import com.pkb.security.TooManyLoginAttemptsException;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.ApiAuthManager;
+import com.pkb.service.user.impl.PersonContactManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PersonContact;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.struts2.interceptor.ServletResponseAware;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolder;
+
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpSession;
+import javax.ws.rs.core.UriBuilder;
+import java.net.URLEncoder;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import static com.pkb.datamodel.ApiAuthSession.LOOKUP_LENGTH;
+import static com.pkb.datamodel.ApiAuthSession.SECRET_SEPARATOR;
+import static com.pkb.datamodel.ImmutableDisclosingEmail.disclosingEmail;
+import static com.pkb.entities.enums.LoginAttemptLogResult.FAIL_BAD_PASSWORD;
+import static com.pkb.entities.enums.api.ApiAuthSessionStatus.AUTHENTICATED;
+import static com.pkb.entities.enums.api.ApiAuthSessionStatus.CREATED;
+import static com.pkb.entities.enums.api.ApiAuthSessionStatus.INVALID;
+import static com.pkb.entities.enums.api.ApiAuthSessionStatus.PRE_2FA;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.isNumeric;
+import static org.springframework.security.web.context.HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY;
+import static org.springframework.util.CollectionUtils.isEmpty;
+
+/**
+ * OAuth 2 process:
+ * Docs here: https://sites.google.com/a/patientsknowbest.com/technology/Home/technologies/oauth-v20/oauth-20-the-good-bits/
+ *
+ * @author robwhelan
+ */
+@SuppressWarnings(&quot;OverlyComplexClass&quot;)
+<span class="fc" id="L70">public class ApiAuthorizeAction extends AbstractTwoFactorAction implements ServletResponseAware {</span>
+    private static final long serialVersionUID = 1L;
+<span class="fc" id="L72">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String MSG_AUTH = &quot;auth&quot;;
+    private static final String MSG_TOO_MANY_REQUESTS = &quot;tooManyLoginAttempts&quot;;
+    private static final String AUTH_COMPLETE_REDIRECT = &quot;authCompleteRedirect&quot;;
+    private static final String REDIRECT_TWO_FA_SETUP = &quot;twoFaMandatoryRedirect&quot;;
+    private static final String AUTH_TWO_FACTOR = &quot;authTwoFactor&quot;;
+    private static final String ERROR_REDIRECT = &quot;errorRedirect&quot;;
+    private static final String SELECT_TEAM = &quot;apiAuthorizeSelectTeam&quot;;
+    private static final String MSG_SCOPE = &quot;scope&quot;;
+
+    // incoming params
+    private String msg;
+
+    /**
+     * always &quot;code&quot; in the implemented flow
+     */
+    private String response_type;
+
+    private String client_id;
+
+    private String scope;
+
+    private String redirect_uri;
+
+    /**
+     * we just pass this through
+     */
+    private String state;
+
+    private String approveUsername;
+
+    private String approvePassword;
+
+    private Long teamId;
+
+    private String providedCode;
+
+    private String newSecret;
+
+    /**
+     * the client (if lookup was successful)
+     */
+    private ApiClient apiClient;
+
+    /**
+     * included in the form so we know which session is being approved
+     */
+    private String sessionId;
+
+    /**
+     * the full URI (including our response) that we're sending back to the end-user
+     */
+    private String returnRedirectUri;
+
+    private HttpServletResponse servletResponse;
+
+    private ApiAuthManager apiAuthManager;
+
+    private PersonContactManager personContactManager;
+
+    private TeamUserManager teamUserManager;
+
+    private UserTypeToScopeMapper userTypeToScopeMapper;
+
+    private String redirectErrorMsgParam;
+
+    private LoginAttemptAuditor.Factory loginAttemptAuditorFactory;
+
+    @Autowired
+    private PKBAuthenticationManager authenticationManager;
+
+    @SuppressWarnings(&quot;ThrowCaughtLocally&quot;)
+    public String doRedirect() {
+        // if there are any problems with the client_id or redirect_uri, just show the end user an error...
+        // we don't have any safe way to notify the app (we can't use the redirect)
+        try {
+            // valid client id?
+<span class="pc" id="L150">            apiClient = apiAuthManager.getApiClientByApiId(client_id).orElseThrow(() -&gt; new SecurityException(&quot;invalid client_id&quot;));</span>
+<span class="fc" id="L151">            client_id = apiClient.getApiId();</span>
+
+            // redirect URI matches, or is blank?
+            // The ApiClient has a csv list of redirectUris (1+)
+            // The redirectUri param can be blank IFF there's just one possibility for this ApiClient -- otherwise
+            //   it's required, and must be in the list.
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">            if (!apiClient.isRedirectionEndpointValid(returnRedirectUri)) {</span>
+<span class="nc" id="L158">                throw new SecurityException(</span>
+                        &quot;invalid returnRedirectUri: &quot; + returnRedirectUri + &quot;: doesn't match stored value for client &quot; + apiClient);
+            }
+<span class="nc" id="L161">        } catch (Exception e) {</span>
+            // don't tell them if the client_id or returnRedirectUri was the problem, to avoid helping attackers
+<span class="nc" id="L163">            LOGGER.error(&quot;Failed authorization request due to &quot;, e);</span>
+<span class="nc" id="L164">            addActionError(getText(&quot;err.global.api.auth.error&quot;));</span>
+<span class="nc" id="L165">            return &quot;globalError&quot;;</span>
+<span class="fc" id="L166">        }</span>
+        // otherwise we're okay to proceed
+<span class="fc" id="L168">        return SUCCESS;</span>
+    }
+
+    @SuppressWarnings(&quot;ThrowCaughtLocally&quot;)
+    @Override
+    public String input() {
+<span class="fc bfc" id="L174" title="All 2 branches covered.">        if (MSG_AUTH.equals(msg)) {</span>
+<span class="fc" id="L175">            addActionError(getText(&quot;authorizeForm.err.invalid_username_or_password&quot;));</span>
+<span class="fc bfc" id="L176" title="All 2 branches covered.">        } else if (MSG_TOO_MANY_REQUESTS.equals(msg)) {</span>
+<span class="fc" id="L177">            addActionError(getText(&quot;authorizeForm.err.too_many_login_attempts&quot;));</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">        } else if (MSG_SCOPE.equals(msg)) {</span>
+<span class="fc" id="L179">            addActionError(getText(&quot;authorizeForm.err.invalid_scope&quot;));</span>
+        }
+        // if there are any problems with the client_id or redirect_uri, just show the end user an error...
+        // we don't have any safe way to notify the app (we can't use the redirect)
+        try {
+            // valid client id?
+<span class="fc" id="L185">            apiClient = apiAuthManager.getApiClientByApiId(client_id).orElseThrow(() -&gt; new SecurityException(&quot;invalid client_id&quot;));</span>
+
+            // redirect URI matches, or is blank?
+<span class="fc bfc" id="L188" title="All 2 branches covered.">            if (!apiClient.isRedirectionEndpointValid(redirect_uri)) {</span>
+<span class="fc" id="L189">                throw new SecurityException(&quot;invalid redirect_uri: doesn't match stored value&quot;);</span>
+            }
+<span class="fc" id="L191">        } catch (Exception e) {</span>
+<span class="fc" id="L192">            LOGGER.error(&quot;Failed authorization request due to &quot;, e);</span>
+<span class="fc" id="L193">            addActionError(getText(&quot;err.global.api.auth.error&quot;));</span>
+<span class="fc" id="L194">            return &quot;globalError&quot;;</span>
+<span class="fc" id="L195">        }</span>
+
+<span class="fc" id="L197">        var session = ModifiableApiAuthSession.create()</span>
+<span class="fc" id="L198">                .setStatus(CREATED)</span>
+<span class="fc" id="L199">                .setSessionId(RandomUtil.randomString(LOOKUP_LENGTH))</span>
+<span class="fc" id="L200">                .setApiClient(apiClient)</span>
+<span class="fc" id="L201">                .setRedirectionEndpoint(apiClient.getSelectedRedirectionEndpoint(redirect_uri))</span>
+<span class="fc" id="L202">                .setState(Optional.ofNullable(state));</span>
+        try {
+<span class="fc bfc" id="L204" title="All 2 branches covered.">            if (!&quot;code&quot;.equals(response_type)) {</span>
+<span class="fc" id="L205">                LOGGER.error(&quot;response_type not 'code'; got {}&quot;, response_type);</span>
+<span class="fc" id="L206">                returnRedirectUri = buildRedirectUri(session, &quot;error&quot;, &quot;unsupported_response_type&quot;);</span>
+<span class="fc" id="L207">                return ERROR_REDIRECT;</span>
+            }
+
+<span class="fc bfc" id="L210" title="All 2 branches covered.">            if (StringUtils.isEmpty(scope)) {</span>
+                // default to scope allowed by app
+<span class="fc" id="L212">                scope = apiClient.getScopeAllowed().map(ApiClientScope::toString).orElse(&quot;&quot;).toLowerCase();</span>
+            }
+
+<span class="fc" id="L215">            var scopeObj = ApiClientScope.lookup(scope);</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">            if (!apiClient.isScopeAllowed(scopeObj)) {</span>
+<span class="fc" id="L217">                LOGGER.error(&quot;returning invalid scope {} but scope allowed is {}&quot;, scope, apiClient.getScopeAllowed().map(ApiClientScope::toString).orElse(&quot;&quot;));</span>
+<span class="fc" id="L218">                returnRedirectUri = buildRedirectUri(session, &quot;error&quot;, &quot;INVALID_SCOPE&quot;);</span>
+<span class="fc" id="L219">                return ERROR_REDIRECT;</span>
+            }
+
+            // Everything looks good!  Create the ApiAuthSession to store the details
+<span class="fc" id="L223">            session.setScope(scopeObj);</span>
+<span class="fc" id="L224">            apiAuthManager.createAuthSession(session);</span>
+
+<span class="fc" id="L226">            sessionId = session.getSessionId();</span>
+<span class="fc" id="L227">        } catch (Exception e) {</span>
+            // client_id and redirect_uri were okay, so send these errors back via the redirect
+<span class="fc" id="L229">            LOGGER.error(&quot;unexpected error in authorization request handling&quot;, e);</span>
+<span class="fc" id="L230">            returnRedirectUri = buildRedirectUri(session, &quot;error&quot;, &quot;server_error&quot;);</span>
+<span class="fc" id="L231">            return ERROR_REDIRECT;</span>
+<span class="fc" id="L232">        }</span>
+
+        // Set the no-frames header and show the authorize page
+<span class="fc" id="L235">        servletResponse.setHeader(&quot;x-frame-options&quot;, &quot;deny&quot;);</span>
+<span class="fc" id="L236">        return SUCCESS;</span>
+    }
+
+    public String deny() {
+<span class="fc" id="L240">        var session = apiAuthManager.getAuthSession(sessionId);</span>
+        try {
+            // log the denial; track this in the database?
+<span class="fc" id="L243">            LOGGER.error(&quot;user denied access to ApiClient {}&quot;, sessionId);</span>
+<span class="fc" id="L244">            var modifiableSession = ModifiableApiAuthSession.create()</span>
+<span class="pc" id="L245">                    .from(session.orElseThrow(() -&gt; new IllegalStateException(&quot;Missing ApiAuthSession&quot;)));</span>
+<span class="fc" id="L246">            apiClient = modifiableSession.getApiClient();</span>
+<span class="fc" id="L247">            client_id = apiClient.getApiId();</span>
+
+            // invalidate the session in the db
+<span class="fc" id="L250">            modifiableSession.setStatus(INVALID);</span>
+
+            // send this error back via the redirect
+<span class="fc" id="L253">            returnRedirectUri = buildAccessDeniedRedirectUri(apiAuthManager.updateAuthSession(modifiableSession, ApiAuthManager.ReEncryptPassword.NO));</span>
+<span class="fc" id="L254">            return ERROR_REDIRECT;</span>
+<span class="nc" id="L255">        } catch (Exception e) {</span>
+<span class="nc" id="L256">            LOGGER.error(&quot;unexpected error in deny auth request handling; sessionId {}&quot;, sessionId, e);</span>
+<span class="nc" id="L257">            returnRedirectUri = buildRedirectUri(session.orElse(null), &quot;error&quot;, &quot;server_error&quot;);</span>
+<span class="nc" id="L258">            return ERROR_REDIRECT;</span>
+        }
+    }
+
+    /**
+     * end-user approved app and submitted username/password: return auth code
+     */
+    @SuppressWarnings({&quot;InstanceofCatchParameter&quot;, &quot;ThrowCaughtLocally&quot;})
+    @Override
+    public String execute() {
+<span class="fc" id="L268">        var apiAuthSession = apiAuthManager.getAuthSession(sessionId);</span>
+        try {
+            //noinspection ConstantConditions
+<span class="fc" id="L271">            var modifiableSession = ModifiableApiAuthSession.create()</span>
+<span class="pc" id="L272">                    .from(apiAuthSession.orElseThrow(() -&gt; new IllegalStateException(&quot;Missing ApiAuthSession&quot;)));</span>
+<span class="fc" id="L273">            apiClient = modifiableSession.getApiClient();</span>
+<span class="fc" id="L274">            client_id = apiClient.getApiId();</span>
+<span class="fc" id="L275">            Email trimmedUserName = disclosingEmail(approveUsername);</span>
+<span class="fc" id="L276">            var usernameMatch = findUserNameMatch(getActivePersonContactsForEmail(trimmedUserName));</span>
+<span class="fc bfc" id="L277" title="All 2 branches covered.">            if (usernameMatch.isEmpty()) {</span>
+<span class="pc bpc" id="L278" title="2 of 4 branches missed.">                if (teams != null &amp;&amp; teams.size() &gt; 1) {</span>
+<span class="fc" id="L279">                    return SELECT_TEAM;</span>
+                }
+<span class="nc" id="L281">                LOGGER.info(&quot;Username [{}] ({} chars) not found in API authorisation.&quot;, trimmedUserName.address(), trimmedUserName.address().length());</span>
+<span class="nc" id="L282">                throw new Exception(&quot;Found no user for given username; failing authentication.&quot;);</span>
+            }
+<span class="fc bfc" id="L284" title="All 2 branches covered.">            if (!userTypeToScopeMapper.isUserTypeInScope(usernameMatch.get().getUserType(), modifiableSession.getScope())) {</span>
+<span class="fc" id="L285">                redirectErrorMsgParam = MSG_SCOPE;</span>
+<span class="fc" id="L286">                throw new Exception(&quot;User type &quot; + usernameMatch.get().getUserType() + &quot; but scope is &quot; + modifiableSession.getScope());</span>
+            }
+
+            // throws PKBException if auth fails
+<span class="fc" id="L290">            PersonAuthInfo authUser = verifyCredentials(usernameMatch.get().getId(), approvePassword);</span>
+<span class="fc" id="L291">            LOGGER.info(&quot;authentication succeeded for API user {}&quot;, usernameMatch.get().getId());</span>
+<span class="pc bpc" id="L292" title="2 of 4 branches missed.">            Predicate&lt;UserStatus&gt; notActive = status -&gt; UserStatus.ACTIVE != status &amp;&amp; UserStatus.EMAIL_CONFIRMED != status;</span>
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">            if (notActive.test(usernameMatch.get().getStatus())) {</span>
+<span class="nc" id="L294">                throw new Exception(&quot;User is not active&quot;);</span>
+            }
+
+<span class="fc" id="L297">            modifiableSession.setPersonId(usernameMatch.get().getId());</span>
+<span class="fc" id="L298">            modifiableSession.setPassword(approvePassword);</span>
+<span class="fc" id="L299">            modifiableSession.setAuthCodePart(RandomUtil.randomString(LOOKUP_LENGTH));</span>
+            // Timestamp is set on web server -- so only validate on web server to avoid drift mismatch
+            // See ApiTokenAction
+<span class="fc" id="L302">            modifiableSession.setAuthCodeIssued(dateTimeService.now());</span>
+
+<span class="fc" id="L304">            return chooseExecuteResult(usernameMatch.get(), authUser, modifiableSession);</span>
+<span class="fc" id="L305">        } catch (Exception e) {</span>
+<span class="fc" id="L306">            LOGGER.error(&quot;auth failed in API approve attempt&quot;, e);</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">            if (redirectErrorMsgParam == null) {</span>
+<span class="fc bfc" id="L308" title="All 2 branches covered.">                redirectErrorMsgParam = (e instanceof TooManyLoginAttemptsException) ? MSG_TOO_MANY_REQUESTS : MSG_AUTH;</span>
+            }
+<span class="fc" id="L310">            returnRedirectUri = buildAccessDeniedRedirectUri(apiAuthSession.orElse(null));</span>
+<span class="fc" id="L311">            return ERROR_REDIRECT;</span>
+        }
+    }
+
+    private Optional&lt;PKBPerson&gt; findUserNameMatch(List&lt;PersonContact&gt; contacts) {
+<span class="pc bpc" id="L316" title="1 of 2 branches missed.">        if (isEmpty(contacts)) {</span>
+<span class="nc" id="L317">            return Optional.empty();</span>
+        }
+<span class="fc" id="L319">        var person = contacts.get(0).getPerson();</span>
+<span class="fc bfc" id="L320" title="All 2 branches covered.">        if (contacts.size() == 1) {</span>
+<span class="fc" id="L321">            return Optional.of(person);</span>
+        }
+<span class="fc" id="L323">        var humanUUID = person.getHumanUUID();</span>
+<span class="fc bfc" id="L324" title="All 2 branches covered.">        if (teamId != null) {</span>
+<span class="fc" id="L325">            return Optional.ofNullable(teamUserManager.getSpecificPersonaForTeam(humanUUID, teamId));</span>
+        }
+<span class="fc" id="L327">        setTeams(teamUserManager.getAllActiveTeamsForClinicianWithHumanUUID(humanUUID)</span>
+<span class="fc" id="L328">                .stream()</span>
+<span class="fc" id="L329">                .map(TeamWithPKBPerson::getTeam)</span>
+<span class="fc" id="L330">                .collect(Collectors.toList()));</span>
+<span class="pc bpc" id="L331" title="2 of 4 branches missed.">        if (teams == null || teams.isEmpty()) {</span>
+            // user is probably deactivated
+<span class="nc" id="L333">            return Optional.of(person);</span>
+        }
+<span class="pc bpc" id="L335" title="1 of 2 branches missed.">        if (teams.size() == 1) {</span>
+            // user has one team he can choose from (on other team user is probably deactivated)
+<span class="nc" id="L337">            return Optional.ofNullable(teamUserManager.getSpecificPersonaForTeam(humanUUID, teams.get(0).getId()));</span>
+        }
+<span class="fc" id="L339">        return Optional.empty();</span>
+    }
+
+    private String chooseExecuteResult(PKBPerson person, PersonAuthInfo authUser, ModifiableApiAuthSession session) {
+<span class="fc bfc" id="L343" title="All 2 branches covered.">        if (twoFactorAuthenticationService.isTwoFactorCheckRequired(person)) {</span>
+<span class="fc" id="L344">            return sendToAuthenticateWith2ndFactor(session);</span>
+<span class="fc bfc" id="L345" title="All 2 branches covered.">        } else if (twoFactorAuthenticationService.isTwoFactorAuthMandatory(person)) {</span>
+            //sets the new secret back into the session
+<span class="fc" id="L347">            var updatedSession = apiAuthManager.updateAuthSession(session, ApiAuthManager.ReEncryptPassword.YES);</span>
+<span class="pc" id="L348">            newSecret = updatedSession.getNewSecret().orElseThrow(() -&gt; new IllegalStateException(&quot;Missing new secret&quot;));</span>
+
+<span class="fc" id="L350">            Optional&lt;ApiAuthInfo&gt; apiAuthInfo = Optional.of(ImmutableApiAuthInfo.builder()</span>
+<span class="fc" id="L351">                    .apiAuthSessionId(sessionId)</span>
+<span class="fc" id="L352">                    .newSecret(newSecret)</span>
+<span class="fc" id="L353">                    .build());</span>
+<span class="fc" id="L354">            UsernamePasswordAuthenticationToken token = authenticationManager.getAuthToken(null,</span>
+<span class="fc" id="L355">                    request.getRemoteAddr(),</span>
+<span class="fc" id="L356">                    authUser.getId(),</span>
+                    true,
+                    apiAuthInfo,
+<span class="fc" id="L359">                    Optional.empty(),</span>
+                    authUser,
+                    approvePassword,
+                    person);
+<span class="fc" id="L363">            SecurityContext sc = SecurityContextHolder.getContext();</span>
+<span class="fc" id="L364">            sc.setAuthentication(token);</span>
+<span class="fc" id="L365">            HttpSession httpSession = request.getSession(true);</span>
+<span class="fc" id="L366">            httpSession.setAttribute(SPRING_SECURITY_CONTEXT_KEY, sc);</span>
+<span class="fc" id="L367">            return REDIRECT_TWO_FA_SETUP;</span>
+        } else {
+<span class="fc" id="L369">            return finishNon2FAAuthentication(session);</span>
+        }
+    }
+
+    @VisibleForTesting
+    List&lt;PersonContact&gt; getActivePersonContactsForEmail(Email trimmedUserName) {
+<span class="fc" id="L375">        return Optional.of(</span>
+<span class="fc" id="L376">                        personContactManager.findPersonByConfirmedOrPrimaryEmail(trimmedUserName, PersonContact.Lazy.PERSON))</span>
+<span class="fc" id="L377">                .orElse(Collections.emptyList())</span>
+<span class="fc" id="L378">                .stream()</span>
+<span class="pc bpc" id="L379" title="1 of 2 branches missed.">                .filter(pc -&gt; UserStatus.EMAIL_CONFIRMED == pc.getPerson().getStatus())</span>
+<span class="fc" id="L380">                .collect(toList());</span>
+    }
+
+    public String authorizeapi2fa() {
+<span class="fc" id="L384">        String result = ERROR_REDIRECT;</span>
+<span class="fc" id="L385">        var session = apiAuthManager.getAuthSession(sessionId);</span>
+        try {
+<span class="pc bpc" id="L387" title="1 of 2 branches missed.">            if (session.isEmpty()) {</span>
+<span class="nc" id="L388">                LOGGER.error(&quot;Session not found for id: {}.&quot;, sessionId);</span>
+<span class="nc" id="L389">                returnRedirectUri = buildAccessDeniedRedirectUri(null);</span>
+<span class="nc" id="L390">                result = ERROR_REDIRECT;</span>
+            } else {
+<span class="fc" id="L392">                result = perform2FAAuth(ModifiableApiAuthSession.create().from(session.get()));</span>
+            }
+<span class="nc" id="L394">        } catch (Exception e) {</span>
+<span class="nc" id="L395">            LOGGER.error(&quot;2FA auth failed in API!&quot;, e);</span>
+<span class="nc" id="L396">            returnRedirectUri = buildRedirectUri(session.orElse(null), &quot;error&quot;, &quot;server_error&quot;);</span>
+<span class="nc" id="L397">            result = ERROR_REDIRECT;</span>
+<span class="fc" id="L398">        }</span>
+<span class="fc" id="L399">        return result;</span>
+    }
+
+    @SuppressWarnings(&quot;ThrowCaughtLocally&quot;)
+    public String finishMandatory2fa() {
+<span class="fc" id="L404">        String result = ERROR_REDIRECT;</span>
+        try {
+<span class="fc" id="L406">            HttpSession session = request.getSession(true);</span>
+<span class="fc" id="L407">            SecurityContext sc = (SecurityContext) session.getAttribute(SPRING_SECURITY_CONTEXT_KEY);</span>
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">            if (sc == null) {</span>
+<span class="nc" id="L409">                throw new RuntimeException(&quot;No security context can be found!&quot;);</span>
+            }
+<span class="fc" id="L411">            var authentication = sc.getAuthentication();</span>
+<span class="pc bpc" id="L412" title="1 of 2 branches missed.">            if (authentication == null) {</span>
+<span class="nc" id="L413">                throw new RuntimeException(&quot;No authentication token can be found!&quot;);</span>
+            }
+<span class="fc" id="L415">            var authDetails = authentication.getDetails();</span>
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">            if (!PKBAuthenticationDetails.class.isInstance(authDetails)) {</span>
+<span class="nc" id="L417">                throw new RuntimeException(&quot;No authentication details can be found!&quot;);</span>
+            }
+<span class="fc" id="L419">            var pkbAuthDetails = PKBAuthenticationDetails.class.cast(authDetails);</span>
+<span class="pc bpc" id="L420" title="1 of 2 branches missed.">            if (!pkbAuthDetails.isOauthTwoFactorAuth()) {</span>
+<span class="nc" id="L421">                throw new RuntimeException(&quot;Not an oauth 2fa flow!&quot;);</span>
+            }
+<span class="pc" id="L423">            ApiAuthInfo apiAuthInfo = pkbAuthDetails.apiAuthInfo().orElseThrow(() -&gt; new RuntimeException(&quot;No ApiAuthInfo in auth details!&quot;));</span>
+<span class="fc" id="L424">            var apiAuthSession = apiAuthManager.getAuthSession(apiAuthInfo.apiAuthSessionId());</span>
+<span class="pc bpc" id="L425" title="1 of 2 branches missed.">            if (apiAuthSession.isEmpty()) {</span>
+<span class="nc" id="L426">                LOGGER.error(&quot;Session not found for id: {}.&quot;, apiAuthInfo.apiAuthSessionId());</span>
+<span class="nc" id="L427">                returnRedirectUri = buildAccessDeniedRedirectUri(null);</span>
+<span class="nc" id="L428">                result = ERROR_REDIRECT;</span>
+            } else {
+<span class="fc" id="L430">                var modifiableSession = ModifiableApiAuthSession.create().from(apiAuthSession.get());</span>
+<span class="pc bpc" id="L431" title="1 of 2 branches missed.">                if (pkbAuthDetails.twoFactorAuthDone()) {</span>
+<span class="fc" id="L432">                    result = set2faDone(modifiableSession, apiAuthInfo.newSecret());</span>
+                } else {
+<span class="nc" id="L434">                    buildAccessDeniedRedirectUri(modifiableSession);</span>
+                }
+            }
+<span class="nc" id="L437">        } catch (Exception e) {</span>
+<span class="nc" id="L438">            LOGGER.error(&quot;mandatory 2FA setup failed in API!&quot;, e);</span>
+<span class="nc" id="L439">            returnRedirectUri = buildRedirectUri(null, &quot;error&quot;, &quot;server_error&quot;);</span>
+<span class="nc" id="L440">            result = ERROR_REDIRECT;</span>
+<span class="fc" id="L441">        }</span>
+<span class="fc" id="L442">        return result;</span>
+    }
+
+    private String sendToAuthenticateWith2ndFactor(ModifiableApiAuthSession session) {
+<span class="fc" id="L446">        session.setStatus(PRE_2FA);</span>
+        //sets the new secret back into the session obj
+<span class="fc" id="L448">        var updatedSession = apiAuthManager.updateAuthSession(session, ApiAuthManager.ReEncryptPassword.YES);</span>
+<span class="pc" id="L449">        newSecret = updatedSession.getNewSecret().orElseThrow(() -&gt; new IllegalStateException(&quot;Missing new secret&quot;));</span>
+<span class="fc" id="L450">        return AUTH_TWO_FACTOR;</span>
+    }
+
+    private String finishNon2FAAuthentication(ModifiableApiAuthSession session) {
+<span class="fc" id="L454">        session.setStatus(AUTHENTICATED);</span>
+        //sets the new secret back into the session obj
+<span class="fc" id="L456">        var updatedSession = apiAuthManager.updateAuthSession(session, ApiAuthManager.ReEncryptPassword.YES);</span>
+        //return code in redirect
+<span class="fc" id="L458">        returnRedirectUri = buildRedirectUri(updatedSession, &quot;code&quot;,</span>
+<span class="fc" id="L459">                updatedSession.getAuthCodePart()</span>
+<span class="pc" id="L460">                        .orElseThrow(() -&gt; new IllegalStateException(&quot;Missing auth code part&quot;))</span>
+<span class="fc" id="L461">                        + SECRET_SEPARATOR + updatedSession.getNewSecret()</span>
+<span class="pc" id="L462">                        .orElseThrow(() -&gt; new IllegalStateException(&quot;Missing new secret&quot;)));</span>
+<span class="fc" id="L463">        return AUTH_COMPLETE_REDIRECT;</span>
+    }
+
+    private String perform2FAAuth(ModifiableApiAuthSession session) {
+<span class="fc" id="L467">        String result = ERROR_REDIRECT;</span>
+<span class="pc bpc" id="L468" title="2 of 4 branches missed.">        if (PRE_2FA == session.getStatus() &amp;&amp; session.getPersonId().isPresent()) {</span>
+<span class="fc bfc" id="L469" title="All 2 branches covered.">            if (isNumeric(providedCode)) {</span>
+<span class="fc" id="L470">                PKBPerson person = userManager.getPKBPerson(session.getPersonId().get());</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">                if (twoFactorAuthenticationService.authorize(person, Integer.parseInt(providedCode))) {</span>
+<span class="fc" id="L472">                    result = set2faDone(session, newSecret);</span>
+                } else {
+<span class="nc" id="L474">                    addFieldError(&quot;providedCode&quot;, getText(TWOFACTORAUTH_ERR_CODE_FAILED));</span>
+<span class="nc" id="L475">                    result = AUTH_TWO_FACTOR;</span>
+                }
+<span class="fc" id="L477">            } else {</span>
+<span class="fc" id="L478">                addFieldError(&quot;providedCode&quot;, getText(TWOFACTORAUTH_ERR_CODE_FAILED));</span>
+<span class="fc" id="L479">                result = AUTH_TWO_FACTOR;</span>
+            }
+        } else {
+<span class="nc" id="L482">            returnRedirectUri = buildAccessDeniedRedirectUri(session);</span>
+<span class="nc" id="L483">            result = ERROR_REDIRECT;</span>
+        }
+<span class="fc" id="L485">        return result;</span>
+    }
+
+    private String set2faDone(ModifiableApiAuthSession session, String secret) {
+<span class="fc" id="L489">        session.setStatus(AUTHENTICATED);</span>
+        //Do not re-encrypt password, as it was done earlier...
+<span class="fc" id="L491">        var updatedSession = apiAuthManager.updateAuthSession(session, ApiAuthManager.ReEncryptPassword.NO);</span>
+<span class="fc" id="L492">        returnRedirectUri = buildRedirectUri(updatedSession, &quot;code&quot;,</span>
+<span class="pc" id="L493">                updatedSession.getAuthCodePart().orElseThrow(() -&gt; new IllegalStateException(&quot;Missing auth code part&quot;)) + SECRET_SEPARATOR + secret);</span>
+<span class="fc" id="L494">        apiClient = updatedSession.getApiClient();</span>
+<span class="fc" id="L495">        client_id = apiClient.getApiId();</span>
+<span class="fc" id="L496">        return AUTH_COMPLETE_REDIRECT;</span>
+    }
+
+    private String buildAccessDeniedRedirectUri(ApiAuthSession session) {
+<span class="fc" id="L500">        return buildRedirectUri(session, &quot;error&quot;, &quot;access_denied&quot;);</span>
+    }
+
+    private List&lt;Team&gt; teams;
+
+    /**
+     * Login and logout again, or throw PKBException
+     */
+    private PersonAuthInfo verifyCredentials(long id, String password) {
+<span class="fc" id="L509">        PersonAuthInfo authUser = null;</span>
+<span class="fc" id="L510">        LoginAttemptAuditor loginAttemptAuditor = loginAttemptAuditorFactory.createAuditor(request.getRemoteAddr());</span>
+<span class="fc" id="L511">        loginAttemptAuditor.checkForTooManyRecentLoginAttempts(id);</span>
+        try {
+            // note: this is not an error; this method takes id, NOT username
+<span class="fc" id="L514">            authUser = userManager.authenticateUser(id, password);</span>
+<span class="fc" id="L515">            loginAttemptAuditor.logAttempt(LoginAttemptLogResult.SUCCESS, id);</span>
+<span class="fc" id="L516">        } catch (Exception e) {</span>
+<span class="fc" id="L517">            LOGGER.warn(&quot;failed verifying creds: invalid password for {}&quot;, id, e);</span>
+<span class="fc" id="L518">        }</span>
+
+<span class="fc bfc" id="L520" title="All 2 branches covered.">        if (authUser == null) {</span>
+<span class="fc" id="L521">            loginAttemptAuditor.logAttempt(FAIL_BAD_PASSWORD, id);</span>
+<span class="fc" id="L522">            throw new SecurityException(&quot;failed verifying creds: invalid password for &quot; + id);</span>
+        }
+<span class="fc" id="L524">        return authUser;</span>
+    }
+
+    /**
+     * Param added will be &quot;code&quot; or &quot;error&quot;
+     * Note: there must be a utility class that'll carefully handle adding new params to a query string...
+     * That'd be safer than tinkering here with ? and &amp; and encodings
+     */
+    @VisibleForTesting
+    String buildRedirectUri(@Nullable ApiAuthSession session, String addParamName, String addParamValue) {
+<span class="fc" id="L534">        String uri = redirect_uri;</span>
+        // override from session if possible
+<span class="pc bpc" id="L536" title="1 of 2 branches missed.">        if (session != null) {</span>
+<span class="fc" id="L537">            uri = session.getRedirectionEndpoint();</span>
+<span class="nc bnc" id="L538" title="All 4 branches missed.">        } else if ((apiClient != null) &amp;&amp; StringUtils.isBlank(uri)) {</span>
+            // take the value in the client if possible
+<span class="nc" id="L540">            uri = apiClient.getSingleRedirectionEndpoint();</span>
+        }
+        // still blank?  Default:
+<span class="pc bpc" id="L543" title="1 of 2 branches missed.">        if (StringUtils.isBlank(uri)) {</span>
+<span class="nc" id="L544">            uri = &quot;/error.jsp&quot;; // TODO: any better option?</span>
+        }
+
+<span class="fc" id="L547">        UriBuilder uriBuilder = UriBuilder.fromUri(uri);</span>
+
+        // add on state if we have that -- DON'T take from request if there's a session that didn't include it
+<span class="pc bpc" id="L550" title="1 of 2 branches missed.">        if (session != null) {</span>
+<span class="fc" id="L551">            var state = session.getState().orElse(null);</span>
+<span class="fc bfc" id="L552" title="All 2 branches covered.">            if (StringUtils.isNotBlank(state)) {</span>
+<span class="fc" id="L553">                uriBuilder.queryParam(&quot;state&quot;, urlEncode(state));</span>
+            }
+<span class="pc bnc" id="L555" title="All 2 branches missed.">        } else if (StringUtils.isNotBlank(state)) {</span>
+            // no session yet
+<span class="nc" id="L557">            uriBuilder.queryParam(&quot;state&quot;, urlEncode(state));</span>
+        }
+
+<span class="pc bpc" id="L560" title="3 of 4 branches missed.">        if (!getConfig().isDisplayOfSensitiveErrorInformationEnabled() &amp;&amp; &quot;code&quot;.equals(addParamName)) {</span>
+<span class="nc" id="L561">            LOGGER.info(&quot;returning redirect {}...snip...&quot;, uriBuilder.build());</span>
+<span class="nc" id="L562">            uriBuilder.queryParam(addParamName, urlEncode(addParamValue));</span>
+        } else {
+<span class="fc" id="L564">            uriBuilder.queryParam(addParamName, urlEncode(addParamValue));</span>
+<span class="fc" id="L565">            LOGGER.info(&quot;returning redirect {}&quot;, uriBuilder.build());</span>
+        }
+<span class="fc" id="L567">        return uriBuilder.build().toString();</span>
+    }
+
+    public String getMsg() {
+<span class="fc" id="L571">        return msg;</span>
+    }
+
+    public void setMsg(String msg) {
+<span class="fc" id="L575">        this.msg = msg;</span>
+<span class="fc" id="L576">    }</span>
+
+    public String getResponse_type() {
+<span class="fc" id="L579">        return response_type;</span>
+    }
+
+    public void setResponse_type(String response_type) {
+<span class="fc" id="L583">        this.response_type = response_type;</span>
+<span class="fc" id="L584">    }</span>
+
+    public String getClient_id() {
+<span class="fc" id="L587">        return client_id;</span>
+    }
+
+    public void setClient_id(String client_id) {
+<span class="fc" id="L591">        this.client_id = client_id;</span>
+<span class="fc" id="L592">    }</span>
+
+    public String getScope() {
+<span class="fc" id="L595">        return scope;</span>
+    }
+
+    public void setScope(String scope) {
+<span class="fc" id="L599">        this.scope = scope;</span>
+<span class="fc" id="L600">    }</span>
+
+    public String getRedirect_uri() {
+<span class="fc" id="L603">        return redirect_uri;</span>
+    }
+
+    public void setRedirect_uri(String redirect_uri) {
+<span class="fc" id="L607">        this.redirect_uri = redirect_uri;</span>
+<span class="fc" id="L608">    }</span>
+
+    public String getState() {
+<span class="fc" id="L611">        return state;</span>
+    }
+
+    public void setState(String state) {
+<span class="fc" id="L615">        this.state = state;</span>
+<span class="fc" id="L616">    }</span>
+
+    public void setApiAuthManager(ApiAuthManager apiAuthManager) {
+<span class="fc" id="L619">        this.apiAuthManager = apiAuthManager;</span>
+<span class="fc" id="L620">    }</span>
+
+    public ApiClient getApiClient() {
+<span class="fc" id="L623">        return apiClient;</span>
+    }
+
+    @Override
+    public void setServletResponse(HttpServletResponse response) {
+<span class="fc" id="L628">        servletResponse = response;</span>
+<span class="fc" id="L629">    }</span>
+
+    @SuppressWarnings(&quot;WeakerAccess&quot;)
+    public String getReturnRedirectUri() {
+<span class="fc" id="L633">        return returnRedirectUri;</span>
+    }
+
+    public String getReturnRedirectUriEscaped() {
+<span class="fc" id="L637">        return URLEncoder.encode(returnRedirectUri, UTF_8);</span>
+    }
+
+    public void setReturnRedirectUri(String returnRedirectUri) {
+<span class="fc" id="L641">        this.returnRedirectUri = returnRedirectUri;</span>
+<span class="fc" id="L642">    }</span>
+
+    public void setApproveUsername(String approveUsername) {
+<span class="fc" id="L645">        this.approveUsername = approveUsername;</span>
+<span class="fc" id="L646">    }</span>
+
+    public void setApprovePassword(String approvePassword) {
+<span class="fc" id="L649">        this.approvePassword = approvePassword;</span>
+<span class="fc" id="L650">    }</span>
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L653">        this.userManager = userManager;</span>
+<span class="fc" id="L654">    }</span>
+
+    public void setPersonContactManager(PersonContactManager personContactManager) {
+<span class="fc" id="L657">        this.personContactManager = personContactManager;</span>
+<span class="fc" id="L658">    }</span>
+
+    public String getSessionId() {
+<span class="fc" id="L661">        return sessionId;</span>
+    }
+
+    public void setSessionId(String sessionId) {
+<span class="fc" id="L665">        this.sessionId = sessionId;</span>
+<span class="fc" id="L666">    }</span>
+
+    public String getApproveUsername() {
+<span class="fc" id="L669">        return approveUsername;</span>
+    }
+
+    public String getApprovePassword() {
+<span class="fc" id="L673">        return approvePassword;</span>
+    }
+
+    public TeamUserManager getTeamUserManager() {
+<span class="nc" id="L677">        return teamUserManager;</span>
+    }
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L681">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L682">    }</span>
+
+    public void setLoginAttemptAuditorFactory(LoginAttemptAuditor.Factory loginAttemptAuditorFactory) {
+<span class="fc" id="L685">        this.loginAttemptAuditorFactory = loginAttemptAuditorFactory;</span>
+<span class="fc" id="L686">    }</span>
+
+    public List&lt;Team&gt; getTeams() {
+<span class="fc" id="L689">        return teams;</span>
+    }
+
+    public void setTeams(List&lt;Team&gt; teams) {
+<span class="fc" id="L693">        this.teams = teams;</span>
+<span class="fc" id="L694">    }</span>
+
+    public Long getTeamId() {
+<span class="fc" id="L697">        return teamId;</span>
+    }
+
+    public void setTeamId(Long teamId) {
+<span class="fc" id="L701">        this.teamId = teamId;</span>
+<span class="fc" id="L702">    }</span>
+
+    public void setProvidedCode(String providedCode) {
+<span class="fc" id="L705">        this.providedCode = providedCode;</span>
+<span class="fc" id="L706">    }</span>
+
+    public String getNewSecret() {
+<span class="fc" id="L709">        return newSecret;</span>
+    }
+
+    public void setNewSecret(String newSecret) {
+<span class="fc" id="L713">        this.newSecret = newSecret;</span>
+<span class="fc" id="L714">    }</span>
+
+    public void setUserTypeToScopeMapper(UserTypeToScopeMapper userTypeToScopeMapper) {
+<span class="fc" id="L717">        this.userTypeToScopeMapper = userTypeToScopeMapper;</span>
+<span class="fc" id="L718">    }</span>
+
+    public String getRedirectErrorMsgParam() {
+<span class="fc" id="L721">        return redirectErrorMsgParam;</span>
+    }
+
+    public void setRedirectErrorMsgParam(String redirectErrorMsgParam) {
+<span class="nc" id="L725">        this.redirectErrorMsgParam = redirectErrorMsgParam;</span>
+<span class="nc" id="L726">    }</span>
+
+    private String urlEncode(String input) {
+<span class="fc" id="L729">        return URLEncoder.encode(input, UTF_8);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

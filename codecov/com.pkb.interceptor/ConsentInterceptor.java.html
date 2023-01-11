@@ -1,0 +1,248 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConsentInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.interceptor</a> &gt; <span class="el_source">ConsentInterceptor.java</span></div><h1>ConsentInterceptor.java</h1><pre class="source lang-java linenums">package com.pkb.interceptor;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableMap;
+import com.opensymphony.xwork2.ActionContext;
+import com.opensymphony.xwork2.ActionInvocation;
+import com.opensymphony.xwork2.interceptor.MethodFilterInterceptor;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRRequestContext.AccountLinkType;
+import com.pkb.app.entity.ImmutableLoggedInUserEHRRequestContext;
+import com.pkb.app.entity.ImmutableLoggedOutEHRRequestContext;
+import com.pkb.app.entity.PersonAuthInfo;
+import com.pkb.consent.model.ConsentStatus;
+import com.pkb.dto.NhsLoginInfo;
+import com.pkb.entities.enums.Route;
+import com.pkb.exception.ConsentReviewRequiredException;
+import com.pkb.institute.entity.Team;
+import com.pkb.service.ehrrequestcontext.EHRRequestContextManager;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.AppIdentityUtil;
+import com.pkb.util.ContextUserUtil;
+import com.pkb.util.ContextUtil;
+import com.pkb.util.CorrelationIdUtil;
+import com.pkb.util.LoggedInUserUtil;
+import com.pkb.util.PKBConstants;
+import com.pkb.util.PKBWebUtil;
+import io.vavr.Tuple;
+import io.vavr.Tuple3;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.struts2.StrutsStatics;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import javax.annotation.Nullable;
+import javax.servlet.http.HttpServletRequest;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+
+import static com.pkb.app.entity.EHRRequestContext.AccountLinkType.NO_LINK;
+import static com.pkb.consent.model.AbstractConsentStatus.defaultConsent;
+import static com.pkb.entities.enums.PropertyName.CONSENT_REVIEW_COMPLETED;
+import static com.pkb.entities.enums.Route.NOT_CAPTURED;
+import static com.pkb.util.Constants.NHS_LOGIN_CORRELATION_ID;
+
+<span class="fc" id="L47">public class ConsentInterceptor extends MethodFilterInterceptor {</span>
+
+    private static final long serialVersionUID = -7761222164940252450L;
+<span class="fc" id="L50">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    @VisibleForTesting
+    static final String REVIEW_CACHE_KEY = &quot;ReviewConsentStatus&quot;;
+
+<span class="fc" id="L55">    private static final Map&lt;String, Tuple3&lt;Route, AccountLinkType, Boolean&gt;&gt; ACTION_TO_ROUTE_LINKTYPE_CONSENTREQUIRED_MAP = ImmutableMap.of(</span>
+<span class="fc" id="L56">            &quot;hl7Upload&quot;, Tuple.of(Route.HL7_API, AccountLinkType.ORG, Boolean.TRUE),</span>
+<span class="fc" id="L57">            &quot;coreDevicesNotificationCallback&quot;, Tuple.of(Route.CORE_DEVICES, AccountLinkType.NO_LINK, Boolean.FALSE));</span>
+
+    @Autowired
+    private EHRRequestContextManager ehrRequestContextManager;
+
+    @Autowired
+    private ContextUserUtil contextUserUtil;
+
+    @Autowired
+    private LoggedInUserUtil loggedInUserUtil;
+
+    @Autowired
+    private ContextUtil contextUtil;
+
+    @Autowired
+    private PKBWebUtil pkbWebUtil;
+
+    @Autowired
+    private AppIdentityUtil appIdentityUtil;
+
+    @Autowired
+    private CorrelationIdUtil correlationIdUtil;
+
+<span class="fc" id="L80">    public enum ReviewConsentStatus {</span>
+<span class="fc" id="L81">        REQUIRED, SUPPRESSED, NOT_REQUIRED</span>
+    }
+
+    @Override
+    protected String doIntercept(ActionInvocation invocation) throws Exception {
+<span class="fc" id="L86">        ActionContext context = invocation.getInvocationContext();</span>
+<span class="fc" id="L87">        Map&lt;String, Object&gt; session = context.getSession();</span>
+<span class="fc" id="L88">        HttpServletRequest request = (HttpServletRequest) context.get(StrutsStatics.HTTP_REQUEST);</span>
+<span class="fc bfc" id="L89" title="All 2 branches covered.">        Route route = appIdentityUtil.isNhsAppSession(request) ? Route.WEBAPP_NHS_APP : Route.WEBAPP;</span>
+
+<span class="fc" id="L91">        PersonAuthInfo principal = loggedInUserUtil.getPrincipal().orElse(null);</span>
+<span class="fc" id="L92">        Long contextUserId = contextUserUtil.getContextUserId();</span>
+
+<span class="fc bfc" id="L94" title="All 2 branches covered.">        if (request.getSession().getAttribute(PKBConstants.ROUTE) != null) {</span>
+<span class="fc" id="L95">            route = (Route) request.getSession().getAttribute(PKBConstants.ROUTE);</span>
+        }
+
+<span class="fc" id="L98">        UUID correlationId = correlationIdUtil.getCorrelationIdFromStringOrGenerateNewOne(getCorrelationIdFromRequest(request));</span>
+<span class="fc" id="L99">        EHRRequestContext requestContext = createEHRRequestContext(principal, contextUserId, invocation, route, correlationId);</span>
+<span class="fc" id="L100">        contextUtil.setEHRRequestContext(request, requestContext);</span>
+
+<span class="fc bfc" id="L102" title="All 2 branches covered.">        if (isConsentModelActive(principal, contextUserId)) {</span>
+<span class="fc" id="L103">            checkConsentReviewStatusForLoggedInUser(session);</span>
+        }
+
+<span class="pc bpc" id="L106" title="1 of 2 branches missed.">        if (requestContext != null) {</span>
+<span class="fc" id="L107">            correlationIdUtil.putIfAbsent(correlationId);</span>
+        }
+
+        try {
+<span class="fc" id="L111">            return invocation.invoke();</span>
+        } finally {
+<span class="fc" id="L113">            correlationIdUtil.remove();</span>
+        }
+    }
+
+    private boolean isConsentModelActive(PersonAuthInfo loggedInUser, Long contextUserId) {
+<span class="fc bfc" id="L118" title="All 6 branches covered.">        return (loggedInUser != null &amp;&amp; loggedInUser.isPatient()) || contextUserId != null;</span>
+    }
+
+    // TODO WARNING this is (mostly) copied into RestUtil.createEHRRequestContext()
+    private EHRRequestContext createEHRRequestContext(PersonAuthInfo loggedInUser, Long contextUserId,
+                                                      ActionInvocation invocation, Route route, UUID correlationId) {
+
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        if (loggedInUser == null) {</span>
+            // No logged in user, but this is expected for HL7 and other uploads
+<span class="fc" id="L127">            return Optional</span>
+<span class="fc" id="L128">                    .ofNullable(ACTION_TO_ROUTE_LINKTYPE_CONSENTREQUIRED_MAP.get(invocation.getInvocationContext().getName()))</span>
+<span class="fc" id="L129">                    .map(r -&gt; ImmutableLoggedOutEHRRequestContext.of(r._2, r._1, ConsentStatus.builder().required(r._3).build(), correlationId))</span>
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">                    .orElse(ImmutableLoggedOutEHRRequestContext.of(NO_LINK, (route == null ? NOT_CAPTURED : route), ConsentStatus.builder().build(), correlationId));</span>
+        }
+
+
+<span class="fc bfc" id="L134" title="All 6 branches covered.">        switch (loggedInUser.getUserType()) {</span>
+            case PATIENT:
+<span class="pc bpc" id="L136" title="1 of 4 branches missed.">                if ((contextUserId == null) || contextUserId.equals(loggedInUser.getId())) {</span>
+                    // Patient's own account
+<span class="fc" id="L138">                    return ehrRequestContextManager.createEHRRequestContextForOwner(loggedInUser,</span>
+                            correlationId, route);
+                } else /* context user is set, and is not the logged-in user */ {
+                    // Carer
+<span class="fc" id="L142">                    return ehrRequestContextManager.createEHRRequestContextForCarer(loggedInUser,</span>
+<span class="fc" id="L143">                            contextUserId, correlationId, route);</span>
+                }
+
+            case REG_CLINICIAN:
+            case INSTITUTE_ADMIN:
+<span class="fc" id="L148">                Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="fc" id="L149">                boolean breakTheGlassActive = pkbWebUtil.hasBreakTheGlassForPatient(contextUserId);</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">                if (team == null) {</span>
+<span class="fc" id="L151">                    return ehrRequestContextManager.createEHRRequestContextForIndividualClinician(loggedInUser,</span>
+                            contextUserId, correlationId, route);
+                } else {
+<span class="fc" id="L154">                    EHRRequestContext ehrRequestContext = ehrRequestContextManager.createEHRRequestContextForTeamClinician(loggedInUser, team,</span>
+                            contextUserId, correlationId, route, breakTheGlassActive);
+
+<span class="fc" id="L157">                    return ehrRequestContext;</span>
+                }
+            case ORG_COORD:
+<span class="fc" id="L160">                return ehrRequestContextManager.createEHRRequestContextForOrgCoord(loggedInUser,</span>
+                        correlationId, route);
+
+            case SUPER_ADMIN:
+                // superadmin has decrypt access for employees, and potentially non-team clinicians to reset passwords.
+                // that's NYI
+<span class="fc" id="L166">                return ehrRequestContextManager.createEHRRequestContextForPkbAdmin(loggedInUser,</span>
+                        correlationId, route);
+            case PRIVACY_OFFICER:
+<span class="fc" id="L169">                return ehrRequestContextManager.createEHRRequestContextForPrivacyOfficer(</span>
+                        loggedInUser, correlationId, route);
+
+        default:
+            // pkb admin, employee
+<span class="fc" id="L174">            return ImmutableLoggedInUserEHRRequestContext.of(NO_LINK, route, defaultConsent(), correlationId, loggedInUser);</span>
+        }
+    }
+
+    private void checkConsentReviewStatusForLoggedInUser(Map&lt;String, Object&gt; session)
+            throws ConsentReviewRequiredException {
+        ReviewConsentStatus status;
+        // Check the session to see if we have existing status
+<span class="fc" id="L182">        Object val = session.get(REVIEW_CACHE_KEY);</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">        if (val != null) {</span>
+<span class="fc" id="L184">            status = (ReviewConsentStatus) val;</span>
+        } else {
+            // Unknown status - check the person properties
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">            if (!loggedInUserUtil.isUserLoggedIn()) {</span>
+                // e.g. on logout.  short-circuit; nothing to do here!
+<span class="nc" id="L189">                return;</span>
+            }
+
+<span class="fc" id="L192">            PKBPerson person = loggedInUserUtil.getLoggedInPerson();</span>
+            // property will return false unless we find the property and it's set &quot;true&quot;
+<span class="fc bfc" id="L194" title="All 2 branches covered.">            boolean reviewRequired = person.isPatient()</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">                    &amp;&amp; !person.checkPropertyFlag(CONSENT_REVIEW_COMPLETED);</span>
+
+<span class="fc bfc" id="L197" title="All 4 branches covered.">            if (reviewRequired || isSelfRegistrationViaNHSLogin()) {</span>
+<span class="fc" id="L198">                status = ReviewConsentStatus.REQUIRED;</span>
+            } else {
+<span class="fc" id="L200">                status = ReviewConsentStatus.NOT_REQUIRED;</span>
+            }
+
+<span class="fc" id="L203">            session.put(REVIEW_CACHE_KEY, status);</span>
+        }
+
+<span class="fc bfc" id="L206" title="All 2 branches covered.">        if (status == ReviewConsentStatus.REQUIRED) {</span>
+            // Suppress the check so we don't go into a loop (this interceptor
+            // will run again on the first wizard page, so it mustn't throw again)
+<span class="fc" id="L209">            session.put(REVIEW_CACHE_KEY, ReviewConsentStatus.SUPPRESSED);</span>
+<span class="fc" id="L210">            throw new ConsentReviewRequiredException(&quot;Suppressed consent check&quot;);</span>
+        }
+<span class="fc" id="L212">    }</span>
+
+    @Override
+    protected boolean applyInterceptor(ActionInvocation invocation) {
+<span class="fc" id="L216">        String actionName = invocation.getProxy().getActionName();</span>
+
+<span class="pc bpc" id="L218" title="1 of 2 branches missed.">        for (String excludeActionName : excludeMethods) {</span>
+<span class="nc" id="L219">            LOGGER.debug(&quot;checking {} against current action {}&quot;, excludeActionName, actionName);</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">            if (StringUtils.equalsIgnoreCase(actionName, excludeActionName)) {</span>
+<span class="nc" id="L221">                return false;</span>
+            }
+<span class="nc" id="L223">        }</span>
+
+<span class="fc" id="L225">        return super.applyInterceptor(invocation);</span>
+    }
+
+    private boolean isSelfRegistrationViaNHSLogin() {
+<span class="fc" id="L229">        return loggedInUserUtil.getNhsLoginAuthenticationDetails()</span>
+<span class="fc" id="L230">                .flatMap(NhsLoginInfo::isSelfReg)</span>
+<span class="fc" id="L231">                .orElse(false);</span>
+    }
+
+    public EHRRequestContextManager getEhrRequestContextManager() {
+<span class="nc" id="L235">        return ehrRequestContextManager;</span>
+    }
+
+    public void setEhrRequestContextManager(
+            EHRRequestContextManager ehrRequestContextManager) {
+<span class="fc" id="L240">        this.ehrRequestContextManager = ehrRequestContextManager;</span>
+<span class="fc" id="L241">    }</span>
+
+    @Nullable
+    private String getCorrelationIdFromRequest(HttpServletRequest request) {
+<span class="fc" id="L245">        return (String) request.getSession().getAttribute(NHS_LOGIN_CORRELATION_ID);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

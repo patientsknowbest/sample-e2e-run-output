@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BaseEhrDataTransformer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.common.transform</a> &gt; <span class="el_source">BaseEhrDataTransformer.java</span></div><h1>BaseEhrDataTransformer.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.common.transform;
+
+import com.pkb.common.ehrdata.serialization.EHRDataDeserializer;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.pub.PublicHl7Partner;
+import com.pkb.fhir.common.configuration.EhrmigratorConfig;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.retrieve.MenuDataSourceInfo;
+import com.pkb.fhir.common.retrieve.PrivacyFlagsDto;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.DomainResource;
+import org.hl7.fhir.r4.model.Extension;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.InstantType;
+import org.hl7.fhir.r4.model.Meta;
+import org.hl7.fhir.r4.model.Reference;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.VisibleForTesting;
+
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Optional;
+import java.util.TimeZone;
+import java.util.UUID;
+
+public abstract class BaseEhrDataTransformer implements FhirTransformationUtil {
+
+    private static final String UPLOADEDDATAID_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/uploaded-data-id&quot;;
+    static final String MENUDATA_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/menudata-legacy-identifier&quot;;
+    private static final String SOURCE_ORG_EXTENSION_URL_PRIVACY_FLAGS = &quot;http://fhir.patientsknowbest.com/structuredefinition/privacy-override-source-organization&quot;;
+    private static final String SOURCE_TEAM_EXTENSION_URL_PRIVACY_FLAGS = &quot;http://fhir.patientsknowbest.com/structuredefinition/privacy-override-source-team&quot;;
+    private static final String SOURCE_PERSON_EXTENSION_URL_PRIVACY_FLAGS = &quot;http://fhir.patientsknowbest.com/structuredefinition/privacy-override-source-person&quot;;
+    private static final String ACCESS_ROUTE_EXTENSION_URL_PRIVACY_FLAGS = &quot;http://fhir.patientsknowbest.com/structuredefinition/privacy-override-access-route&quot;;
+    private static final String CHANGE_DATE_EXTENSION_URL_PRIVACY_FLAGS = &quot;http://fhir.patientsknowbest.com/structuredefinition/privacy-override-change-date&quot;;
+
+    //Widely used
+    private static final String SNOMED_IDENTIFIER_SYSTEM = &quot;http://snomed.info/sct&quot;;
+    //These are legacy, and I can only find refs in old specs. Should we be converting everything to snomed...?
+    private static final String CTV3_IDENTIFIER_SYSTEM =  &quot;http://read.info/ctv3&quot;;
+    private static final String READ2_IDENTIFIER_SYSTEM =  &quot;http://read.info/readv2&quot;;
+    //An attempt to make something comprehensible out of this. Have a standard prefix, and suffix with the codeSystem we've
+    // been provided, plus a unique identifier for the org (if two orgs both send us the same codeSystem, and it's non-standard,
+    // then we have no guarantee that the same code means the same thing at both orgs)
+    private static final String BESPOKE_CODE_SYSTEM_PREFIX = &quot;http://fhir.patientsknowbest.com/codesystem/&quot;;
+
+    private EhrmigratorConfig config;
+    PersonService personService;
+    private TeamService teamService;
+    private OrgService orgService;
+    private Hl7PartnerService hl7PartnerService;
+    EHRDataDeserializer ehrDataDeserializer;
+
+    public BaseEhrDataTransformer(EhrmigratorConfig config,
+                                  PersonService personService, TeamService teamService, OrgService orgService, Hl7PartnerService hl7PartnerService,
+<span class="fc" id="L70">                                  EHRDataDeserializer ehrDataDeserializer) {</span>
+<span class="fc" id="L71">        this.config = config;</span>
+<span class="fc" id="L72">        this.personService = personService;</span>
+<span class="fc" id="L73">        this.teamService = teamService;</span>
+<span class="fc" id="L74">        this.orgService = orgService;</span>
+<span class="fc" id="L75">        this.hl7PartnerService = hl7PartnerService;</span>
+<span class="fc" id="L76">        this.ehrDataDeserializer = ehrDataDeserializer;</span>
+
+<span class="fc" id="L78">    }</span>
+
+    public abstract String transformToFhirJson(@NotNull TransformableDto item);
+
+    private void addCodeTypeExtensionForMeta(Route accessRoute, @NotNull String extensionUrl, @NotNull String systemUrl, @NotNull Meta meta) {
+<span class="fc" id="L83">        Optional.ofNullable(accessRoute)</span>
+<span class="fc" id="L84">                .map(valueNotNull -&gt; meta.addExtension(new Extension(extensionUrl,</span>
+<span class="fc" id="L85">                        new Coding().setCode(valueNotNull.name()).setSystem(systemUrl).setDisplay(getDisplayForRoute(accessRoute)))));</span>
+<span class="fc" id="L86">    }</span>
+
+    void setId(UUID id, DomainResource resource) {
+<span class="fc" id="L89">        Optional.ofNullable(id)</span>
+<span class="fc" id="L90">                .map(Object::toString)</span>
+<span class="fc" id="L91">                .ifPresent(resource::setId);</span>
+<span class="fc" id="L92">    }</span>
+
+    Identifier getIdentifier(@NotNull String value, @NotNull String system) {
+<span class="fc" id="L95">        Identifier identifier = new Identifier();</span>
+<span class="fc" id="L96">        identifier.setSystem(system);</span>
+<span class="fc" id="L97">        identifier.setValue(value);</span>
+<span class="fc" id="L98">        return identifier;</span>
+    }
+
+    Optional&lt;ZonedDateTime&gt; getDateWithZone(LocalDateTime dateTime) {
+<span class="fc" id="L102">        return Optional.ofNullable(dateTime)</span>
+<span class="fc" id="L103">                .map(stored -&gt; ZonedDateTime.of(dateTime, ZoneId.of(config.getSourceDbTimezone())));</span>
+    }
+
+    InstantType mapToInstantTypeUTC(ZonedDateTime date) {
+<span class="fc" id="L107">        return (InstantType) new InstantType().setValue(Date.from(date.toInstant())).setTimeZone(TimeZone.getTimeZone(ZoneOffset.UTC));</span>
+    }
+
+    DateTimeType mapToDateTimeTypeUTC(ZonedDateTime date) {
+<span class="fc" id="L111">        return (DateTimeType) new DateTimeType().setValue(Date.from(date.toInstant())).setTimeZone(TimeZone.getTimeZone(ZoneOffset.UTC));</span>
+    }
+
+    @SuppressWarnings(&quot;OverlyComplexMethod&quot;)
+    @VisibleForTesting
+    String getDisplayForRoute(Route route) {
+<span class="fc" id="L117">        return Optional.ofNullable(route)</span>
+<span class="fc" id="L118">                .flatMap(actualRoute -&gt; {</span>
+<span class="pc bpc" id="L119" title="18 of 20 branches missed.">                    switch (actualRoute) {</span>
+                        case WEBAPP:
+<span class="fc" id="L121">                            return Optional.of(&quot;PKB website&quot;);</span>
+                        case HL7_API:
+<span class="fc" id="L123">                            return Optional.of(&quot;Integration (HL7)&quot;);</span>
+                        case WEBAPP_NHS_APP:
+<span class="nc" id="L125">                            return Optional.of(&quot;Integration (NHS App)&quot;);</span>
+                        case REST_API:
+<span class="nc" id="L127">                            return Optional.of(&quot;Integration (REST)&quot;);</span>
+                        case NOT_CAPTURED:
+<span class="nc" id="L129">                            return Optional.of(&quot;unknown route&quot;);</span>
+                        case SUPPORT_TOOL:
+<span class="nc" id="L131">                            return Optional.of(&quot;Support-tool&quot;);</span>
+                        case CORE_DEVICES:
+<span class="nc" id="L133">                            return Optional.of(&quot;Integration (Device)&quot;);</span>
+                        case EMIS_ES:
+<span class="nc" id="L135">                            return Optional.of(&quot;Integration (EMIS extract services)&quot;);</span>
+                        case SCISTORE:
+<span class="nc" id="L137">                            return Optional.of(&quot;Integration (Scottish Care Information Store)&quot;);</span>
+                        case WEBAPP_SYSTMONE_PORTAL:
+<span class="nc" id="L139">                            return Optional.of(&quot;Integration (SystmOne single sign on)&quot;);</span>
+                        case WEBAPP_OTP:
+<span class="nc" id="L141">                            return Optional.of(&quot;Integration (OTP)&quot;);</span>
+                        case SCHED_TASK:
+<span class="nc" id="L143">                            return Optional.of(&quot;PKB website (automated update)&quot;);</span>
+                        case WEBAPP_EMIS_PORTAL:
+<span class="nc" id="L145">                            return Optional.of(&quot;Integration (EMIS single sign on)&quot;);</span>
+                        case FHIR_API:
+<span class="nc" id="L147">                            return Optional.of(&quot;Integration (FHIR)&quot;);</span>
+                        case CSV_API:
+<span class="nc" id="L149">                            return Optional.of(&quot;Integration (CSV)&quot;);</span>
+                        case EMIS_PFS:
+<span class="nc" id="L151">                            return Optional.of(&quot;Integration (EMIS patient facing services)&quot;);</span>
+                        case PACR:
+<span class="nc" id="L153">                            return Optional.of(&quot;Integration (NCRAS cancer registry)&quot;);</span>
+                        case S1:
+<span class="nc" id="L155">                            return Optional.of(&quot;Integration (SystmOne)&quot;);</span>
+                        case EXPORT:
+<span class="nc" id="L157">                            return Optional.of(&quot;PKB website (data export)&quot;);</span>
+                        default:
+<span class="nc" id="L159">                            return Optional.empty();</span>
+                    }
+<span class="pc" id="L161">                }).orElseThrow(() -&gt; new IllegalArgumentException(String.format(&quot;Unmapped route %s&quot;, route)));</span>
+    }
+
+    void processEncryptedFields(@NotNull TransformableDto item, @NotNull DomainResource resource) {
+<span class="fc" id="L165">        var ehrDataMap = ehrDataDeserializer.deserialize(item.getContent().getBytes());</span>
+<span class="fc" id="L166">        ehrDataMap.forEach((key, value) -&gt; processDeserializedEhrDataMap(key, value, resource)</span>
+<span class="fc" id="L167">                .ifPresent(unknownFields -&gt; {</span>
+<span class="nc" id="L168">                    throw new IllegalArgumentException(String.format(&quot;Unknown field %s in decrypted data&quot;, unknownFields));</span>
+                }));
+<span class="fc" id="L170">    }</span>
+
+    abstract Optional&lt;String&gt; processDeserializedEhrDataMap(@NotNull String dataType, @Nullable Object data, @NotNull DomainResource resource);
+
+    @NotNull
+    Optional&lt;Extension&gt; getSourcePersonExtension(@Nullable Long sourcePersonId, String extensionUrl) {
+<span class="fc" id="L176">        return Optional.ofNullable(sourcePersonId)</span>
+<span class="fc" id="L177">                .flatMap(sourcePersonIdNotNull -&gt; personService.findPersonOptional(sourcePersonIdNotNull))</span>
+<span class="fc" id="L178">                .flatMap(sourcePerson -&gt; getReferenceString(sourcePerson.getUserType(), sourcePerson.getPublicId()))</span>
+<span class="fc" id="L179">                .map(referenceString -&gt; getExtensionWithReference(extensionUrl, referenceString));</span>
+    }
+
+    @NotNull
+    private Optional&lt;Extension&gt; getSourceOrgExtension(@Nullable Long sourceOrgId, String extensionUrl) {
+<span class="fc" id="L184">        return Optional.ofNullable(sourceOrgId)</span>
+<span class="fc" id="L185">                .flatMap(orgService::findById)</span>
+<span class="fc" id="L186">                .map(sourceOrg -&gt; getExtensionWithReference(extensionUrl, String.format(&quot;Organization/%s&quot;, sourceOrg.getPublicId().toString())));</span>
+    }
+
+    @NotNull
+    private Optional&lt;Extension&gt; getSourceTeamExtension(@Nullable Long sourceTeamId, String extensionUrl) {
+<span class="fc" id="L191">        return Optional.ofNullable(sourceTeamId)</span>
+<span class="fc" id="L192">                .flatMap(teamService::findById)</span>
+<span class="fc" id="L193">                .map(sourceTeam -&gt; getExtensionWithReference(extensionUrl, String.format(&quot;Organization/%s&quot;, sourceTeam.getPublicId().toString())));</span>
+    }
+
+    Optional&lt;String&gt; getReferenceString(UserType userType, UUID publicId) {
+<span class="pc bpc" id="L197" title="1 of 2 branches missed.">        if (userType == UserType.TECH_SUPPORT) {</span>
+<span class="nc" id="L198">            return Optional.empty(); // We don't migrate any ids with this userType</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">        } else if (userType == UserType.PATIENT) {</span>
+<span class="fc" id="L200">            return Optional.of(String.format(&quot;Patient/%s&quot;, publicId.toString()));</span>
+        } else {
+<span class="fc" id="L202">            return Optional.of(String.format(&quot;Practitioner/%s&quot;, publicId.toString()));</span>
+        }
+    }
+
+    private Extension getExtensionWithReference(@NotNull String extensionUrl, @NotNull String identifier) {
+<span class="fc" id="L207">        Extension extension = new Extension().setUrl(extensionUrl);</span>
+<span class="fc" id="L208">        extension.setValue(new Reference(identifier));</span>
+<span class="fc" id="L209">        return extension;</span>
+    }
+
+    /**
+     * The meta is composed of source and security information about the resource in question.
+     * Some of this should be split out to Provenance. This will be done in PHR-11358
+     */
+    void createMeta(DomainResource resource, PrivacyFlagsDto privacyFlagsDto, MenuDataSourceInfo menuDataSourceInfo) {
+<span class="fc" id="L217">        Meta meta = new Meta();</span>
+<span class="fc" id="L218">        List&lt;Coding&gt; security = new ArrayList&lt;&gt;();</span>
+
+        //menu_data source info
+<span class="fc" id="L221">        getSourceOrgExtension(menuDataSourceInfo.getMenuDataSourceOrgId(), SOURCE_ORG_EXTENSION_URL)</span>
+<span class="fc" id="L222">                .ifPresent(meta::addExtension);</span>
+
+<span class="fc" id="L224">        getSourceTeamExtension(menuDataSourceInfo.getMenuDataSourceTeamId(), SOURCE_TEAM_EXTENSION_URL)</span>
+<span class="fc" id="L225">                .ifPresent(meta::addExtension);</span>
+
+<span class="fc" id="L227">        getSourcePersonExtension(menuDataSourceInfo.getMenuDataSourcePersonId(), SOURCE_PERSON_EXTENSION_URL)</span>
+<span class="fc" id="L228">                .ifPresent(meta::addExtension);</span>
+
+<span class="fc" id="L230">        Optional.ofNullable(menuDataSourceInfo.getRoute())</span>
+<span class="fc" id="L231">                .ifPresent(route -&gt; addCodeTypeExtensionForMeta(route, ACCESS_ROUTE_EXTENSION_URL, ACCESS_ROUTE_SYSTEM_URL, meta));</span>
+
+<span class="fc" id="L233">        Optional.ofNullable(menuDataSourceInfo.getUploadedDataId())</span>
+<span class="fc" id="L234">                .ifPresent(uploadedDataId -&gt; addExtension(String.valueOf(uploadedDataId), UPLOADEDDATAID_EXTENSION_URL, resource));</span>
+
+<span class="fc" id="L236">        Optional.ofNullable(menuDataSourceInfo.getResponsibleOrganisationIdentifier())</span>
+<span class="fc" id="L237">                .ifPresent(responsibleOrganisationIdentifier -&gt; addExtension(responsibleOrganisationIdentifier, RESPONSIBLE_ORGANISATION_EXTENSION_URL, resource));</span>
+
+<span class="fc" id="L239">        getDateWithZone(menuDataSourceInfo.getPersistedDate())</span>
+<span class="fc" id="L240">                .map(this::mapToDateTimeTypeUTC)</span>
+<span class="fc" id="L241">                .ifPresent(persisted -&gt; addExtension(persisted, VERSION_PERSISTED_EXTENSION_URL, resource));</span>
+
+<span class="fc" id="L243">        getDateWithZone(menuDataSourceInfo.getCreated())</span>
+<span class="fc" id="L244">                .map(this::mapToDateTimeTypeUTC)</span>
+<span class="fc" id="L245">                .ifPresent(created -&gt; addExtension(created, CREATED_DATE_EXTENSION_URL, resource));</span>
+
+<span class="fc" id="L247">        getHl7PartnerPublicId(menuDataSourceInfo.getHl7PartnerId())</span>
+<span class="pc" id="L248">                .ifPresent(hl7PartnerPublicId -&gt; resource.addExtension(getExtensionWithReferenceIdentifier(PARTNER_EXTENSION_URL, hl7PartnerPublicId)));</span>
+
+        //privacy_flags source info
+<span class="fc" id="L251">        getSourceOrgExtension(privacyFlagsDto.getSourceOrgId(), SOURCE_ORG_EXTENSION_URL_PRIVACY_FLAGS)</span>
+<span class="fc" id="L252">                .ifPresent(meta::addExtension);</span>
+
+<span class="fc" id="L254">        getSourceTeamExtension(privacyFlagsDto.getSourceTeamId(), SOURCE_TEAM_EXTENSION_URL_PRIVACY_FLAGS)</span>
+<span class="fc" id="L255">                .ifPresent(meta::addExtension);</span>
+
+<span class="fc" id="L257">        getSourcePersonExtension(privacyFlagsDto.getSourcePersonId(), SOURCE_PERSON_EXTENSION_URL_PRIVACY_FLAGS)</span>
+<span class="fc" id="L258">                .ifPresent(meta::addExtension);</span>
+
+<span class="fc" id="L260">        Optional.ofNullable(privacyFlagsDto.getAccessRoute())</span>
+<span class="fc" id="L261">                .ifPresent(route -&gt; addCodeTypeExtensionForMeta(route, ACCESS_ROUTE_EXTENSION_URL_PRIVACY_FLAGS, ACCESS_ROUTE_SYSTEM_URL, meta));</span>
+
+<span class="fc" id="L263">        getDateWithZone(privacyFlagsDto.getChangeDate())</span>
+<span class="fc" id="L264">                .map(this::mapToDateTimeTypeUTC)</span>
+<span class="fc" id="L265">                .ifPresent(changeDate -&gt; addExtension(changeDate, CHANGE_DATE_EXTENSION_URL_PRIVACY_FLAGS, resource));</span>
+
+<span class="fc" id="L267">        privacyFlagsDto.getPrivacyFlags().forEach(flag -&gt; {</span>
+<span class="fc" id="L268">            Coding coding = new Coding();</span>
+<span class="fc" id="L269">            coding.setSystem(PRIVACY_LABEL_CODESYSTEM_URL);</span>
+<span class="fc" id="L270">            coding.setCode(StringUtils.normalizeSpace(flag));</span>
+<span class="fc" id="L271">            security.add(coding);</span>
+<span class="fc" id="L272">        });</span>
+
+<span class="fc" id="L274">        meta.setSecurity(security);</span>
+<span class="fc" id="L275">        resource.setMeta(meta);</span>
+<span class="fc" id="L276">    }</span>
+
+    @NotNull
+    private Optional&lt;UUID&gt; getHl7PartnerPublicId(@Nullable Long partnerId) {
+<span class="fc" id="L280">        return Optional.ofNullable(partnerId)</span>
+<span class="pc" id="L281">                .flatMap(hl7PartnerId -&gt; hl7PartnerService.findPartnerById(hl7PartnerId)</span>
+<span class="nc" id="L282">                        .map(PublicHl7Partner::getPublicId));</span>
+    }
+
+
+    /**
+     * EHRData talks about &quot;CodeableConcepts&quot; but it's actually just a hash map + string under the sheets.
+     * The string display text is set on the CC; the list of codings are made up of code + system + maybe display text
+     * of their own.
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    Optional&lt;CodeableConcept&gt; createCodeableConceptFromEhrDataMap(Object data, DomainResource resource) {
+
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">        if (!(data instanceof HashMap)) {</span>
+            //An old way of holding this info as a string. Just put it as display text.
+<span class="nc" id="L296">            CodeableConcept codeableConcept = new CodeableConcept();</span>
+<span class="nc" id="L297">            return Optional.ofNullable(data)</span>
+<span class="nc" id="L298">                    .map(displayText -&gt; codeableConcept.setText((String)displayText));</span>
+        }
+
+<span class="fc" id="L301">        HashMap hashMapData = (HashMap)data;</span>
+<span class="fc" id="L302">        return Optional.ofNullable(hashMapData)</span>
+<span class="fc" id="L303">                .map(dataNotNull -&gt; {</span>
+<span class="fc" id="L304">                    CodeableConcept codeableConcept = new CodeableConcept();</span>
+
+                    //Display text
+<span class="fc" id="L307">                    Optional.ofNullable(dataNotNull.get(&quot;displayText&quot;))</span>
+<span class="fc" id="L308">                            .map(displayText -&gt; codeableConcept.setText((String)displayText));</span>
+
+                    //Coding list
+<span class="fc" id="L311">                    var fhirCodingList = Optional.ofNullable(dataNotNull.get(&quot;codings&quot;))</span>
+<span class="fc" id="L312">                            .map(pkbCodings -&gt; {</span>
+<span class="fc" id="L313">                                List&lt;Coding&gt; codingList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L314">                                ((ArrayList)pkbCodings).forEach(pkbCoding -&gt; {</span>
+<span class="fc" id="L315">                                    HashMap codingMap = ((HashMap)pkbCoding);</span>
+<span class="fc" id="L316">                                    Coding fhirCoding = new Coding();</span>
+
+<span class="fc" id="L318">                                    Optional.ofNullable(codingMap.get(&quot;code&quot;))</span>
+<span class="fc" id="L319">                                            .ifPresent(code -&gt; fhirCoding.setCode((String)code));</span>
+
+<span class="fc" id="L321">                                    processCodeSystemForCoding(codingMap, fhirCoding, resource);</span>
+
+<span class="fc" id="L323">                                    Optional.ofNullable(codingMap.get(&quot;displayText&quot;))</span>
+<span class="fc" id="L324">                                            .ifPresent(displayText -&gt; fhirCoding.setDisplay((String)displayText));</span>
+
+<span class="fc" id="L326">                                    codingList.add(fhirCoding);</span>
+<span class="fc" id="L327">                                });</span>
+<span class="fc" id="L328">                                return codingList;</span>
+<span class="fc" id="L329">                            }).orElse(List.of());</span>
+
+<span class="fc" id="L331">                    codeableConcept.setCoding(fhirCodingList);</span>
+<span class="fc" id="L332">                    return codeableConcept;</span>
+                });
+    }
+
+    /**
+     * Customers can send us any old nonsense in here. Let's try to make the best of it.
+     */
+    private void processCodeSystemForCoding(HashMap codingMap, Coding fhirCoding, DomainResource resource) {
+<span class="fc" id="L340">        Optional.ofNullable(codingMap.get(&quot;codeSystem&quot;))</span>
+<span class="fc" id="L341">                .ifPresent(codeSystem -&gt; {</span>
+<span class="fc bfc" id="L342" title="All 2 branches covered.">                    if (StringUtils.containsIgnoreCase((String)codeSystem, &quot;snomed&quot;)) {</span>
+<span class="fc" id="L343">                        fhirCoding.setSystem(SNOMED_IDENTIFIER_SYSTEM);</span>
+                    }
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">                    else if (StringUtils.containsIgnoreCase((String)codeSystem, &quot;ctv3&quot;)) {</span>
+<span class="nc" id="L346">                        fhirCoding.setSystem(CTV3_IDENTIFIER_SYSTEM);</span>
+                    }
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">                    else if (StringUtils.containsIgnoreCase((String)codeSystem, &quot;read2&quot;)</span>
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">                      || StringUtils.containsIgnoreCase((String)codeSystem, &quot;readv2&quot;)</span>
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">                      || StringUtils.containsIgnoreCase((String)codeSystem, &quot;read v2&quot;)) {</span>
+<span class="nc" id="L351">                        fhirCoding.setSystem(READ2_IDENTIFIER_SYSTEM);</span>
+                    }
+                    else {
+                        //All hope is lost, make what we can. This will be &lt;url_prefix&gt;/&lt;code_system&gt;-&lt;source_org_uuid&gt;
+<span class="fc" id="L355">                        Optional.ofNullable(resource.getMeta().getExtensionByUrl(SOURCE_ORG_EXTENSION_URL))</span>
+<span class="fc" id="L356">                                .ifPresentOrElse(sourceOrgExtension -&gt; {</span>
+<span class="fc" id="L357">                                    String sourceOrgUuid = ((Reference)sourceOrgExtension.getValue()).getReferenceElement().getIdPart();</span>
+<span class="fc" id="L358">                                    String sanitisedCodeSystem = StringUtils.replace((String)codeSystem, &quot; &quot;, &quot;&quot;);</span>
+<span class="fc" id="L359">                                    String codeSystemComposite = BESPOKE_CODE_SYSTEM_PREFIX + sanitisedCodeSystem + &quot;-&quot; + sourceOrgUuid;</span>
+<span class="fc" id="L360">                                    fhirCoding.setSystem(codeSystemComposite);</span>
+<span class="fc" id="L361">                                }, () -&gt; {</span>
+                                    //Bad; implies we've allowed this to happen via the GUI for a patient-entered data point.
+<span class="nc" id="L363">                                    throw new MigrationException(&quot;Got a bespoke CodeableConcept codeSystem [&quot; + codeSystem + &quot;], &quot; +</span>
+                                            &quot;but do not have a source org to attribute this to&quot;);
+                                });
+                    }
+<span class="fc" id="L367">                });</span>
+<span class="fc" id="L368">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

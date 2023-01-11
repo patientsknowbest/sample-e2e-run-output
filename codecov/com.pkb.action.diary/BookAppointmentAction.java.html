@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BookAppointmentAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.diary</a> &gt; <span class="el_source">BookAppointmentAction.java</span></div><h1>BookAppointmentAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.diary;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.emis.pfs.EmisPfsStatsCollector;
+import com.pkb.emis.appointment.model.EmisAvailableAppointmentSlots;
+import com.pkb.emis.appointment.service.ErrorCode;
+import com.pkb.emis.appointment.service.SessionData;
+import com.pkb.integrations.emis.model.datatypes.Necessity;
+import com.pkb.integrations.emis.model.restcalls.EmisAppointmentCreateRequest;
+import com.pkb.integrations.emis.model.restcalls.ImmutableEmisAppointmentCreateRequest;
+import com.pkb.util.YearAndMonth;
+import io.vavr.control.Either;
+import org.apache.commons.lang3.StringUtils;
+
+import java.time.YearMonth;
+import java.time.ZonedDateTime;
+import java.util.Optional;
+
+import static com.pkb.emis.appointment.service.ErrorCode.EMIS_ACCOUNT_CLOSED;
+import static com.pkb.emis.appointment.service.ErrorCode.MISSING_LINK_TO_GP;
+import static com.pkb.emis.appointment.service.ErrorCode.UNLINKED_PATIENT;
+import static com.pkb.integrations.emis.model.datatypes.ApplicationLinkLevel.Restricted;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.Predicates.isIn;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+
+<span class="fc" id="L30">public class BookAppointmentAction extends BaseAppointmentAction {</span>
+
+<span class="fc" id="L32">    private int day = 0;</span>
+<span class="fc" id="L33">    private int month = 0;</span>
+<span class="fc" id="L34">    private int year = 0;</span>
+    private EmisAvailableAppointmentSlots emisAvailableAppointmentSlots;
+    private String practiceName;
+    private Necessity bookingReasonRequirement;
+    private String welcomeMessage;
+    private String appointmentMessage;
+    private YearAndMonth yearAndMonth;
+    private String selectedAvailableAppointmentSlotId;
+    private String bookingReasonText;
+
+    public String getTab() {
+<span class="pc bpc" id="L45" title="1 of 2 branches missed.">        return isLoggedInUserPatient() ? &quot;diary&quot; : &quot;schedule&quot;;</span>
+    }
+
+    public String getSubTab() {
+<span class="fc" id="L49">        return &quot;calendar&quot;;</span>
+    }
+
+    @Override
+    public String input() {
+<span class="fc" id="L54">        return emisAppointmentManager.getSessionInfo(getEmisContextHolder())</span>
+<span class="fc" id="L55">                .map(SessionData::sessionType)</span>
+<span class="fc" id="L56">                .flatMap(linkLevel -&gt; {</span>
+<span class="fc" id="L57">                    fetchEmisPracticeDetails();</span>
+<span class="fc bfc" id="L58" title="All 2 branches covered.">                    if (linkLevel == Restricted) {</span>
+                        //noinspection StrutsI18nError,SSBasedInspection
+<span class="fc" id="L60">                        addActionError(emisMessageHelper.getEmisActionError(ErrorCode.RESTRICTED_PATIENT, getLocale(), getEmisContextHolder()));</span>
+<span class="fc" id="L61">                        EmisPfsStatsCollector.countBookingAccountErrors(ErrorCode.RESTRICTED_PATIENT);</span>
+                    }
+<span class="fc" id="L63">                    return getAvailableAppointmentSlots();</span>
+                })
+<span class="fc" id="L65">                .map(this::processAvailableSlots)</span>
+<span class="fc" id="L66">                .getOrElseGet(error -&gt; Match(error).of(</span>
+<span class="fc" id="L67">                    Case($(MISSING_LINK_TO_GP), () -&gt; {</span>
+<span class="fc" id="L68">                        EmisPfsStatsCollector.countBookingAccountErrors(error);</span>
+<span class="fc" id="L69">                        return &quot;register&quot;;</span>
+                    }),
+<span class="fc" id="L71">                    Case($(isIn(UNLINKED_PATIENT, EMIS_ACCOUNT_CLOSED)), () -&gt; {</span>
+<span class="fc" id="L72">                        EmisPfsStatsCollector.countBookingAccountErrors(error);</span>
+<span class="fc" id="L73">                        return &quot;reregister&quot;;</span>
+                    }),
+<span class="fc" id="L75">                    Case($(), () -&gt; {</span>
+<span class="fc" id="L76">                        EmisPfsStatsCollector.countBookingErrors(error);</span>
+<span class="fc" id="L77">                        return INPUT;</span>
+                    })));
+    }
+
+    private String processAvailableSlots(EmisAvailableAppointmentSlots availableAppointmentSlots) {
+<span class="fc" id="L82">        emisAvailableAppointmentSlots = availableAppointmentSlots;</span>
+<span class="fc bfc" id="L83" title="All 2 branches covered.">        if (availableAppointmentSlots.availableAppointmentSlots().isEmpty()) {</span>
+<span class="fc" id="L84">            addActionError(getText(&quot;bookAppointment.err.no_slots_available&quot;));</span>
+        } else {
+<span class="pc bpc" id="L86" title="1 of 4 branches missed.">            if (year == 0 || month == 0) {</span>
+<span class="fc" id="L87">                ZonedDateTime firstAvailableAppointment = emisAvailableAppointmentSlots.availableAppointmentSlots().get(0).getStartTime();</span>
+<span class="fc" id="L88">                year = firstAvailableAppointment.getYear();</span>
+<span class="fc" id="L89">                month = firstAvailableAppointment.getMonthValue();</span>
+<span class="fc" id="L90">                day = firstAvailableAppointment.getDayOfMonth();</span>
+<span class="fc" id="L91">                yearAndMonth = new YearAndMonth(YearMonth.from(firstAvailableAppointment), emisAvailableAppointmentSlots.availableAppointmentSlots());</span>
+<span class="fc" id="L92">            } else {</span>
+<span class="pc bpc" id="L93" title="1 of 4 branches missed.">                if (day == 0 &amp;&amp; emisAvailableAppointmentSlots.getFirstAvailableAppointmentSlotInMonth(month) != null) {</span>
+<span class="fc" id="L94">                    ZonedDateTime firstAvailableAppointmentInMonth = emisAvailableAppointmentSlots.getFirstAvailableAppointmentSlotInMonth(month).getStartTime();</span>
+<span class="fc" id="L95">                    day = firstAvailableAppointmentInMonth.getDayOfMonth();</span>
+                }
+<span class="fc" id="L97">                yearAndMonth = new YearAndMonth(YearMonth.of(year, month), emisAvailableAppointmentSlots.availableAppointmentSlots());</span>
+            }
+        }
+
+<span class="fc" id="L101">        return Action.INPUT;</span>
+    }
+
+    private Either&lt;ErrorCode, EmisAvailableAppointmentSlots&gt; getAvailableAppointmentSlots() {
+<span class="fc" id="L105">        return emisAppointmentManager.getAvailableAppointmentSlots(getEmisContextHolder(), getZoneIdOfLoggedInUser());</span>
+    }
+
+    @Override
+    public void validate() {
+<span class="fc bfc" id="L110" title="All 2 branches covered.">        if (isBlank(selectedAvailableAppointmentSlotId)) {</span>
+<span class="fc" id="L111">            addActionError(getText(&quot;bookAppointment.err.select_an_appointment&quot;));</span>
+        } else {
+<span class="fc" id="L113">            fetchEmisPracticeDetails();</span>
+<span class="fc bfc" id="L114" title="All 4 branches covered.">            if (bookingReasonRequirement == Necessity.RequestedMandatory &amp;&amp; isBlank(bookingReasonText)) {</span>
+<span class="fc" id="L115">                addFieldError(&quot;bookingReasonText&quot;, getText(&quot;bookAppointment.txt.booking_reason_required&quot;));</span>
+            }
+        }
+<span class="fc" id="L118">    }</span>
+
+    private void fetchEmisPracticeDetails() {
+<span class="fc" id="L121">        long personId = loggedInUserUtil.getLoggedInUserId();</span>
+<span class="fc" id="L122">        emisAppointmentManager.getNationalPracticeCode(getEmisContextHolder())</span>
+<span class="fc" id="L123">                .flatMap(practiceCode -&gt; {</span>
+<span class="fc" id="L124">                    this.practiceName = emisMessageHelper.getPracticeName(getLocale(), practiceCode);</span>
+<span class="fc" id="L125">                    return emisAppointmentManager.getPracticeSettings(getEmisContextHolder(), practiceCode);</span>
+                })
+<span class="fc" id="L127">                .peek(practiceSettings -&gt; {</span>
+<span class="fc" id="L128">                    this.bookingReasonRequirement = practiceSettings.getInputRequirements().getAppointmentBookingReason();</span>
+<span class="fc" id="L129">                    this.welcomeMessage = practiceSettings.getMessages().getWelcomeMessage().orElse(null);</span>
+<span class="fc" id="L130">                    this.appointmentMessage = practiceSettings.getMessages().getAppointmentsMessage().orElse(null);</span>
+<span class="fc" id="L131">                });</span>
+<span class="fc" id="L132">    }</span>
+
+    public String cancel() {
+<span class="fc" id="L135">        return SUCCESS;</span>
+    }
+
+    @SuppressWarnings({&quot;StrutsI18nError&quot;, &quot;SSBasedInspection&quot;})
+    public String confirmBookAppointment() {
+<span class="fc" id="L140">        return getAvailableAppointmentSlots()</span>
+<span class="fc" id="L141">                .map(slots -&gt; {</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">                    if (slots.getAvailableAppointmentSlotWithSlotId(Long.parseLong(selectedAvailableAppointmentSlotId)) != null) {</span>
+<span class="fc" id="L143">                        emisAvailableAppointmentSlots = slots;</span>
+<span class="fc" id="L144">                        return &quot;confirm&quot;;</span>
+                    }
+
+<span class="fc" id="L147">                    addActionError(emisMessageHelper.getEmisActionError(ErrorCode.APPOINTMENT_NO_LONGER_AVAILABLE, getLocale(), getEmisContextHolder()));</span>
+<span class="fc" id="L148">                    return INPUT;</span>
+                })
+<span class="fc" id="L150">                .getOrElseGet(error -&gt; {</span>
+<span class="nc" id="L151">                    addActionError(emisMessageHelper.getEmisActionError(error, getLocale(), getEmisContextHolder()));</span>
+<span class="nc" id="L152">                    EmisPfsStatsCollector.countRetrieveAppointmentsErrors(error);</span>
+<span class="nc" id="L153">                    return INPUT;</span>
+                });
+    }
+
+    public String cancelConfirmBookAppointment() {
+<span class="fc" id="L158">        return &quot;cancel&quot;;</span>
+    }
+
+    public String bookAppointment() {
+<span class="fc" id="L162">        EmisAppointmentCreateRequest context = ImmutableEmisAppointmentCreateRequest.builder()</span>
+<span class="fc" id="L163">                .slotId(Long.parseLong(selectedAvailableAppointmentSlotId))</span>
+<span class="fc" id="L164">                .bookingReason(bookingReasonText)</span>
+<span class="fc" id="L165">                .build();</span>
+
+<span class="fc" id="L167">        return emisAppointmentManager.bookAnAppointment(getEmisContextHolder(), context)</span>
+<span class="fc" id="L168">                .map(success -&gt; {</span>
+<span class="fc" id="L169">                    addActionMessage(getText(&quot;bookAppointment.txt.successfully_booked&quot;));</span>
+<span class="fc" id="L170">                    emisAppointmentManager.getNationalPracticeCode(getEmisContextHolder()).map(ods -&gt; {</span>
+<span class="fc" id="L171">                        EmisPfsStatsCollector.countBookingPerPractice(ods);</span>
+<span class="fc" id="L172">                        return ods;</span>
+                    });
+<span class="fc" id="L174">                    return SUCCESS;</span>
+                })
+<span class="fc" id="L176">                .getOrElseGet(error -&gt; {</span>
+                    //noinspection StrutsI18nError,SSBasedInspection
+<span class="fc" id="L178">                    addActionError(emisMessageHelper.getEmisActionError(error, getLocale(), getEmisContextHolder()));</span>
+<span class="fc" id="L179">                    EmisPfsStatsCollector.countBookingErrors(error);</span>
+<span class="fc" id="L180">                    return CANCEL;</span>
+                });
+    }
+
+    public int getDay() {
+<span class="fc" id="L185">        return day;</span>
+    }
+
+    public void setDay(int day) {
+<span class="fc" id="L189">        this.day = day;</span>
+<span class="fc" id="L190">    }</span>
+
+    public int getMonth() {
+<span class="fc" id="L193">        return month;</span>
+    }
+
+    public void setMonth(int month) {
+<span class="fc" id="L197">        this.month = month;</span>
+<span class="fc" id="L198">    }</span>
+
+    public int getYear() {
+<span class="fc" id="L201">        return year;</span>
+    }
+
+    public void setYear(int year) {
+<span class="fc" id="L205">        this.year = year;</span>
+<span class="fc" id="L206">    }</span>
+
+    public EmisAvailableAppointmentSlots getEmisAvailableAppointmentSlots() {
+<span class="fc" id="L209">        return emisAvailableAppointmentSlots;</span>
+    }
+
+    public YearAndMonth getYearAndMonth() {
+<span class="fc" id="L213">        return yearAndMonth;</span>
+    }
+
+    public String getSelectedAvailableAppointmentSlotId() {
+<span class="fc" id="L217">        return selectedAvailableAppointmentSlotId;</span>
+    }
+
+    public void setSelectedAvailableAppointmentSlotId(String selectedAvailableAppointmentSlotId) {
+<span class="fc" id="L221">        this.selectedAvailableAppointmentSlotId = selectedAvailableAppointmentSlotId;</span>
+<span class="fc" id="L222">    }</span>
+
+    public String getBookingReasonText() {
+<span class="fc" id="L225">        return bookingReasonText;</span>
+    }
+
+    public void setBookingReasonText(String bookingReasonText) {
+<span class="fc" id="L229">        this.bookingReasonText = bookingReasonText;</span>
+<span class="fc" id="L230">    }</span>
+
+    public Optional&lt;String&gt; getPracticeName() {
+<span class="fc" id="L233">        return Optional.ofNullable(practiceName);</span>
+    }
+
+    public Necessity getBookingReasonRequirement() {
+<span class="nc" id="L237">        return bookingReasonRequirement;</span>
+    }
+
+    public Optional&lt;String&gt; getWelcomeMessage() {
+<span class="fc" id="L241">        return Optional.ofNullable(welcomeMessage);</span>
+    }
+
+    public Optional&lt;String&gt; getAppointmentMessage() {
+<span class="fc" id="L245">        return Optional.ofNullable(appointmentMessage);</span>
+    }
+
+    public boolean isBookingReasonRequirementMandatoryOrOptional() {
+<span class="fc bfc" id="L249" title="All 2 branches covered.">        return this.bookingReasonRequirement != Necessity.NotRequested;</span>
+    }
+
+    public boolean isBookingReasonRequirementMandatory() {
+<span class="fc bfc" id="L253" title="All 2 branches covered.">        return this.bookingReasonRequirement == Necessity.RequestedMandatory;</span>
+    }
+
+    public boolean isGpMessagesVisible() {
+<span class="pc bpc" id="L257" title="1 of 4 branches missed.">        return StringUtils.isNotBlank(welcomeMessage) || StringUtils.isNotBlank(appointmentMessage);</span>
+    }
+
+    public boolean isBookAppointmentWarningVisible() {
+<span class="fc" id="L261">        return config.isBookAppointmentWarningVisible();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ChunkFetchInputStream.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.file</a> &gt; <span class="el_source">ChunkFetchInputStream.java</span></div><h1>ChunkFetchInputStream.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2011 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.service.file;
+
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.document.entity.ChunkedDocDTO;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.UUID;
+
+import static java.util.Objects.requireNonNull;
+
+/**
+ * Only read each chunk from Tolven as it's needed, to send down via the response.
+ * The buffer is initialized with the top-level file
+ * The fileChunks queue
+ *
+ * @author robwhelan
+ */
+public class ChunkFetchInputStream extends InputStream {
+
+<span class="fc" id="L34">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private ChunkedDocManager chunkedDocManager;
+    private LoggedInEHRRequestContext requestContext;
+
+    private UUID baseFileId; // just for logging in case of error
+    private int chunkSize; // for skip impl
+
+    private LinkedList&lt;UUID&gt; nextChunkQueue;
+    private byte[] buffer;
+    private int length;
+    private int pos;
+
+
+    /**
+     *
+     * @param chunkedDocManager
+     */
+<span class="fc" id="L52">    public ChunkFetchInputStream(@NotNull LoggedInEHRRequestContext context, UUID parentDocId, ChunkedDocManager chunkedDocManager) {</span>
+<span class="fc" id="L53">        this.chunkedDocManager = requireNonNull(chunkedDocManager, &quot;IChunkedDocManager cannot be null!&quot;);</span>
+<span class="fc" id="L54">        this.requestContext = requireNonNull(context, &quot;EHRRequestContext cannot be null!&quot;);</span>
+<span class="fc" id="L55">        List&lt;UUID&gt; chunkIds = chunkedDocManager.getChunkIds(requireNonNull(parentDocId, &quot;parentDocId cannot be null!&quot;));</span>
+<span class="fc" id="L56">        this.baseFileId = parentDocId;</span>
+
+        // init buffer with the top-level file
+<span class="fc" id="L59">        setVariables(chunkedDocManager.getChunk(requestContext, baseFileId));</span>
+
+        // set up queue of &quot;what's next&quot; for chunk IDs
+        // pop will take from the front, so add to the end (we want FIFO)
+<span class="fc" id="L63">        nextChunkQueue = new LinkedList&lt;&gt;();</span>
+<span class="fc bfc" id="L64" title="All 2 branches covered.">        for (UUID chunkId : chunkIds) {</span>
+<span class="fc" id="L65">            nextChunkQueue.addLast(chunkId);</span>
+<span class="fc" id="L66">        }</span>
+<span class="fc" id="L67">    }</span>
+
+    @Override
+    public int read() throws IOException {
+<span class="fc bfc" id="L71" title="All 2 branches covered.">        if (pos &lt; length) {</span>
+<span class="fc" id="L72">            return (buffer[pos++] &amp; 0xff);</span>
+        }
+
+        // uh oh, buffer is used up!
+<span class="fc" id="L76">        buffer = null; // release it</span>
+<span class="fc bfc" id="L77" title="All 2 branches covered.">        if (nextChunkQueue.isEmpty()) {</span>
+<span class="fc" id="L78">            LOGGER.info(&quot;Download of attachment parentDocId: {} finished.&quot;, baseFileId);</span>
+<span class="fc" id="L79">            return -1; // the last chunk has been sent!</span>
+        }
+
+        try {
+<span class="fc" id="L83">            setVariables(chunkedDocManager.getChunk(requestContext, nextChunkQueue.pop()));</span>
+<span class="nc" id="L84">        } catch (Exception e) {</span>
+<span class="nc" id="L85">            LOGGER.error(&quot;Error fetching file chunks for file {}&quot;, baseFileId, e);</span>
+            // ending download
+<span class="nc" id="L87">            return -1;</span>
+<span class="fc" id="L88">        }</span>
+
+<span class="fc" id="L90">        return (buffer[pos++] &amp; 0xff);</span>
+    }
+
+    @Override
+    public long skip(long n) throws IOException {
+<span class="nc" id="L95">        long current = n;</span>
+<span class="nc" id="L96">        UUID attachmentId = baseFileId;</span>
+
+<span class="nc bnc" id="L98" title="All 2 branches missed.">        while (current &gt; chunkSize) {</span>
+<span class="nc" id="L99">            current -= chunkSize;</span>
+<span class="nc" id="L100">            attachmentId = nextChunkQueue.pop();</span>
+        }
+
+<span class="nc" id="L103">        setVariables(chunkedDocManager.getChunk(requestContext, attachmentId));</span>
+
+<span class="nc" id="L105">        return super.skip(current);</span>
+    }
+
+    @Override
+    public int available() throws IOException {
+<span class="nc" id="L110">        return length - pos; // answer for the current chunk</span>
+    }
+
+    @Override
+    public void close() throws IOException {
+        // free stuff
+<span class="fc" id="L116">        chunkedDocManager = null;</span>
+<span class="fc" id="L117">        buffer = null;</span>
+<span class="fc" id="L118">    }</span>
+
+    public List&lt;UUID&gt; getNextChunkQueue() {
+<span class="fc" id="L121">        return nextChunkQueue;</span>
+    }
+
+    private void setVariables(ChunkedDocDTO chunk) {
+<span class="fc" id="L125">        buffer = chunk.getContent();</span>
+<span class="fc" id="L126">        chunkSize = buffer.length; // size of first chunk</span>
+<span class="fc" id="L127">        length = buffer.length;</span>
+<span class="fc" id="L128">        pos = 0;</span>
+<span class="fc" id="L129">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

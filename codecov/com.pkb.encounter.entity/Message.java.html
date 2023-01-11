@@ -1,0 +1,945 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>Message.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.encounter.entity</a> &gt; <span class="el_source">Message.java</span></div><h1>Message.java</h1><pre class="source lang-java linenums">package com.pkb.encounter.entity;
+
+//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: Message.java May 25, 2009 12:02:20 PM pravinam$
+//
+//------------------------------------------------------------------------------
+
+import com.pkb.annotation.EHRField;
+import com.pkb.annotation.EHRField.QueryField;
+import com.pkb.annotation.EHRMigration;
+import com.pkb.app.dto.DTOBaseFields;
+import com.pkb.app.dto.ParticipantDTO;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.app.interfaces.IBaseDTO;
+import com.pkb.code.entity.Code;
+import com.pkb.document.entity.Attachment;
+import com.pkb.encounter.entity.Encounter.EncounterStatus;
+import com.pkb.entities.enums.EncounterClass;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.messaging.MessageStatus;
+import com.pkb.util.Constants;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+
+import java.io.Serializable;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static com.pkb.entities.enums.messaging.MessageStatus.INDRAFT;
+import static com.pkb.entities.enums.messaging.MessageStatus.READ;
+import static com.pkb.entities.enums.messaging.MessageStatus.UNREAD;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * This class represents a PKB Message exchanged between a patient and a
+ * Clinician
+ * &lt;p&gt;
+ * Refer to http://www.hl7.org/implement/standards/fhir/encounter.html
+ */
+@EHRMigration(migratorClass = MessageMigrator.class)
+public class Message implements IBaseDTO, Cloneable, Serializable, InlineContentTypes {
+
+<span class="fc" id="L59">    private static final Instant SHARED_UNIQUEIDS_AVAILABLE_APPROX_INSTANT = LocalDate.of(2019, 3, 21).atStartOfDay(Constants.APPLICATION_TZ).toInstant();</span>
+
+<span class="fc" id="L61">    public static final MenuDataType MS_PATH_MESSAGE = MenuDataType.message;</span>
+
+<span class="fc" id="L63">    private static final Pattern MED_PATTERN = Pattern.compile(&quot;\\[MED=\\d+]&quot;);</span>
+<span class="fc" id="L64">    private static final Pattern CALL_PATTERN = Pattern.compile(&quot;\\[CALL=#]&quot;);</span>
+<span class="fc" id="L65">    private static final Pattern PLAN_PATTERN = Pattern.compile(&quot;\\[PLAN=[\\w-,]+]&quot;);</span>
+<span class="fc" id="L66">    private static final Pattern QUESTIONNAIRE_PATTERN = Pattern.compile(&quot;\\[SURVEY=[\\w-,]+]&quot;);</span>
+
+<span class="nc" id="L68">    public enum SortField {</span>
+<span class="nc" id="L69">        SUBJECT, SENDER, DATE</span>
+    }
+
+    public static final String ENCOUNTER_ID = &quot;encounterUniqueId&quot;;
+
+    public static final String ENCOUNTER_UNIQUE_ID_COLUMN = &quot;uuid01&quot;;
+
+    public static final String EXTERNAL_MESSAGE_ID = &quot;externalMessageId&quot;;
+
+    public static final String EXTERNAL_ENCOUNTER_ID = &quot;string12&quot;;
+
+    public static final String MESSAGE_TYPE_ID = &quot;messageTypeId&quot;;
+
+    public static final String PH_PARTICIPANTS_LIST = &quot;participants&quot;;
+
+    private static final String QUESTIONNAIRE_INLINE_SUMMARY = &quot;... Online Survey ...&quot;;
+
+    private static final String MED_INLINE_SUMMARY = &quot;... Prescription ...&quot;;
+
+    private static final String CALL_INLINE_SUMMARY = &quot;... Call ...&quot;;
+
+    private static final String PHPLAN_INLINE_SUMMARY = &quot;... Personal Health Plan ...&quot;;
+
+    // In an encounter , we read the latest of each message type
+    // If there any changes to a type of message; create a new message of the same type with new details
+<span class="fc" id="L94">    public enum MessageType {</span>
+<span class="fc" id="L95">        MESSAGE,</span>
+<span class="fc" id="L96">        ENCOUNTER_DETAILS,</span>
+<span class="fc" id="L97">        PATIENT_ADMIT, // ADT^A01</span>
+<span class="fc" id="L98">        PATIENT_TRANSFER, // ADT^A02</span>
+<span class="fc" id="L99">        PATIENT_DISCHARGE, // ADT^A03</span>
+<span class="fc" id="L100">        PATIENT_INFORMATION_UPDATE, // ADT^A08</span>
+<span class="fc" id="L101">        CANCEL_PATIENT_ADMIT, // ADT^A11</span>
+<span class="fc" id="L102">        CANCEL_PATIENT_TRANSFER, // ADT^A12</span>
+<span class="fc" id="L103">        CANCEL_PATIENT_DISCHARGE, // ADT^A13</span>
+<span class="fc" id="L104">        PATIENT_PRE_ADMIT, // ADT^A05</span>
+<span class="fc" id="L105">        CANCEL_PATIENT_PRE_ADMIT, // ADT^A38</span>
+<span class="fc" id="L106">        PATIENT_PENDING_ADMIT, // ADT^A14</span>
+<span class="fc" id="L107">        CANCEL_PATIENT_PENDING_ADMIT, // ADT^A27</span>
+<span class="fc" id="L108">        HL7_DOCUMENT; //MDM^T02</span>
+
+        // Keep adding more events like EVENT_ADMISSION, EVENT_DISCHARGE
+
+        // Code below is mapping between the higher level PKB specific enumerated types for messages
+        // and the HL7 spec message types.
+
+        // XXX: Should we just be using explicit HL7 names to avoid confusion? (i.e. ADT_A01 instead of PATIENT_ADMIT)
+<span class="fc" id="L116">        private static Map&lt;String, MessageType&gt; hl7MessageMap = new HashMap&lt;&gt;();</span>
+
+        static {
+<span class="fc" id="L119">            hl7MessageMap.put(&quot;ADT^A01&quot;, PATIENT_ADMIT);</span>
+<span class="fc" id="L120">            hl7MessageMap.put(&quot;ADT^A02&quot;, PATIENT_TRANSFER);</span>
+<span class="fc" id="L121">            hl7MessageMap.put(&quot;ADT^A03&quot;, PATIENT_DISCHARGE);</span>
+<span class="fc" id="L122">            hl7MessageMap.put(&quot;ADT^A08&quot;, PATIENT_INFORMATION_UPDATE);</span>
+<span class="fc" id="L123">            hl7MessageMap.put(&quot;ADT^A11&quot;, CANCEL_PATIENT_ADMIT);</span>
+<span class="fc" id="L124">            hl7MessageMap.put(&quot;ADT^A12&quot;, CANCEL_PATIENT_TRANSFER);</span>
+<span class="fc" id="L125">            hl7MessageMap.put(&quot;ADT^A13&quot;, CANCEL_PATIENT_DISCHARGE);</span>
+
+<span class="fc" id="L127">            hl7MessageMap.put(&quot;ADT^A05&quot;, PATIENT_PRE_ADMIT);</span>
+<span class="fc" id="L128">            hl7MessageMap.put(&quot;ADT^A38&quot;, CANCEL_PATIENT_PRE_ADMIT);</span>
+<span class="fc" id="L129">            hl7MessageMap.put(&quot;ADT^A14&quot;, PATIENT_PENDING_ADMIT);</span>
+<span class="fc" id="L130">            hl7MessageMap.put(&quot;ADT^A27&quot;, CANCEL_PATIENT_PENDING_ADMIT);</span>
+
+<span class="fc" id="L132">            hl7MessageMap.put(&quot;MDM^T02&quot;, HL7_DOCUMENT);</span>
+<span class="fc" id="L133">        }</span>
+
+        public static MessageType getPKBMessageTypeFromHL7ADTMessageType(String adtMessageType) {
+<span class="fc" id="L136">            return hl7MessageMap.get(adtMessageType);</span>
+        }
+    }
+
+<span class="fc" id="L140">    public enum DocumentType {</span>
+<span class="fc" id="L141">        DISCHARGE_SUMMARY(&quot;DS&quot;, &quot;documentType.dischargeSummary.subject&quot;, &quot;documentType.dischargeSummary.content&quot;, &quot;DischargeSummary&quot;),</span>
+<span class="fc" id="L142">        DISCHARGE_LETTER(&quot;DL&quot;, &quot;documentType.dischargeLetter.subject&quot;, &quot;documentType.dischargeLetter.content&quot;, &quot;DischargeLetter&quot;),</span>
+<span class="fc" id="L143">        CLINIC_LETTER(&quot;CL&quot;, &quot;documentType.clinicLetter.subject&quot;, &quot;documentType.clinicLetter.content&quot;, &quot;ClinicLetter&quot;),</span>
+<span class="fc" id="L144">        REFERRAL_LETTER(&quot;RL&quot;, &quot;documentType.referralLetter.subject&quot;, &quot;documentType.referralLetter.content&quot;, &quot;ReferralLetter&quot;),</span>
+<span class="fc" id="L145">        APPOINTMENT_LETTER(&quot;AL&quot;, &quot;documentType.appointmentLetter.subject&quot;, &quot;documentType.appointmentLetter.content&quot;, &quot;AppointmentLetter&quot;),</span>
+<span class="fc" id="L146">        ADMISSION_TCI_LETTER(&quot;TCI&quot;, &quot;documentType.admissionTCILetter.subject&quot;, &quot;documentType.admissionTCILetter.content&quot;, &quot;AdmissionLetter&quot;),</span>
+<span class="fc" id="L147">        MULTI_DISCIPLINARY_TEAM_MEETING_NOTES(&quot;MDT&quot;, &quot;documentType.multiDisciplinaryTeamNotes.subject&quot;, &quot;documentType.multiDisciplinaryTeamNotes.content&quot;, &quot;TeamMeetingNotes&quot;),</span>
+<span class="fc" id="L148">        ALERT_NOTIFICATION(&quot;AN&quot;, &quot;documentType.alertNotification.subject&quot;, &quot;documentType.alertNotification.content&quot;, &quot;AlertNotification&quot;),</span>
+<span class="fc" id="L149">        BIRTH_REPORT(&quot;BR&quot;, &quot;documentType.birthReport.subject&quot;, &quot;documentType.birthReport.content&quot;, &quot;BirthReport&quot;),</span>
+<span class="fc" id="L150">        HEALTH_SCREENING_REPORT(&quot;HS&quot;, &quot;documentType.healthScreeningReport.subject&quot;, &quot;documentType.healthScreeningReport.content&quot;, &quot;HealthScreeningReport&quot;),</span>
+<span class="fc" id="L151">        TIMETABLE(&quot;TT&quot;, &quot;documentType.timetable.subject&quot;, &quot;documentType.timetable.content&quot;, &quot;Timetable&quot;),</span>
+<span class="fc" id="L152">        SIGNPOSTING_DOCUMENT(&quot;SP&quot;, &quot;documentType.signpostingDocument.subject&quot;, &quot;documentType.signpostingDocument.content&quot;, &quot;SignpostingDocument&quot;),</span>
+<span class="fc" id="L153">        SUPPORT_DOCUMENT(&quot;ST&quot;, &quot;documentType.supportDocument.subject&quot;, &quot;documentType.supportDocument.content&quot;, &quot;SupportDocument&quot;);</span>
+
+        private final String value;
+        private final String subjectProperty;
+        private final String contentProperty;
+        private final String filename;
+
+<span class="fc" id="L160">        private static final HashMap&lt;String, DocumentType&gt; VALUE = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L161">        private static final EnumMap&lt;DocumentType, String&gt; SUBJECT_PROPERTY = new EnumMap&lt;&gt;(DocumentType.class);</span>
+<span class="fc" id="L162">        private static final EnumMap&lt;DocumentType, String&gt; CONTENT_PROPERTY = new EnumMap&lt;&gt;(DocumentType.class);</span>
+<span class="fc" id="L163">        private static final EnumMap&lt;DocumentType, String&gt; FILENAME = new EnumMap&lt;&gt;(DocumentType.class);</span>
+
+        static {
+<span class="fc" id="L166">            Arrays.stream(values()).forEach(element -&gt; VALUE.put(element.value, element));</span>
+<span class="fc" id="L167">            Arrays.stream(values()).forEach(element -&gt; SUBJECT_PROPERTY.put(element, element.subjectProperty));</span>
+<span class="fc" id="L168">            Arrays.stream(values()).forEach(element -&gt; CONTENT_PROPERTY.put(element, element.contentProperty));</span>
+<span class="fc" id="L169">            Arrays.stream(values()).forEach(element -&gt; FILENAME.put(element, element.filename));</span>
+<span class="fc" id="L170">        }</span>
+
+<span class="fc" id="L172">        DocumentType(String value, String subjectProperty, String contentProperty, String filename) {</span>
+<span class="fc" id="L173">            this.value = value;</span>
+<span class="fc" id="L174">            this.subjectProperty = subjectProperty;</span>
+<span class="fc" id="L175">            this.contentProperty = contentProperty;</span>
+<span class="fc" id="L176">            this.filename = filename;</span>
+<span class="fc" id="L177">        }</span>
+
+        public static @Nullable DocumentType from(String value) {
+<span class="fc" id="L180">            return VALUE.getOrDefault(value, null);</span>
+        }
+
+        public static String subjectProperty(@Nullable DocumentType type) {
+<span class="fc" id="L184">            return SUBJECT_PROPERTY.getOrDefault(type, &quot;&quot;);</span>
+        }
+
+        public static String contentProperty(@Nullable DocumentType type) {
+<span class="fc" id="L188">            return CONTENT_PROPERTY.getOrDefault(type, &quot;&quot;);</span>
+        }
+
+        public static String filename(@Nullable DocumentType type) {
+<span class="fc" id="L192">            return FILENAME.getOrDefault(type, &quot;&quot;);</span>
+        }
+
+        public static void translate(@NotNull BiFunction&lt;String, String[], String&gt; method, @NotNull Message message) {
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">            if (message.getDocumentType() != null) {</span>
+<span class="fc" id="L197">                SourceDetails source = message.getSource();</span>
+<span class="pc bpc" id="L198" title="1 of 4 branches missed.">                String sourceName = source != null ? (source.getTeamName() != null ? source.getTeamName() : source.getOrgName()) : &quot;&quot;;</span>
+<span class="fc" id="L199">                message.setSubject(method.apply(subjectProperty(message.getDocumentType()), null));</span>
+<span class="fc" id="L200">                message.setContent(method.apply(contentProperty(message.getDocumentType()), new String[]{sourceName}));</span>
+            }
+<span class="fc" id="L202">        }</span>
+    }
+
+    private static final long serialVersionUID = 1L;
+
+    /**
+     * DELIBERATELY PROTECTED DO NOT CHANGE! Use the available constructors!
+     * &lt;p&gt;
+     * Would have even less visibility but JPA spec &amp; Hibernate requires a no arg const. which is public or protected.
+     * Other than those, nothing should be able to construct without parameters, as changelog wouldn't be filled correctly etc.
+     */
+<span class="fc" id="L213">    protected Message() {</span>
+<span class="fc" id="L214">        this.source = new SourceDetails();</span>
+<span class="fc" id="L215">    }</span>
+
+<span class="fc" id="L217">    public Message(SourceDetails sourceDetails) {</span>
+<span class="fc" id="L218">        this.source = sourceDetails;</span>
+<span class="fc" id="L219">    }</span>
+
+<span class="nc" id="L221">    public Message(String senderId, String content, SourceDetails sourceDetails) {</span>
+<span class="nc" id="L222">        this.senderId = senderId;</span>
+<span class="nc" id="L223">        this.content = content;</span>
+<span class="nc" id="L224">        this.source = sourceDetails;</span>
+<span class="nc" id="L225">    }</span>
+
+    @EHRField(queryField = QueryField.id)
+    private Long id;
+
+    @EHRField(queryField = QueryField.date01)
+    private Instant messageTimestamp;
+
+    // Context patient around whom messages/conversation exists
+    @EHRField(queryField = QueryField.string03)
+    private String patientId;
+
+    @EHRField(queryField = QueryField.string02)
+    private String senderId;
+
+    @EHRField
+    private String onBehalfAuthorId; // retained for some old messages dating back to 2010
+
+    @EHRField(queryField = QueryField.string01)
+    private String receiverId;
+
+    @EHRField
+    private String subject;
+
+    @EHRField
+    private String content;
+
+<span class="pc" id="L252">    @EHRField</span>
+<span class="pc" id="L253">    private Boolean htmlAllowed = false;</span>
+
+    /**
+     * encounterUniqueId is an internally generated shared UUID that all messages
+     * for a given encounter are grouped together by. This is an internal
+     * PKB equivalent to the externally provided PV1-19 Visit ID in an HL7 Encounter message (for example).
+     * This is used in the UI conversation/discussion view to group Inbox messages for a given
+     * encounter.
+     */
+    @EHRField(queryField = QueryField.uuid01)
+    private UUID encounterUniqueId;
+
+    @EHRField(queryField = QueryField.string04)
+    private MessageStatus messageStatus;
+
+    @EHRField(queryField = QueryField.string14)
+    private DocumentType documentType;
+
+<span class="pc" id="L271">    private Long attachmentCount = 0L;</span>
+
+    private Long prevMessageId;
+
+    // Derived fields filled in by MessageManager.expandInlineContents()
+
+    private String inlineContentType;
+
+    private String inlineContentId;
+
+    private String inlineContentText;
+
+    private String receiverSkypeId;
+
+    private String receiverPhoneNumber;
+
+    private List&lt;Attachment&gt; attachments;
+
+    private String messageTimestampFormatted;
+
+    private String patientIdString;
+
+    private List&lt;String&gt; failedReceivers;
+
+    @EHRField(queryField = QueryField.boolean01)
+    private Boolean privateMessage;
+
+    @EHRField(queryField = QueryField.boolean02)
+    private Boolean patientNotFound;
+
+    @EHRField
+    private Long delayDisplayDays;
+
+    private SourceDetails source;
+
+<span class="pc" id="L306">    private DTOBaseFields baseFields = new DTOBaseFields();</span>
+
+    private List&lt;String&gt; copyToList;
+
+    @EHRField(queryField = QueryField.date02)
+    private Date startDate;
+
+    @EHRField(queryField = QueryField.date03)
+    private Date endDate;
+
+    @EHRField(queryField = QueryField.date05)
+    private Instant postalDate;
+
+    @EHRField(queryField = QueryField.long01)
+    private Long reasonCodeId; //Reason the encounter takes place
+
+    @EHRField
+    private String reasonCode;//Code for reason the encounter takes place
+
+    @EHRField
+    private String indication;//Reason the encounter takes place
+
+    @EHRField
+    private GeographicLocation location;
+
+    @EHRField
+    private List&lt;String&gt; participants;
+
+    //private	List&lt;ParticipantDTO&gt; participantsPKB;
+
+    @EHRField
+    private List&lt;ParticipantDTO&gt; participantsNonPKB;
+
+    private List&lt;String&gt; observations;
+
+    private List&lt;String&gt; measurements;
+
+    @EHRField(queryField = QueryField.string09)
+    private EncounterClass encounterClass;
+
+    @EHRField
+    private EncounterStatus encounterStatus;
+
+    // code01code
+    @EHRField(queryField = QueryField.string10)
+    private String externalMessageId;
+
+    @EHRField(queryField = QueryField.string05)
+    private String messageTypeId;
+
+    private MessageType messageType;
+
+    private Code codeDetails; //not saved in DB
+
+    @EHRField(queryField = QueryField.string12)
+    private String externalEncounterId;
+
+    @EHRField(queryField = QueryField.date04)
+    private Instant firstReadTimestamp;
+
+    public MenuDataType getDataType() {
+<span class="fc" id="L367">        return MS_PATH_MESSAGE;</span>
+    }
+
+    public Boolean isPrivateMessage() {
+<span class="fc bfc" id="L371" title="All 2 branches covered.">        if (privateMessage == null) {</span>
+<span class="fc" id="L372">            return Boolean.FALSE;</span>
+        }
+<span class="fc" id="L374">        return privateMessage;</span>
+    }
+
+    public void initializeUniqueIds(boolean isFirst) {
+<span class="fc bfc" id="L378" title="All 2 branches covered.">        if (isFirst) {</span>
+            // For new encounters, set the uniqueId of the first message to the uniqueId of the encounter. (PHRZ-121)
+<span class="fc" id="L380">            getBaseFields().setUniqueId(encounterUniqueId);</span>
+        } else {
+<span class="fc" id="L382">            generateNewRandomUniqueId();</span>
+        }
+<span class="fc" id="L384">    }</span>
+
+    public void setPrivateMessage(Boolean privateMessage) {
+<span class="fc" id="L387">        this.privateMessage = privateMessage;</span>
+<span class="fc" id="L388">    }</span>
+
+    public MessageStatus getMessageStatus() {
+<span class="fc" id="L391">        return messageStatus;</span>
+    }
+
+    public void setMessageStatus(MessageStatus messageStatus) {
+<span class="fc" id="L395">        this.messageStatus = messageStatus;</span>
+<span class="fc" id="L396">    }</span>
+
+    public DocumentType getDocumentType() {
+<span class="fc" id="L399">        return documentType;</span>
+    }
+
+    public Optional&lt;String&gt; getDocumentTypeTextName() {
+<span class="pc bpc" id="L403" title="1 of 2 branches missed.">        if (documentType == null) {</span>
+<span class="fc" id="L404">            return Optional.empty();</span>
+        }
+<span class="nc" id="L406">        return Optional.of(&quot;discussionCenter.doctype.&quot; + documentType);</span>
+    }
+
+    public void setDocumentType(DocumentType documentType) {
+<span class="fc" id="L410">        this.documentType = documentType;</span>
+<span class="fc" id="L411">    }</span>
+
+    public Long getAttachmentCount() {
+<span class="fc" id="L414">        return attachmentCount;</span>
+    }
+
+    public void setAttachmentCount(Long attachmentCount) {
+<span class="fc" id="L418">        this.attachmentCount = attachmentCount;</span>
+<span class="fc" id="L419">    }</span>
+
+    @Override
+    public Long getId() {
+<span class="fc" id="L423">        return id;</span>
+    }
+
+    @Override
+    public void setId(Long id) {
+<span class="fc" id="L428">        this.id = id;</span>
+<span class="fc" id="L429">    }</span>
+
+    public Instant getMessageTimestamp() {
+<span class="fc" id="L432">        return messageTimestamp;</span>
+    }
+
+    public void setMessageTimestamp(Instant messageTimestamp) {
+<span class="fc" id="L436">        this.messageTimestamp = messageTimestamp;</span>
+<span class="fc" id="L437">    }</span>
+
+    public String getSubject() {
+<span class="fc" id="L440">        return subject;</span>
+    }
+
+    public void setSubject(String subject) {
+<span class="fc" id="L444">        this.subject = subject;</span>
+<span class="fc" id="L445">    }</span>
+
+    public String getContent() {
+<span class="fc" id="L448">        return content;</span>
+    }
+
+    public void setContent(String content) {
+<span class="fc" id="L452">        this.content = content;</span>
+<span class="fc" id="L453">    }</span>
+
+    public @Nullable UUID getEncounterUniqueId() {
+<span class="fc" id="L456">        return encounterUniqueId;</span>
+    }
+
+    public void setEncounterUniqueId(UUID encounterUniqueId) {
+<span class="fc" id="L460">        this.encounterUniqueId = encounterUniqueId;</span>
+<span class="fc" id="L461">    }</span>
+
+    /**
+     * uniqueID of the first message in the conversation, containing the privacy flags for the encounter.
+     * It should always be the same as the encounterUniqueId. (PHRZ-121)
+     */
+    public UUID getFirstMessageUniqueId() {
+<span class="fc" id="L468">        return getEncounterUniqueId();</span>
+    }
+
+    public String getSenderId() {
+<span class="fc" id="L472">        return senderId;</span>
+    }
+
+    public void setSenderId(String senderId) {
+<span class="fc" id="L476">        this.senderId = senderId;</span>
+<span class="fc" id="L477">    }</span>
+
+    public String getOnBehalfAuthorId() {
+<span class="fc" id="L480">        return onBehalfAuthorId;</span>
+    }
+
+    public void setOnBehalfAuthorId(String onBehalfAuthorId) {
+<span class="fc" id="L484">        this.onBehalfAuthorId = onBehalfAuthorId;</span>
+<span class="fc" id="L485">    }</span>
+
+    public String getReceiverId() {
+<span class="pc bpc" id="L488" title="1 of 2 branches missed.">        if (receiverId == null) {</span>
+<span class="nc" id="L489">            receiverId = &quot;&quot;;</span>
+        }
+<span class="fc" id="L491">        return receiverId;</span>
+    }
+
+    public void setReceiverId(String receiverId) {
+<span class="fc" id="L495">        this.receiverId = receiverId;</span>
+<span class="fc" id="L496">    }</span>
+
+    public String getExternalMessageId() {
+<span class="fc" id="L499">        return externalMessageId;</span>
+    }
+
+    public void setExternalMessageId(String externalMessageId) {
+<span class="fc" id="L503">        this.externalMessageId = externalMessageId;</span>
+<span class="fc" id="L504">    }</span>
+
+    @Override
+    public String toString() {
+<span class="nc" id="L508">        StringBuilder buffer = new StringBuilder(200);</span>
+<span class="nc" id="L509">        buffer.append(&quot;Message: Id - &quot;).append(id).append(&quot; &quot;);</span>
+<span class="nc" id="L510">        buffer.append(&quot;Sender - &quot;).append(senderId).append(&quot; &quot;);</span>
+<span class="nc bnc" id="L511" title="All 2 branches missed.">        if (onBehalfAuthorId != null) {</span>
+<span class="nc" id="L512">            buffer.append(&quot;(Author &quot;).append(onBehalfAuthorId).append(&quot; on behalf of)&quot;);</span>
+        }
+<span class="nc" id="L514">        buffer.append(&quot;Receiver-&quot;).append(receiverId).append(&quot; &quot;);</span>
+<span class="nc" id="L515">        buffer.append(&quot;Attachment Count-&quot;).append(attachmentCount).append(&quot; &quot;);</span>
+<span class="nc" id="L516">        buffer.append(&quot;Timestamp-&quot;).append(messageTimestamp).append(&quot; &quot;);</span>
+<span class="nc" id="L517">        buffer.append(&quot;Subject length &quot;).append(StringUtils.length(subject)).append(&quot;; content length &quot;).append(StringUtils.length(content)).append(&quot;\n&quot;);</span>
+<span class="nc" id="L518">        return buffer.toString();</span>
+    }
+
+    @Override
+    public String getInlineContentType() {
+<span class="fc" id="L523">        return inlineContentType;</span>
+    }
+
+    /**
+     * @deprecated this is only used for a few special cases, like embedding IMH results in messages (dead feature, still
+     * in some old data)
+     */
+    @Deprecated
+    public void setInlineContentType(String inlineContentType) {
+<span class="fc" id="L532">        this.inlineContentType = inlineContentType;</span>
+<span class="fc" id="L533">    }</span>
+
+    /**
+     * @deprecated this is only used for a few special cases, like embedding IMH results in messages (dead feature, still
+     * in some old data)
+     */
+    @Deprecated
+    public String getInlineContentId() {
+<span class="fc" id="L541">        return inlineContentId;</span>
+    }
+
+    public void setInlineContentId(String inlineContentId) {
+<span class="fc" id="L545">        this.inlineContentId = inlineContentId;</span>
+<span class="fc" id="L546">    }</span>
+
+    public String getInlineContentText() {
+<span class="fc" id="L549">        return inlineContentText;</span>
+    }
+
+    public void setInlineContentText(String inlineContentText) {
+<span class="fc" id="L553">        this.inlineContentText = inlineContentText;</span>
+<span class="fc" id="L554">    }</span>
+
+    public List&lt;Attachment&gt; getAttachments() {
+<span class="fc" id="L557">        return attachments;</span>
+    }
+
+    public void setAttachments(List&lt;Attachment&gt; attachments) {
+<span class="fc" id="L561">        this.attachments = attachments;</span>
+<span class="fc" id="L562">    }</span>
+
+    public String getPatientIdString() {
+<span class="fc" id="L565">        return patientIdString;</span>
+    }
+
+    public void setPatientIdString(String patientIdString) {
+<span class="fc" id="L569">        this.patientIdString = patientIdString;</span>
+<span class="fc" id="L570">    }</span>
+
+    public boolean isHtmlAllowed() {
+<span class="pc bpc" id="L573" title="1 of 2 branches missed.">        if (htmlAllowed == null) {</span>
+<span class="nc" id="L574">            return false;</span>
+        }
+<span class="fc" id="L576">        return htmlAllowed;</span>
+    }
+
+    public void setHtmlAllowed(Boolean htmlAllowed) {
+<span class="fc" id="L580">        this.htmlAllowed = htmlAllowed;</span>
+<span class="fc" id="L581">    }</span>
+
+    @Nullable
+    public String getExcerpt() {
+<span class="pc bpc" id="L585" title="1 of 2 branches missed.">        if (content == null) {</span>
+<span class="nc" id="L586">            return null;</span>
+        }
+<span class="fc" id="L588">        String excerpt = summarizeInlineContents();</span>
+<span class="pc bpc" id="L589" title="1 of 2 branches missed.">        if (excerpt.length() &gt; 200) {</span>
+<span class="nc" id="L590">            excerpt = excerpt.substring(0, 200);</span>
+        }
+<span class="fc" id="L592">        return excerpt;</span>
+    }
+
+    private String summarizeInlineContents() {
+        // Replace a call altogether
+
+<span class="pc bpc" id="L598" title="1 of 2 branches missed.">        if (content.contains(&quot;[CALL=#]&quot;)) {</span>
+<span class="nc" id="L599">            return CALL_INLINE_SUMMARY;</span>
+        }
+
+        // Look for a tag of the form [IMH=&lt;imhId&gt;]
+        // Replace this with &quot;... Instant Medical History ...&quot;
+
+<span class="fc" id="L605">        StringBuffer result = new StringBuffer();</span>
+<span class="fc" id="L606">        Matcher tagMatcher = MED_PATTERN.matcher(content);</span>
+
+<span class="pc bpc" id="L608" title="1 of 2 branches missed.">        while (tagMatcher.find()) {</span>
+<span class="nc" id="L609">            tagMatcher.appendReplacement(result, MED_INLINE_SUMMARY);</span>
+        }
+
+<span class="fc" id="L612">        tagMatcher.appendTail(result);</span>
+
+        // [CALL=#] -&gt; ... Call ...
+
+<span class="fc" id="L616">        StringBuffer result3 = new StringBuffer();</span>
+<span class="fc" id="L617">        tagMatcher = CALL_PATTERN.matcher(result);</span>
+
+<span class="pc bpc" id="L619" title="1 of 2 branches missed.">        while (tagMatcher.find()) {</span>
+<span class="nc" id="L620">            tagMatcher.appendReplacement(result3, CALL_INLINE_SUMMARY);</span>
+        }
+<span class="fc" id="L622">        tagMatcher.appendTail(result3);</span>
+
+        // [IMHINVITE=&lt;consultationId&gt;] -&gt; ... Invitation to online consultation
+        // ...
+
+<span class="fc" id="L627">        StringBuffer result4 = new StringBuffer();</span>
+<span class="fc" id="L628">        tagMatcher = PLAN_PATTERN</span>
+<span class="fc" id="L629">                .matcher(result3);</span>
+
+<span class="pc bpc" id="L631" title="1 of 2 branches missed.">        while (tagMatcher.find()) {</span>
+<span class="nc" id="L632">            tagMatcher.appendReplacement(result4, PHPLAN_INLINE_SUMMARY);</span>
+        }
+<span class="fc" id="L634">        tagMatcher.appendTail(result4);</span>
+
+        // [SURVEY=&lt;questionnaireId&gt;] -&gt; ... Invitation to take questionnaire
+        // ...
+
+<span class="fc" id="L639">        StringBuilder result6 = new StringBuilder();</span>
+<span class="fc" id="L640">        tagMatcher = QUESTIONNAIRE_PATTERN</span>
+<span class="fc" id="L641">                .matcher(result4);</span>
+
+<span class="pc bpc" id="L643" title="1 of 2 branches missed.">        while (tagMatcher.find()) {</span>
+<span class="nc" id="L644">            tagMatcher.appendReplacement(result6, QUESTIONNAIRE_INLINE_SUMMARY);</span>
+        }
+<span class="fc" id="L646">        tagMatcher.appendTail(result6);</span>
+
+<span class="fc" id="L648">        return result6.toString();</span>
+    }
+
+    public Long getPrevMessageId() {
+<span class="fc" id="L652">        return prevMessageId;</span>
+    }
+
+    public void setPrevMessageId(Long prevMessageId) {
+<span class="nc" id="L656">        this.prevMessageId = prevMessageId;</span>
+<span class="nc" id="L657">    }</span>
+
+    public String getReceiverSkypeId() {
+<span class="fc" id="L660">        return receiverSkypeId;</span>
+    }
+
+    public void setReceiverSkypeId(String receiverSkypeId) {
+<span class="fc" id="L664">        this.receiverSkypeId = receiverSkypeId;</span>
+<span class="fc" id="L665">    }</span>
+
+    public String getReceiverPhoneNumber() {
+<span class="fc" id="L668">        return receiverPhoneNumber;</span>
+    }
+
+    public void setReceiverPhoneNumber(String receiverPhoneNumber) {
+<span class="fc" id="L672">        this.receiverPhoneNumber = receiverPhoneNumber;</span>
+<span class="fc" id="L673">    }</span>
+
+    public String getMessageTimestampFormatted() {
+<span class="fc" id="L676">        return messageTimestampFormatted;</span>
+    }
+
+    public void setMessageTimestampFormatted(String messageTimestampFormatted) {
+<span class="nc" id="L680">        this.messageTimestampFormatted = messageTimestampFormatted;</span>
+<span class="nc" id="L681">    }</span>
+
+    public String getPatientId() {
+<span class="fc" id="L684">        return patientId;</span>
+    }
+
+    public void setPatientId(String patientId) {
+<span class="fc" id="L688">        this.patientId = patientId;</span>
+<span class="fc" id="L689">    }</span>
+
+    public List&lt;String&gt; getFailedReceivers() {
+<span class="fc" id="L692">        return failedReceivers;</span>
+    }
+
+    public void setFailedReceivers(List&lt;String&gt; failedReceivers) {
+<span class="fc" id="L696">        this.failedReceivers = failedReceivers;</span>
+<span class="fc" id="L697">    }</span>
+
+    @Override
+    public DTOBaseFields getBaseFields() {
+<span class="fc" id="L701">        return baseFields;</span>
+    }
+
+    public EncounterClass getEncounterClass() {
+<span class="fc" id="L705">        return encounterClass;</span>
+    }
+
+    public void setEncounterClass(EncounterClass encounterClass) {
+<span class="fc" id="L709">        this.encounterClass = encounterClass;</span>
+<span class="fc" id="L710">    }</span>
+
+    public List&lt;String&gt; getObservations() {
+<span class="fc" id="L713">        return observations;</span>
+    }
+
+    public void setObservations(List&lt;String&gt; observations) {
+<span class="nc" id="L717">        this.observations = observations;</span>
+<span class="nc" id="L718">    }</span>
+
+    public List&lt;String&gt; getMeasurements() {
+<span class="fc" id="L721">        return measurements;</span>
+    }
+
+    public void setMeasurements(List&lt;String&gt; measurements) {
+<span class="nc" id="L725">        this.measurements = measurements;</span>
+<span class="nc" id="L726">    }</span>
+
+    public List&lt;ParticipantDTO&gt; getAllParticipants() {
+<span class="fc" id="L729">        List&lt;ParticipantDTO&gt; allParticipants = new ArrayList&lt;&gt;();</span>
+        //allParticipants.addAll(participantsNonPKB);
+        //TODO : This needs to be fixed when List&lt;String&gt; participants is also migrated to list&lt;ParticipantDTO&gt;
+<span class="fc" id="L732">        List&lt;String&gt; parList = getParticipants(); // there's null avoidance in the get method</span>
+<span class="pc bpc" id="L733" title="1 of 2 branches missed.">        if (!parList.isEmpty()) {</span>
+            // PKB participants
+<span class="fc" id="L735">            List&lt;ParticipantDTO&gt; participantsPKB = new ArrayList&lt;&gt;();</span>
+            ParticipantDTO dto;
+<span class="fc bfc" id="L737" title="All 2 branches covered.">            for (String participant : parList) {</span>
+<span class="fc" id="L738">                dto = new ParticipantDTO();</span>
+<span class="fc" id="L739">                dto.setPersonId(participant);</span>
+<span class="fc" id="L740">                participantsPKB.add(dto);</span>
+<span class="fc" id="L741">            }</span>
+<span class="fc" id="L742">            allParticipants.addAll(participantsPKB);</span>
+        }
+<span class="fc" id="L744">        return allParticipants;</span>
+    }
+
+    /**
+     * @return never null (fallback to empty list)
+     */
+    public List&lt;String&gt; getParticipants() {
+<span class="fc bfc" id="L751" title="All 2 branches covered.">        if (participants == null) {</span>
+<span class="fc" id="L752">            participants = new ArrayList&lt;&gt;();</span>
+        }
+<span class="fc" id="L754">        return participants;</span>
+    }
+
+    public void setParticipants(List&lt;String&gt; participants) {
+<span class="fc" id="L758">        this.participants = participants;</span>
+<span class="fc" id="L759">    }</span>
+
+    public Long getDelayDisplayDays() {
+<span class="fc" id="L762">        return delayDisplayDays;</span>
+    }
+
+    public void setDelayDisplayDays(Long delayDisplayDays) {
+<span class="fc" id="L766">        this.delayDisplayDays = delayDisplayDays;</span>
+<span class="fc" id="L767">    }</span>
+
+    @Override
+    public SourceDetails getSource() {
+<span class="fc" id="L771">        return source;</span>
+    }
+
+    public Date getEndDate() {
+<span class="fc" id="L775">        return endDate;</span>
+    }
+
+    public void setEndDate(Date endDate) {
+<span class="fc" id="L779">        this.endDate = endDate;</span>
+<span class="fc" id="L780">    }</span>
+
+    public String getIndication() {
+<span class="fc" id="L783">        return indication;</span>
+    }
+
+    public void setIndication(String indication) {
+<span class="fc" id="L787">        this.indication = indication;</span>
+<span class="fc" id="L788">    }</span>
+
+    public List&lt;String&gt; getCopyToList() {
+<span class="fc" id="L791">        return copyToList;</span>
+    }
+
+    public void setCopyToList(List&lt;String&gt; copyToList) {
+<span class="nc" id="L795">        this.copyToList = copyToList;</span>
+<span class="nc" id="L796">    }</span>
+
+    public Boolean getPatientNotFound() {
+<span class="fc" id="L799">        return patientNotFound;</span>
+    }
+
+    public void setPatientNotFound(Boolean patientNotFound) {
+<span class="fc" id="L803">        this.patientNotFound = patientNotFound;</span>
+<span class="fc" id="L804">    }</span>
+
+    public Code getCodeDetails() {
+<span class="fc" id="L807">        return codeDetails;</span>
+    }
+
+    public void setCodeDetails(Code codeDetails) {
+<span class="nc" id="L811">        this.codeDetails = codeDetails;</span>
+<span class="nc" id="L812">    }</span>
+
+    public GeographicLocation getLocation() {
+<span class="fc" id="L815">        return location;</span>
+    }
+
+    public void setLocation(GeographicLocation location) {
+<span class="fc" id="L819">        this.location = location;</span>
+<span class="fc" id="L820">    }</span>
+
+    public List&lt;ParticipantDTO&gt; getParticipantsNonPKB() {
+<span class="fc" id="L823">        return participantsNonPKB;</span>
+    }
+
+    public void setParticipantsNonPKB(List&lt;ParticipantDTO&gt; participantsNonPKB) {
+<span class="fc" id="L827">        this.participantsNonPKB = participantsNonPKB;</span>
+<span class="fc" id="L828">    }</span>
+
+    public Date getStartDate() {
+<span class="fc" id="L831">        return startDate;</span>
+    }
+
+    public void setStartDate(Date startDate) {
+<span class="fc" id="L835">        this.startDate = startDate;</span>
+<span class="fc" id="L836">    }</span>
+
+    public EncounterStatus getEncounterStatus() {
+<span class="fc" id="L839">        return encounterStatus;</span>
+    }
+
+    public void setEncounterStatus(EncounterStatus encounterStatus) {
+<span class="fc" id="L843">        this.encounterStatus = encounterStatus;</span>
+<span class="fc" id="L844">    }</span>
+
+    public String getMessageTypeId() {
+<span class="fc" id="L847">        return messageTypeId;</span>
+    }
+
+    public void setMessageTypeId(String messageTypeId) {
+<span class="fc" id="L851">        this.messageTypeId = messageTypeId;</span>
+<span class="fc" id="L852">    }</span>
+
+    public MessageType getMessageType() {
+<span class="fc" id="L855">        return messageType;</span>
+    }
+
+    public void setMessageType(MessageType messageType) {
+<span class="fc" id="L859">        this.messageType = messageType;</span>
+<span class="fc" id="L860">    }</span>
+
+    public String getExternalEncounterId() {
+<span class="fc" id="L863">        return externalEncounterId;</span>
+    }
+
+    public void setExternalEncounterId(String externalEncounterId) {
+<span class="fc" id="L867">        this.externalEncounterId = externalEncounterId;</span>
+<span class="fc" id="L868">    }</span>
+
+    public void setReasonCodeId(Long reasonCodeId) {
+<span class="fc" id="L871">        this.reasonCodeId = reasonCodeId;</span>
+<span class="fc" id="L872">    }</span>
+
+    public Long getReasonCodeId() {
+<span class="fc" id="L875">        return reasonCodeId;</span>
+    }
+
+    public String getReasonCode() {
+<span class="fc" id="L879">        return reasonCode;</span>
+    }
+
+    public void setReasonCode(String reasonCode) {
+<span class="fc" id="L883">        this.reasonCode = reasonCode;</span>
+<span class="fc" id="L884">    }</span>
+
+    public boolean shouldPrivacyFlagsRollUp() {
+<span class="fc" id="L887">        return false;</span>
+    }
+
+    public Instant getFirstReadTimestamp() {
+<span class="fc" id="L891">        return firstReadTimestamp;</span>
+    }
+
+    public void setFirstReadTimestamp(Instant firstReadTimestamp) {
+<span class="fc" id="L895">        this.firstReadTimestamp = firstReadTimestamp;</span>
+<span class="fc" id="L896">    }</span>
+
+    public Instant getPostalDate() {
+<span class="fc" id="L899">        return postalDate;</span>
+    }
+
+    public void setPostalDate(Instant postalDate) {
+<span class="fc" id="L903">        this.postalDate = postalDate;</span>
+<span class="fc" id="L904">    }</span>
+
+    /**
+     * Unique ids were only correctly shared between accounts from the end of march 2019.
+     * If this message was created after then, the uniqueId can be used safely to identify all copies of a message.
+     */
+    @Nullable
+    public UUID getConsistentUniqueIdOrNull() {
+<span class="pc bpc" id="L912" title="1 of 2 branches missed.">        if (messageTimestamp != null</span>
+<span class="fc bfc" id="L913" title="All 2 branches covered.">                &amp;&amp; messageTimestamp.isAfter(SHARED_UNIQUEIDS_AVAILABLE_APPROX_INSTANT)) {</span>
+<span class="fc" id="L914">            return getBaseFields().getUniqueId();</span>
+        }
+<span class="fc" id="L916">        return null;</span>
+    }
+
+    @Override
+    public Object clone() {
+        try {
+<span class="fc" id="L922">            return super.clone();</span>
+<span class="nc" id="L923">        } catch (CloneNotSupportedException cnse) {</span>
+            // no need to force catch
+<span class="nc" id="L925">            throw new RuntimeException(cnse);</span>
+        }
+    }
+
+    public boolean isRead() {
+<span class="fc bfc" id="L930" title="All 2 branches covered.">        return READ == messageStatus;</span>
+    }
+
+    public boolean isUnRead() {
+<span class="fc bfc" id="L934" title="All 2 branches covered.">        return UNREAD == messageStatus;</span>
+    }
+
+    public boolean isDraft() {
+<span class="fc bfc" id="L938" title="All 2 branches covered.">        return INDRAFT == messageStatus;</span>
+    }
+
+    public boolean isReportable() {
+<span class="fc" id="L942">        return isNotBlank(externalMessageId);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

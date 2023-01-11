@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SftpConnection.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.sftp</a> &gt; <span class="el_source">SftpConnection.java</span></div><h1>SftpConnection.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.sftp;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableSet;
+import com.jcraft.jsch.ChannelSftp;
+import com.jcraft.jsch.ChannelSftp.LsEntry;
+import com.jcraft.jsch.JSch;
+import com.jcraft.jsch.JSchException;
+import com.jcraft.jsch.Session;
+import com.jcraft.jsch.SftpException;
+import com.pkb.service.dataupload.emis.esv2.EmisLsEntry;
+import com.pkb.service.dataupload.emis.esv2.IEmisDownloadConnection;
+import com.pkb.service.dataupload.emis.esv2.ImmutableEmisLsDirEntry;
+import com.pkb.service.dataupload.emis.esv2.ImmutableEmisLsRegFileEntry;
+import io.prometheus.client.Summary;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.Vector;
+import java.util.stream.Collectors;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
+import static org.apache.commons.lang3.StringUtils.appendIfMissing;
+
+/**
+ * SSH file transfer protocol client.
+ */
+public class SftpConnection implements IEmisDownloadConnection {
+
+    private static final String SFTP_CHANNEL_TYPE = &quot;sftp&quot;;
+<span class="fc" id="L46">    private final static Set&lt;String&gt; PATHS_TO_SKIP = ImmutableSet.of(&quot;.ssh&quot;, &quot;..&quot;, &quot;.&quot;);</span>
+<span class="fc" id="L47">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L49">    private static final Summary fileDownloadDurationSeconds = Summary.build()</span>
+<span class="fc" id="L50">            .name(&quot;pkb_phr_integration_emis_csv_sftp_fileDownloadDurationSeconds&quot;)</span>
+<span class="fc" id="L51">            .help(&quot;Time needed to download a file from EMIS&quot;)</span>
+<span class="fc" id="L52">            .register();</span>
+
+    private final SftpConnectionData connectionData;
+
+    private ChannelSftp channel;
+    private Session session;
+
+    /**
+     * Initialize SFTP client.
+     *
+     * @param connectionData connection and authentication information to use to connect to SFTP
+     * @throws NullPointerException in case the parameter is null
+     */
+<span class="fc" id="L65">    public SftpConnection(@NotNull SftpConnectionData connectionData) {</span>
+<span class="fc" id="L66">        this.connectionData = checkNotNull(connectionData, &quot;Connection data can't be null!&quot;);</span>
+<span class="fc" id="L67">    }</span>
+
+    /**
+     * Establishes connection to SFTP.
+     *
+     * @throws RuntimeException in case any error occurs.
+     */
+    @Override
+    public void connect() {
+        try {
+<span class="fc" id="L77">            establishSession();</span>
+<span class="fc" id="L78">        } catch (JSchException | IOException e) {</span>
+<span class="fc" id="L79">            throw new RuntimeException(String.format(&quot;Error during connecting to Sftp server! Config: [%s]&quot;, connectionData), e);</span>
+<span class="fc" id="L80">        }</span>
+<span class="fc" id="L81">    }</span>
+
+    private void establishSession() throws JSchException, IOException {
+<span class="pc bpc" id="L84" title="1 of 2 branches missed.">        if (session == null) {</span>
+<span class="fc" id="L85">            LOGGER.debug(&quot;Initializing Sftp connection to {}&quot;, connectionData.host());</span>
+<span class="fc" id="L86">            LOGGER.trace(&quot;Sftp connection data: {}&quot;, connectionData);</span>
+<span class="fc" id="L87">            JSch jsch = getJsch();</span>
+<span class="fc" id="L88">            jsch.addIdentity(connectionData.userName(), getPrivateKey(connectionData.privateKey()), null,</span>
+<span class="pc" id="L89">                    connectionData.keyPassphrase().map(key -&gt; key.getBytes(StandardCharsets.UTF_8)).orElse(null));</span>
+<span class="fc" id="L90">            session = jsch.getSession(connectionData.userName(), connectionData.host(), connectionData.port());</span>
+<span class="fc" id="L91">            configureSessionOptions(connectionData.options());</span>
+<span class="fc" id="L92">            session.setTimeout(connectionData.timeoutInMilliseconds());</span>
+<span class="fc" id="L93">            LOGGER.debug(&quot;Connecting to Sftp&quot;);</span>
+<span class="fc" id="L94">            session.connect();</span>
+<span class="pc bpc" id="L95" title="1 of 2 branches missed.">            if (!session.isConnected()) {</span>
+<span class="nc" id="L96">                throw new RuntimeException(String.format(&quot;Failed to connect to SFTP! Config: [%s]&quot;, connectionData));</span>
+            }
+<span class="fc" id="L98">            LOGGER.debug(&quot;Connected to Sftp {}, opening channel&quot;, connectionData.host());</span>
+<span class="fc" id="L99">            establishChannel();</span>
+<span class="fc" id="L100">        } else {</span>
+<span class="nc" id="L101">            throw new IllegalStateException(&quot;Sftp session is already connected!&quot;);</span>
+        }
+<span class="fc" id="L103">    }</span>
+
+    private void configureSessionOptions(Map&lt;String, String&gt; options) {
+<span class="fc bfc" id="L106" title="All 2 branches covered.">        for (Entry&lt;String, String&gt; entry : options.entrySet()) {</span>
+<span class="fc" id="L107">            LOGGER.trace(&quot;Setting option of SFTP key: {} value: {}&quot;, entry.getKey(), entry.getValue());</span>
+<span class="fc" id="L108">            session.setConfig(entry.getKey(), entry.getValue());</span>
+<span class="fc" id="L109">        }</span>
+<span class="fc" id="L110">    }</span>
+
+    private void establishChannel() throws JSchException {
+<span class="pc bpc" id="L113" title="1 of 2 branches missed.">        if (channel == null) {</span>
+<span class="fc" id="L114">            channel = ChannelSftp.class.cast(session.openChannel(SFTP_CHANNEL_TYPE));</span>
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">            if (channel == null) {</span>
+<span class="nc" id="L116">                throw new RuntimeException(String.format(&quot;Failed to establish SFTP channel! Config: [%s]&quot;, connectionData));</span>
+            }
+<span class="fc" id="L118">            channel.connect();</span>
+<span class="pc bpc" id="L119" title="1 of 2 branches missed.">            if (!channel.isConnected()) {</span>
+<span class="nc" id="L120">                throw new RuntimeException(String.format(&quot;Failed to establish SFTP channel! Config: [%s]&quot;, connectionData));</span>
+            }
+
+        } else {
+<span class="nc" id="L124">            throw new IllegalStateException(&quot;Sftp channel is already open!&quot;);</span>
+        }
+<span class="fc" id="L126">    }</span>
+
+    public void changeDirectory(@NotNull String remoteDirectoryName) {
+<span class="nc" id="L129">        checkNotNull(remoteDirectoryName, &quot;Remote directory name can't be null!&quot;);</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">        checkState(channel != null, &quot;No active connection to Sftp server!&quot;);</span>
+        try {
+<span class="nc" id="L132">            channel.cd(remoteDirectoryName);</span>
+<span class="nc" id="L133">            LOGGER.debug(&quot;Changed Sftp directory to {}.&quot;, remoteDirectoryName);</span>
+<span class="nc" id="L134">        } catch (Exception e) {</span>
+<span class="nc" id="L135">            throw new RuntimeException(String.format(&quot;Failed to change Sftp directory to [%s]!&quot;, remoteDirectoryName), e);</span>
+<span class="nc" id="L136">        }</span>
+<span class="nc" id="L137">    }</span>
+
+    /**
+     * Retrieves the content of the given remote directory.
+     *
+     * @param remotePath to list
+     * @return entries in the given directory
+     * @throws NullPointerException  in case the parameter is null
+     * @throws IllegalStateException in case the connection is not yet established
+     * @throws RuntimeException      in case any other error occurs.
+     */
+    @SuppressWarnings(&quot;unchecked&quot;)
+    @NotNull
+    @Override
+    public Collection&lt;EmisLsEntry&gt; listDirectory() {
+<span class="fc" id="L152">        String remotePath = connectionData.remoteDirectory();</span>
+<span class="fc" id="L153">        checkNotNull(remotePath, &quot;Remote path can't be null!&quot;);</span>
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">        checkState(channel != null, &quot;No active connection to Sftp server!&quot;);</span>
+        try {
+<span class="fc" id="L156">            Collection&lt;LsEntry&gt; sftpListing = getLsEntries(remotePath);</span>
+
+<span class="fc" id="L158">            ArrayList&lt;EmisLsEntry&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">            for (LsEntry lsEntry : sftpListing) {</span>
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">                if (!lsEntry.getAttrs().isDir()) {</span>
+                    //based on exa spec, this shouldn't actually happen
+<span class="nc" id="L162">                    LOGGER.error(&quot;Found regular file {} in unexpected location, skipping&quot;, lsEntry.getFilename());</span>
+<span class="nc" id="L163">                    continue;</span>
+                }
+<span class="fc" id="L165">                Path remoteSubdirPath = Paths.get(remotePath, lsEntry.getFilename());</span>
+<span class="fc" id="L166">                Collection&lt;LsEntry&gt; sftpSubdirListing = getLsEntries(remoteSubdirPath.toString());</span>
+<span class="fc" id="L167">                Path directoryPath = Path.of(lsEntry.getFilename());</span>
+<span class="fc" id="L168">                ImmutableEmisLsDirEntry.Builder lsDirEntryBuilder = ImmutableEmisLsDirEntry.builder().relativePath(directoryPath).size(lsEntry.getAttrs().getSize());</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">                for (LsEntry subdirLsEntry : sftpSubdirListing) {</span>
+<span class="fc" id="L170">                    lsDirEntryBuilder.addChildren(buildRegularFile(subdirLsEntry, directoryPath));</span>
+<span class="fc" id="L171">                }</span>
+<span class="fc" id="L172">                result.add(lsDirEntryBuilder.build());</span>
+<span class="fc" id="L173">            }</span>
+<span class="fc" id="L174">            return result;</span>
+<span class="nc" id="L175">        } catch (Exception e) {</span>
+<span class="nc" id="L176">            throw new RuntimeException(String.format(&quot;Failed to list Sftp directory [%s] content!&quot;, remotePath), e);</span>
+        }
+    }
+
+    @NotNull
+    private ImmutableEmisLsRegFileEntry buildRegularFile(LsEntry e, Path parentDirectory) {
+<span class="fc" id="L182">        Path filePath = parentDirectory.resolve(e.getFilename());</span>
+<span class="fc" id="L183">        return ImmutableEmisLsRegFileEntry.builder().relativePath(filePath).size(e.getAttrs().getSize()).build();</span>
+    }
+
+    @NotNull
+    @SuppressWarnings(&quot;unchecked&quot;)
+    private Collection&lt;LsEntry&gt; getLsEntries(String remotePath) throws SftpException {
+<span class="fc" id="L189">        List&lt;LsEntry&gt; sftpListing = ((Vector&lt;LsEntry&gt;) channel.ls(remotePath)).stream()</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">                .filter(ls -&gt; !PATHS_TO_SKIP.contains(ls.getFilename())).collect(Collectors.toList());</span>
+
+<span class="fc" id="L192">        LOGGER.debug(&quot;Received {} entries from sftp dir '{}'.&quot;, sftpListing.size(), remotePath);</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">        if (LOGGER.isTraceEnabled()) {</span>
+<span class="nc" id="L194">            List&lt;String&gt; names = sftpListing.stream().map(LsEntry::getFilename).collect(Collectors.toList());</span>
+<span class="nc" id="L195">            LOGGER.trace(&quot;Received the following entries from sftp dir {}: {}&quot;, remotePath, names);</span>
+        }
+<span class="fc" id="L197">        return sftpListing;</span>
+    }
+
+    /**
+     * Downloads the given remote file as the given local file.
+     *
+     * @param remoteFileNameAndRelativePath        The file to download
+     * @param localFileWithPath The local filename with complete path
+     * @throws IllegalStateException in case the connection is not yet established
+     * @throws RuntimeException      In case the given path does not exist, or any other error occurs.
+     */
+    @Override
+    public void download(@NotNull String remoteFileNameAndRelativePath, @NotNull Path localFileWithPath) {
+<span class="fc" id="L210">        checkNotNull(remoteFileNameAndRelativePath, &quot;Remote file can't be null!&quot;);</span>
+<span class="fc" id="L211">        checkNotNull(localFileWithPath, &quot;LocalFileWithPath can't be null!&quot;);</span>
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">        checkState(channel != null, &quot;No active connection to Sftp server!&quot;);</span>
+<span class="fc" id="L213">        downloadFile(remoteFileNameAndRelativePath, localFileWithPath);</span>
+<span class="fc" id="L214">    }</span>
+
+    @Override
+    public String uniqueTag() {
+<span class="fc" id="L218">        return connectionData.uniqueTag();</span>
+    }
+
+    private void downloadFile(String sourceFile, Path localFileWithPath) {
+<span class="fc" id="L222">        try (OutputStream destination = getOutputStream(localFileWithPath); Summary.Timer ignored = fileDownloadDurationSeconds.startTimer()) {</span>
+<span class="fc" id="L223">            String remoteDir = appendIfMissing(connectionData.remoteDirectory(), &quot;/&quot;);</span>
+<span class="fc" id="L224">            channel.get(remoteDir + sourceFile, destination);</span>
+<span class="fc" id="L225">            destination.flush();</span>
+<span class="fc" id="L226">            destination.close();</span>
+<span class="fc" id="L227">            LOGGER.trace(&quot;Downloaded {} to {}.&quot;, sourceFile, localFileWithPath);</span>
+<span class="nc" id="L228">        } catch (SftpException e) {</span>
+<span class="nc" id="L229">            throw new RuntimeException(String.format(&quot;Failed to downloaded file %s from Sftp!&quot;, sourceFile), e);</span>
+<span class="nc" id="L230">        } catch (IOException e) {</span>
+<span class="nc" id="L231">            throw new RuntimeException(String.format(&quot;Failed to perist downloaded file %s to %s&quot;, sourceFile, localFileWithPath), e);</span>
+<span class="fc" id="L232">        }</span>
+<span class="fc" id="L233">    }</span>
+
+    private byte[] getPrivateKey(Path privateKeyPath) throws IOException {
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">        if (Files.notExists(privateKeyPath)) {</span>
+<span class="nc" id="L237">            throw new IllegalStateException(String.format(&quot;Sftp private keyfile '%s' does not exist!&quot;, privateKeyPath));</span>
+        }
+<span class="fc" id="L239">        return Files.readAllBytes(privateKeyPath);</span>
+    }
+
+    @Override
+    public void close() throws Exception {
+<span class="fc bfc" id="L244" title="All 2 branches covered.">        if (channel != null) {</span>
+<span class="fc" id="L245">            channel.disconnect();</span>
+        }
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">        if (session != null) {</span>
+<span class="fc" id="L248">            session.disconnect();</span>
+        }
+<span class="fc" id="L250">    }</span>
+
+    @VisibleForTesting
+    JSch getJsch() {
+<span class="fc" id="L254">        return new JSch();</span>
+    }
+
+    @VisibleForTesting
+    void setSession(Session session) {
+<span class="nc" id="L259">        this.session = session;</span>
+<span class="nc" id="L260">    }</span>
+
+    @VisibleForTesting
+    OutputStream getOutputStream(Path input) throws IOException {
+<span class="fc" id="L264">        return new BufferedOutputStream(Files.newOutputStream(input));</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,342 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FhirPatientCreationService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir</a> &gt; <span class="el_source">FhirPatientCreationService.java</span></div><h1>FhirPatientCreationService.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir;
+
+import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
+import ca.uhn.fhir.parser.IParser;
+import ca.uhn.fhir.rest.server.exceptions.BaseServerResponseException;
+import ca.uhn.fhir.rest.server.exceptions.InternalErrorException;
+import ca.uhn.fhir.rest.server.exceptions.UnprocessableEntityException;
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.consent.model.NoConsentsRequired;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.dataupload.entity.UploadedDataDTO;
+import com.pkb.model.PKBPersonDTO;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.dataupload.hl7.CreationTeamsResponse;
+import com.pkb.service.dataupload.hl7.HL7ApiHelper;
+import com.pkb.service.dataupload.hl7.HL7ConnContext;
+import com.pkb.service.dataupload.hl7.HL7ConnContextFactory;
+import com.pkb.service.dataupload.hl7.HL7TeamService;
+import com.pkb.service.dataupload.hl7.segment.HL7Patient;
+import com.pkb.service.dataupload.impl.DataUploadManager;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamService;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.PatientIdentifiers;
+import io.vavr.control.Either;
+import org.hl7.fhir.dstu3.model.CodeableConcept;
+import org.hl7.fhir.dstu3.model.HumanName;
+import org.hl7.fhir.dstu3.model.Identifier;
+import org.hl7.fhir.dstu3.model.OperationOutcome;
+import org.hl7.fhir.dstu3.model.Patient;
+import org.hl7.fhir.dstu3.model.StringType;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.time.ZoneId;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.dataupload.entity.UploadedData.Destination.PATIENT_ADD;
+import static com.pkb.dataupload.entity.UploadedData.Status.COMPLETED;
+import static com.pkb.entities.enums.NationalIdType.NHS_NUMBER;
+import static com.pkb.entities.enums.Route.FHIR_API;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+import static java.lang.String.format;
+
+/**
+ * This is a relatively throwaway service for taking an STU3 Patient resource and being able fit into the existing
+ * HL7 demographics workflow. This means that this service is used to create, register, invite and update persons
+ * onto PKB via, effectively, a thin FHIR -&gt; internal HL7 DTO mapping layer on top of our existing HL7 logic stack.
+ *
+ * Why: Integration partners want to use FHIR to interoperate with us. They want to register patients on PKB.
+ * However, our registration/invitation flows are so complicated that doing this as a separate logic stack from what
+ * we've got already is highly painful. Considering we're actively trying to move away from this, having a relatively
+ * isolated, quick mapping layer on top of what we've already got was judged the lesser evil.
+ *
+ * Input: STU3 Patient resource, with some mandatory CareConnect elements.
+ * Process: Validates the content of the Patient resource; maps the Patient to a HL7Patient DTO; passes this to a
+ * simplified version of the HL7 demographics flow.
+ * Output: Newly created PKBPerson with account entities; invites person if email is includes; update PKBPerson if
+ * they already exist on the system.
+ *
+ * This service has a limited shelf life as we are actively moving towards a) a FHIR data store and b) to remove
+ * user encryption from our data.
+ */
+public class FhirPatientCreationService {
+
+<span class="fc" id="L78">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+
+    private final HL7TeamService hl7TeamService;
+    private final FhirPatientHL7PatientMapper fhirPatientHL7PatientMapper;
+    private final DateTimeService dateTimeService;
+    private final UserManager userManager;
+    private final TeamUserManager teamUserManager;
+    private final PatientConsentManager patientConsentManager;
+    private final TeamService teamService;
+    private final HL7ApiHelper apiHelper;
+    private final DataUploadManager dataUploadManager;
+    private final IParser fhirParser;
+    private final FhirPatientResourceService fhirPatientResourceService;
+
+    public FhirPatientCreationService(HL7TeamService hl7TeamService, FhirPatientHL7PatientMapper fhirPatientHL7PatientMapper,
+            DateTimeService dateTimeService, UserManager userManager, TeamUserManager teamUserManager,
+            PatientConsentManager patientConsentManager, TeamService teamService,
+            HL7ApiHelper apiHelper, DataUploadManager dataUploadManager, IParser fhirParser,
+<span class="fc" id="L96">            FhirPatientResourceService fhirPatientResourceService) {</span>
+<span class="fc" id="L97">        this.hl7TeamService = hl7TeamService;</span>
+<span class="fc" id="L98">        this.fhirPatientHL7PatientMapper = fhirPatientHL7PatientMapper;</span>
+<span class="fc" id="L99">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L100">        this.userManager = userManager;</span>
+<span class="fc" id="L101">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L102">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L103">        this.teamService = teamService;</span>
+<span class="fc" id="L104">        this.apiHelper = apiHelper;</span>
+<span class="fc" id="L105">        this.dataUploadManager = dataUploadManager;</span>
+<span class="fc" id="L106">        this.fhirParser = fhirParser;</span>
+<span class="fc" id="L107">        this.fhirPatientResourceService = fhirPatientResourceService;</span>
+<span class="fc" id="L108">    }</span>
+
+<span class="fc" id="L110">    public enum State {</span>
+<span class="fc" id="L111">        VALIDATED,</span>
+<span class="fc" id="L112">        PROCESSED</span>
+    }
+
+    Either&lt;BaseServerResponseException, State&gt; processPatient(@NotNull Patient patient, @NotNull UUID orgPublicId, @NotNull UUID correlationId) {
+        try {
+<span class="fc" id="L117">            return processDemographics(patient, orgPublicId, correlationId).mapLeft(outcome -&gt; {</span>
+<span class="fc" id="L118">                var message = outcome.getIssueFirstRep().getDiagnosticsElement().getValue();</span>
+<span class="fc" id="L119">                LOGGER.error(format(&quot;Handled error processing FHIR message: %s&quot;, message));</span>
+<span class="fc" id="L120">                return new UnprocessableEntityException(message, outcome);</span>
+            });
+<span class="nc" id="L122">        } catch (Exception e) {</span>
+<span class="nc" id="L123">            LOGGER.error(&quot;Unhandled error processing FHIR message&quot;, e);</span>
+<span class="nc" id="L124">            return left(new InternalErrorException(e.getMessage(), createOperationOutcomeResponse(e.getMessage(),</span>
+                    OperationOutcome.IssueType.UNKNOWN)));
+        }
+    }
+
+    @VisibleForTesting
+    Either&lt;OperationOutcome, State&gt; validatePatient(@NotNull Patient patient) {
+        // 1. Patient must have exactly one NHS number
+<span class="fc" id="L132">        List&lt;Identifier&gt; identifierList = patient.getIdentifier().stream()</span>
+<span class="fc" id="L133">                .filter(identifier -&gt; identifier.getSystem().equals(NHS_NUMBER.getFhirIdentifierSystem()))</span>
+<span class="fc" id="L134">                .filter(identifier -&gt; NHS_NUMBER.getValidNationalIdAndType(identifier.getValue()).isPresent())</span>
+<span class="fc" id="L135">                .collect(Collectors.toList());</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">        if (identifierList.size() != 1) {</span>
+<span class="fc" id="L137">            return left(createOperationOutcomeResponse(&quot;Patient resource must contain exactly one NHS number identifier&quot;,</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+<span class="pc bpc" id="L141" title="1 of 2 branches missed.">        if (identifierList.stream().filter(this::isVerifiedNhsNumber).count() != 1) {</span>
+<span class="nc" id="L142">            return left(createOperationOutcomeResponse(&quot;NHS number identifier is not verified&quot;,</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+        // 2. The patient must have a first and last name
+<span class="fc" id="L147">        List&lt;HumanName&gt; nameList = patient.getName();</span>
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">        if (nameList.size() != 1) {</span>
+<span class="nc" id="L149">            return left(createOperationOutcomeResponse(&quot;Patient resource must contain exactly one name element&quot;,</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+<span class="pc bpc" id="L153" title="2 of 4 branches missed.">        if (nameList.stream().noneMatch(HumanName::hasFamily) || nameList.stream().noneMatch(HumanName::hasGiven)) {</span>
+<span class="nc" id="L154">            return left(createOperationOutcomeResponse(&quot;Name element must include family name and at least one given name&quot;,</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+        // 3. The patient must have a gender code
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">        if (!patient.hasGender()) {</span>
+<span class="nc" id="L160">            return left(createOperationOutcomeResponse(&quot;No gender element included&quot;,</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+        // 4. The patient must have a date of birth
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">        if (!patient.hasBirthDate()) {</span>
+<span class="nc" id="L166">            return left(createOperationOutcomeResponse(&quot;No birth date element included&quot;,</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+        // 5. The patient's DOB is a date type (which means supplying minutes and hours etc is invalid
+<span class="fc" id="L171">        TemporalPrecisionEnum dobPrecision = patient.getBirthDateElement().getPrecision();</span>
+<span class="fc" id="L172">        if (!Set.of(TemporalPrecisionEnum.YEAR, TemporalPrecisionEnum.MONTH, TemporalPrecisionEnum.DAY)</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">                .contains(dobPrecision)) {</span>
+<span class="fc" id="L174">            return left(createOperationOutcomeResponse(String.format(&quot;BirthDate has invalid precision: %s&quot;, dobPrecision),</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+<span class="fc" id="L178">        return right(State.VALIDATED);</span>
+    }
+
+    @VisibleForTesting
+    boolean isVerifiedNhsNumber(@NotNull Identifier id) {
+<span class="fc" id="L183">        return id.getExtension()</span>
+<span class="fc" id="L184">                .stream()</span>
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">                .anyMatch(extension -&gt; extension.getUrl() != null</span>
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">                        &amp;&amp; extension.getUrl().equals(&quot;https://fhir.hl7.org.uk/STU3/StructureDefinition/Extension-CareConnect-NHSNumberVerificationStatus-1&quot;)</span>
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">                        &amp;&amp; extension.hasValue()</span>
+<span class="fc" id="L188">                        &amp;&amp; ((CodeableConcept) extension.getValue()).getCoding().stream()</span>
+<span class="pc bpc" id="L189" title="2 of 4 branches missed.">                                .anyMatch(coding -&gt; coding.getSystem() != null</span>
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">                                        &amp;&amp; coding.getSystem().equals(&quot;https://fhir.hl7.org.uk/STU3/CodeSystem/CareConnect-NHSNumberVerificationStatus-1&quot;)</span>
+<span class="pc bpc" id="L191" title="2 of 4 branches missed.">                                        &amp;&amp; coding.getCode() != null &amp;&amp; coding.getCode().equals(&quot;01&quot;)));</span>
+    }
+
+    @VisibleForTesting
+    Either&lt;OperationOutcome, State&gt; processDemographics(@NotNull Patient patientResource, @NotNull UUID orgPublicId, @NotNull UUID correlationId) {
+
+        // The validation here allows us to know certain things about the structure of the data and e.g. findFirst() with confidence.
+        // It also means that we can upgrade a lot of these errors to Runtime in the processing, as a failure in here indicates a bug in validation.
+<span class="fc" id="L199">        var result = validatePatient(patientResource);</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">        if (result.isLeft()) {</span>
+<span class="fc" id="L201">            return left(result.getLeft());</span>
+        }
+
+        // In a FHIR data store world, the Patient resource will contain a reference to the Organization resource which manages
+        // the patient record. But for now we can just use the x-org-public-id.
+<span class="fc" id="L206">        var sourceOrg = hl7TeamService.getOrgByPublicId(orgPublicId);</span>
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">        if (sourceOrg.isEmpty()) {</span>
+<span class="nc" id="L208">            return left(createOperationOutcomeResponse(&quot;Could not find org for source org UUID [&quot; + orgPublicId + &quot;]&quot;,</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+<span class="fc" id="L212">        HL7ConnContext hl7ConnContext = HL7ConnContextFactory.create(sourceOrg.get(), correlationId, Optional.empty(), FHIR_API);</span>
+
+        // The HL7ConnContext gives you the default team for the source org, defined as Org.hl7NewPatientTeamCode.
+        // You can, optionally, include an extension which includes the team aliases for those you want to add the patient to.
+        // This is fully equivalent of the ZTM segment in HL7, so if you use this extension, you must include the creating team in it as well.
+<span class="fc" id="L217">        CreationTeamsResponse creatingTeams = hl7TeamService.getCreationTeams(getTeamsToAddPatientTo(patientResource), hl7ConnContext);</span>
+
+<span class="fc" id="L219">        HL7Patient messagePatient = fhirPatientHL7PatientMapper.map(patientResource, hl7ConnContext);</span>
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">        Optional&lt;NationalId&gt; nationalId = messagePatient.getNationalIds().stream().filter(id -&gt; id.getType() == NHS_NUMBER).findFirst();</span>
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">        if (nationalId.isEmpty()) {</span>
+<span class="nc" id="L222">            return left(createOperationOutcomeResponse(&quot;No national id found on Patient resource for FHIR. UUID [&quot;</span>
+<span class="nc" id="L223">                    + patientResource.getMeta().getId() + &quot;] for org UUID [&quot; + orgPublicId + &quot;]&quot;,</span>
+                    OperationOutcome.IssueType.INVALID));
+        }
+
+<span class="fc" id="L227">        PatientIdentifiers idents = new PatientIdentifiers.Builder()</span>
+<span class="fc" id="L228">                .withNationalId(nationalId.get())</span>
+<span class="fc" id="L229">                .build();</span>
+<span class="fc" id="L230">        PKBPerson existingPatient = userManager.lookupSinglePatient(idents).orElse(null);</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">        if (existingPatient == null) {</span>
+<span class="fc" id="L232">            var outcome = addNewPatient(patientResource, hl7ConnContext, messagePatient, creatingTeams);</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">            if (outcome.isLeft()) {</span>
+<span class="nc" id="L234">                return left(outcome.getLeft());</span>
+            }
+<span class="fc" id="L236">            existingPatient = outcome.get();</span>
+<span class="fc" id="L237">        } else {</span>
+<span class="fc" id="L238">            processUpdatedPatient(hl7ConnContext, existingPatient, messagePatient);</span>
+        }
+
+        // Persist Patient resource
+<span class="fc" id="L242">        String resource = fhirParser.encodeResourceToString(patientResource);</span>
+<span class="fc" id="L243">        fhirPatientResourceService.addOrUpdatePatientResource(resource, existingPatient.getId(), orgPublicId);</span>
+
+<span class="fc" id="L245">        teamService.addToTeams(existingPatient, creatingTeams.getCreationTeams(), hl7ConnContext.getEHRRequestContext());</span>
+<span class="fc" id="L246">        return right(State.PROCESSED);</span>
+    }
+
+    private List&lt;String&gt; getTeamsToAddPatientTo(Patient patientResource) {
+        //Team aliases are stored in an extension we've defined. In future team links will be Consent resources, but this
+        // achieves HL7 parity in this area for now and makes the API usable for organisations with multiple teams.
+        // If you don't include this extension the Patient will just be added to the default team for the org.
+<span class="fc" id="L253">        return patientResource.getExtension()</span>
+<span class="fc" id="L254">                .stream()</span>
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">                .filter(extension -&gt; extension.getUrl() != null</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">                        &amp;&amp; extension.getUrl().equals(&quot;http://fhir.patientsknowbest.com/structuredefinition/team-alias&quot;)</span>
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">                        &amp;&amp; extension.hasValue())</span>
+<span class="fc" id="L258">                .map(extension -&gt; ((StringType) extension.getValue()).getValueAsString())</span>
+<span class="fc" id="L259">                .collect(Collectors.toList());</span>
+    }
+
+    @VisibleForTesting
+    ZoneId getOrgTimezone(@NotNull HL7ConnContext connContext) {
+<span class="nc bnc" id="L264" title="All 2 branches missed.">        return connContext.getTimeZoneId().isBlank() ? ZoneId.of(&quot;UTC&quot;) : ZoneId.of(connContext.getTimeZoneId());</span>
+    }
+
+    @VisibleForTesting
+    Either&lt;OperationOutcome, PKBPerson&gt; addNewPatient(@NotNull Patient patientResource, @NotNull HL7ConnContext hl7ConnContext,
+            @NotNull HL7Patient hl7Patient, @NotNull CreationTeamsResponse creatingTeams) {
+<span class="fc" id="L270">        var result = apiHelper.populatePKBPersonDTOForNewPatient(hl7ConnContext, hl7Patient);</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">        if (result.isLeft()) {</span>
+<span class="nc" id="L272">            return left(createOperationOutcomeResponse(result.getLeft().getMessage(), OperationOutcome.IssueType.INVALID));</span>
+        }
+<span class="fc" id="L274">        PKBPersonDTO patientDto = result.get();</span>
+<span class="fc" id="L275">        String authBy = hl7ConnContext.getName() + &quot; (&quot; + hl7ConnContext.getId() + &quot;)&quot;;</span>
+
+<span class="fc" id="L277">        return teamUserManager.transactional(() -&gt; {</span>
+<span class="fc" id="L278">            EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+<span class="fc" id="L279">            PKBPerson newPatient = teamUserManager.createPatientForHL7API(ehrRequestContext, patientDto, creatingTeams,</span>
+<span class="fc" id="L280">                    hl7Patient.getNationalIds(), hl7Patient.getOrgLevelIds(), hl7Patient.getTeamLevelIds(),</span>
+<span class="fc" id="L281">                    authBy, dateTimeService.now(), hl7ConnContext);</span>
+
+<span class="fc" id="L283">            LOGGER.info(&quot;FHIR PATIENT: created patient id {} for {}&quot;, newPatient.getId(), hl7ConnContext);</span>
+
+            // This completed UploadedData record serves purely as an audit, it has no functional purpose otherwise
+            // With pkbperson updates through the webapp you lose the information that they were registered via the FHIR API,
+            // as the accessroute is a mutable field which is modified on update.
+            // I think this is valuable information to preserve, at least initially as the API gets going.
+            // Also, it's what we do for HL7, for probably exactly the same reason.
+<span class="fc" id="L290">            UploadedDataDTO udDto = new UploadedDataDTO();</span>
+<span class="fc" id="L291">            udDto.setSourceOrg(hl7ConnContext.getSourceOrg());</span>
+<span class="fc" id="L292">            udDto.setConnectingOrg(hl7ConnContext.getConnectingOrg());</span>
+<span class="fc" id="L293">            udDto.setData(fhirParser.encodeResourceToString(patientResource));</span>
+<span class="fc" id="L294">            udDto.setEmbeddedId(patientResource.getId());</span>
+<span class="fc" id="L295">            udDto.setDestination(PATIENT_ADD);</span>
+<span class="fc" id="L296">            udDto.setFormat(UploadedData.Format.FHIR_API);</span>
+<span class="fc" id="L297">            udDto.setStatus(COMPLETED);</span>
+<span class="fc" id="L298">            udDto.setResponsibleOrganisationIdentifier(hl7ConnContext.getMaybeResponsibleOrganisationIdentifier().orElse(null));</span>
+<span class="fc" id="L299">            UploadedDataDTO savedUdDto = dataUploadManager.addUploadedData(udDto, newPatient, ehrRequestContext);</span>
+
+            // Set implied consent
+<span class="fc" id="L302">            creatingTeams.getCreationTeams()</span>
+<span class="fc" id="L303">                    .forEach(team -&gt; patientConsentManager.grantDefaultConsentToTeam(hl7ConnContext,</span>
+                            newPatient,
+                            team,
+<span class="fc" id="L306">                            savedUdDto.getId(),</span>
+                            FHIR_API));
+<span class="fc" id="L308">            return right(newPatient);</span>
+        });
+    }
+
+    private void processUpdatedPatient(@NotNull HL7ConnContext hl7ConnContext, @NotNull PKBPerson existingPatient,
+            @NotNull HL7Patient hl7Patient) {
+
+<span class="fc" id="L315">        EHRRequestContext ehrRequestContext = hl7ConnContext.getEHRRequestContext();</span>
+
+        // Update the demographics...
+<span class="fc" id="L318">        boolean demographicsChanged = apiHelper.updatePatientDemographics(ehrRequestContext, dateTimeService.now(), hl7ConnContext,</span>
+                existingPatient, hl7Patient);
+
+        // Log and notify
+<span class="fc bfc" id="L322" title="All 2 branches covered.">        if (demographicsChanged) {</span>
+            //TODO:PHR-2817 these notifications need to respect consent level. See Jira ticket
+<span class="fc" id="L324">            apiHelper.logActivityAndNotifyPatient(hl7ConnContext, Activity.Action.UPLOADED_PATIENT_PROFILE_UPDATE, existingPatient,</span>
+<span class="fc" id="L325">                    new NoConsentsRequired(), dateTimeService.now());</span>
+        }
+
+<span class="fc" id="L328">        LOGGER.info(&quot;FHIR PATIENT: updated patient id {} for {}&quot;, existingPatient.getId(), hl7ConnContext);</span>
+<span class="fc" id="L329">    }</span>
+
+    private OperationOutcome createOperationOutcomeResponse(@NotNull String exceptionMessage,
+            @NotNull OperationOutcome.IssueType issueType) {
+<span class="fc" id="L333">        OperationOutcome operationOutcome = new OperationOutcome();</span>
+<span class="fc" id="L334">        operationOutcome.setId(UUID.randomUUID().toString());</span>
+<span class="fc" id="L335">        operationOutcome.addIssue()</span>
+<span class="fc" id="L336">                .setSeverity(OperationOutcome.IssueSeverity.ERROR)</span>
+<span class="fc" id="L337">                .setCode(issueType)</span>
+<span class="fc" id="L338">                .setDiagnosticsElement(new StringType(exceptionMessage));</span>
+<span class="fc" id="L339">        return operationOutcome;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

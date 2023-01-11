@@ -1,0 +1,858 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CalendarManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.calendar.impl</a> &gt; <span class="el_source">CalendarManager.java</span></div><h1>CalendarManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.calendar.impl;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ArrayTable;
+import com.google.common.collect.Ordering;
+import com.google.common.collect.Streams;
+import com.pkb.annotation.EHRField;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PKBFilter;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.calendar.entity.AppointmentDTO;
+import com.pkb.calendar.entity.AppointmentRequestDTO;
+import com.pkb.calendar.entity.AvailabilityDTO;
+import com.pkb.calendar.entity.Event;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.ReferenceDatum;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.domain.ReferenceDatumService;
+import com.pkb.entities.enums.AppointmentStatus;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.exception.CalendarException;
+import com.pkb.model.RecordWithId;
+import com.pkb.service.SynchableManager;
+import com.pkb.service.dataupload.processor.UploadedDataService;
+import com.pkb.service.encounter.impl.tolven.EncounterManager;
+import com.pkb.service.integration.DatapointExternalIntegrationUrlService;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.Constants;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.ReferenceDataType.HOSPITAL_SERVICE;
+import static com.pkb.service.dataupload.processor.ImmutableLoggedInUploadedDataProcessingContext.loggedInUploadedDataProcessingContext;
+import static java.util.Collections.emptyList;
+import static java.util.Collections.singletonList;
+import static java.util.Comparator.comparing;
+import static java.util.stream.Collectors.groupingBy;
+import static java.util.stream.Collectors.joining;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+
+@SuppressWarnings(&quot;ClassWithTooManyMethods&quot;)
+public class CalendarManager extends TransactionManager implements SynchableManager {
+
+<span class="fc" id="L76">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private final UserManager userManager;
+    private final EncounterManager encounterManager;
+    private final AppointmentService appointmentService;
+    private final UploadedDataService uploadedDataService;
+    private final ReferenceDatumService referenceDatumService;
+    private final DatapointExternalIntegrationUrlService datapointExternalIntegrationUrlService;
+
+    public CalendarManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, UserManager userManager,
+                           EncounterManager encounterManager, AppointmentService appointmentService,
+                           UploadedDataService uploadedDataService, ReferenceDatumService referenceDatumService, DatapointExternalIntegrationUrlService datapointExternalIntegrationUrlService) {
+<span class="fc" id="L88">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L89">        this.userManager = userManager;</span>
+<span class="fc" id="L90">        this.encounterManager = encounterManager;</span>
+<span class="fc" id="L91">        this.appointmentService = appointmentService;</span>
+<span class="fc" id="L92">        this.uploadedDataService = uploadedDataService;</span>
+<span class="fc" id="L93">        this.referenceDatumService = referenceDatumService;</span>
+<span class="fc" id="L94">        this.datapointExternalIntegrationUrlService = datapointExternalIntegrationUrlService;</span>
+<span class="fc" id="L95">    }</span>
+
+    /**
+     * Check if the user is available on referenceDate &amp; check the next
+     * available date w.r.t referenceDate
+     *
+     * @param referencedate the date when availability is being checked
+     * @param userIdList    List of user ids
+     * @return List of {@link AvailabilityDTO}
+     * @throws CalendarException Capture the exceptions related to the Calendar feature
+     */
+    public List&lt;AvailabilityDTO&gt; getAvailability(EHRRequestContext requestContext, List&lt;Long&gt; userIdList, Instant referenceDate) throws CalendarException {
+        try {
+            // This method operates on Event data types and so there is no need to synch uploaded Appointment data beforehand
+<span class="fc" id="L109">            var userAvailability = new ArrayList&lt;AvailabilityDTO&gt;();</span>
+<span class="fc" id="L110">            var defaultAccIds = beanFactory.getPKBPersonBean().getDefaultAccountIds(userIdList);</span>
+            // TODO Optimize getAvailability(...) and getNextAvailability(...) to lookup data in batches
+<span class="fc" id="L112">            userIdList.forEach(userId -&gt; {</span>
+<span class="fc" id="L113">                var accountId = defaultAccIds.get(userId);</span>
+                // get the user availability for today
+<span class="fc" id="L115">                var availableToday = isAvailableOnDate(requestContext, userId, accountId, referenceDate);</span>
+                // get the next available date
+<span class="fc" id="L117">                var nextAvailable = getNextAvailability(requestContext, accountId, referenceDate);</span>
+                // fill the DTO
+<span class="fc" id="L119">                var availabilityDTO = new AvailabilityDTO();</span>
+<span class="fc" id="L120">                availabilityDTO.setUserId(Long.toString(userId));</span>
+<span class="fc" id="L121">                availabilityDTO.setAvailableToday(availableToday);</span>
+<span class="fc" id="L122">                availabilityDTO.setNextAvailable(Date.from(nextAvailable));</span>
+                // add it to the list
+<span class="fc" id="L124">                userAvailability.add(availabilityDTO);</span>
+<span class="fc" id="L125">            });</span>
+<span class="fc" id="L126">            return userAvailability;</span>
+<span class="nc" id="L127">        } catch (Exception exception) {</span>
+<span class="nc" id="L128">            throw new CalendarException(&quot;Exception while updating availability for users-&quot;, exception);</span>
+        }
+    }
+
+    /**
+     * Update the schedule with list of events
+     *
+     * @param events    list of {@link Event} objects
+     * @param startDate start date
+     * @param endDate   end date
+     * @return true if schedule is updated successfully else false
+     */
+    public boolean updateSchedule(@NotNull LoggedInEHRRequestContext requestContext, List&lt;Event&gt; events, Instant startDate, Instant endDate) throws CalendarException {
+<span class="fc" id="L141">        var accessingUserId = requestContext.getAccessingUserId();</span>
+<span class="fc" id="L142">        var exceptionString = &quot;Exception while updating schedule for user-&quot; + accessingUserId;</span>
+<span class="fc" id="L143">        var defaultAccountId = Optional.ofNullable(beanFactory.getPKBPersonBean().getDefaultAccountId(accessingUserId))</span>
+<span class="pc" id="L144">                .orElseThrow(() -&gt; new CalendarException(exceptionString, new RuntimeException(String.format(&quot;defaultAccountId is null for user %d&quot;, accessingUserId))));</span>
+        // This method operates on Event data types and so there is no need to synch uploaded Appointment data beforehand
+        try {
+            // Get the schedule for the given date range
+<span class="fc" id="L148">            var existingEvents = getSchedule(requestContext, startDate, endDate);</span>
+            // Update the events
+            // Pravina : Ideally we should check if the event is overlapping and send a warning before updating the schedule
+<span class="fc" id="L151">            existingEvents.forEach(event -&gt; deleteEvent(event.getId()));</span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">            if (events != null) {</span>
+<span class="fc" id="L153">                events.forEach(event -&gt; saveEvent(requestContext, defaultAccountId, event));</span>
+            }
+<span class="fc" id="L155">            return true;</span>
+<span class="nc" id="L156">        } catch (Exception exception) {</span>
+<span class="nc" id="L157">            throw new CalendarException(exceptionString, exception);</span>
+        }
+    }
+
+    /**
+     * Get the schedule within the specified date range
+     *
+     * @param startDate The start of the specified date range
+     * @param endDate   The end of the specified date range
+     * @return events list of {@link Event} objects
+     */
+    public List&lt;Event&gt; getSchedule(@NotNull LoggedInEHRRequestContext requestContext, Instant startDate, Instant endDate) throws CalendarException {
+<span class="fc" id="L169">        var accessingUserId = requestContext.getAccessingUserId();</span>
+<span class="fc" id="L170">        var exceptionString = &quot;Exception while getting schedule for user-&quot; + accessingUserId;</span>
+<span class="fc" id="L171">        var defaultAccountId = Optional.ofNullable(beanFactory.getPKBPersonBean().getDefaultAccountId(accessingUserId))</span>
+<span class="pc" id="L172">                .orElseThrow(() -&gt; new CalendarException(exceptionString, new RuntimeException(String.format(&quot;defaultAccountId is null for user %d&quot;, accessingUserId))));</span>
+        try {
+            // This method operates on Event data types and so there is no need to synch uploaded Appointment data beforehand
+<span class="fc" id="L175">            var search = new EHRSearch&lt;&gt;(defaultAccountId, Event.class, Event.MS_PATH);</span>
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">            if (startDate != null) {</span>
+<span class="fc" id="L177">                search.addFilter(new PKBFilter(Event.PH_EVENT_START_DATE, PKBFilter.Operator.GREATER_OR_EQUAL, startDate));</span>
+            }
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">            if (endDate != null) {</span>
+<span class="fc" id="L180">                search.addFilter(new PKBFilter(Event.PH_EVENT_END_DATE, PKBFilter.Operator.LESS_OR_EQUAL, endDate));</span>
+            }
+<span class="fc" id="L182">            search.setOrderBy(Event.PH_EVENT_START_DATE, EHRSearch.OrderByDirection.Asc);</span>
+<span class="fc" id="L183">            return beanFactory.getEhrRemote().queryDecryptAndPopulateData(search, Event.class, requestContext);</span>
+<span class="nc" id="L184">        } catch (Exception exception) {</span>
+<span class="nc" id="L185">            throw new CalendarException(exceptionString, exception);</span>
+        }
+    }
+
+    private Optional&lt;AppointmentDTO&gt; findAppointment(LoggedInEHRRequestContext requestContext, Long appointmentId, long accountId) {
+        try {
+<span class="fc" id="L191">            var appt = beanFactory.getEhrRemote().findDecryptAndPopulate(appointmentId, AppointmentDTO.class, requestContext);</span>
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">            if (appt == null) {</span>
+<span class="nc" id="L193">                LOGGER.debug(&quot;Did not find appointment {} in account {} with context {}&quot;, appointmentId, accountId, requestContext);</span>
+<span class="nc" id="L194">                return Optional.empty();</span>
+            }
+            // populate AppointmentRequests
+<span class="fc" id="L197">            var reqList = getAppointmentRequestListAndDecrypt(requestContext, appointmentId, accountId);</span>
+<span class="fc" id="L198">            appt.setAppointmentRequestList(reqList);</span>
+<span class="fc" id="L199">            return Optional.of(appt);</span>
+<span class="nc" id="L200">        } catch (Exception e) {</span>
+<span class="nc" id="L201">            throw new CalendarException(&quot;Exception while getting appointment &quot; + appointmentId + &quot; for acct &quot; + accountId, e);</span>
+        }
+    }
+
+    public Optional&lt;AppointmentDTO&gt; getAppointmentByUniqueId(LoggedInEHRRequestContext requestContext, @Nullable UUID uniqueId, long accountId) {
+<span class="fc" id="L206">        return getAppointmentByUniqueId(requestContext, uniqueId, accountId, false);</span>
+    }
+
+    public Optional&lt;AppointmentDTO&gt; getAppointmentByUniqueId(LoggedInEHRRequestContext requestContext, @Nullable UUID uniqueId, long accountId, boolean syncUploadedDataFirst) {
+        try {
+<span class="fc bfc" id="L211" title="All 2 branches covered.">            if (uniqueId == null) {</span>
+<span class="fc" id="L212">                LOGGER.debug(&quot;Unique ID was null in account {} with context {}&quot;, accountId, requestContext);</span>
+<span class="fc" id="L213">                return Optional.empty();</span>
+            }
+<span class="fc bfc" id="L215" title="All 2 branches covered.">            if (syncUploadedDataFirst) {</span>
+<span class="fc" id="L216">                syncUploadedData(requestContext, accountId);</span>
+            }
+<span class="fc" id="L218">            var search = new EHRSearch&lt;&gt;(accountId, AppointmentDTO.class, AppointmentDTO.MS_PATH);</span>
+<span class="fc" id="L219">            search.addFilter(new PKBFilter(&quot;uniqueId&quot;, PKBFilter.Operator.EQUAL, uniqueId));</span>
+<span class="fc" id="L220">            search.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L221">            search.setOrderBy(AppointmentDTO.START_TIMESTAMP, EHRSearch.OrderByDirection.Asc);</span>
+
+<span class="fc" id="L223">            var dtoList = beanFactory.getEhrRemote().queryDecryptAndPopulateData(search, AppointmentDTO.class, requestContext);</span>
+
+<span class="fc bfc" id="L225" title="All 2 branches covered.">            if (dtoList.isEmpty()) {</span>
+<span class="fc" id="L226">                LOGGER.debug(&quot;DTO list was empty for unique ID {} in account {} with context {}&quot;, uniqueId, accountId, requestContext);</span>
+<span class="fc" id="L227">                return Optional.empty();</span>
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">            } else if (dtoList.size() &gt; 1) {</span>
+<span class="nc" id="L229">                LOGGER.error(&quot;Found {} appointments for unique id {} in account {} with context {}&quot;, dtoList.size(), uniqueId, accountId, requestContext);</span>
+            }
+<span class="fc" id="L231">            var dto = dtoList.get(0);</span>
+            // populate AppointmentRequests
+<span class="fc" id="L233">            var reqList = getAppointmentRequestListAndDecrypt(requestContext, dto.getId(), accountId);</span>
+<span class="fc" id="L234">            dto.setAppointmentRequestList(reqList);</span>
+<span class="fc" id="L235">            return Optional.of(dto);</span>
+<span class="nc" id="L236">        } catch (Exception e) {</span>
+<span class="nc" id="L237">            throw new CalendarException(&quot;Exception while getting appointment &quot; + uniqueId + &quot; for acct &quot; + accountId, e);</span>
+        }
+    }
+
+    /**
+     * Lookup AppointmentDTO using Placer ID (SCH-1.1 in HL7) which is stored as the Appointment External ID, for the specified org.
+     */
+    public @Nullable AppointmentDTO getAppointmentByExternalIdAndDecrypt(LoggedInEHRRequestContext requestContext, String externalId, long accountId, long sourceOrgId) {
+<span class="fc" id="L245">        var appointmentSearcher = searcherWithDecryption(requestContext, AppointmentDTO.class);</span>
+<span class="fc" id="L246">        var appointmentRequestSearcher = searcherWithDecryption(requestContext, AppointmentRequestDTO.class);</span>
+<span class="fc" id="L247">        return getAppointmentByExternalId(requestContext, externalId, accountId, sourceOrgId, appointmentSearcher, appointmentRequestSearcher);</span>
+    }
+
+    /**
+     * As for getAppointmentByExternalId except the DTO is not decrypted.
+     */
+    public @Nullable AppointmentDTO getAppointmentByExternalId(EHRRequestContext requestContext, String externalId, long accountId, long sourceOrgId) {
+<span class="fc" id="L254">        var appointmentSearcher = searcherWithoutDecryption(requestContext, AppointmentDTO.class);</span>
+<span class="fc" id="L255">        var appointmentRequestSearcher = searcherWithoutDecryption(requestContext, AppointmentRequestDTO.class);</span>
+<span class="fc" id="L256">        return getAppointmentByExternalId(requestContext, externalId, accountId, sourceOrgId, appointmentSearcher, appointmentRequestSearcher);</span>
+    }
+
+    private @Nullable AppointmentDTO getAppointmentByExternalId(EHRRequestContext requestContext, String externalId, long accountId, long sourceOrgId,
+                                                                Function&lt;EHRSearch&lt;AppointmentDTO&gt;, List&lt;RecordWithId&lt;Long, AppointmentDTO&gt;&gt;&gt; appointmentSearch, Function&lt;EHRSearch&lt;AppointmentRequestDTO&gt;, List&lt;RecordWithId&lt;Long, AppointmentRequestDTO&gt;&gt;&gt; appointmentRequestSearch) {
+        try {
+            // We don't expect to have decrypt access
+<span class="fc" id="L263">            var search = new EHRSearch&lt;&gt;(accountId, AppointmentDTO.class, AppointmentDTO.MS_PATH);</span>
+<span class="fc" id="L264">            search.addFilter(new PKBFilter(EHRField.QueryField.string03.toString(), PKBFilter.Operator.EQUAL, externalId));</span>
+<span class="fc" id="L265">            search.addFilter(new PKBFilter(SourceDetails.EHRQUERY_ORG_ID, PKBFilter.Operator.EQUAL, sourceOrgId));</span>
+<span class="fc" id="L266">            search.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L267">            var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L268">            var appointments = appointmentSearch.apply(search);</span>
+<span class="fc bfc" id="L269" title="All 2 branches covered.">            if (appointments.isEmpty()) {</span>
+<span class="fc" id="L270">                LOGGER.debug(&quot;Appointment not found for external ID {} in account {} with context {}&quot;, externalId, accountId, requestContext);</span>
+<span class="fc" id="L271">                return null;</span>
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">            } else if (appointments.size() &gt; 1) {</span>
+<span class="nc" id="L273">                LOGGER.error(&quot;WARNING: found {} appointments for external ID {} in account {} with context {}&quot;, appointments.size(), externalId, accountId, requestContext);</span>
+            }
+            // populate AppointmentRequests
+<span class="fc" id="L276">            var dto = appointments.get(0).record();</span>
+<span class="fc" id="L277">            var reqList = getAppointmentRequestList(dto.getId(), accountId, appointmentRequestSearch);</span>
+<span class="fc" id="L278">            dto.setAppointmentRequestList(reqList);</span>
+<span class="fc" id="L279">            return dto;</span>
+<span class="nc" id="L280">        } catch (Exception e) {</span>
+<span class="nc" id="L281">            throw new CalendarException(&quot;Exception while getting appointment (no decryption) using Placer ID: &quot; + externalId + &quot; for acct &quot; + accountId, e);</span>
+        }
+    }
+
+    private &lt;D&gt; Function&lt;EHRSearch&lt;D&gt;, List&lt;RecordWithId&lt;Long, D&gt;&gt;&gt; searcherWithoutDecryption(@NotNull EHRRequestContext requestContext, Class&lt;D&gt; dtoClass) {
+<span class="fc" id="L286">        return search -&gt; beanFactory.getEhrRemote().queryWithoutDecryptAndPopulateDataByAccountId(search, dtoClass, requestContext);</span>
+    }
+
+    private &lt;D&gt; Function&lt;EHRSearch&lt;D&gt;, List&lt;RecordWithId&lt;Long, D&gt;&gt;&gt; searcherWithDecryption(@NotNull LoggedInEHRRequestContext requestContext, Class&lt;D&gt; dtoClass) {
+<span class="fc" id="L290">        return search -&gt; beanFactory.getEhrRemote().queryDecryptAndPopulateDataByAccountId(search, dtoClass, requestContext);</span>
+    }
+
+    private Map&lt;Long, List&lt;AppointmentRequestDTO&gt;&gt; getAppointmentRequestListAndDecrypt(@NotNull LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; appointmentIds, long accountId) {
+<span class="fc" id="L294">        return getAppointmentRequestList(appointmentIds, accountId, search -&gt; beanFactory.getEhrRemote().queryDecryptAndPopulateDataByAccountId(search, AppointmentRequestDTO.class, requestContext))</span>
+<span class="fc" id="L295">                .stream().collect(Collectors.groupingBy(AppointmentRequestDTO::getAppointmentId, toList()));</span>
+    }
+
+    private List&lt;AppointmentRequestDTO&gt; getAppointmentRequestList(Long appointmentId, long accountId, Function&lt;EHRSearch&lt;AppointmentRequestDTO&gt;, List&lt;RecordWithId&lt;Long, AppointmentRequestDTO&gt;&gt;&gt; searcher) {
+<span class="pc bpc" id="L299" title="1 of 2 branches missed.">        if (appointmentId == null) {</span>
+<span class="nc" id="L300">            throw new IllegalStateException(&quot;null appointment ID; trying to fetch requests for account &quot; + accountId);</span>
+        }
+<span class="fc" id="L302">        return getAppointmentRequestList(singletonList(appointmentId), accountId, searcher);</span>
+    }
+
+    private List&lt;AppointmentRequestDTO&gt; getAppointmentRequestListAndDecrypt(@NotNull LoggedInEHRRequestContext requestContext, Long appointmentId, long accountId) {
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">        if (appointmentId == null) {</span>
+<span class="nc" id="L307">            throw new IllegalStateException(&quot;null appointment ID; trying to fetch requests for account &quot; + accountId);</span>
+        }
+<span class="fc" id="L309">        return getAppointmentRequestList(singletonList(appointmentId), accountId, search -&gt; beanFactory.getEhrRemote().queryDecryptAndPopulateDataByAccountId(search, AppointmentRequestDTO.class, requestContext));</span>
+    }
+
+    private List&lt;AppointmentRequestDTO&gt; getAppointmentRequestList(Collection&lt;Long&gt; appointmentIds, long accountId,
+                                                                  Function&lt;EHRSearch&lt;AppointmentRequestDTO&gt;, List&lt;RecordWithId&lt;Long, AppointmentRequestDTO&gt;&gt;&gt; searcher) {
+<span class="fc bfc" id="L314" title="All 2 branches covered.">        if (isEmpty(appointmentIds)) {</span>
+<span class="fc" id="L315">            LOGGER.debug(&quot;No appointment IDs provided in account {}&quot;, accountId);</span>
+<span class="fc" id="L316">            return emptyList();</span>
+        }
+
+        try {
+<span class="fc" id="L320">            var search = new EHRSearch&lt;&gt;(accountId, AppointmentRequestDTO.class, AppointmentRequestDTO.MS_PATH);</span>
+<span class="fc" id="L321">            search.addFilter(new PKBFilter(AppointmentRequestDTO.APPOINTMENT_ID, PKBFilter.Operator.IN, appointmentIds));</span>
+<span class="fc" id="L322">            search.setOrderBy(AppointmentRequestDTO.ID, EHRSearch.OrderByDirection.Asc);</span>
+<span class="fc" id="L323">            return searcher.apply(search)</span>
+<span class="fc" id="L324">                    .stream()</span>
+<span class="fc" id="L325">                    .map(RecordWithId::record)</span>
+<span class="fc" id="L326">                    .collect(toList());</span>
+<span class="nc" id="L327">        } catch (Exception e) {</span>
+<span class="nc" id="L328">            String ids = appointmentIds.stream().map(l -&gt; l.toString()).collect(joining(&quot;,&quot;));</span>
+<span class="nc" id="L329">            throw new IllegalStateException(&quot;Exception while getting appointment requests for appt(s) &quot; + ids + &quot;, acct &quot; + accountId, e);</span>
+        }
+    }
+
+    public Tuple2&lt;Long, UUID&gt; createAppointment(SourceDetails sourceDetails, EHRRequestContext requestContext, AppointmentDTO dto, long accountId) {
+<span class="fc" id="L334">        return appointmentService.createAppointment(sourceDetails, requestContext, dto, accountId);</span>
+    }
+
+    private void populateAppointmentRequestListSource(EHRRequestContext requestContext, AppointmentDTO dto) {
+<span class="fc" id="L338">        appointmentService.populateAppointmentRequestListSource(new SourceDetails(requestContext), dto);</span>
+<span class="fc" id="L339">    }</span>
+
+    public void updateAppointment(LoggedInEHRRequestContext requestContext, AppointmentDTO dto, long accountId) {
+        try {
+<span class="pc bpc" id="L343" title="2 of 4 branches missed.">            if ((dto.getId() == null) || (dto.getId() &lt;= 0)) {</span>
+                //noinspection ThrowCaughtLocally
+<span class="nc" id="L345">                throw new IllegalArgumentException(&quot;cannot update appointment without id&quot;);</span>
+            }
+<span class="fc" id="L347">            populateAppointmentRequestListSource(requestContext, dto);</span>
+<span class="fc" id="L348">            saveAppointment(requestContext, dto, accountId, true);</span>
+<span class="nc" id="L349">        } catch (Exception e) {</span>
+<span class="nc" id="L350">            throw new CalendarException(&quot;Exception saving appointment for acct &quot; + accountId, e);</span>
+<span class="fc" id="L351">        }</span>
+<span class="fc" id="L352">    }</span>
+
+    /**
+     * delete for ALL accounts
+     */
+    public boolean deleteAppointment(LoggedInEHRRequestContext requestContext, Long appointmentId, long accountId) {
+        try {
+            // fetch the appt to get the req IDs
+<span class="fc" id="L360">            var deleteDto = findAppointment(requestContext, appointmentId, accountId);</span>
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">            if (deleteDto.isEmpty()) {</span>
+<span class="nc" id="L362">                LOGGER.warn(&quot;Attempted to delete appointment that could not be found: appointment {} in account {} with context {}&quot;, appointmentId, accountId, requestContext);</span>
+<span class="nc" id="L363">                return false;</span>
+            }
+<span class="fc" id="L365">            var paticipantDefaultAccountIds = beanFactory.getPKBPersonBean().getDefaultAccountIds(getParticipantIds(deleteDto.get().getAppointmentRequestList()));</span>
+<span class="fc" id="L366">            int deletionCount = deleteAppointmentFromAccounts(requestContext, deleteDto.get().getCommonId(), Set.copyOf(paticipantDefaultAccountIds.values()));</span>
+<span class="pc bpc" id="L367" title="1 of 2 branches missed.">            boolean success = 0 &lt; deletionCount;</span>
+<span class="pc bpc" id="L368" title="1 of 2 branches missed.">            if (!success) {</span>
+<span class="nc" id="L369">                LOGGER.debug(&quot;Deletion count was {} for appointment {} in account {} with context {}&quot;, deletionCount, appointmentId, accountId, requestContext);</span>
+            }
+<span class="fc" id="L371">            return success;</span>
+<span class="nc" id="L372">        } catch (Exception e) {</span>
+<span class="nc" id="L373">            throw new CalendarException(&quot;Exception while deleting appointment &quot; + appointmentId + &quot; for acct &quot; + accountId, e);</span>
+        }
+    }
+
+    private Set&lt;Long&gt; getParticipantIds(Collection&lt;AppointmentRequestDTO&gt; input) {
+<span class="fc" id="L378">        return input.stream().map(AppointmentRequestDTO::getParticipantId).filter(participantIdFilter()).map(Long::parseLong).collect(toSet());</span>
+    }
+
+    private Predicate&lt;String&gt; participantIdFilter() {
+<span class="fc" id="L382">        return StringUtils::isNotBlank;</span>
+    }
+
+    private void syncUploadedData(LoggedInEHRRequestContext requestContext, long accountId) throws Exception {
+<span class="fc" id="L386">        doSyncUploadedData(requestContext, singletonList(userManager.getAccountOwner(accountId).getId()));</span>
+<span class="fc" id="L387">    }</span>
+
+    private void doSyncUploadedData(LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; patientIds) {
+<span class="fc" id="L390">        List&lt;PKBPerson&gt; patients = userManager.getPKBPersonList(patientIds);</span>
+<span class="fc" id="L391">        Map&lt;Long, Long&gt; defaultAccountIds = userManager.getDefaultAccountId(patientIds);</span>
+<span class="fc bfc" id="L392" title="All 2 branches covered.">        for (PKBPerson patient : patients) {</span>
+<span class="fc" id="L393">            LoggedInEHRRequestContext piggybackContext = requestContext.withPiggyback(true);</span>
+<span class="fc" id="L394">            Long accountId = defaultAccountIds.get(patient.getId());</span>
+
+            /*
+             * Claim any new uploaded data for Encounters (as some of these
+             * might trigger creation of calendar appointments that should
+             * appear now rather than wait for the user to navigate to the
+             * Discussions page).
+             */
+            try {
+<span class="fc" id="L403">                LOGGER.info(&quot;Sync'ing Encounter UploadedData for userId={} on behalf of patientId={}&quot;,</span>
+<span class="fc" id="L404">                        piggybackContext.getAccessingUserId(), patient.getId());</span>
+
+<span class="fc" id="L406">                encounterManager.synchUploadedData(</span>
+                        piggybackContext,
+<span class="fc" id="L408">                        accountId);</span>
+
+<span class="nc" id="L410">            } catch (Exception e) {</span>
+<span class="nc" id="L411">                LOGGER.warn(&quot;Can't claim encounter uploaded data externally. Continue with Calendar processing. Exception message: {}&quot;,</span>
+<span class="nc" id="L412">                        e.getMessage());</span>
+<span class="fc" id="L413">            }</span>
+
+<span class="fc" id="L415">            uploadedDataService.synchUploadedData(</span>
+<span class="fc" id="L416">                    loggedInUploadedDataProcessingContext()</span>
+<span class="fc" id="L417">                            .requestContext(piggybackContext)</span>
+<span class="fc" id="L418">                            .patientId(patient.getId())</span>
+<span class="fc" id="L419">                            .destination(UploadedData.Destination.APPOINTMENT)</span>
+<span class="fc" id="L420">                            .build());</span>
+<span class="fc" id="L421">        }</span>
+<span class="fc" id="L422">    }</span>
+
+    public void updateAppointmentSpeciality(AppointmentDTO dto) {
+<span class="fc" id="L425">        Long orgId = dto.getSource().getOrgId();</span>
+<span class="fc" id="L426">        String speciality = dto.getBaseFields().getHospitalServiceCode();</span>
+<span class="fc" id="L427">        dto.setUpdatedSpeciality(referenceDatumService.getReferenceDatum(orgId, HOSPITAL_SERVICE, speciality)</span>
+<span class="fc" id="L428">                .map(ReferenceDatum::getDataText)</span>
+<span class="fc" id="L429">                .getOrElse(speciality));</span>
+<span class="fc" id="L430">    }</span>
+
+    @Override
+    public void syncUploadedData(LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; targetPersonIds) {
+<span class="fc" id="L434">        doSyncUploadedData(requestContext, targetPersonIds);</span>
+<span class="fc" id="L435">    }</span>
+
+    /**
+     * @return appointments before &quot;now&quot; (inclusive) in descending order by start date
+     */
+    public List&lt;AppointmentDTO&gt; getPastAppointments(LoggedInEHRRequestContext requestContext, long accountId, int limit) {
+        try {
+<span class="fc" id="L442">            syncUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L443">            return getAppointmentsByStartTimestamp(requestContext, accountId, dateTimeService.now(), PKBFilter.Operator.LESS_OR_EQUAL, limit, EHRSearch.OrderByDirection.Desc);</span>
+<span class="nc" id="L444">        } catch (Exception e) {</span>
+<span class="nc" id="L445">            throw new CalendarException(&quot;Exception while getting appointments for account &quot; + accountId, e);</span>
+        }
+    }
+
+    /**
+     * @return appointments after &quot;now&quot; (exclusive) in ascending order by start date
+     */
+    public List&lt;AppointmentDTO&gt; getUpcomingAppointments(LoggedInEHRRequestContext requestContext, long accountId, int limit) {
+        try {
+<span class="fc" id="L454">            syncUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L455">            return getAppointmentsByStartTimestamp(requestContext, accountId, dateTimeService.now(), PKBFilter.Operator.GREATER, limit, EHRSearch.OrderByDirection.Asc);</span>
+<span class="nc" id="L456">        } catch (Exception e) {</span>
+<span class="nc" id="L457">            throw new CalendarException(&quot;Exception while getting appointments for account &quot; + accountId, e);</span>
+        }
+    }
+
+    /**
+     * @return number of appointments after a certain date (exclusive)
+     */
+    public Long countUpcomingAppointments(LoggedInEHRRequestContext requestContext, long accountId) {
+        try {
+<span class="fc" id="L466">            syncUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L467">            return countAppointmentsByStartTimestamp(requestContext, accountId, dateTimeService.now(), PKBFilter.Operator.GREATER);</span>
+<span class="nc" id="L468">        } catch (Exception e) {</span>
+<span class="nc" id="L469">            throw new CalendarException(&quot;Exception while counting upcoming appointments for account &quot; + accountId, e);</span>
+        }
+    }
+
+    /**
+     * @return number of appointments before &quot;now&quot;
+     */
+    public Long countPastAppointments(LoggedInEHRRequestContext requestContext, long accountId) {
+        try {
+<span class="fc" id="L478">            syncUploadedData(requestContext, accountId);</span>
+<span class="fc" id="L479">            return countAppointmentsByStartTimestamp(requestContext, accountId, dateTimeService.now(), PKBFilter.Operator.LESS_OR_EQUAL);</span>
+<span class="nc" id="L480">        } catch (Exception e) {</span>
+<span class="nc" id="L481">            throw new CalendarException(&quot;Exception while counting past appointments for account &quot; + accountId, e);</span>
+        }
+    }
+
+    private boolean isAvailableOnDate(EHRRequestContext requestContext, long userId, long accountId, Instant date) {
+        try {
+<span class="fc" id="L487">            var ehrSearch = new EHRSearch&lt;&gt;(accountId, Event.class, Event.MS_PATH);</span>
+<span class="fc" id="L488">            ehrSearch.addFilter(new PKBFilter(Event.PH_EVENT_START_DATE, PKBFilter.Operator.EQUAL, date));</span>
+<span class="fc" id="L489">            var count = beanFactory.getEhrRemote().countEHRData(ehrSearch, requestContext.withoutAccessLog());</span>
+            // Available is true if there are no events on this date
+<span class="fc bfc" id="L491" title="All 2 branches covered.">            return count == 0L;</span>
+<span class="nc" id="L492">        } catch (Exception e) {</span>
+<span class="nc" id="L493">            throw new RuntimeException(&quot;Exception while getting availability for user-&quot; + userId + &quot;, account &quot; + accountId, e);</span>
+        }
+    }
+
+    /**
+     * IMPORTANT NOTE: this doesn't decrypt (no encrypted fields selected), and in fact would fail if it tried... because
+     * the PATIENT user is retrieving the PROFESSIONAL's availability. The current user (for this call) generally doesn't
+     * have decrypt access to this account. For the same reason, do not log the access.
+     */
+    private Instant getNextAvailability(EHRRequestContext requestContext, long accountId, Instant referencedate) {
+        try {
+<span class="fc" id="L504">            var search = new EHRSearch&lt;&gt;(accountId, Event.class, Event.MS_PATH);</span>
+<span class="fc" id="L505">            search.addFields(Event.PH_EVENT_START_DATE);</span>
+<span class="fc" id="L506">            search.addFilter(new PKBFilter(Event.PH_EVENT_START_DATE, PKBFilter.Operator.GREATER, referencedate));</span>
+<span class="fc" id="L507">            search.setOrderBy(Event.PH_EVENT_START_DATE, EHRSearch.OrderByDirection.Asc);</span>
+<span class="fc" id="L508">            var fieldMapList = beanFactory.getEhrRemote().queryEHRDataFields(search, requestContext.withoutAccessLog());</span>
+            // Increase the reference day by 1
+<span class="fc" id="L510">            var oneDayLater = ZonedDateTime.ofInstant(referencedate, Constants.APPLICATION_TZ).plusDays(1L);</span>
+            // Iterate through the dates
+<span class="fc bfc" id="L512" title="All 2 branches covered.">            for (Map&lt;String, Object&gt; fieldMap : fieldMapList) {</span>
+                //noinspection UseOfObsoleteDateTimeApi
+<span class="fc" id="L514">                var nextNotAvailableDate = ((Date) fieldMap.get(Event.PH_EVENT_START_DATE)).toInstant();</span>
+<span class="fc" id="L515">                var nextZdt = ZonedDateTime.ofInstant(nextNotAvailableDate, Constants.APPLICATION_TZ);</span>
+<span class="pc bpc" id="L516" title="1 of 2 branches missed.">                if (nextZdt.isAfter(oneDayLater)) {</span>
+                    //we got the difference of atleast 1 day from the reference date
+<span class="nc" id="L518">                    break;</span>
+                } else {
+                    // Move the reference day to next not available date
+                    // Increase the reference day by 1
+<span class="fc" id="L522">                    oneDayLater = nextZdt.plusDays(1L);</span>
+                }
+<span class="fc" id="L524">            }</span>
+<span class="fc" id="L525">            return oneDayLater.toInstant();</span>
+<span class="nc" id="L526">        } catch (Exception e) {</span>
+<span class="nc" id="L527">            throw new RuntimeException(&quot;Exception while getting next availability for accountId: &quot; + accountId, e);</span>
+        }
+    }
+
+    private void saveEvent(EHRRequestContext requestContext, long accountId, Event event) {
+        try {
+<span class="fc" id="L533">            var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L534">            var ed = ehrBean.populateEHRData(new EHRData(), event, accountId, Event.MS_PATH, requestContext);</span>
+<span class="fc" id="L535">            ehrBean.saveEHRData(requestContext, ed);</span>
+<span class="nc" id="L536">        } catch (Exception e) {</span>
+<span class="nc" id="L537">            throw new RuntimeException(&quot;Exception while saving event&quot;, e);</span>
+<span class="fc" id="L538">        }</span>
+<span class="fc" id="L539">    }</span>
+
+    private void deleteEvent(Long eventId) {
+<span class="fc" id="L542">        beanFactory.getEhrRemote().deleteEHRData(eventId);</span>
+<span class="fc" id="L543">    }</span>
+
+    private List&lt;RecordWithId&lt;Long, AppointmentRequestDTO&gt;&gt; getAppointmentRequestListsEHRData(Set&lt;Long&gt; appointmentIds, Set&lt;Long&gt; accountIds, Function&lt;EHRSearch&lt;AppointmentRequestDTO&gt;, List&lt;RecordWithId&lt;Long, AppointmentRequestDTO&gt;&gt;&gt; appointmentRequestSearch) {
+<span class="fc" id="L546">        var search = new EHRSearch&lt;&gt;(accountIds, AppointmentRequestDTO.class, AppointmentRequestDTO.MS_PATH);</span>
+<span class="fc" id="L547">        search.addFilter(new PKBFilter(AppointmentRequestDTO.APPOINTMENT_ID, PKBFilter.Operator.IN, appointmentIds));</span>
+<span class="fc" id="L548">        search.setOrderBy(AppointmentRequestDTO.ID, EHRSearch.OrderByDirection.Asc);</span>
+<span class="fc" id="L549">        return appointmentRequestSearch.apply(search);</span>
+    }
+
+    private List&lt;AppointmentDTO&gt; getAppointmentByCommonIdNoDecrypt(EHRRequestContext requestContext, String commonId, Collection&lt;Long&gt; accountIds) {
+        try {
+<span class="fc" id="L554">            var singleEhrData = getAppointmentByCommonId(requestContext, commonId, accountIds);</span>
+<span class="fc" id="L555">            return fillAppointmentDtosWithRequestList(singleEhrData, requestDtoSearch -&gt; beanFactory.getEhrRemote().queryWithoutDecryptAndPopulateDataByAccountId(requestDtoSearch, AppointmentRequestDTO.class, requestContext));</span>
+<span class="nc" id="L556">        } catch (Exception e) {</span>
+<span class="nc" id="L557">            throw new IllegalStateException(&quot;Exception while getting appt (non-encrypted) &quot; + commonId + &quot; for acct &quot; + accountIds, e);</span>
+        }
+    }
+
+    private int deleteAppointmentFromAccounts(EHRRequestContext requestContext, String commonId, Collection&lt;Long&gt; accountIds) {
+        // fetch the appt (non-encrypted portions only) to get the IDs
+<span class="fc" id="L563">        var deleteDtos = getAppointmentByCommonIdNoDecrypt(requestContext, commonId, accountIds);</span>
+<span class="fc" id="L564">        var appointmentRequestIdsToDelete = deleteDtos.stream().map(AppointmentDTO::getAppointmentRequestList).flatMap(Collection::stream).map(AppointmentRequestDTO::getId);</span>
+<span class="fc" id="L565">        var appointmentIdsToDelete = deleteDtos.stream().map(AppointmentDTO::getId);</span>
+<span class="fc" id="L566">        var idsToDelete = Streams.concat(appointmentIdsToDelete, appointmentRequestIdsToDelete).collect(toList());</span>
+<span class="fc" id="L567">        return beanFactory.getEhrRemote().deleteEHRData(idsToDelete);</span>
+    }
+
+    @VisibleForTesting
+    List&lt;RecordWithId&lt;Long, AppointmentDTO&gt;&gt; getAppointmentByCommonId(EHRRequestContext requestContext, String commonId, Collection&lt;Long&gt; accountIds) {
+<span class="fc" id="L572">        return getAppointmentEHRDataByCommonId(commonId, accountIds, search -&gt; beanFactory.getEhrRemote().queryWithoutDecryptAndPopulateDataByAccountId(search, AppointmentDTO.class, requestContext), RecordWithId::id);</span>
+    }
+
+    @VisibleForTesting
+    List&lt;EHRData&gt; getAppointmentEHRDataByCommonId(EHRRequestContext requestContext, String commonId, Collection&lt;Long&gt; accountIds) {
+<span class="fc" id="L577">        return getAppointmentEHRDataByCommonId(commonId, accountIds, search -&gt; beanFactory.getEhrRemote().queryEHRData(search, requestContext), EHRData::getAccountId);</span>
+    }
+
+    private &lt;R&gt; List&lt;R&gt; getAppointmentEHRDataByCommonId(String commonId, Collection&lt;Long&gt; accountIds, Function&lt;EHRSearch&lt;AppointmentDTO&gt;, List&lt;R&gt;&gt; searcher, Function&lt;R, Long&gt; accountIdProvider) {
+<span class="fc bfc" id="L581" title="All 2 branches covered.">        if (isEmpty(accountIds)) {</span>
+<span class="fc" id="L582">            LOGGER.debug(&quot;No account IDs provided for common ID {}&quot;, commonId);</span>
+<span class="fc" id="L583">            return emptyList();</span>
+        }
+        try {
+<span class="fc" id="L586">            var search = new EHRSearch&lt;&gt;(accountIds, AppointmentDTO.class, AppointmentDTO.MS_PATH);</span>
+<span class="fc" id="L587">            search.addFilter(new PKBFilter(AppointmentDTO.COMMON_ID, PKBFilter.Operator.EQUAL, commonId));</span>
+<span class="fc" id="L588">            search.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L589">            List&lt;R&gt; dtoList = searcher.apply(search);</span>
+<span class="fc" id="L590">            var appointmentsByAccountId = dtoList.stream().collect(groupingBy(accountIdProvider));</span>
+<span class="fc" id="L591">            var singleEhrData = new ArrayList&lt;R&gt;(dtoList.size());</span>
+<span class="fc" id="L592">            appointmentsByAccountId.forEach((key, value) -&gt; {</span>
+<span class="pc bpc" id="L593" title="1 of 2 branches missed.">                if (value.isEmpty()) {</span>
+<span class="nc" id="L594">                    LOGGER.debug(&quot;WARNING: found 0 appointments for common ID {} in account {}&quot;, commonId, key);</span>
+<span class="pc bpc" id="L595" title="1 of 2 branches missed.">                } else if (value.size() &lt; 2) {</span>
+<span class="fc" id="L596">                    singleEhrData.addAll(value);</span>
+                } else {
+<span class="nc" id="L598">                    LOGGER.error(&quot;WARNING: found {} appointments for common ID {} in account {}&quot;, value.size(), commonId, key);</span>
+                }
+<span class="fc" id="L600">            });</span>
+<span class="fc" id="L601">            return singleEhrData;</span>
+<span class="nc" id="L602">        } catch (Exception e) {</span>
+<span class="nc" id="L603">            throw new IllegalStateException(&quot;Exception while getting appt (non-encrypted) &quot; + commonId + &quot; for acct &quot; + accountIds, e);</span>
+        }
+    }
+
+    @VisibleForTesting
+    List&lt;AppointmentDTO&gt; fillAppointmentDtosWithRequestList(List&lt;RecordWithId&lt;Long, AppointmentDTO&gt;&gt; appointmentsWithoutRequestList, Function&lt;EHRSearch&lt;AppointmentRequestDTO&gt;, List&lt;RecordWithId&lt;Long, AppointmentRequestDTO&gt;&gt;&gt; appointmentRequestSearch) {
+<span class="fc bfc" id="L609" title="All 2 branches covered.">        if (isEmpty(appointmentsWithoutRequestList)) {</span>
+<span class="fc" id="L610">            LOGGER.debug(&quot;No appointmentsWithoutRequestList&quot;);</span>
+<span class="fc" id="L611">            return emptyList();</span>
+        }
+        // populate the AppointmentRequestDTOs inside
+        // slightly odd handling: the accountIds may vary, so pass them from the corresponding ED records
+<span class="fc" id="L615">        var appointmentIds = appointmentsWithoutRequestList.stream().map(r -&gt; r.record().getId()).collect(toSet());</span>
+<span class="fc" id="L616">        var accountIds = appointmentsWithoutRequestList.stream().map(RecordWithId::id).collect(toSet());</span>
+<span class="fc" id="L617">        var appointmentRequestEhrData = getAppointmentRequestListsEHRData(appointmentIds, accountIds, appointmentRequestSearch);</span>
+<span class="fc" id="L618">        var appointmentRequestsByAccountAndAppointmentIds = groupDTOsByAccountIdAndKey(accountIds,</span>
+                appointmentRequestEhrData,
+                AppointmentRequestDTO::getAppointmentId,
+                appointmentIds);
+
+<span class="fc" id="L623">        return appointmentsWithoutRequestList.stream()</span>
+<span class="fc" id="L624">                .map(r -&gt; {</span>
+<span class="fc" id="L625">                    var appointmentDto = r.record();</span>
+<span class="fc" id="L626">                    var actualList = appointmentRequestsByAccountAndAppointmentIds.get(r.id(), appointmentDto.getId());</span>
+<span class="pc bpc" id="L627" title="1 of 2 branches missed.">                    appointmentDto.setAppointmentRequestList(actualList == null ? emptyList() : actualList);</span>
+<span class="fc" id="L628">                    return appointmentDto;</span>
+                })
+<span class="fc" id="L630">                .collect(toList());</span>
+    }
+
+    /**
+     * Populate annotated DTO objects with data from EHRData objects, and groups them by accountId and the given key.
+     */
+    private &lt;K&gt; ArrayTable&lt;Long, K, List&lt;AppointmentRequestDTO&gt;&gt; groupDTOsByAccountIdAndKey(Set&lt;Long&gt; accountIds,
+                                                                                            List&lt;RecordWithId&lt;Long, AppointmentRequestDTO&gt;&gt; input,
+                                                                                            Function&lt;AppointmentRequestDTO, K&gt; keyFunction,
+                                                                                            Set&lt;K&gt; keys) {
+<span class="fc" id="L640">        var result = ArrayTable.&lt;Long, K, List&lt;AppointmentRequestDTO&gt;&gt;create(accountIds, keys);</span>
+<span class="fc" id="L641">        input.forEach(r -&gt; {</span>
+<span class="fc" id="L642">            var dto = r.record();</span>
+<span class="fc" id="L643">            var actual = result.get(r.id(), keyFunction.apply(dto));</span>
+<span class="fc bfc" id="L644" title="All 2 branches covered.">            if (actual == null) {</span>
+<span class="fc" id="L645">                actual = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L646">                result.put(r.id(), keyFunction.apply(dto), actual);</span>
+            }
+<span class="fc" id="L648">            actual.add(dto);</span>
+<span class="fc" id="L649">        });</span>
+<span class="fc" id="L650">        return result;</span>
+    }
+
+    private List&lt;AppointmentDTO&gt; getAppointmentsByStartTimestamp(LoggedInEHRRequestContext requestContext, long accountId, Instant startTimestamp,
+                                                                 PKBFilter.Operator operator, int limit, EHRSearch.OrderByDirection orderByDirection) {
+        try {
+<span class="fc" id="L656">            var search = new EHRSearch&lt;&gt;(accountId, AppointmentDTO.class, AppointmentDTO.MS_PATH);</span>
+<span class="fc" id="L657">            search.addFilter(new PKBFilter(AppointmentDTO.START_TIMESTAMP, operator, Date.from(startTimestamp)));</span>
+<span class="fc" id="L658">            search.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L659">            search.setOrderBy(AppointmentDTO.START_TIMESTAMP, orderByDirection);</span>
+<span class="fc" id="L660">            search.setResultsMaxReturned(limit);</span>
+<span class="fc" id="L661">            var dtoResults = beanFactory.getEhrRemote().queryDecryptAndPopulateDataByAccountId(search, AppointmentDTO.class, requestContext)</span>
+<span class="fc" id="L662">                    .stream()</span>
+<span class="fc" id="L663">                    .map(RecordWithId::record)</span>
+<span class="fc" id="L664">                    .collect(toList());</span>
+
+            // populate the AppointmentRequestDTOs inside
+<span class="fc" id="L667">            var appointmentIds = dtoResults.stream().map(AppointmentDTO::getId).collect(toSet());</span>
+<span class="fc" id="L668">            var appointmentRequestsByAppointmentId = getAppointmentRequestListAndDecrypt(requestContext, appointmentIds, accountId);</span>
+<span class="fc" id="L669">            dtoResults.forEach(dto -&gt; dto.setAppointmentRequestList(appointmentRequestsByAppointmentId.getOrDefault(dto.getId(), emptyList())));</span>
+<span class="fc" id="L670">            return dtoResults;</span>
+<span class="nc" id="L671">        } catch (Exception e) {</span>
+<span class="nc" id="L672">            throw new RuntimeException(&quot;Exception while getting appointments for acct &quot; + accountId, e);</span>
+        }
+    }
+
+    private long countAppointmentsByStartTimestamp(LoggedInEHRRequestContext requestContext, long accountId, Instant startTimestamp, PKBFilter.Operator operator) {
+        try {
+<span class="fc" id="L678">            var search = new EHRSearch&lt;&gt;(accountId, AppointmentDTO.class, AppointmentDTO.MS_PATH);</span>
+<span class="fc" id="L679">            search.addFilter(new PKBFilter(AppointmentDTO.START_TIMESTAMP, operator, Date.from(startTimestamp)));</span>
+<span class="fc" id="L680">            search.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L681">            return beanFactory.getEhrRemote().countEHRData(search, requestContext);</span>
+<span class="nc" id="L682">        } catch (Exception e) {</span>
+<span class="nc" id="L683">            throw new RuntimeException(&quot;Exception while counting appointments for acct &quot; + accountId, e);</span>
+        }
+    }
+
+    // Please note this method is currently not safe to use in a lambda
+    @SuppressWarnings(&quot;NewExceptionWithoutArguments&quot;)
+    @VisibleForTesting
+    Tuple2&lt;Long, UUID&gt; createAppointmentInAccount(EHRRequestContext requestContext, AppointmentDTO dto, long accountId) {
+        // the new appointment id for THIS account
+<span class="fc" id="L692">        dto.getBaseFields().setUniqueId(UUID.randomUUID());</span>
+<span class="fc" id="L693">        var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L694">        var ed = ehrBean.populateEHRData(new EHRData(), dto, accountId, AppointmentDTO.MS_PATH, requestContext);</span>
+<span class="fc" id="L695">        ed.setId(0); // Otherwise we overwrite the original dto menu_data record</span>
+<span class="pc bpc" id="L696" title="1 of 2 branches missed.">        if (!dto.getSource().isPopulated()) {</span>
+<span class="nc" id="L697">            throw new IllegalStateException(&quot;PHRZ-105,PHRZ-104: Source is null for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+        }
+<span class="fc" id="L699">        var returnApptId = ehrBean.saveEHRData(requestContext, ed);</span>
+<span class="fc bfc" id="L700" title="All 2 branches covered.">        for (AppointmentRequestDTO reqDto : dto.getAppointmentRequestList()) {</span>
+<span class="fc" id="L701">            reqDto.setAppointmentId(returnApptId);</span>
+<span class="fc" id="L702">            reqDto.setId(null);</span>
+<span class="pc bpc" id="L703" title="1 of 2 branches missed.">            if (!reqDto.getSource().isPopulated()) {</span>
+<span class="nc" id="L704">                throw new IllegalStateException(&quot;PHRZ-105,PHRZ-104: Source is null for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+            }
+<span class="fc" id="L706">            var recEd = ehrBean.populateEHRData(new EHRData(), reqDto, accountId, AppointmentRequestDTO.MS_PATH, requestContext);</span>
+<span class="fc" id="L707">            recEd.generateNewRandomUniqueId();</span>
+<span class="fc" id="L708">            ehrBean.saveEHRData(requestContext, recEd);</span>
+<span class="fc" id="L709">        }</span>
+<span class="fc" id="L710">        return Tuple.of(returnApptId, dto.getBaseFields().getUniqueId());</span>
+    }
+
+    public @Nullable Tuple2&lt;Long, UUID&gt; saveAppointment(@NotNull EHRRequestContext requestContext, AppointmentDTO dto, long accountId, boolean syncUploadedDataFirst) {
+<span class="fc" id="L714">        Tuple2&lt;Long, UUID&gt; returnApptIds = null; // the new appt id for THIS account</span>
+<span class="fc bfc" id="L715" title="All 2 branches covered.">        boolean update = (dto.getId() != null);</span>
+<span class="fc" id="L716">        String currentUserId = requestContext.getMaybeAccessingUserId().map(Object::toString).orElse(null);</span>
+
+<span class="fc bfc" id="L718" title="All 2 branches covered.">        if (dto.getStatus() == null) {</span>
+<span class="fc" id="L719">            dto.setStatus(AppointmentStatus.ACTIVE); // Because there might be some old queued appointments</span>
+        }
+
+        /*
+         * we need to save in each participant's account!
+         * this means retrieving each appointment, then finding the appt requests in each one
+         * ...comparing the participant list to see how it has changed (eek)
+         */
+        try {
+<span class="fc bfc" id="L728" title="All 2 branches covered.">            if (syncUploadedDataFirst) {</span>
+<span class="fc" id="L729">                syncUploadedData((LoggedInEHRRequestContext) requestContext, accountId);</span>
+            }
+<span class="fc" id="L731">            var personBean = beanFactory.getPKBPersonBean();</span>
+<span class="fc bfc" id="L732" title="All 2 branches covered.">            if (update) {</span>
+<span class="fc" id="L733">                LoggedInEHRRequestContext loggedInEHRRequestContext = requestContext.getLoggedInContext().orElseThrow();</span>
+                // updates are more complex; participants may have been added, removed, or just need the update
+<span class="fc" id="L735">                List&lt;AppointmentRequestDTO&gt; dbReqList = getAppointmentRequestListAndDecrypt(loggedInEHRRequestContext.withoutAccessLog(), dto.getId(), accountId);</span>
+
+<span class="fc" id="L737">                Map&lt;Long, Long&gt; participantDefaultAccountIds = personBean.getDefaultAccountIds(getParticipantIds(dto.getAppointmentRequestList()));</span>
+
+                // search for current &amp; new participants (and handle updates)
+                newLoop:
+<span class="fc bfc" id="L741" title="All 2 branches covered.">                for (AppointmentRequestDTO req : dto.getAppointmentRequestList()) {</span>
+<span class="fc bfc" id="L742" title="All 2 branches covered.">                    for (AppointmentRequestDTO dbReq : dbReqList) {</span>
+<span class="fc bfc" id="L743" title="All 2 branches covered.">                        if (req.getCommonId().equals(dbReq.getCommonId())) {</span>
+                            // found it!  update, and move on
+<span class="fc" id="L745">                            Long updateAccountId = participantDefaultAccountIds.get(Long.parseLong(req.getParticipantId()));</span>
+<span class="fc" id="L746">                            updateAppointmentInAccount(requestContext, dto, updateAccountId);</span>
+
+<span class="fc" id="L748">                            continue newLoop;</span>
+                        }
+<span class="fc" id="L750">                    }</span>
+                    // not found in db appointment!  create the new appointment
+<span class="fc" id="L752">                    Long reqAccountId = participantDefaultAccountIds.get(Long.parseLong(req.getParticipantId()));</span>
+<span class="fc" id="L753">                    createAppointmentInAccount(requestContext, dto, reqAccountId);</span>
+<span class="fc" id="L754">                }</span>
+
+                // search for deleted participants
+<span class="fc" id="L757">                Set&lt;Long&gt; deletedParticipants = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L758">                Set&lt;String&gt; commonIdsToDelete = new HashSet&lt;&gt;();</span>
+                deleteLoop:
+<span class="fc bfc" id="L760" title="All 2 branches covered.">                for (AppointmentRequestDTO dbReq : dbReqList) {</span>
+<span class="fc bfc" id="L761" title="All 2 branches covered.">                    for (AppointmentRequestDTO req : dto.getAppointmentRequestList()) {</span>
+<span class="fc bfc" id="L762" title="All 2 branches covered.">                        if (dbReq.getCommonId().equals(req.getCommonId())) {</span>
+<span class="fc" id="L763">                            continue deleteLoop; // found it!  check next</span>
+                        }
+<span class="fc" id="L765">                    }</span>
+                    // not found in saved appointment!  delete from DB
+<span class="pc bpc" id="L767" title="1 of 2 branches missed.">                    if (participantIdFilter().test(dbReq.getParticipantId())) {</span>
+<span class="fc" id="L768">                        Long participantId = participantDefaultAccountIds.get(Long.parseLong(dbReq.getParticipantId()));</span>
+<span class="pc bpc" id="L769" title="1 of 2 branches missed.">                        if (participantId != null) {</span>
+<span class="nc" id="L770">                            deletedParticipants.add(participantId);</span>
+                        }
+                    }
+<span class="fc" id="L773">                    commonIdsToDelete.add(dbReq.getCommonId());</span>
+<span class="fc" id="L774">                }</span>
+                // delete appointment entirely for the deleted participant
+<span class="fc" id="L776">                deleteAppointmentFromAccounts(requestContext, dto.getCommonId(), deletedParticipants);</span>
+                // and delete all reqs across accounts with this commonId
+<span class="fc" id="L778">                int deletedAppointmentRequests = beanFactory.getEhrRemote().deleteDataTypeByString01s(MenuDataType.appointmentRequest, commonIdsToDelete);</span>
+<span class="fc" id="L779">                LOGGER.info(&quot;Removed {} participants from appointment {} with commonIds: {}&quot;, deletedAppointmentRequests, dto.getId(), commonIdsToDelete);</span>
+<span class="fc" id="L780">            } else {</span>
+                // just write to each participant's account
+<span class="fc" id="L782">                Map&lt;String, Tuple2&lt;Long, UUID&gt;&gt; appointments = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L783">                Map&lt;Long, Long&gt; participantDefaultAccountIds = personBean.getDefaultAccountIds(getParticipantIds(dto.getAppointmentRequestList()));</span>
+<span class="fc bfc" id="L784" title="All 2 branches covered.">                for (AppointmentRequestDTO req : dto.getAppointmentRequestList()) {</span>
+<span class="fc" id="L785">                    Long reqAccountId = participantDefaultAccountIds.get(Long.parseLong(req.getParticipantId()));</span>
+<span class="fc" id="L786">                    appointments.put(req.getParticipantId(), createAppointmentInAccount(requestContext, dto, reqAccountId));</span>
+
+                    // return the new appt id for the original account, not the copies in others' accounts
+<span class="fc bfc" id="L789" title="All 4 branches covered.">                    if (req.getParticipantId().equals(currentUserId) || dto.getAppointmentRequestList().size() == 1) {</span>
+<span class="fc" id="L790">                        returnApptIds = appointments.get(req.getParticipantId());</span>
+                    }
+<span class="fc" id="L792">                }</span>
+<span class="fc bfc" id="L793" title="All 2 branches covered.">                if (returnApptIds == null) {</span>
+                    // this has been created by a user that isn't one of the participants so we need to return the
+                    // patient's appointment id for the email notification to work
+<span class="fc" id="L796">                    returnApptIds = appointments.get(dto.getPatientId());</span>
+                }
+            }
+<span class="nc" id="L799">        } catch (Exception e) {</span>
+<span class="nc" id="L800">            throw new CalendarException(&quot;Failure saving appointment &quot; + dto + &quot; for acct &quot; + accountId + &quot;, current user &quot; + currentUserId + &quot;; update? &quot; + update, e);</span>
+<span class="fc" id="L801">        }</span>
+
+<span class="fc" id="L803">        return returnApptIds;</span>
+    }
+
+    /**
+     * may not have decrypt access -- don't assume it does!
+     */
+    @VisibleForTesting
+    void updateAppointmentInAccount(EHRRequestContext requestContext, AppointmentDTO dto, long accountId) {
+        // fetch the existing to get the IDs right
+<span class="fc" id="L812">        var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L813">        List&lt;EHRData&gt; ehrDataList = getAppointmentEHRDataByCommonId(requestContext, dto.getCommonId(), singletonList(accountId));</span>
+<span class="fc" id="L814">        var ehrDataIds = ehrDataList.stream().map(EHRData::getId).collect(toList());</span>
+<span class="fc" id="L815">        var appointmentDtos = ehrBean.populateDTOListWithAccount(ehrDataList, AppointmentDTO.class, requestContext)</span>
+<span class="fc" id="L816">                .stream()</span>
+<span class="pc" id="L817">                .sorted(comparing(r -&gt; r.record().getId(), Ordering.explicit(ehrDataIds)))</span>
+<span class="fc" id="L818">                .collect(toList());</span>
+
+<span class="fc" id="L820">        Function&lt;EHRSearch&lt;AppointmentRequestDTO&gt;, List&lt;RecordWithId&lt;Long, AppointmentRequestDTO&gt;&gt;&gt; appointmentRequestSearcher = requestDtoSearch -&gt; ehrBean.queryWithoutDecryptAndPopulateDataByAccountId(requestDtoSearch, AppointmentRequestDTO.class, requestContext);</span>
+<span class="fc" id="L821">        AppointmentDTO dbDto = fillAppointmentDtosWithRequestList(appointmentDtos, appointmentRequestSearcher).get(0);</span>
+<span class="fc" id="L822">        EHRData ed = ehrDataList.get(0);</span>
+<span class="fc" id="L823">        dto.setId(ed.getId());</span>
+<span class="fc" id="L824">        dto.getBaseFields().setUniqueId(dbDto.getBaseFields().getUniqueId());</span>
+
+<span class="fc" id="L826">        ed = ehrBean.populateEHRData(ed, dto, accountId, AppointmentDTO.MS_PATH, requestContext);</span>
+<span class="fc" id="L827">        ehrBean.saveEHRData(requestContext, ed);</span>
+
+        // update/save the requests
+<span class="fc bfc" id="L830" title="All 2 branches covered.">        for (AppointmentRequestDTO req : dto.getAppointmentRequestList()) {</span>
+<span class="fc" id="L831">            AppointmentRequestDTO dbReq = dbDto.getAppointmentRequestByCommonId(req.getCommonId());</span>
+<span class="fc bfc" id="L832" title="All 2 branches covered.">            if (dbReq == null) {</span>
+                // new record
+<span class="fc" id="L834">                req.setId(null);</span>
+<span class="fc" id="L835">                req.setAppointmentId(dbDto.getId());</span>
+<span class="pc bpc" id="L836" title="1 of 2 branches missed.">                if (!req.getSource().isPopulated()) {</span>
+<span class="nc" id="L837">                    throw new IllegalStateException(&quot;PHRZ-105,PHRZ-104: Source is null for data point!!! Fix code path to set it, and backfill DB!&quot;);</span>
+                }
+
+<span class="fc" id="L840">                var newEd = ehrBean.populateEHRData(new EHRData(), req, accountId, AppointmentRequestDTO.MS_PATH, requestContext);</span>
+<span class="fc" id="L841">                ehrBean.saveEHRData(requestContext, newEd);</span>
+<span class="fc" id="L842">            } else {</span>
+                // update existing record
+<span class="fc" id="L844">                req.setId(dbReq.getId());</span>
+<span class="fc" id="L845">                req.setAppointmentId(dbDto.getId());</span>
+
+<span class="fc" id="L847">                var existingEd = ehrBean.populateEHRData(ehrBean.findEHRData(req.getId(), requestContext), req, accountId, AppointmentRequestDTO.MS_PATH, requestContext);</span>
+<span class="fc" id="L848">                ehrBean.saveEHRData(requestContext, existingEd);</span>
+            }
+            // don't worry about deletes; handled in one call for all accounts, from saveAppointment()
+<span class="fc" id="L851">        }</span>
+<span class="fc" id="L852">    }</span>
+
+    public void saveAppointmentExternalIntegrationUrl(UUID appointmentId, String url, EHRRequestContext requestContext) {
+<span class="fc" id="L855">        datapointExternalIntegrationUrlService.save(appointmentId, url, requestContext);</span>
+<span class="fc" id="L856">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

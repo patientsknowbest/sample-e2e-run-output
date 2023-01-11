@@ -1,0 +1,552 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DiagnosisAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.diagnoses</a> &gt; <span class="el_source">DiagnosisAction.java</span></div><h1>DiagnosisAction.java</h1><pre class="source lang-java linenums">package com.pkb.action.diagnoses;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.BaseAction;
+import com.pkb.action.ConsentCategoryBaseAction;
+import com.pkb.action.message.ComposeMessageAction;
+import com.pkb.action.support.DiagnosisGroupTransformer;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.bean.IMessageWebBean;
+import com.pkb.coding.entity.CodeableConcept;
+import com.pkb.diagnosis.DiagnosisHelper;
+import com.pkb.diagnosis.entity.Diagnosis;
+import com.pkb.dto.DiagnosisGroupDto;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.institute.entity.Team;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.datapoint.DataWithUIPermissions;
+import com.pkb.service.diagnosis.DiagnosisManager;
+import com.pkb.service.user.impl.UserManager;
+import io.vavr.control.Either;
+import org.apache.struts2.interceptor.validation.SkipValidation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.lang.invoke.MethodHandles;
+import java.text.ParseException;
+import java.time.format.DateTimeFormatter;
+import java.util.Collections;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.regex.Pattern;
+
+import static com.pkb.user.entity.PKBPerson.Lazy.CONTACTS;
+import static java.util.stream.Collectors.toList;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+
+
+<span class="fc" id="L44">public class DiagnosisAction extends ConsentCategoryBaseAction {</span>
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L48">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L49">    private static final Pattern LINUX_NEWLINE_PATTERN = Pattern.compile(&quot;\n&quot;);</span>
+
+    private DiagnosisManager diagnosisManager;
+
+    private IMessageWebBean messageWebBean;
+
+    private DiagnosisHelper diagnosisHelper;
+
+    private Diagnosis diag;
+
+    private DiagnosisGroupTransformer diagnosisGroupTransformer;
+
+    // To viewDiagnoses.jsp
+    private List&lt;DataWithUIPermissions&lt;Diagnosis&gt;&gt; diagnoses;
+
+    private List&lt;DiagnosisGroupDto&gt; currentDiagnosisGroups;
+    private List&lt;DiagnosisGroupDto&gt; pastDiagnosisGroups;
+
+    // From viewDiagnoses.jsp
+    private List&lt;Long&gt; diagnosisIds;
+
+    // From addDiagnosis.jsp
+    private Long id;
+    // From editPrivacyLabels.jsp
+    private Long dataPointId;
+
+    private UUID uniqueId;
+
+    private String startDateString;
+
+    private String endDateString;
+
+    private String diagnosis;
+
+    private String details;
+
+    private DateTimeFormatter dateFormat;
+
+    private Long loggedUserId;
+
+    private Long patientId;
+
+    private Long patientAccountId;
+
+    private boolean callerIsClinician;
+
+    private Long callerTeamId;
+
+    private Long callerOrgId;
+
+    private String discussMessage;
+
+    private String discussTopic;
+
+    // Tabs
+    public String getTab() {
+<span class="fc" id="L105">        return &quot;health&quot;;</span>
+    }
+
+    public String getSubTab() {
+<span class="fc" id="L109">        return &quot;diagnoses&quot;;</span>
+    }
+
+    private BaseAction.Users findUsers() {
+<span class="fc" id="L113">        return findUsers(getLoggedInEHRRequestContext());</span>
+    }
+
+    private BaseAction.Users findUsers(LoggedInEHRRequestContext context) {
+<span class="fc" id="L117">        var users = getContextAndLoggedInUsers(context, CONTACTS);</span>
+<span class="fc" id="L118">        loggedUserId = users.loggedInUser().getId();</span>
+<span class="fc" id="L119">        patientId = users.contextUser().getId();</span>
+<span class="fc" id="L120">        patientAccountId = userManager.getDefaultAccountId(patientId);</span>
+
+<span class="fc" id="L122">        callerIsClinician = context.isPro();</span>
+
+<span class="fc" id="L124">        Team callerTeam = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        callerTeamId = callerTeam == null ? null : callerTeam.getId();</span>
+<span class="fc" id="L126">        return users;</span>
+    }
+
+    public String viewDiagnoses() throws Exception {
+<span class="fc" id="L130">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L131">        var users = findUsers(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L133">        List&lt;Diagnosis&gt; allDiagnoses = diagnosisGroupTransformer.transformDiagnosis(diagnosisManager.getDiagnoses(patientId, patientAccountId, null,</span>
+                loggedInEHRRequestContext,
+                false/*includeNegativeConditions*/ /*fetch RRs*/));
+
+<span class="fc" id="L137">        List&lt;DataWithUIPermissions&lt;Diagnosis&gt;&gt; diagnosisWithPermissions = dataPointManager.getPermissions(allDiagnoses, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam());</span>
+
+<span class="fc" id="L139">        diagnoses = diagnosisWithPermissions.stream()</span>
+<span class="fc" id="L140">                .filter(d -&gt; diagnosisHelper.isCurrent(d.getData()))</span>
+<span class="fc" id="L141">                .collect(toList());</span>
+
+<span class="fc" id="L143">        List&lt;DataWithUIPermissions&lt;Diagnosis&gt;&gt; pastDiagnoses = diagnosisWithPermissions.stream()</span>
+<span class="fc" id="L144">                .filter(d -&gt; diagnosisHelper.isPast(d.getData()))</span>
+<span class="fc" id="L145">                .collect(toList());</span>
+
+<span class="fc" id="L147">        currentDiagnosisGroups = diagnosisGroupTransformer.transformDiagnosisDTOsWithoutGrouping(diagnoses, false);</span>
+<span class="fc" id="L148">        pastDiagnosisGroups = diagnosisGroupTransformer.groupByReverseEndDateAndAlphabetical(pastDiagnoses, true);</span>
+
+<span class="fc" id="L150">        return Action.SUCCESS;</span>
+    }
+
+    public String getDiagnosisForm() {
+<span class="fc" id="L154">        id = null;</span>
+<span class="fc" id="L155">        startDateString = &quot;&quot;;</span>
+<span class="fc" id="L156">        endDateString = &quot;&quot;;</span>
+<span class="fc" id="L157">        diagnosis = &quot;&quot;;</span>
+
+<span class="fc" id="L159">        setDefaultFlagToTeamDefault();</span>
+
+<span class="fc" id="L161">        return Action.SUCCESS;</span>
+    }
+
+    public String addDiagnosis() throws Exception {
+<span class="fc" id="L165">        var users = findUsers();</span>
+<span class="fc" id="L166">        refillPrivacyFlags();</span>
+
+<span class="fc" id="L168">        boolean errors = false;</span>
+
+<span class="fc bfc" id="L170" title="All 2 branches covered.">        if (isBlank(diagnosis)) {</span>
+<span class="fc" id="L171">            addFieldError(&quot;diagnosis&quot;, getText(&quot;diagnosisAction.err.enter_illness&quot;));</span>
+<span class="fc" id="L172">            errors = true;</span>
+        }
+
+<span class="fc" id="L175">        Date startDate = null;</span>
+<span class="pc bpc" id="L176" title="2 of 6 branches missed.">        if ((startDateString != null) &amp;&amp; !startDateString.isEmpty() &amp;&amp; !&quot;-&quot;.equals(startDateString)) {</span>
+            try {
+<span class="fc" id="L178">                startDate = parseDate(startDateString);</span>
+<span class="fc" id="L179">            } catch (ParseException ignored) {</span>
+<span class="fc" id="L180">                addFieldError(&quot;startDateString&quot;, getText(&quot;diagnosisAction.err.enter_date&quot;));</span>
+<span class="fc" id="L181">                errors = true;</span>
+<span class="fc" id="L182">            }</span>
+        }
+
+<span class="fc" id="L185">        Date endDate = null;</span>
+<span class="pc bpc" id="L186" title="2 of 6 branches missed.">        if ((endDateString != null) &amp;&amp; !endDateString.isEmpty() &amp;&amp; !&quot;-&quot;.equals(endDateString)) {</span>
+            try {
+                //endDate = dateFormat.parse(endDateString);
+<span class="fc" id="L189">                endDate = parseDate(endDateString);</span>
+<span class="fc" id="L190">            } catch (ParseException ignored) {</span>
+<span class="fc" id="L191">                addFieldError(&quot;endDateString&quot;, getText(&quot;diagnosisAction.err.enter_date&quot;));</span>
+<span class="fc" id="L192">                errors = true;</span>
+<span class="fc" id="L193">            }</span>
+        }
+
+<span class="fc bfc" id="L196" title="All 2 branches covered.">        if (errors) {</span>
+<span class="fc" id="L197">            disablePrivacyFlagEditForm();</span>
+<span class="fc" id="L198">            return RELOAD;</span>
+        }
+
+<span class="fc" id="L201">        EHRRequestContext requestContext = getEHRRequestContext();</span>
+<span class="fc" id="L202">        diag = new Diagnosis(new SourceDetails(requestContext));</span>
+<span class="fc" id="L203">        diag.setId(id);</span>
+<span class="fc" id="L204">        diag.getBaseFields().setUniqueId(uniqueId);</span>
+<span class="fc" id="L205">        diag.setStartDate(startDate);</span>
+<span class="fc" id="L206">        diag.setEndDate(endDate);</span>
+<span class="fc" id="L207">        diag.setDiagnosis(new CodeableConcept.Builder(diagnosis).build());</span>
+<span class="fc" id="L208">        diag.setDetails(details);</span>
+<span class="fc" id="L209">        diag.setPatientAccountId(patientAccountId);</span>
+
+<span class="fc bfc" id="L211" title="All 2 branches covered.">        if (id == null) {</span>
+<span class="fc" id="L212">            fillPrivacyFlagIn(diag);</span>
+<span class="fc" id="L213">            diagnosisManager.transactional(() -&gt; {</span>
+<span class="fc" id="L214">                Either&lt;String, UUID&gt; maybeDiagnosis = diagnosisManager.saveDiagnosis(diag, requestContext);</span>
+<span class="fc" id="L215">                maybeDiagnosis.left().forEach(this::handleExcludedDataPoint);</span>
+<span class="fc" id="L216">                maybeDiagnosis.right().forEach(uniqueId -&gt; {</span>
+<span class="fc" id="L217">                    logActivityByOthers(Activity.Action.ADDED_DIAGNOSIS, dateTimeService.now(), true, diag, getLoggedInEHRRequestContext());</span>
+<span class="fc" id="L218">                });</span>
+<span class="fc" id="L219">            });</span>
+        } else {
+<span class="fc" id="L221">            Diagnosis originalDiagnosis = diagnosisManager.getDiagnosis(users.loggedInUser().getDefaultAccountId(), id, getLoggedInEHRRequestContext());</span>
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">            if (hasNotPermissionsToEditDatapoint(diag, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam())) {</span>
+<span class="nc" id="L223">                return CANCEL;</span>
+            }
+<span class="fc" id="L225">            diag.setPrivacyFlagsFrom(originalDiagnosis);</span>
+<span class="fc" id="L226">            diagnosisManager.transactional(() -&gt; {</span>
+<span class="fc" id="L227">                Either&lt;String, UUID&gt; maybeDiagnosis = diagnosisManager.updateDiagnosis(patientId, diag, requestContext);</span>
+<span class="fc" id="L228">                maybeDiagnosis.left().forEach(this::handleExcludedDataPoint);</span>
+<span class="fc" id="L229">                maybeDiagnosis.right().forEach(uniqueId -&gt; {</span>
+<span class="fc" id="L230">                    logActivityByOthers(Activity.Action.UPDATED_DIAGNOSIS, dateTimeService.now(), true, diag, getLoggedInEHRRequestContext());</span>
+<span class="fc" id="L231">                });</span>
+<span class="fc" id="L232">            });</span>
+        }
+
+<span class="fc" id="L235">        return Action.SUCCESS;</span>
+    }
+
+    public String cancel() {
+<span class="fc" id="L239">        return Action.SUCCESS;</span>
+    }
+
+    public String discussDiagnoses() {
+
+        //this should be the correct condition but won't currently apply due to dummy checkbox workaround (ticket 2249)
+<span class="pc bpc" id="L245" title="2 of 4 branches missed.">        if ((diagnosisIds == null) || diagnosisIds.isEmpty()) {</span>
+<span class="nc" id="L246">            addActionError(getText(&quot;diagnosisAction.err.choose_diagnosis_discuss&quot;));</span>
+<span class="nc" id="L247">            return RELOAD;</span>
+        }
+
+        //this is the equivalent test with the dummy checkbox workaround:
+<span class="pc bpc" id="L251" title="3 of 4 branches missed.">        if ((diagnosisIds.size() == 1) &amp;&amp; (diagnosisIds.get(0) == -1)) {</span>
+<span class="nc" id="L252">            addActionError(getText(&quot;diagnosisAction.err.choose_diagnosis_discuss&quot;));</span>
+<span class="nc" id="L253">            return RELOAD;</span>
+        }
+
+<span class="fc" id="L256">        findUsers();</span>
+
+        //remove the dummy diagnosis ID - workaround:
+<span class="fc" id="L259">        diagnosisIds.remove(-1L);</span>
+
+<span class="fc" id="L261">        diagnoses = diagnosisManager.getDiagnoses(patientId, patientAccountId, diagnosisIds, getLoggedInEHRRequestContext(),</span>
+<span class="fc" id="L262">                        false/*includeNegativeConditions*/ /*fetch RRs*/).stream()</span>
+<span class="fc" id="L263">                .map(DataWithUIPermissions::new).collect(toList());</span>
+
+<span class="fc" id="L265">        StringBuilder messageText = new StringBuilder();</span>
+<span class="fc bfc" id="L266" title="All 2 branches covered.">        for (DataWithUIPermissions&lt;Diagnosis&gt; diagnosis : diagnoses) {</span>
+<span class="fc" id="L267">            String diagnosisText = Optional.ofNullable(diagnosis.getData().getDiagnosis())</span>
+<span class="fc" id="L268">                    .map(CodeableConcept::getTextForDisplay)</span>
+<span class="fc" id="L269">                    .orElse(&quot;&quot;);</span>
+<span class="fc" id="L270">            String startedText = Optional.ofNullable(diagnosis.getData().getStartDate())</span>
+<span class="fc" id="L271">                    .map(d -&gt; &quot;\n&quot; + getText(&quot;diagnosisAction.msg.started&quot;) + &quot;: &quot; + dateToString(d, dateFormat))</span>
+<span class="fc" id="L272">                    .orElse(&quot;&quot;);</span>
+<span class="fc" id="L273">            String notedText = Optional.ofNullable(diagnosis.getData().getDateAsserted())</span>
+<span class="pc" id="L274">                    .map(d -&gt; &quot;\n&quot; + getText(&quot;diagnosisAction.msg.noted&quot;) + &quot;: &quot; + dateToString(d, dateFormat))</span>
+<span class="fc" id="L275">                    .orElse(&quot;&quot;);</span>
+<span class="fc" id="L276">            String endedText = Optional.ofNullable(diagnosis.getData().getEndDate())</span>
+<span class="fc" id="L277">                    .map(d -&gt; &quot;\n&quot; + getEndingTypeText(diagnosis.getData()) + &quot;: &quot; + dateToString(d, dateFormat))</span>
+<span class="fc" id="L278">                    .orElse(&quot;&quot;);</span>
+
+<span class="fc" id="L280">            messageText.append(&quot;\n\n&quot; + getText(&quot;diagnosisAction.msg.diagnosis&quot;) + &quot;: &quot;</span>
+                    + diagnosisText
+                    + startedText + notedText + endedText);
+<span class="fc" id="L283">        }</span>
+
+<span class="fc" id="L285">        discussMessage = messageText.toString();</span>
+<span class="fc" id="L286">        discussTopic = ComposeMessageAction.TOPIC_DIAGNOSES;</span>
+<span class="fc" id="L287">        sessionUtil.setContextRecipientId(getLoggedInEHRRequestContext());</span>
+<span class="fc" id="L288">        return DISCUSS;</span>
+    }
+
+    private String getEndingTypeText(Diagnosis diagnosis) {
+<span class="fc bfc" id="L292" title="All 2 branches covered.">        if (diagnosisHelper.isPast(diagnosis)) {</span>
+<span class="fc" id="L293">            return getText(&quot;diagnosisAction.msg.ended&quot;);</span>
+        } else {
+<span class="fc" id="L295">            return getText(&quot;diagnosisAction.msg.ending&quot;);</span>
+        }
+    }
+
+    public String deleteDiagnoses() {
+
+        //this is the correct code but doesn't currently apply because of the dummy checkbox workaround (ticket 2249)
+<span class="nc bnc" id="L302" title="All 4 branches missed.">        if ((diagnosisIds == null) || diagnosisIds.isEmpty()) {</span>
+<span class="nc" id="L303">            addActionError(getText(&quot;diagnosisAction.err.choose_diagnosis_delete&quot;));</span>
+<span class="nc" id="L304">            return RELOAD;</span>
+        }
+
+        //this is the equivalent test with the dummy checkbox workaround:
+<span class="nc bnc" id="L308" title="All 4 branches missed.">        if ((diagnosisIds.size() == 1) &amp;&amp; (diagnosisIds.get(0) == -1)) {</span>
+<span class="nc" id="L309">            addActionError(getText(&quot;diagnosisAction.err.choose_diagnosis_delete&quot;));</span>
+<span class="nc" id="L310">            return RELOAD;</span>
+        }
+
+<span class="nc" id="L313">        var users = findUsers();</span>
+
+        //remove the dummy diagnosis ID - workaround:
+<span class="nc" id="L316">        diagnosisIds.remove(-1L);</span>
+
+<span class="nc" id="L318">        List&lt;Diagnosis&gt; diagnosisList = diagnosisManager.getDiagnoses(users.contextUser().getId(), patientAccountId, diagnosisIds, getLoggedInEHRRequestContext(),</span>
+                false/*includeNegativeConditions*/ /*fetch RRs*/);
+
+<span class="nc" id="L321">        diagnoses = dataPointManager.getPermissions(diagnosisList, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam());</span>
+
+<span class="nc" id="L323">        return &quot;confirmDelete&quot;;</span>
+    }
+
+    public String deleteDiagnosis() {
+
+<span class="pc bpc" id="L328" title="2 of 4 branches missed.">        if ((id == null) || (id == 0)) {</span>
+<span class="nc" id="L329">            addActionError(getText(&quot;diagnosisAction.err.choose_diagnosis_delete&quot;));</span>
+<span class="nc" id="L330">            return RELOAD;</span>
+        }
+
+<span class="fc" id="L333">        var users = findUsers();</span>
+<span class="fc" id="L334">        List&lt;Long&gt; idAsList = Collections.singletonList(id);</span>
+<span class="fc" id="L335">        List&lt;Diagnosis&gt; diagnosisList = diagnosisManager.getDiagnoses(patientId, patientAccountId, idAsList, getLoggedInEHRRequestContext(),</span>
+                false/*includeNegativeConditions*/);
+
+<span class="fc" id="L338">        diagnoses = dataPointManager.getPermissions(diagnosisList, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam());</span>
+
+<span class="fc" id="L340">        return &quot;confirmDelete&quot;;</span>
+    }
+
+    public String confirmDeleteDiagnoses() {
+<span class="fc" id="L344">        findUsers();</span>
+
+<span class="fc" id="L346">        SourceDetails deletedBy = new SourceDetails();</span>
+<span class="fc" id="L347">        LoggedInEHRRequestContext context = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L348">        deletedBy.init(context);</span>
+
+<span class="fc" id="L350">        diagnosisManager.transactional(() -&gt; {</span>
+<span class="fc" id="L351">            List&lt;Diagnosis&gt; deletedDiagnosis = diagnosisManager.deleteDiagnoses(patientAccountId, diagnosisIds, deletedBy, null, context);</span>
+<span class="fc" id="L352">            deletedDiagnosis.forEach(diagnosis -&gt; logActivityByOthers(Activity.Action.DELETED_DIAGNOSIS, dateTimeService.now(), true, diagnosis, getLoggedInEHRRequestContext()));</span>
+<span class="fc" id="L353">        });</span>
+
+<span class="fc" id="L355">        return Action.SUCCESS;</span>
+    }
+
+    public String cancelDeleteDiagnoses() {
+<span class="fc" id="L359">        return Action.SUCCESS;</span>
+    }
+
+    public String editDiagnosis() {
+<span class="fc" id="L363">        var users = findUsers();</span>
+<span class="fc" id="L364">        disablePrivacyFlagEditForm();</span>
+<span class="fc" id="L365">        diag = diagnosisManager.getDiagnosis(users.loggedInUser().getDefaultAccountId(), id, getLoggedInEHRRequestContext() /*fetch RRs*/);</span>
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">        if (hasNotPermissionsToEditDatapoint(diag, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam())) {</span>
+<span class="nc" id="L367">            return CANCEL;</span>
+        }
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">        startDateString = diag.getStartDate() != null ? dateToString(diag.getStartDate(), dateFormat) : &quot;-&quot;;</span>
+<span class="fc bfc" id="L370" title="All 2 branches covered.">        endDateString = diag.getEndDate() != null ? dateToString(diag.getEndDate(), dateFormat) : &quot;-&quot;;</span>
+<span class="fc" id="L371">        diagnosis = diag.getDiagnosis().getTextForDisplay();</span>
+<span class="fc" id="L372">        details = diag.getDetails();</span>
+<span class="fc" id="L373">        uniqueId = diag.getBaseFields().getUniqueId();</span>
+<span class="fc" id="L374">        return Action.SUCCESS;</span>
+    }
+
+    public String viewDiagnosisDetails() {
+<span class="fc" id="L378">        var users = findUsers();</span>
+
+<span class="fc" id="L380">        diag = diagnosisManager.getDiagnosis(users.loggedInUser().getDefaultAccountId(), id, getLoggedInEHRRequestContext() /*fetch RRs*/);</span>
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">        startDateString = diag.getStartDate() != null ? dateToString(diag.getStartDate(), dateFormat) : &quot;-&quot;;</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">        endDateString = diag.getEndDate() != null ? dateToString(diag.getEndDate(), dateFormat) : &quot;-&quot;;</span>
+<span class="fc" id="L383">        diagnosis = diag.getDiagnosis().getTextForDisplay();</span>
+<span class="fc" id="L384">        details = LINUX_NEWLINE_PATTERN.matcher(diag.getDetails()).replaceAll(&quot;&lt;/br&gt;&quot;);</span>
+<span class="fc" id="L385">        fillPrivacyFlagsFrom(diag);</span>
+<span class="fc" id="L386">        return Action.SUCCESS;</span>
+    }
+
+    public String editPrivacyForm() {
+<span class="fc" id="L390">        var users = findUsers();</span>
+<span class="fc" id="L391">        diag = diagnosisManager.getDiagnosis(users.loggedInUser().getDefaultAccountId(), dataPointId, getLoggedInEHRRequestContext() /*fetch RRs*/);</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">        if (hasNotPermissionsToEditPrivacyLabels(diag, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam())) {</span>
+<span class="nc" id="L393">            return CANCEL;</span>
+        }
+<span class="fc" id="L395">        fillPrivacyFlagsFrom(diag);</span>
+<span class="fc" id="L396">        return INPUT;</span>
+    }
+
+    @SkipValidation
+    public String editPrivacySave() {
+<span class="fc" id="L401">        var users = findUsers();</span>
+<span class="fc" id="L402">        LoggedInEHRRequestContext context = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L403">        diag = diagnosisManager.getDiagnosis(users.loggedInUser().getDefaultAccountId(), dataPointId, context);</span>
+<span class="pc bpc" id="L404" title="1 of 2 branches missed.">        if (hasNotPermissionsToEditPrivacyLabels(diag, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam())) {</span>
+<span class="nc" id="L405">            return CANCEL;</span>
+        }
+<span class="fc" id="L407">        privacyService.handlePrivacyChange(diag, MenuDataType.diagnosis, getNewFlag(), context, patientAccountId,</span>
+<span class="fc" id="L408">                users.contextUser(), users.loggedInUser());</span>
+<span class="fc" id="L409">        return SUCCESS;</span>
+    }
+
+    @SkipValidation
+    public String editPrivacyCancel() {
+<span class="fc" id="L414">        return CANCEL;</span>
+    }
+
+    public void setDiagnosisManager(DiagnosisManager diagnosisManager) {
+<span class="fc" id="L418">        this.diagnosisManager = diagnosisManager;</span>
+<span class="fc" id="L419">    }</span>
+
+    public UserManager getUserManager() {
+<span class="nc" id="L422">        return userManager;</span>
+    }
+
+    public void setUserManager(UserManager userManager) {
+<span class="fc" id="L426">        this.userManager = userManager;</span>
+<span class="fc" id="L427">    }</span>
+
+    public List&lt;DataWithUIPermissions&lt;Diagnosis&gt;&gt; getDiagnoses() {
+<span class="fc" id="L430">        return diagnoses;</span>
+    }
+
+    public String getStartDateString() {
+<span class="fc" id="L434">        return startDateString;</span>
+    }
+
+    public void setStartDateString(String startDate) {
+<span class="fc" id="L438">        this.startDateString = startDate;</span>
+<span class="fc" id="L439">    }</span>
+
+    public String getEndDateString() {
+<span class="fc" id="L442">        return endDateString;</span>
+    }
+
+    public void setEndDateString(String endDate) {
+<span class="fc" id="L446">        this.endDateString = endDate;</span>
+<span class="fc" id="L447">    }</span>
+
+    public String getDiagnosis() {
+<span class="fc" id="L450">        return diagnosis;</span>
+    }
+
+    public void setDiagnosis(String diagnosis) {
+<span class="fc" id="L454">        this.diagnosis = diagnosis;</span>
+<span class="fc" id="L455">    }</span>
+
+    public List&lt;Long&gt; getDiagnosisIds() {
+<span class="fc" id="L458">        return diagnosisIds;</span>
+    }
+
+    public void setDiagnosisIds(List&lt;Long&gt; diagnosisIds) {
+<span class="fc" id="L462">        this.diagnosisIds = diagnosisIds;</span>
+<span class="fc" id="L463">    }</span>
+
+    public Long getId() {
+<span class="fc" id="L466">        return id;</span>
+    }
+
+    public void setId(Long id) {
+<span class="fc" id="L470">        this.id = id;</span>
+<span class="fc" id="L471">    }</span>
+
+    public Long getDataPointId() {
+<span class="fc" id="L474">        return dataPointId;</span>
+    }
+
+    public void setDataPointId(Long dataPointId) {
+<span class="fc" id="L478">        this.dataPointId = dataPointId;</span>
+<span class="fc" id="L479">    }</span>
+
+    public IMessageWebBean getMessageWebBean() {
+<span class="fc" id="L482">        return messageWebBean;</span>
+    }
+
+    public void setMessageWebBean(IMessageWebBean messageWebBean) {
+<span class="fc" id="L486">        this.messageWebBean = messageWebBean;</span>
+<span class="fc" id="L487">    }</span>
+
+    public UUID getUniqueId() {
+<span class="fc" id="L490">        return uniqueId;</span>
+    }
+
+    public void setUniqueId(UUID uniqueId) {
+<span class="fc" id="L494">        this.uniqueId = uniqueId;</span>
+<span class="fc" id="L495">    }</span>
+
+    public String getDetails() {
+<span class="fc" id="L498">        return details;</span>
+    }
+
+    public void setDetails(String details) {
+<span class="fc" id="L502">        this.details = details;</span>
+<span class="fc" id="L503">    }</span>
+
+    public Map&lt;String, List&lt;DiagnosisGroupDto&gt;&gt; getAllDiagnosisGroups() {
+<span class="fc" id="L506">        Map&lt;String, List&lt;DiagnosisGroupDto&gt;&gt; allDiagnosisGroups = new LinkedHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L508">        allDiagnosisGroups.put(&quot;current&quot;, currentDiagnosisGroups);</span>
+<span class="fc" id="L509">        allDiagnosisGroups.put(&quot;past&quot;, pastDiagnosisGroups);</span>
+
+<span class="fc" id="L511">        return allDiagnosisGroups;</span>
+    }
+
+    public List&lt;DiagnosisGroupDto&gt; getCurrentDiagnosisGroups() {
+<span class="nc" id="L515">        return currentDiagnosisGroups;</span>
+    }
+
+    public List&lt;DiagnosisGroupDto&gt; getPastDiagnosisGroups() {
+<span class="nc" id="L519">        return pastDiagnosisGroups;</span>
+    }
+
+    public String getDiscussMessage() {
+<span class="fc" id="L523">        return discussMessage;</span>
+    }
+
+    public void setDiscussMessage(String discussMessage) {
+<span class="nc" id="L527">        this.discussMessage = discussMessage;</span>
+<span class="nc" id="L528">    }</span>
+
+    public String getDiscussTopic() {
+<span class="fc" id="L531">        return discussTopic;</span>
+    }
+
+    public void setDiscussTopic(String discussTopic) {
+<span class="nc" id="L535">        this.discussTopic = discussTopic;</span>
+<span class="nc" id="L536">    }</span>
+
+    @Override
+    public void prepare() throws Exception {
+<span class="fc" id="L540">        super.prepare();</span>
+<span class="fc" id="L541">        dateFormat = getGlobalDateInputFormatter();</span>
+<span class="fc" id="L542">    }</span>
+
+    public void setDiagnosisHelper(DiagnosisHelper diagnosisHelper) {
+<span class="fc" id="L545">        this.diagnosisHelper = diagnosisHelper;</span>
+<span class="fc" id="L546">    }</span>
+
+    public void setDiagnosisGroupTransformer(DiagnosisGroupTransformer diagnosisGroupTransformer) {
+<span class="fc" id="L549">        this.diagnosisGroupTransformer = diagnosisGroupTransformer;</span>
+<span class="fc" id="L550">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

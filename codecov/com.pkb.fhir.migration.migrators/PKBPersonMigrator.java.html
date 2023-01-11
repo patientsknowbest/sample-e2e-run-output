@@ -1,0 +1,485 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PKBPersonMigrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration.migrators</a> &gt; <span class="el_source">PKBPersonMigrator.java</span></div><h1>PKBPersonMigrator.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration.migrators;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.entities.enums.FhirStoreSyncSourceTable;
+import com.pkb.entities.enums.Gender;
+import com.pkb.entities.enums.UserType;
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.entities.pub.PublicPersonContact;
+import com.pkb.fhir.common.exception.MigrationEntityNotFoundException;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.migration.service.AccountService;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import io.vavr.API;
+import io.vavr.collection.Map;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.Address;
+import org.hl7.fhir.r4.model.CodeableConcept;
+import org.hl7.fhir.r4.model.ContactPoint;
+import org.hl7.fhir.r4.model.DateTimeType;
+import org.hl7.fhir.r4.model.DomainResource;
+import org.hl7.fhir.r4.model.Enumerations;
+import org.hl7.fhir.r4.model.HumanName;
+import org.hl7.fhir.r4.model.IdType;
+import org.hl7.fhir.r4.model.Identifier;
+import org.hl7.fhir.r4.model.Organization;
+import org.hl7.fhir.r4.model.Patient;
+import org.hl7.fhir.r4.model.Person;
+import org.hl7.fhir.r4.model.Practitioner;
+import org.hl7.fhir.r4.model.Provenance;
+import org.hl7.fhir.r4.model.Reference;
+import org.hl7.fhir.r4.model.ResourceType;
+import org.jetbrains.annotations.NotNull;
+
+import java.sql.Date;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+
+import static ca.uhn.fhir.model.api.TemporalPrecisionEnum.SECOND;
+import static com.pkb.entities.enums.ContactType.ALSO_CONTACT;
+import static com.pkb.entities.enums.ContactType.EMAIL;
+import static com.pkb.entities.enums.FhirStoreSyncSourceTable.NATIONALID;
+import static com.pkb.entities.enums.FhirStoreSyncSourceTable.ORGLEVELID;
+import static com.pkb.entities.enums.FhirStoreSyncSourceTable.PERSONCONTACT;
+import static com.pkb.entities.enums.FhirStoreSyncSourceTable.PERSON_GUID;
+import static com.pkb.entities.enums.FhirStoreSyncSourceTable.PKBPERSON;
+import static com.pkb.entities.enums.FhirStoreSyncSourceTable.TEAMLEVELID;
+import static com.pkb.entities.enums.Gender.FEMALE;
+import static com.pkb.entities.enums.Gender.INDETERMINATE;
+import static com.pkb.entities.enums.Gender.MALE;
+import static com.pkb.entities.enums.Gender.UNKNOWN;
+import static com.pkb.entities.enums.UserType.TECH_SUPPORT;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.CREATE_OR_UPDATE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.DELETE;
+import static io.vavr.control.Either.right;
+import static java.util.TimeZone.getTimeZone;
+import static org.hl7.fhir.r4.model.ContactPoint.ContactPointSystem.PHONE;
+
+/**
+ * Many tables within the PKB schema, such as personcontact or nationalid, are not FHIR resources in their own right.
+ * They are, instead, elements within a Patient or Practitioner resources. This means we can either patch the resource
+ * or update it entirely. I choose the latter as it is more bombproof and eaiser to understand.
+ *
+ * Therefore, if a personcontact, national id, or the person themselves changes, the action is the same: we
+ * regenerate the entire Patient/Practitioner, from current state, in order to update state in the FHIR data store.
+ *
+ * For deletes, the pattern is similar. If you delete a personcontact, just regenerate the Patient from current state.
+ * The only divergence is if you delete a pkbperson. In that case, the entire Patient will be deleted in FHIR.
+ * But of course, that means we've deleted their personcontacts, nationalids etc. in the PKB data store already, right? :)
+ */
+public class PKBPersonMigrator extends BaseFhirMigrator {
+
+<span class="fc" id="L84">    private static final DateTimeFormatter DATE_OF_BIRTH_FORMATTER = DateTimeFormatter.ofPattern(&quot;yyyy-MM-dd&quot;);</span>
+
+    //See https://dev.patientsknowbest.com/home/fhir-api/identifier-systems
+    private static final String HUMAN_UUID_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/human-uuid&quot;;
+    private static final String PKBPERSON_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/pkbperson-legacy-identifier&quot;;
+    private static final String NATIONALID_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/nationalid-legacy-identifier&quot;;
+    private static final String ORGLEVELID_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/orglevelid-legacy-identifier&quot;;
+    private static final String TEAMLEVELID_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/teamlevelid-legacy-identifier&quot;;
+    private static final String PERSONCONTACT_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/personcontact-legacy-identifier&quot;;
+    private static final String EMIS_ES_GUID_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/emis-es-patient-guid&quot;;
+    private static final String EMIS_ES_GUID_LEGACY_PRIMARY_KEY_SYSTEM_URL = &quot;http://fhir.patientsknowbest.com/id/emis-es-patient-guid-legacy-identifier&quot;;
+
+    //See https://dev.patientsknowbest.com/home/fhir-api/structuredefinition
+    private static final String PERSON_DEFAULT_ACCOUNT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/default-account&quot;;
+    private static final String PERSON_STATUS_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/status&quot;;
+    private static final String REGISTERED_ON_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/registered-on&quot;;
+    private static final String LANGUAGE_CODE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/language-code&quot;;
+    private static final String JOB_TITLE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/job-title&quot;;
+
+    private static final String CONTACT_CONFIRMED_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/contact-confirmed&quot;;
+    private static final String FROZEN_BY_TEAM_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/frozen-by-team&quot;;
+    private static final String TWO_FACTOR_AUTH_STATE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/two-factor-auth-state&quot;;
+    private static final String TWO_FACTOR_AUTH_MANDATORY_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/two-factor-auth-mandatory&quot;;
+    private static final String SKYPE_ID_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/skype-id&quot;;
+    private static final String NOTIFICATION_OPTION_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/notification-option&quot;;
+    private static final String LAST_EMAIL_SENT_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/last-email-sent&quot;;
+    private static final String STATUS_DATE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/status-date&quot;;
+    private static final String PWD_ACCESS_DOCUMENT_METADATA_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/pwd-access-document-metadata&quot;;
+    private static final String USER_TYPE_EXTENSION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/user-type&quot;;
+
+<span class="fc" id="L114">    private static Map&lt;Gender, Enumerations.AdministrativeGender&gt; PKB_TO_FHIR_GENDER_MAPPING = API.Map(</span>
+            UNKNOWN, Enumerations.AdministrativeGender.UNKNOWN,
+            MALE, Enumerations.AdministrativeGender.MALE,
+            FEMALE, Enumerations.AdministrativeGender.FEMALE,
+            INDETERMINATE, Enumerations.AdministrativeGender.OTHER
+    );
+
+    private final AccountService accountService;
+
+    public PKBPersonMigrator(PersonService personService, TeamService teamService, OrgService orgService,
+                             Hl7PartnerService hl7PartnerService, AccountService accountService) {
+<span class="fc" id="L125">        super(personService, teamService, orgService, hl7PartnerService);</span>
+<span class="fc" id="L126">        this.accountService = accountService;</span>
+<span class="fc" id="L127">    }</span>
+
+    @Override
+    Either&lt;MigrationException, List&lt;ResourceAndOperation&gt;&gt; migrate(@NotNull PublicFhirStoreSync fhirStoreSync) {
+        //Bit special, as deletes of subcomponents, e.g. personcontact, results in an update to the FHIR resource,
+        // not a deletion.
+<span class="fc bfc" id="L133" title="All 4 branches covered.">        if (fhirStoreSync.isDeleteOperation() &amp;&amp; fhirStoreSync.getSyncDetails().getSourceTable() == PKBPERSON) {</span>
+            //This PKBPerson is no longer on the database. This one is trickier because we create several different resources here.
+            // They should be added in reverse order to how they'd be created, i.e. delete child resources first.
+<span class="fc" id="L136">            List&lt;IBaseResource&gt; toDelete = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">            if (fhirStoreSync.getSyncDetails().isPatient()) {</span>
+<span class="fc" id="L138">                toDelete = getResourcesToDeleteForPatient(fhirStoreSync);</span>
+            }
+            else {
+<span class="fc" id="L141">                toDelete = getResourcesToDeleteForPractitioner(fhirStoreSync);</span>
+            }
+<span class="fc" id="L143">            return right(ResourceAndOperation.all(toDelete, DELETE));</span>
+        }
+
+<span class="fc" id="L146">        return Option.ofOptional(getPublicPKBPerson(fhirStoreSync))</span>
+<span class="fc" id="L147">                .toEither(() -&gt; (MigrationException)new MigrationEntityNotFoundException(&quot;Failed to sync pkbperson to fhir store for source table &quot;</span>
+<span class="fc" id="L148">                        + fhirStoreSync.getSyncDetails().getSourceTable() +</span>
+<span class="fc" id="L149">                        &quot; and source id &quot; + fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="fc" id="L150">                .map(person -&gt; ResourceAndOperation.all(transformPkbPersonToFhir(person), CREATE_OR_UPDATE));</span>
+    }
+
+    @NotNull
+    private Optional&lt;PublicPKBPerson&gt; getPublicPKBPerson(@NotNull PublicFhirStoreSync fhirStoreSync) {
+<span class="fc" id="L155">        FhirStoreSyncSourceTable sourceTable = fhirStoreSync.getSyncDetails().getSourceTable();</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        if (sourceTable == PKBPERSON) {</span>
+<span class="fc" id="L157">            return personService.findOptionalByIdFetchAllLazies(fhirStoreSync.getSyncDetails().getSourceTableId());</span>
+        }
+<span class="pc bpc" id="L159" title="1 of 10 branches missed.">        else if (sourceTable == PERSONCONTACT || sourceTable == NATIONALID || sourceTable == ORGLEVELID || sourceTable == TEAMLEVELID</span>
+          || sourceTable == PERSON_GUID) {
+            //Sub-element within the person
+<span class="fc" id="L162">            return personService.findOptionalByIdFetchAllLazies(fhirStoreSync.getSyncDetails().getSourceTableParentId());</span>
+        }
+        else  {
+<span class="nc" id="L165">            throw new MigrationException(&quot;Trying to process unexpected source table [&quot; + sourceTable + &quot;] within the PKBPerson migrator&quot;);</span>
+        }
+    }
+
+    @VisibleForTesting
+    @NotNull
+    List&lt;IBaseResource&gt; transformPkbPersonToFhir(PublicPKBPerson pkbPerson) {
+<span class="fc bfc" id="L172" title="All 2 branches covered.">        if (pkbPerson.isPatient()) {</span>
+<span class="fc" id="L173">            return transformPatientToFhir(pkbPerson);</span>
+        }
+<span class="fc bfc" id="L175" title="All 2 branches covered.">        else if (personBecomesPractitionerResource(pkbPerson.getUserType())) {</span>
+<span class="fc" id="L176">            return transformPractitionerToFhir(pkbPerson);</span>
+        }
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">        else if (isUnmodelledPkbPersonType(pkbPerson.getUserType())){</span>
+            //We do not model TECH_SUPPORT within FHIR.
+            // These eventually become just a set of credentials in Keycloak.
+<span class="fc" id="L181">            return List.of();</span>
+        }
+        else {
+<span class="nc" id="L184">            throw new MigrationException(&quot;Unhandled PKBPerson type [&quot; + pkbPerson.getUserType() + &quot;]&quot;);</span>
+        }
+    }
+
+    private boolean isUnmodelledPkbPersonType(UserType userType) {
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">        return userType == TECH_SUPPORT;</span>
+    }
+
+    @NotNull
+    private List&lt;IBaseResource&gt; transformPatientToFhir(@NotNull PublicPKBPerson pkbPerson) {
+
+<span class="fc" id="L195">        List&lt;IBaseResource&gt; resourcesToSend = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L197">        Patient patient = new Patient();</span>
+<span class="fc" id="L198">        patient.setId(String.valueOf(pkbPerson.getPublicId()));</span>
+<span class="fc" id="L199">        setMeta(pkbPerson.getVersionDetails().getVersionPersisted(), patient);</span>
+<span class="fc" id="L200">        resourcesToSend.add(patient);</span>
+
+        //Every Patient has a Person sitting above them. For migrated data, the id for the Person and the Patient is
+        // going to be the same for simplicity. The Person deliberately contains no demographic information.
+        // CURRENTLY: This allows for the linking of a Patient and any RelatedPersons (i.e. carers)
+        // IN THE FUTURE: This allows for the linking of Patients to Practitioners as well. This is not modelled in our
+        // current database structure, so legacy data will never be like this unless we try to clean it up.
+<span class="fc" id="L207">        Person person = new Person();</span>
+<span class="fc" id="L208">        person.setId(String.valueOf(pkbPerson.getPublicId()));</span>
+<span class="fc" id="L209">        setMeta(pkbPerson.getVersionDetails().getVersionPersisted(), person);</span>
+<span class="fc" id="L210">        resourcesToSend.add(person);</span>
+
+<span class="fc" id="L212">        Person.PersonLinkComponent patientLinkComponent = new Person.PersonLinkComponent();</span>
+<span class="fc" id="L213">        patientLinkComponent.setTarget(new Reference(patient));</span>
+<span class="fc" id="L214">        person.addLink(patientLinkComponent);</span>
+
+        //Demographics
+<span class="fc" id="L217">        getName(pkbPerson).ifPresent(patient::addName);</span>
+<span class="fc" id="L218">        getAddress(pkbPerson).ifPresent(patient::addAddress);</span>
+<span class="fc" id="L219">        Optional.ofNullable(pkbPerson.getDeathTimestamp())</span>
+<span class="pc" id="L220">                .map(deathTimestamp -&gt; patient.setDeceased(</span>
+<span class="nc" id="L221">                        new DateTimeType(Date.from(deathTimestamp.atZone(ZoneOffset.UTC).toInstant()), SECOND, getTimeZone(&quot;UTC&quot;))));</span>
+<span class="fc" id="L222">        getDateOfBirth(pkbPerson).ifPresent(dob -&gt; patient.setBirthDate(Date.from(dob)));</span>
+
+        //Gender
+<span class="fc" id="L225">        patient.setGender(getAdministrativeGender(pkbPerson));</span>
+
+        //Identifiers
+<span class="fc" id="L228">        processPatientIdentifiers(pkbPerson, patient);</span>
+
+        //Telecoms
+<span class="fc" id="L231">        pkbPerson.getContacts()</span>
+<span class="fc" id="L232">                .forEach(contact -&gt; transformPersonContactToFhir(contact).ifPresent(patient::addTelecom));</span>
+<span class="fc" id="L233">        getPhone(pkbPerson).ifPresent(patient::addTelecom);</span>
+
+        //Extensions
+<span class="fc" id="L236">        addCommonExtensions(pkbPerson, patient);</span>
+
+        //Provenance information
+<span class="fc" id="L239">        resourcesToSend.add(getProvenance(pkbPerson.getVersionDetails(), patient));</span>
+<span class="fc" id="L240">        return resourcesToSend;</span>
+    }
+
+    Enumerations.AdministrativeGender getAdministrativeGender(@NotNull PublicPKBPerson pkbPerson) {
+<span class="fc" id="L244">        return PKB_TO_FHIR_GENDER_MAPPING.get(Gender.getById(pkbPerson.getGender()))</span>
+<span class="pc" id="L245">                .getOrElseThrow(() -&gt; new MigrationException(&quot;Unexpected gender id [&quot; + pkbPerson.getGender() + &quot;]&quot;));</span>
+    }
+
+    private void processPatientIdentifiers(@NotNull PublicPKBPerson pkbPerson, @NotNull Patient patient) {
+<span class="fc" id="L249">        patient.addIdentifier(getPkbIdentifier(pkbPerson.getId(), PKBPERSON_LEGACY_PRIMARY_KEY_SYSTEM_URL));</span>
+
+<span class="fc" id="L251">        pkbPerson.getNationalIds()</span>
+                //If you remove a national id, it nulls out the value but leaves it linked to the person...
+<span class="fc" id="L253">                .stream().filter(nationalId -&gt; StringUtils.isNotBlank(nationalId.getValue()))</span>
+<span class="fc" id="L254">                .forEach(nationalId -&gt; {</span>
+<span class="fc" id="L255">            Identifier identifier = new Identifier();</span>
+<span class="fc" id="L256">            identifier.setValue(nationalId.getValue());</span>
+<span class="fc" id="L257">            identifier.setSystem(Optional.ofNullable(nationalId.getType().getFhirIdentifierSystem()).filter(StringUtils::isNotBlank)</span>
+<span class="pc" id="L258">                    .orElseThrow(() -&gt; new MigrationException(&quot;Blank fhir identifier system for person &quot; + pkbPerson.getId())));</span>
+<span class="fc" id="L259">            addExtension(nationalId.getId(), NATIONALID_LEGACY_PRIMARY_KEY_SYSTEM_URL, identifier);</span>
+<span class="fc" id="L260">            addSourceInformationExtensions(nationalId.getVersionDetails(), identifier);</span>
+<span class="fc" id="L261">            patient.addIdentifier(identifier);</span>
+<span class="fc" id="L262">        });</span>
+
+<span class="fc" id="L264">        pkbPerson.getOrgLevelIds().forEach(orgLevelId -&gt; {</span>
+<span class="fc" id="L265">            Identifier identifier = new Identifier();</span>
+<span class="fc" id="L266">            identifier.setValue(Optional.ofNullable(orgLevelId.getValue()).filter(StringUtils::isNotBlank)</span>
+<span class="pc" id="L267">                    .orElseThrow(() -&gt; new MigrationException(&quot;Blank org level id value for person &quot; + pkbPerson.getId())));</span>
+            //Specific to each org level id type; prepended with urn:uuid:
+<span class="fc" id="L269">            identifier.setSystem(URN_UUID_PREFIX + String.valueOf(orgLevelId.getType().getPublicId()));</span>
+<span class="fc" id="L270">            identifier.setType(new CodeableConcept().setText(&quot;Org level identifier&quot;));</span>
+<span class="fc" id="L271">            addExtension(orgLevelId.getId(), ORGLEVELID_LEGACY_PRIMARY_KEY_SYSTEM_URL, identifier);</span>
+<span class="fc" id="L272">            identifier.setAssigner(new Reference(new Organization().setId(String.valueOf(orgLevelId.getOrg().getPublicId()))));</span>
+<span class="fc" id="L273">            addSourceInformationExtensions(orgLevelId.getVersionDetails(), identifier);</span>
+<span class="fc" id="L274">            patient.addIdentifier(identifier);</span>
+<span class="fc" id="L275">        });</span>
+
+<span class="fc" id="L277">        pkbPerson.getTeamLevelIds().forEach(teamLevelId -&gt; {</span>
+<span class="fc" id="L278">            Identifier identifier = new Identifier();</span>
+<span class="fc" id="L279">            identifier.setValue(Optional.ofNullable(teamLevelId.getValue()).filter(StringUtils::isNotBlank)</span>
+<span class="pc" id="L280">                    .orElseThrow(() -&gt; new MigrationException(&quot;Blank team level id value for person &quot; + pkbPerson.getId())));</span>
+            //Specific to each team level id type; prepended with urn:uuid:
+<span class="fc" id="L282">            identifier.setSystem(URN_UUID_PREFIX + String.valueOf(teamLevelId.getType().getPublicId()));</span>
+<span class="fc" id="L283">            identifier.setType(new CodeableConcept().setText(&quot;Team level identifier&quot;));</span>
+<span class="fc" id="L284">            addExtension(teamLevelId.getId(), TEAMLEVELID_LEGACY_PRIMARY_KEY_SYSTEM_URL, identifier);</span>
+<span class="fc" id="L285">            identifier.setAssigner(new Reference(new Organization().setId(String.valueOf(teamLevelId.getTeam().getPublicId()))));</span>
+<span class="fc" id="L286">            addSourceInformationExtensions(teamLevelId.getVersionDetails(), identifier);</span>
+<span class="fc" id="L287">            patient.addIdentifier(identifier);</span>
+<span class="fc" id="L288">        });</span>
+
+<span class="fc" id="L290">        Optional.ofNullable(pkbPerson.getEmisEsPersonGuid()).ifPresent(emisEsPersonGuid -&gt; {</span>
+<span class="fc" id="L291">            Identifier identifier = new Identifier();</span>
+<span class="fc" id="L292">            identifier.setValue(Optional.ofNullable(emisEsPersonGuid.getValue()).filter(StringUtils::isNotBlank)</span>
+<span class="pc" id="L293">                    .orElseThrow(() -&gt; new MigrationException(&quot;Blank EMIS guid value for person &quot; + pkbPerson.getId())));</span>
+<span class="fc" id="L294">            identifier.setSystem(EMIS_ES_GUID_SYSTEM_URL);</span>
+<span class="fc" id="L295">            addExtension(emisEsPersonGuid.getId(), EMIS_ES_GUID_LEGACY_PRIMARY_KEY_SYSTEM_URL, identifier);</span>
+<span class="fc" id="L296">            patient.addIdentifier(identifier);</span>
+<span class="fc" id="L297">        });</span>
+<span class="fc" id="L298">    }</span>
+
+    private void addCommonExtensions(PublicPKBPerson pkbPerson, DomainResource resource) {
+<span class="fc" id="L301">        Optional.ofNullable(pkbPerson.getDefaultAccountId())</span>
+<span class="fc" id="L302">                .flatMap(accountService::findAccount)</span>
+<span class="fc" id="L303">                .ifPresent(account -&gt; resource.addExtension(getExtensionWithReferenceIdentifier(PERSON_DEFAULT_ACCOUNT_EXTENSION_URL, account.getPublicId())));</span>
+
+<span class="fc" id="L305">        Optional.ofNullable(pkbPerson.getStatus())</span>
+<span class="fc" id="L306">                .ifPresent(status -&gt; addExtension(status.name(), PERSON_STATUS_EXTENSION_URL, resource));</span>
+<span class="fc" id="L307">        addExtension(pkbPerson.getRegisteredOn(), REGISTERED_ON_EXTENSION_URL, resource);</span>
+<span class="fc" id="L308">        addExtension(pkbPerson.getLanguageCode(), LANGUAGE_CODE_EXTENSION_URL, resource);</span>
+<span class="fc" id="L309">        addExtension(pkbPerson.getTimeZoneId(), TIME_ZONE_ID_EXTENSION_URL, resource);</span>
+
+<span class="fc" id="L311">        Optional.ofNullable(pkbPerson.getFrozenByTeamId())</span>
+<span class="fc" id="L312">                .flatMap(teamService::findById)</span>
+<span class="pc" id="L313">                .ifPresent(team -&gt; resource.addExtension(getExtensionWithReference(FROZEN_BY_TEAM_EXTENSION_URL,</span>
+<span class="nc" id="L314">                        new Organization().setId(String.valueOf(team.getPublicId())))));</span>
+
+<span class="fc" id="L316">        addExtension(pkbPerson.getTwoFactorAuthState(), TWO_FACTOR_AUTH_STATE_EXTENSION_URL, resource);</span>
+<span class="fc" id="L317">        addExtension(pkbPerson.getTwoFactorAuthMandatory(), TWO_FACTOR_AUTH_MANDATORY_EXTENSION_URL, resource);</span>
+<span class="fc" id="L318">        addExtension(pkbPerson.getSkypeId(), SKYPE_ID_EXTENSION_URL, resource);</span>
+
+<span class="fc" id="L320">        Optional.ofNullable(pkbPerson.getNotificationOption())</span>
+<span class="fc" id="L321">                .ifPresent(notificationOption -&gt; addExtension(notificationOption.name(), NOTIFICATION_OPTION_EXTENSION_URL, resource));</span>
+
+<span class="fc" id="L323">        addExtension(pkbPerson.getLastEmailSent(), LAST_EMAIL_SENT_EXTENSION_URL, resource);</span>
+<span class="fc" id="L324">        addExtension(pkbPerson.getStatusDate(), STATUS_DATE_EXTENSION_URL, resource);</span>
+
+<span class="fc" id="L326">        Optional.ofNullable(pkbPerson.getPwdAccessDocumentMetadataId())</span>
+<span class="fc" id="L327">                .ifPresent(pwdAccessDocumentMetadataId -&gt;</span>
+<span class="fc" id="L328">                        resource.addExtension(getExtensionWithReferenceIdentifier(PWD_ACCESS_DOCUMENT_METADATA_EXTENSION_URL, pwdAccessDocumentMetadataId)));</span>
+
+        //This is only strictly needed for Practitioners, who can be of multiple types. But it does no harm for us to
+        // put this in for Patients are well so any application logic can be consistent, and so if we were to ever
+        // create another usertype that went into Patient (!?) we wouldn't have an issue.
+<span class="fc" id="L333">        Optional.ofNullable(pkbPerson.getUserType())</span>
+<span class="fc" id="L334">                .ifPresent(userType -&gt; addExtension(userType.name(), USER_TYPE_EXTENSION_URL, resource));</span>
+<span class="fc" id="L335">    }</span>
+
+    @NotNull
+    private Optional&lt;ContactPoint&gt; getPhone(PublicPKBPerson pkbPerson) {
+<span class="fc" id="L339">        return Optional.ofNullable(pkbPerson.getPhone()).filter(StringUtils::isNotBlank).map(phone -&gt; {</span>
+<span class="fc" id="L340">            ContactPoint contactPoint = new ContactPoint();</span>
+<span class="fc" id="L341">            contactPoint.setValue(phone);</span>
+<span class="fc" id="L342">            contactPoint.setSystem(PHONE);</span>
+<span class="fc" id="L343">            return contactPoint;</span>
+        });
+    }
+
+    @NotNull
+    private Optional&lt;HumanName&gt; getName(PublicPKBPerson pkbPerson) {
+<span class="fc" id="L349">        HumanName name = new HumanName();</span>
+<span class="fc" id="L350">        Optional.ofNullable(pkbPerson.getTitle()).filter(StringUtils::isNotBlank).map(name::addPrefix);</span>
+<span class="fc" id="L351">        Optional.ofNullable(pkbPerson.getFirstName()).filter(StringUtils::isNotBlank).map(name::addGiven);</span>
+<span class="fc" id="L352">        Optional.ofNullable(pkbPerson.getMiddleName()).filter(StringUtils::isNotBlank).map(name::addGiven);</span>
+<span class="fc" id="L353">        Optional.ofNullable(pkbPerson.getLastName()).filter(StringUtils::isNotBlank).map(name::setFamily);</span>
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">        return name.isEmpty() ? Optional.empty() : Optional.of(name);</span>
+    }
+
+    @NotNull
+    private Optional&lt;Address&gt; getAddress(PublicPKBPerson pkbPerson) {
+<span class="fc" id="L359">        Address address = new Address();</span>
+<span class="fc" id="L360">        Optional.ofNullable(pkbPerson.getAddress1()).filter(StringUtils::isNotBlank).map(address::addLine);</span>
+<span class="fc" id="L361">        Optional.ofNullable(pkbPerson.getAddress2()).filter(StringUtils::isNotBlank).map(address::addLine);</span>
+<span class="fc" id="L362">        Optional.ofNullable(pkbPerson.getCity()).filter(StringUtils::isNotBlank).map(address::setCity);</span>
+<span class="fc" id="L363">        Optional.ofNullable(pkbPerson.getState()).filter(StringUtils::isNotBlank).map(address::setState);</span>
+<span class="fc" id="L364">        Optional.ofNullable(pkbPerson.getCountry()).filter(StringUtils::isNotBlank).map(address::setCountry);</span>
+<span class="fc" id="L365">        Optional.ofNullable(pkbPerson.getPostalCode()).filter(StringUtils::isNotBlank).map(address::setPostalCode);</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">        return address.isEmpty() ? Optional.empty() : Optional.of(address);</span>
+    }
+
+    private Optional&lt;ContactPoint&gt; transformPersonContactToFhir(@NotNull PublicPersonContact personContact) {
+<span class="fc bfc" id="L370" title="All 2 branches covered.">        if (personContact.getContactType() == EMAIL) {</span>
+<span class="fc" id="L371">            return Optional.ofNullable(personContact.getContactValue()).filter(StringUtils::isNotBlank).map(contactValue -&gt; {</span>
+<span class="fc" id="L372">                ContactPoint email = new ContactPoint();</span>
+<span class="fc" id="L373">                email.setSystem(ContactPoint.ContactPointSystem.EMAIL);</span>
+<span class="fc" id="L374">                email.setValue(contactValue);</span>
+
+                //We only set the rank element for the primary contact
+<span class="fc bfc" id="L377" title="All 2 branches covered.">                if (personContact.isPrimary()) {</span>
+<span class="fc" id="L378">                    email.setRank(1);</span>
+                }
+
+<span class="fc" id="L381">                addExtension(personContact.isConfirmed(), CONTACT_CONFIRMED_EXTENSION_URL, email);</span>
+<span class="fc" id="L382">                addExtension(personContact.getId(), PERSONCONTACT_LEGACY_PRIMARY_KEY_SYSTEM_URL, email);</span>
+<span class="fc" id="L383">                addHl7SourcedVersionDetailExtensions(personContact.getVersionDetails(), email);</span>
+<span class="fc" id="L384">                addSourceInformationExtensions(personContact.getVersionDetails(), email);</span>
+<span class="fc" id="L385">                return Optional.of(email);</span>
+<span class="fc" id="L386">            }).orElse(Optional.empty());</span>
+        }
+<span class="pc bpc" id="L388" title="1 of 2 branches missed.">        else if (personContact.getContactType() == ALSO_CONTACT) {</span>
+            //Ignore; these will be handled by the carer migration (they're effectively just pointers to the fact that
+            // a patient has a carer at all, so chances are we'll just ignore them entirely)
+<span class="fc" id="L391">            return Optional.empty();</span>
+        }
+        else {
+            //PHONE, but there shouldn't be any of these, it was never used.
+<span class="nc" id="L395">            throw new MigrationException(&quot;Unexpected personcontact type &quot; + personContact.getContactType());</span>
+        }
+    }
+
+    /**
+     * Practitioners are being migrated as they're represented within the PKB datamodel, i.e. one PKBPerson ==
+     * one Practitioner, and instituteusers == PractitionerRole(s).
+     *
+     * PKBPersons can represent the same human being through use of humanuuid. This collapse of many rows to one
+     * resource is not happening in the migration to the upstream PKB FHIR store. Rather, it will happen at aggregation
+     * into the downstream aggregator store, which the web UI (and everything else) subsequent feeds from. This webapp
+     * FHIR store is effectively a mirror of the PKB data store: the chunky logic happens at aggregation.
+     *
+     * This is because it has proven too fiddly to do the squish into a single Practitioner while the application
+     * is capable of linking or, much worse, unlinking PKBPersons from one another. The migration effectively becomes
+     * unidirectional which means unpicking such a situation is very tricky.
+     */
+    @NotNull
+    private List&lt;IBaseResource&gt; transformPractitionerToFhir(@NotNull PublicPKBPerson pkbPerson){
+<span class="fc" id="L414">        List&lt;IBaseResource&gt; resourcesToSend = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L416">        Practitioner practitioner = new Practitioner();</span>
+<span class="fc" id="L417">        practitioner.setId(String.valueOf(pkbPerson.getPublicId()));</span>
+<span class="fc" id="L418">        setMeta(pkbPerson.getVersionDetails().getVersionPersisted(), practitioner);</span>
+<span class="fc" id="L419">        resourcesToSend.add(practitioner);</span>
+
+<span class="fc" id="L421">        practitioner.addIdentifier(getPkbIdentifier(pkbPerson.getId(), PKBPERSON_LEGACY_PRIMARY_KEY_SYSTEM_URL));</span>
+<span class="fc" id="L422">        Optional.ofNullable(pkbPerson.getHumanUUID())</span>
+<span class="fc" id="L423">                .ifPresent(humanUuidNotNull -&gt; {</span>
+<span class="fc" id="L424">                    Identifier identifier = new Identifier();</span>
+<span class="fc" id="L425">                    identifier.setSystem(HUMAN_UUID_SYSTEM_URL);</span>
+<span class="fc" id="L426">                    identifier.setValue(String.valueOf(humanUuidNotNull));</span>
+<span class="fc" id="L427">                    practitioner.addIdentifier(identifier);</span>
+<span class="fc" id="L428">                });</span>
+
+        //Demographics
+<span class="fc" id="L431">        getName(pkbPerson).ifPresent(practitioner::addName);</span>
+<span class="fc" id="L432">        getAddress(pkbPerson).ifPresent(practitioner::addAddress);</span>
+<span class="fc" id="L433">        addExtension(pkbPerson.getJobTitle(), JOB_TITLE_EXTENSION_URL, practitioner);</span>
+<span class="fc" id="L434">        getDateOfBirth(pkbPerson).ifPresent(dob -&gt; practitioner.setBirthDate(Date.from(dob)));</span>
+
+        //Gender
+<span class="fc" id="L437">        practitioner.setGender(getAdministrativeGender(pkbPerson));</span>
+
+        //Telecoms
+<span class="fc" id="L440">        pkbPerson.getContacts()</span>
+<span class="fc" id="L441">                .forEach(contact -&gt; transformPersonContactToFhir(contact).ifPresent(practitioner::addTelecom));</span>
+<span class="fc" id="L442">        getPhone(pkbPerson).ifPresent(practitioner::addTelecom);</span>
+
+        //Extensions
+<span class="fc" id="L445">        addCommonExtensions(pkbPerson, practitioner);</span>
+
+        //Provenance information
+<span class="fc" id="L448">        resourcesToSend.add(getProvenance(pkbPerson.getVersionDetails(), practitioner));</span>
+<span class="fc" id="L449">        return resourcesToSend;</span>
+    }
+
+    private Optional&lt;Instant&gt; getDateOfBirth(@NotNull PublicPKBPerson pkbPerson) {
+<span class="fc" id="L453">        return Optional.ofNullable(pkbPerson.getDateOfBirthString())</span>
+<span class="fc" id="L454">                .map(dateOfBirthString -&gt; LocalDate.parse(dateOfBirthString, DATE_OF_BIRTH_FORMATTER).atStartOfDay(ZoneOffset.UTC).toInstant());</span>
+    }
+
+    private List&lt;IBaseResource&gt; getResourcesToDeleteForPatient(PublicFhirStoreSync fhirStoreSync) {
+<span class="fc" id="L458">        Provenance provenanceToDelete = new Provenance();</span>
+<span class="fc" id="L459">        IdType idTypeProvenance = new IdType(ResourceType.Provenance.name(),</span>
+<span class="fc" id="L460">                getProvenanceUuidFromResourceTarget(String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()), ResourceType.Patient));</span>
+<span class="fc" id="L461">        provenanceToDelete.setId(idTypeProvenance);</span>
+
+<span class="fc" id="L463">        Person personToDelete = new Person();</span>
+<span class="fc" id="L464">        IdType idTypePerson = new IdType(ResourceType.Person.name(), String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()));</span>
+<span class="fc" id="L465">        personToDelete.setId(idTypePerson);</span>
+
+<span class="fc" id="L467">        Patient patientToDelete = new Patient();</span>
+<span class="fc" id="L468">        IdType idTypePatient = new IdType(ResourceType.Patient.name(), String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()));</span>
+<span class="fc" id="L469">        patientToDelete.setId(idTypePatient);</span>
+<span class="fc" id="L470">        return List.of(provenanceToDelete, personToDelete, patientToDelete);</span>
+    }
+
+    private List&lt;IBaseResource&gt; getResourcesToDeleteForPractitioner(PublicFhirStoreSync fhirStoreSync) {
+<span class="fc" id="L474">        Provenance provenanceToDelete = new Provenance();</span>
+<span class="fc" id="L475">        IdType idTypeProvenance = new IdType(ResourceType.Provenance.name(),</span>
+<span class="fc" id="L476">                getProvenanceUuidFromResourceTarget(String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()), ResourceType.Practitioner));</span>
+<span class="fc" id="L477">        provenanceToDelete.setId(idTypeProvenance);</span>
+
+<span class="fc" id="L479">        Practitioner practitionerToDelete = new Practitioner();</span>
+<span class="fc" id="L480">        IdType idTypePractitioner = new IdType(ResourceType.Practitioner.name(), String.valueOf(fhirStoreSync.getSyncDetails().getSourceTablePublicId()));</span>
+<span class="fc" id="L481">        practitionerToDelete.setId(idTypePractitioner);</span>
+<span class="fc" id="L482">        return List.of(provenanceToDelete, practitionerToDelete);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

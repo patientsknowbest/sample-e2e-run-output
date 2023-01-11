@@ -1,0 +1,2568 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ManagePlansAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.plan.action</a> &gt; <span class="el_source">ManagePlansAction.java</span></div><h1>ManagePlansAction.java</h1><pre class="source lang-java linenums">package com.pkb.plan.action;
+
+import com.fasterxml.jackson.databind.ObjectReader;
+import com.google.common.annotations.VisibleForTesting;
+import com.opensymphony.xwork2.Action;
+import com.pkb.action.file.ChunkedUploadAction;
+import com.pkb.action.message.ComposeMessageAction;
+import com.pkb.action.support.AllergyGroupTransformer;
+import com.pkb.action.support.DiagnosisGroupTransformer;
+import com.pkb.action.test.SymptomsListAware;
+import com.pkb.allergy.entity.Allergy;
+import com.pkb.app.dto.DateFilterDTO;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.bean.IMedicationWebBean;
+import com.pkb.bean.IPlanWebBean;
+import com.pkb.coding.entity.CodeableConcept;
+import com.pkb.datamodel.consent.RequiresConsent;
+import com.pkb.datamodel.plantemplate.ImmutableTemplateAttachment;
+import com.pkb.datamodel.plantemplate.TemplateAttachment;
+import com.pkb.datamodel.plantemplate.TemplateField;
+import com.pkb.diagnosis.DiagnosisHelper;
+import com.pkb.diagnosis.entity.Diagnosis;
+import com.pkb.dto.AllergyGroupDto;
+import com.pkb.dto.DiagnosisGroupDto;
+import com.pkb.dto.MeasurementOverviewDto;
+import com.pkb.entities.enums.MenuDataType;
+import com.pkb.entities.enums.Route;
+import com.pkb.entities.enums.TemplateStatus;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.Team;
+import com.pkb.mappers.ImmutableEntityDependency;
+import com.pkb.mappers.MeasurementMapper;
+import com.pkb.mappers.SparkLineGraphMapper;
+import com.pkb.medication.entity.Medication;
+import com.pkb.notification.entity.Activity;
+import com.pkb.phplan.entity.PHPlan;
+import com.pkb.phplan.entity.PHPlan.ApprovalStatus;
+import com.pkb.phplan.entity.PHPlan.PlanStatus;
+import com.pkb.phplan.entity.PHPlanAttachment;
+import com.pkb.phplan.entity.PHPlanTemplate;
+import com.pkb.phplan.entity.PHPlanTemplate.TemplateFieldLabel;
+import com.pkb.phplan.entity.PlanField;
+import com.pkb.phplan.entity.TemplateMetric;
+import com.pkb.plan.domain.PlanAutosave;
+import com.pkb.plan.support.PhPlanToPlanDtoConverter;
+import com.pkb.plan.support.PhPlanTransformer;
+import com.pkb.service.allergy.impl.AllergyManager;
+import com.pkb.service.datapoint.DataWithUIPermissions;
+import com.pkb.service.diagnosis.DiagnosisManager;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.medication.MedicationManager;
+import com.pkb.service.phplan.PHPlanDTO;
+import com.pkb.service.phplan.ParticipantManager;
+import com.pkb.service.phplan.PlanManager;
+import com.pkb.service.phplan.PlanTemplateManager;
+import com.pkb.service.symptom.SymptomReportManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.test.LoincManager;
+import com.pkb.service.test.MeasurementManager;
+import com.pkb.service.test.TestManager;
+import com.pkb.symptom.entity.Symptom;
+import com.pkb.symptom.entity.SymptomReportDTO;
+import com.pkb.symptom.entity.SymptomReportHistoryDTO;
+import com.pkb.test.entity.LoincTest;
+import com.pkb.test.entity.MeasurementDTO;
+import com.pkb.test.entity.MeasurementHistoryDTO;
+import com.pkb.test.entity.MeasurementTypeId;
+import com.pkb.test.entity.PredefinedMeasurementType;
+import com.pkb.test.entity.TestHistoryDTO;
+import com.pkb.test.entity.TestResultDTO;
+import com.pkb.test.entity.TestResultType.ValueType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.ChartHeading;
+import com.pkb.util.ChartRow;
+import com.pkb.util.LabResultFormattingService;
+import com.pkb.util.MedicationDTO;
+import com.pkb.util.TimelineChartUtil;
+import com.pkb.util.TimelineChartUtil.ChartCell;
+import com.pkb.util.TimelineChartUtil.RangeDetails;
+import com.pkb.util.TimelineChartUtil.RangeDetails.Range;
+import com.pkb.util.TrendlineService;
+import com.pkb.util.TrendlineService.TrendlineDataSet;
+import com.pkb.util.security.CustomStyledHtmlFilter;
+import io.vavr.Tuple2;
+import org.apache.commons.beanutils.BeanUtils;
+import org.apache.commons.collections4.MapUtils;
+import org.apache.commons.lang3.math.NumberUtils;
+import org.apache.struts2.ServletActionContext;
+import org.apache.struts2.dispatcher.mapper.ActionMapping;
+import org.apache.struts2.interceptor.validation.SkipValidation;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.invoke.MethodHandles;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import static com.pkb.action.BaseAction.NhsAppPage.HEALTH_RECORDS;
+import static com.pkb.action.plan.ActionHelper.convertToMeasurement;
+import static com.pkb.entities.enums.PrivacyFlag.GENERAL;
+import static com.pkb.phplan.entity.PHPlan.EditableStatus.ALL;
+import static com.pkb.phplan.entity.PHPlan.Lazy.CREATOR_DETAILS;
+import static com.pkb.phplan.entity.PHPlan.Lazy.LAST_EDITOR_DEATILS;
+import static com.pkb.phplan.entity.TemplateMetric.MetricType.LAB_TEST;
+import static com.pkb.test.IncludeDeletedResults.EXCLUDE_DELETED;
+import static com.pkb.user.entity.PKBPerson.Lazy.CONTACTS;
+import static com.pkb.user.entity.PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS;
+import static com.pkb.user.entity.PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS_DEEP;
+import static com.pkb.user.entity.PKBPerson.Lazy.PROPERTIES;
+import static com.pkb.util.Constants.APPLICATION_TZ;
+import static com.pkb.util.StringUtil.isDecimalNumber;
+import static com.pkb.util.StringUtil.newLineToBR;
+import static com.pkb.util.StringUtil.recoverAmpersand;
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Comparator.comparing;
+import static java.util.Comparator.naturalOrder;
+import static java.util.Comparator.nullsLast;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isEmpty;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+import static org.apache.commons.lang3.StringUtils.EMPTY;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isEmpty;
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * The setters for some fields (allergies, medications, diagnoses) have been
+ * removed because there have been instances of people adding HTML snippets to
+ * care plans that use those words as an element id/name. When this happens,
+ * struts attempts to map the form data to the fields even though the types will
+ * almost certainly not match (and then fail silently!)
+ * &lt;p&gt;
+ * See commit 9301c8269f for more details
+ *
+ * @author russgray
+ */
+
+<span class="fc" id="L167">public class ManagePlansAction extends ChunkedUploadAction implements SymptomsListAware {</span>
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L171">    private static final Long EMPTY_TEMPLATE_ID = Long.valueOf(&quot;-1&quot;);</span>
+
+<span class="fc" id="L173">    private static final ObjectReader PLAN_READER = OBJECT_MAPPER.readerFor(PlanAutosave.class);</span>
+    // To viewPlan.jsp
+    private static final String EDIT = &quot;edit&quot;;
+    private static final String RELOAD_CREATE_PLAN_FORM = &quot;reloadCreatePlanForm&quot;;
+<span class="fc" id="L177">    private static final Logger LOGGER = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());</span>
+    private static final int SHOW_GRAPH_THRESHOLD = 2;
+    private static final String NAMESPACE_AUTH = &quot;auth&quot;;
+
+    @Autowired
+    private TrendlineService trendlineService;
+    @Autowired
+    private LabResultFormattingService labResultFormattingService;
+    @Autowired
+    private LoincManager loincManager;
+
+    // To managePlans.jsp
+    private List&lt;PHPlanDTO&gt; plans;
+    // From managePlans.jsp
+    private UUID selectedPlanUniqueId;
+    private Long planId;
+    // To createPlan.jsp
+    private Long patientId;
+    private String patientFullName;
+    private List&lt;com.pkb.datamodel.plantemplate.PHPlanTemplate&gt; planTemplates;
+    private List&lt;PKBPerson&gt; approvers;
+    // From createPlan.jsp
+    private String planName;
+    private Long planTemplateId;
+    //private String emptyTemplate = &quot;Empty&quot;;
+    private Long approverId;
+    // To editPlan.jsp
+    private PHPlan pHPlan;
+    private String planTemplateName;
+    private String reviewDate;
+    private PKBPerson approver;
+    private String actionPlanText;
+    private String greenText;
+    private String amberText;
+    private String redText;
+    private List&lt;TemplateAttachment&gt; templateAttachments;
+    private List&lt;Symptom&gt; symptomList;
+    private List&lt;PredefinedMeasurementType&gt; measurementTypeList;
+    private List&lt;LoincTest&gt; loincTestList;
+    private Long creatorId;
+    // From editPrivacyLabels.jsp
+    private UUID dataPointUniqueId;
+
+    // Metrics entered in editPlan.jsp
+
+    /**
+     * These capture the user-entered date/time information. This timestamp is used only for the content timestamp of
+     * the metrics.
+     * &lt;p&gt;
+     * For example, it will be used to set the clinically-relevant timestamp of a lab result, but not
+     * DTOBaseFields.enteredDate.
+     */
+    private String updateDate;
+    private String updateTime;
+
+    /**
+     * testIdToResult maps from LoincTest.id to the result as entered by the user into the web interface. There will be
+     * one entry in this list for each lab test metric associated with the care plan.
+     * &lt;p&gt;
+     * Reference range low/high values are stored respectively in the corresponding testIdToMinimum and
+     * testIdToMaximum maps. Textual reference ranges are permitted by the PKB data model but not supported in the web
+     * interface; see PHR-7914.
+     */
+    private Map&lt;Long, String&gt; testIdToResult;
+    private Map&lt;Long, String&gt; testIdToMinimum;
+    private Map&lt;Long, String&gt; testIdToMaximum;
+
+    /**
+     * Similar to loincTestResult, measurementValue maps from PredefinedMeasurementType.id to the value as entered by the user
+     * into the web interface. measurementValue2 is used for the second value of multi-valued measurements (e.g. blood
+     * pressure).
+     */
+    private Map&lt;String, String&gt; measurementValue;
+    private Map&lt;String, String&gt; measurementValue2;
+
+    /**
+     * In contrast to measurements and test results, symptom metrics are not stored into a Map. Instead, a List is used,
+     * whereby each textual entry in the list is a structured String of the form:
+     * severity-as-an-integer,symptom-id
+     * See BaseAction.convertToSymptomReportDto.
+     */
+    private List&lt;String&gt; symptomsResultSet2Value;
+
+    // For editPlan.jsp autosave
+    private String json;
+    private InputStream autoSaveResult;
+    // For ComposeMessageAction
+    private Long selectedPlanVersion;
+    private Long originalContextUser;
+    // From editPlan.jsp
+    private Set&lt;Long&gt; wantedAttachmentIds;
+    private String editable;
+    private PlanTemplateManager planTemplateManager;
+    private PlanManager planManager;
+    private ParticipantManager participantManager;
+    private TeamUserManager teamUserManager;
+    private SymptomReportManager symptomReportManager;
+    private MeasurementManager measurementManager;
+    private TestManager testManager;
+    private PKBEmailMessageManager pkbEmailMessageManager;
+    private IPlanWebBean planWebBean;
+    private DiagnosisManager diagnosisManager;
+    private MedicationManager medicationManager;
+    private IMedicationWebBean medicationWebBean;
+    private AllergyManager allergyManager;
+    private PhPlanToPlanDtoConverter phPlanToPlanDtoConverter;
+    private Instant reviewDateDisplay;
+    private PKBPerson patient;
+    private PKBPerson loggedInUser;
+    private List&lt;DiagnosisGroupDto&gt; currentDiagnosisGroups;
+    private List&lt;MedicationDTO&gt; currentMedications;
+    private List&lt;AllergyGroupDto&gt; allergyGroups;
+    private PKBPerson creator;
+    private Instant createdDate;
+    private PKBPerson editor;
+    private Long version;
+    private Long activeVersionCount;
+    private Instant lastEditedDate;
+    private List&lt;PHPlanAttachment&gt; planAttachments;
+<span class="fc" id="L296">    private String tab = &quot;treatments&quot;;</span>
+<span class="fc" id="L297">    private String subTab = &quot;plans&quot;;</span>
+    private String attachmentName;
+    // URL query parameter coming from viewPlanHistory.jsp
+    private boolean historic;
+    private String approvalStatus;
+    private String viewPlanLink;
+<span class="fc" id="L303">    private boolean actionPlanShow = true;</span>
+    // To confirmEditPlan.jsp
+    private String lastEditedTimestamp;
+<span class="fc" id="L306">    private boolean createPlan = false;</span>
+    private String rangeWanted;
+    private RangeDetails rangeDetails;
+
+    private boolean noHeaderRequired;
+    //template metrics
+    private List&lt;MeasurementOverviewDto&gt; measurementOverviewList;
+    private List&lt;SymptomReportHistoryDTO&gt; symptomHistoryList;
+    private List&lt;TestHistoryDTO&gt; testHistoryList;
+    private List&lt;ChartHeading&gt; chartHeadings;
+    private List&lt;ChartRow&lt;ChartCell&gt;&gt; chartRows;
+<span class="fc" id="L317">    private boolean displayMetrics = false;</span>
+    private DateTimeFormatter dateFormat;
+    private String discussMessage;
+    private String discussTopic;
+    @Autowired
+    private TimelineChartUtil timelineChartUtil;
+    private DiagnosisHelper diagnosisHelper;
+    @Autowired
+    private DiagnosisGroupTransformer diagnosisGroupTransformer;
+    @Autowired
+    private AllergyGroupTransformer allergyGroupTransformer;
+    @Autowired
+    private PhPlanTransformer planTransformer;
+<span class="fc" id="L330">    private DateTimeFormatter timestampFormat = DateTimeFormatter.ofPattern(&quot;yyyy-MM-dd HH:mm:ss.SSS&quot;).withZone(ZoneId.of(&quot;UTC&quot;));</span>
+    @Autowired
+    private MeasurementMapper measurementMapper;
+    @Autowired
+    private SparkLineGraphMapper sparkLineGraphMapper;
+    @Autowired
+    private CustomStyledHtmlFilter customStyledHtmlFilter;
+
+    public static String getEDIT() {
+<span class="nc" id="L339">        return EDIT;</span>
+    }
+
+    public static long getSerialversionuid() {
+<span class="nc" id="L343">        return serialVersionUID;</span>
+    }
+
+    public String getPlanList() {
+<span class="fc" id="L347">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L348">        logMethod(loggedInEHRRequestContext, &quot;getPlanList&quot;);</span>
+<span class="fc" id="L349">        setNhsAppPage(HEALTH_RECORDS.name());</span>
+
+<span class="fc bfc" id="L351" title="All 2 branches covered.">        if (!isSharingEnabled(loggedInEHRRequestContext)) {</span>
+<span class="fc" id="L352">            addActionMessage(getText(&quot;managePlansAction.warn.sharingDisabled&quot;));</span>
+        }
+
+
+<span class="fc" id="L356">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L358">        Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+
+<span class="fc" id="L360">        List&lt;PHPlan&gt; phPlans = retrievePhPlans(loggedInEHRRequestContext, patientAccountId);</span>
+
+<span class="fc" id="L362">        List&lt;DataWithUIPermissions&lt;PHPlan&gt;&gt; phPlansWithPermissions = dataPointManager.getPermissions(phPlans, loggedInEHRRequestContext);</span>
+<span class="fc" id="L363">        var deletableByUniqueIdMap = planManager.planIsDeletableBy(phPlans, loggedInUser.getId());</span>
+
+<span class="fc" id="L365">        plans = phPlansWithPermissions.stream()</span>
+<span class="fc" id="L366">                .map(pwp -&gt; convertToDto(pwp, loggedInUser, deletableByUniqueIdMap))</span>
+<span class="fc" id="L367">                .collect(toList());</span>
+        // Not logging these because they are only shown as summaries
+
+<span class="fc" id="L370">        return Action.SUCCESS;</span>
+    }
+
+    private List&lt;PHPlan&gt; retrievePhPlans(LoggedInEHRRequestContext requestContext, Long patientAccountId) {
+<span class="fc" id="L374">        return planTransformer.transformPlan(planManager.getPHPlans(requestContext, requestContext.getAccessingUserId(), patientAccountId, 1000, 0 /*link filter*/, CREATOR_DETAILS, LAST_EDITOR_DEATILS));</span>
+    }
+
+    private PHPlanDTO convertToDto(DataWithUIPermissions&lt;PHPlan&gt; planWithUIPermissions, PKBPerson loggedInUser, Map&lt;UUID, Boolean&gt; deletableByUniqueIdMap) {
+<span class="fc" id="L378">        PHPlanDTO planDTO = phPlanToPlanDtoConverter.convert(planWithUIPermissions.getData(), loggedInUser, true, planManager.getPlanDeletableProvider(deletableByUniqueIdMap));</span>
+<span class="fc" id="L379">        planWithUIPermissions.copyPermissionsInto(planDTO);</span>
+<span class="fc" id="L380">        return planDTO;</span>
+    }
+
+    public String createPlanForm() {
+<span class="fc" id="L384">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L385">        logMethod(loggedInEHRRequestContext, &quot;createPlanForm&quot;);</span>
+
+<span class="fc" id="L387">        PKBPerson clinician = null;</span>
+
+<span class="fc" id="L389">        Users users = loadContextAndLoggedInUsers(loggedInEHRRequestContext);</span>
+<span class="fc" id="L390">        PKBPerson patient = users.contextUser();</span>
+<span class="fc bfc" id="L391" title="All 2 branches covered.">        if (loggedInEHRRequestContext.isPro()) {</span>
+<span class="fc" id="L392">            clinician = users.loggedInUser();</span>
+        }
+
+<span class="fc" id="L395">        patientId = patient.getId();</span>
+<span class="fc" id="L396">        patientFullName = patient.getTitle() + &quot; &quot; + patient.getFirstName() + &quot; &quot; + patient.getLastName();</span>
+<span class="fc bfc" id="L397" title="All 2 branches covered.">        if (!isSharingEnabled(loggedInEHRRequestContext)) {</span>
+<span class="fc" id="L398">            addActionMessage(getText(&quot;patient.sharing.disabled&quot;));</span>
+<span class="fc" id="L399">            return &quot;sharingDisabled&quot;;</span>
+        }
+
+<span class="fc" id="L402">        planTemplates = new LinkedList&lt;&gt;();</span>
+<span class="fc bfc" id="L403" title="All 2 branches covered.">        if (clinician != null) {</span>
+            // Get the template list for the clinician's team
+<span class="fc" id="L405">            List&lt;Team&gt; instituteList = teamUserManager.getUserTeams(loggedInEHRRequestContext, clinician.getId(), true/*activeOnly*/);</span>
+<span class="pc bpc" id="L406" title="1 of 2 branches missed.">            if (instituteList.isEmpty()) {</span>
+                // not an active institute clinician -- probably external clinician invited by patient
+<span class="nc" id="L408">                LOGGER.info(&quot;clinician teamList is empty! Returning empty list of planTemplates&quot;);</span>
+            } else {
+<span class="fc bfc" id="L410" title="All 2 branches covered.">                for (Team t : instituteList) {</span>
+<span class="fc" id="L411">                    LOGGER.info(&quot;clinician in team-{} = {}&quot;, t.getId(), t.getName());</span>
+<span class="fc" id="L412">                }</span>
+<span class="fc" id="L413">                Long instituteId = instituteList.get(0).getId();</span>
+<span class="fc" id="L414">                LOGGER.info(&quot;first team is {}&quot;, instituteId);</span>
+<span class="fc" id="L415">                planTemplates.addAll(planTemplateManager.getTemplateListByStatus(instituteId, TemplateStatus.ACTIVE));</span>
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">                LOGGER.info(&quot;that team had {} plans&quot;, (planTemplates == null ? &quot;null&quot; : planTemplates.size()));</span>
+            }
+<span class="fc" id="L418">        } else {</span>
+            // Get the templates for all the patient teams
+<span class="fc bfc" id="L420" title="All 2 branches covered.">            for (Team patientTeam : teamUserManager.getUserTeams(loggedInEHRRequestContext, patient.getId(), false/*activeOnly*/)) {</span>
+<span class="fc" id="L421">                LOGGER.info(&quot;looking at patient team-{} = {}&quot;, patientTeam.getId(), patientTeam.getName());</span>
+<span class="fc" id="L422">                planTemplates.addAll(planTemplateManager.getTemplateListByStatus(patientTeam.getId(), TemplateStatus.ACTIVE));</span>
+<span class="fc" id="L423">                LOGGER.info(&quot;now got {} plans&quot;, planTemplates.size());</span>
+<span class="fc" id="L424">            }</span>
+        }
+
+<span class="fc" id="L427">        return Action.SUCCESS;</span>
+    }
+
+    private List&lt;MedicationDTO&gt; fetchAndSortMedicationDtos(long userId, Long patientAccountId, LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc" id="L431">        List&lt;DataWithUIPermissions&lt;Medication&gt;&gt; currentMeds = medicationManager.getCurrentMedications(loggedInEHRRequestContext, userId,</span>
+                        patientAccountId, false/* medications not taken*/)
+<span class="fc" id="L433">                .stream().map(DataWithUIPermissions::new).collect(toList());</span>
+<span class="fc" id="L434">        List&lt;MedicationDTO&gt; currentMedicationDTOs = medicationWebBean.convertMedicationsToDTOs(currentMeds,</span>
+<span class="fc" id="L435">                ImmutableEntityDependency.&lt;Medication&gt;builder()</span>
+<span class="fc" id="L436">                        .locale(getLocale())</span>
+<span class="fc" id="L437">                        .iOSDevice(userAgentAnalyzerBean.isAnIOSDevice())</span>
+<span class="fc" id="L438">                        .loggedInRequestContext(loggedInEHRRequestContext)</span>
+<span class="fc" id="L439">                        .build());</span>
+<span class="fc" id="L440">        currentMedicationDTOs.sort(MedicationDTO.BY_REVERSE_START_DATE_THEN_ALPHABETIC_NAME);</span>
+<span class="fc" id="L441">        return currentMedicationDTOs;</span>
+    }
+
+    public String createPlan() throws IOException {
+<span class="fc" id="L445">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L446">        logMethod(loggedInEHRRequestContext, &quot;createPlan&quot;);</span>
+
+
+<span class="pc bpc" id="L449" title="2 of 4 branches missed.">        if ((planName == null) || planName.isEmpty()) {</span>
+<span class="nc" id="L450">            addFieldError(&quot;planName&quot;, getText(&quot;managePlansAction.err.select_at_least_one_template&quot;));</span>
+<span class="nc" id="L451">            return RELOAD_CREATE_PLAN_FORM;</span>
+        }
+
+<span class="fc" id="L454">        attachments = generateAttachmentsFromInputs();</span>
+<span class="fc" id="L455">        long loggedInUserId = loggedInEHRRequestContext.getAccessingUserId();</span>
+<span class="fc" id="L456">        Instant rightNow = dateTimeService.now();</span>
+
+<span class="fc" id="L458">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L460">        patientFullName = patient.getTitle() + &quot; &quot; + patient.getFirstName() + &quot; &quot; + patient.getLastName();</span>
+
+<span class="fc" id="L462">        Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+
+<span class="fc" id="L464">        loadPlandata(patientAccountId, patient.getId(), loggedInUserId, loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L466">        pHPlan = new PHPlan(new SourceDetails(loggedInEHRRequestContext));</span>
+<span class="fc" id="L467">        pHPlan.setName(planName);</span>
+<span class="fc" id="L468">        pHPlan.setPatientId(patient.getId());</span>
+<span class="fc" id="L469">        pHPlan.setVersion(0L);</span>
+<span class="fc" id="L470">        pHPlan.getBaseFields().generateNewRandomUniqueId();</span>
+<span class="fc" id="L471">        pHPlan.setCreatorId(loggedInUserId);</span>
+<span class="fc" id="L472">        pHPlan.setCreationDate(Date.from(rightNow));</span>
+<span class="fc" id="L473">        pHPlan.setLastEditedOn(Date.from(rightNow));</span>
+<span class="fc" id="L474">        pHPlan.setLastEditorId(loggedInUserId);</span>
+
+<span class="pc bpc" id="L476" title="1 of 2 branches missed.">        if (approverId == null) {</span>
+<span class="fc" id="L477">            pHPlan.setApproverId(null);</span>
+<span class="fc" id="L478">            pHPlan.setApprovalStatus(ApprovalStatus.NULL);</span>
+        } else {
+<span class="nc" id="L480">            approver = userManager.getPKBPerson(approverId);</span>
+<span class="nc" id="L481">            pHPlan.setApproverId(approverId);</span>
+<span class="nc" id="L482">            pHPlan.setApprovalStatus(ApprovalStatus.AWAITING_APPROVAL);</span>
+        }
+
+        // Check if empty template was chosen
+<span class="fc bfc" id="L486" title="All 2 branches covered.">        if (EMPTY_TEMPLATE_ID.equals(planTemplateId)) {</span>
+<span class="fc" id="L487">            planTemplateName = getText(&quot;managePlansAction.txt.empty&quot;);</span>
+<span class="fc" id="L488">            reviewDate = dateFormat.format(dateTimeService.nowLocalDateTime().plusYears(1L));</span>
+
+<span class="fc" id="L490">            actionPlanText = &quot;&quot;;</span>
+<span class="fc" id="L491">            greenText = &quot;&quot;;</span>
+<span class="fc" id="L492">            amberText = &quot;&quot;;</span>
+<span class="fc" id="L493">            redText = &quot;&quot;;</span>
+
+        } else {
+            // Not an empty template
+<span class="fc" id="L497">            pHPlan.setTemplateId(planTemplateId);</span>
+<span class="fc" id="L498">            Optional&lt;PHPlanTemplate&gt; planTemplate = planTemplateManager.getPHPlanTemplateOldStyleWithMetrics(planTemplateId);</span>
+<span class="fc" id="L499">            planTemplateName = planTemplate.map(PHPlanTemplate::getName).orElse(null);</span>
+
+<span class="fc bfc" id="L501" title="All 2 branches covered.">            for (TemplateField templateField : planTemplateManager.getTemplateFieldList(planTemplateId)) {</span>
+                // Not vital to filter here because we validate on care plan template creation so in theory we won't
+                // have invalid care plan templates
+<span class="fc" id="L504">                String text = customStyledHtmlFilter.filter(templateField.getText());</span>
+<span class="pc bpc" id="L505" title="1 of 5 branches missed.">                switch (templateField.getLabel()) {</span>
+                    case ACTION_PLAN:
+<span class="fc" id="L507">                        actionPlanText = text;</span>
+<span class="fc" id="L508">                        break;</span>
+                    case GREEN:
+<span class="fc" id="L510">                        greenText = text;</span>
+<span class="fc" id="L511">                        break;</span>
+                    case AMBER:
+<span class="fc" id="L513">                        amberText = text;</span>
+<span class="fc" id="L514">                        break;</span>
+                    case RED:
+<span class="fc" id="L516">                        redText = text;</span>
+                        break;
+                }
+<span class="fc" id="L519">            }</span>
+
+<span class="fc" id="L521">            templateAttachments = planTemplateManager.getTemplateAttachments(planTemplateId)</span>
+<span class="fc" id="L522">                    .stream()</span>
+<span class="fc" id="L523">                    .map(attachment -&gt; ImmutableTemplateAttachment.copyOf(attachment).withChecked(true))</span>
+<span class="fc" id="L524">                    .collect(toList());</span>
+
+<span class="fc" id="L526">            wantedAttachmentIds = new TreeSet&lt;&gt;();</span>
+
+<span class="fc" id="L528">            pHPlan.setMetrics(planTemplate.map(PHPlanTemplate::getMetrics).orElse(null));</span>
+<span class="fc" id="L529">            loadMetrics(pHPlan.getMetrics(), true);</span>
+
+        }
+
+<span class="fc" id="L533">        setDefaultFlag();</span>
+
+<span class="fc" id="L535">        pHPlan.setPlanFields(populateDefaultFields());</span>
+<span class="fc" id="L536">        createPlan = true;</span>
+<span class="pc bpc" id="L537" title="1 of 2 branches missed.">        actionPlanShow = !hasAttachmentAsActionPlanContent();</span>
+<span class="fc" id="L538">        performSave(PlanStatus.INDRAFT, ALL, loggedInEHRRequestContext);</span>
+<span class="fc" id="L539">        selectedPlanUniqueId = pHPlan.getBaseFields().getUniqueId();</span>
+<span class="fc" id="L540">        updateLastEditedTimeStamp();</span>
+<span class="fc" id="L541">        return EDIT;</span>
+    }
+
+    private void loadMetrics(List&lt;TemplateMetric&gt; templateMetrics, boolean freshDates) {
+
+<span class="fc" id="L546">        symptomList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L547">        measurementTypeList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L548">        loincTestList = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L550" title="All 2 branches covered.">        if (templateMetrics == null) {</span>
+<span class="fc" id="L551">            return;</span>
+        }
+
+<span class="fc bfc" id="L554" title="All 2 branches covered.">        if (freshDates) {</span>
+<span class="fc" id="L555">            Tuple2&lt;String, String&gt; currentDateAndTime = getCurrentDateAndTime();</span>
+<span class="fc" id="L556">            updateDate = currentDateAndTime._1;</span>
+<span class="fc" id="L557">            updateTime = currentDateAndTime._2;</span>
+        }
+
+<span class="fc" id="L560">        Set&lt;Long&gt; labtestIds = templateMetrics.stream()</span>
+<span class="fc bfc" id="L561" title="All 2 branches covered.">                .filter(tm -&gt; tm.getMetricType() == LAB_TEST)</span>
+<span class="fc" id="L562">                .map(TemplateMetric::getMetricId)</span>
+<span class="fc" id="L563">                .collect(toSet());</span>
+<span class="fc" id="L564">        Map&lt;Long, LoincTest&gt; loincTests = loincManager.getLoincTestsByIds(labtestIds, Collectors.toMap(LoincTest::getId, identity()));</span>
+<span class="fc bfc" id="L565" title="All 2 branches covered.">        for (TemplateMetric templateMetric : templateMetrics) {</span>
+<span class="pc bpc" id="L566" title="1 of 4 branches missed.">            switch (templateMetric.getMetricType()) {</span>
+
+                case SYMPTOM:
+
+<span class="fc" id="L570">                    symptomList.add(Symptom.getById(templateMetric.getMetricId()));</span>
+<span class="fc" id="L571">                    break;</span>
+
+                case MEASUREMENT:
+
+<span class="fc" id="L575">                    PredefinedMeasurementType parent = PredefinedMeasurementType.getById(templateMetric.getMetricId());</span>
+<span class="pc bpc" id="L576" title="2 of 4 branches missed.">                    if (parent != null &amp;&amp; !parent.getType().derived()) {</span>
+<span class="fc" id="L577">                        measurementTypeList.add(parent);</span>
+<span class="fc" id="L578">                        List&lt;PredefinedMeasurementType&gt; children = parent.getChildTypes();</span>
+<span class="fc" id="L579">                        measurementTypeList.addAll(children);</span>
+<span class="fc" id="L580">                    } else {</span>
+<span class="nc bnc" id="L581" title="All 2 branches missed.">                        if (parent == PredefinedMeasurementType.BMI) {</span>
+                            // Later - automate dependances
+
+<span class="nc" id="L584">                            PredefinedMeasurementType height = PredefinedMeasurementType.HEIGHT;</span>
+<span class="nc" id="L585">                            measurementTypeList.add(height);</span>
+<span class="nc" id="L586">                            List&lt;PredefinedMeasurementType&gt; children = height.getChildTypes();</span>
+<span class="nc" id="L587">                            measurementTypeList.addAll(children);</span>
+<span class="nc" id="L588">                            PredefinedMeasurementType weight = PredefinedMeasurementType.WEIGHT;</span>
+<span class="nc" id="L589">                            measurementTypeList.add(weight);</span>
+<span class="nc" id="L590">                            children = weight.getChildTypes();</span>
+<span class="nc" id="L591">                            measurementTypeList.addAll(children);</span>
+<span class="nc" id="L592">                        }</span>
+
+                    }
+                    break;
+
+                case LAB_TEST:
+<span class="fc" id="L598">                    LoincTest labTest = loincTests.get(templateMetric.getMetricId());</span>
+<span class="fc" id="L599">                    labTest.setNameLocal(getText(labTest.getNameKey()));</span>
+<span class="fc" id="L600">                    loincTestList.add(labTest);</span>
+<span class="fc" id="L601">                    break;</span>
+
+                default:
+                    break;
+            }
+<span class="fc" id="L606">        }</span>
+<span class="fc" id="L607">    }</span>
+
+    private List&lt;DiagnosisGroupDto&gt; loadCurrentDiagnosisGroups(Long patientId, Long patientAccountId, LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc" id="L610">        List&lt;DataWithUIPermissions&lt;Diagnosis&gt;&gt; diagnoses = diagnosisManager.getDiagnoses(patientId, patientAccountId, null,</span>
+<span class="fc" id="L611">                        loggedInEHRRequestContext, false/*includeNegativeConditions*/).stream()</span>
+<span class="fc" id="L612">                .filter(diagnosisHelper::isCurrent)</span>
+<span class="fc" id="L613">                .map(DataWithUIPermissions::new).collect(toList());</span>
+<span class="fc" id="L614">        return diagnosisGroupTransformer.transformDiagnosisDTOsWithoutGrouping(diagnoses, false);</span>
+    }
+
+    private void loadDraftData(List&lt;TemplateMetric&gt; draftData) {
+<span class="fc bfc" id="L618" title="All 2 branches covered.">        if (draftData != null) {</span>
+
+<span class="fc" id="L620">            symptomsResultSet2Value = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L621">            measurementValue = new TreeMap&lt;&gt;();</span>
+<span class="fc" id="L622">            measurementValue2 = new TreeMap&lt;&gt;();</span>
+<span class="fc" id="L623">            testIdToResult = new TreeMap&lt;&gt;();</span>
+<span class="fc" id="L624">            testIdToMinimum = new TreeMap&lt;&gt;();</span>
+<span class="fc" id="L625">            testIdToMaximum = new TreeMap&lt;&gt;();</span>
+
+<span class="fc bfc" id="L627" title="All 2 branches covered.">            for (TemplateMetric metric : draftData) {</span>
+<span class="fc" id="L628">                updateDate = metric.getMetricDateString();</span>
+<span class="fc" id="L629">                updateTime = metric.getMetricTimeString();</span>
+<span class="pc bpc" id="L630" title="1 of 4 branches missed.">                switch (metric.getMetricType()) {</span>
+                    case SYMPTOM:
+
+<span class="fc" id="L633">                        symptomsResultSet2Value.add(Integer.parseInt(metric.getValue1()) + &quot;,&quot; + metric.getSelectedMetricId());</span>
+<span class="fc" id="L634">                        break;</span>
+
+                    case MEASUREMENT:
+
+<span class="fc" id="L638">                        measurementValue.put(MeasurementTypeId.ofPredefinedTypeId(metric.getSelectedMetricId()).toString(), metric.getValue1());</span>
+<span class="fc" id="L639">                        measurementValue2.put(MeasurementTypeId.ofPredefinedTypeId(metric.getSelectedMetricId()).toString(), metric.getValue2());</span>
+<span class="fc" id="L640">                        break;</span>
+
+                    case LAB_TEST:
+
+<span class="fc" id="L644">                        testIdToResult.put(metric.getSelectedMetricId(), metric.getValue1());</span>
+<span class="fc" id="L645">                        testIdToMinimum.put(metric.getSelectedMetricId(), metric.getValue2());</span>
+<span class="fc" id="L646">                        testIdToMaximum.put(metric.getSelectedMetricId(), metric.getValue3());</span>
+<span class="fc" id="L647">                        break;</span>
+
+                    default:
+                        break;
+                }
+<span class="fc" id="L652">            }</span>
+        }
+<span class="fc" id="L654">    }</span>
+
+    public String editPlan() throws IOException {
+<span class="fc" id="L657">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L658">        logMethod(loggedInEHRRequestContext, &quot;editPlan&quot;);</span>
+
+<span class="fc" id="L660">        noHeaderRequired = true;</span>
+
+<span class="pc bpc" id="L662" title="1 of 2 branches missed.">        if (selectedPlanUniqueId == null) {</span>
+<span class="nc" id="L663">            addActionMessage(getText(&quot;managePlansAction.err.select_a_plan&quot;));</span>
+<span class="nc" id="L664">            return Action.INPUT;</span>
+        }
+
+<span class="fc" id="L667">        getPlan(loggedInEHRRequestContext, true);</span>
+
+<span class="pc bpc" id="L669" title="1 of 2 branches missed.">        if ((pHPlan.getEditableStatus() == PHPlan.EditableStatus.CREATOR) &amp;&amp;</span>
+<span class="nc bnc" id="L670" title="All 2 branches missed.">                !pHPlan.getCreatorId().equals(loggedInEHRRequestContext.getAccessingUserId())) {</span>
+<span class="nc" id="L671">            return Action.ERROR;</span>
+        }
+
+<span class="fc bfc" id="L674" title="All 2 branches covered.">        if ((pHPlan.getStatus() == PlanStatus.INDRAFT) &amp;&amp;</span>
+<span class="pc bpc" id="L675" title="1 of 2 branches missed.">                !pHPlan.getLastEditorId().equals(loggedInEHRRequestContext.getAccessingUserId())) {</span>
+<span class="nc" id="L676">            editor = userManager.getPKBPerson(pHPlan.getLastEditorId());</span>
+<span class="nc" id="L677">            updateLastEditedTimeStamp();</span>
+<span class="nc" id="L678">            return &quot;confirmEditPlan&quot;;</span>
+        }
+
+<span class="fc" id="L681">        loadMetrics(pHPlan.getMetrics(), true);</span>
+<span class="fc bfc" id="L682" title="All 2 branches covered.">        if (pHPlan.getStatus() == PlanStatus.INDRAFT) {</span>
+<span class="fc" id="L683">            loadDraftData(pHPlan.getMetricDraftData());</span>
+        }
+<span class="fc" id="L685">        disablePrivacyFlagEditForm();</span>
+
+<span class="fc" id="L687">        performSave(PlanStatus.INDRAFT, ALL, loggedInEHRRequestContext);</span>
+<span class="fc" id="L688">        updateLastEditedTimeStamp();</span>
+<span class="fc" id="L689">        return EDIT;</span>
+    }
+
+    public String confirmedEditPlan() throws IOException {
+<span class="nc" id="L693">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="nc" id="L694">        logMethod(loggedInEHRRequestContext, &quot;confirmedEditPlan&quot;);</span>
+
+<span class="nc" id="L696">        getPlan(loggedInEHRRequestContext, true);</span>
+<span class="nc" id="L697">        loadMetrics(pHPlan.getMetrics(), true);</span>
+<span class="nc" id="L698">        loadDraftData(pHPlan.getMetricDraftData());</span>
+<span class="nc" id="L699">        performSaveAndUpdateLastEditedTimestamp(PlanStatus.INDRAFT, ALL, loggedInEHRRequestContext);</span>
+<span class="nc" id="L700">        return EDIT;</span>
+    }
+
+    private void ensureUsersLoaded(LoggedInEHRRequestContext requestContext) {
+<span class="pc bpc" id="L704" title="1 of 4 branches missed.">        if (patient == null || loggedInUser == null) {</span>
+<span class="fc" id="L705">            var users = loadContextAndLoggedInUsers(requestContext);</span>
+<span class="fc" id="L706">            patient = users.contextUser();</span>
+<span class="fc" id="L707">            loggedInUser = users.loggedInUser();</span>
+        }
+<span class="fc" id="L709">    }</span>
+
+    private Users loadContextAndLoggedInUsers(LoggedInEHRRequestContext requestContext) {
+<span class="fc" id="L712">        return getContextAndLoggedInUsers(requestContext, CONTACTS, NATIONAL_AND_LOCAL_IDS, NATIONAL_AND_LOCAL_IDS_DEEP, PROPERTIES);</span>
+    }
+
+    /**
+     * A care plan linked to a test type will show a trendline for test results of that type directly inside the care
+     * plan. Users are then able to click that trendline to be taken to more information about those tests. In keeping
+     * with the main tests screens, the trendline will not be shown unless all results are numeric.
+     * &lt;p&gt;
+     * This method allows the care plan to determine whether to show the trendline for a particular test history.
+     *
+     * @param testHistoryDTO The test history being checked for display.
+     * @return true - if the trendline should be shown for this test history. false - otherwise.
+     */
+    public boolean showGraphFor(TestHistoryDTO testHistoryDTO) {
+<span class="fc bfc" id="L726" title="All 2 branches covered.">        return testHistoryDTO.hasNumericValuesOnly() &amp;&amp;</span>
+<span class="fc bfc" id="L727" title="All 2 branches covered.">                testHistoryDTO.getTestResultList().size() &gt;= SHOW_GRAPH_THRESHOLD;</span>
+    }
+
+    public String getGraphSource(TestHistoryDTO testHistoryDTO) {
+<span class="fc" id="L731">        TrendlineDataSet trendline = trendlineService</span>
+<span class="fc" id="L732">                .getTrendlineDataFor(loggedInUserUtil.getLoggedInUserType(), testHistoryDTO.getTestResultList());</span>
+<span class="fc" id="L733">        return sparkLineGraphMapper.buildGraphPath(trendline.getTestTimestamps(), trendline.getTestValues());</span>
+    }
+
+    public @NotNull String formatRange(@NotNull TestResultDTO latestTestResult, @NotNull LoincTest loincTest) {
+<span class="fc" id="L737">        return labResultFormattingService.formatRange(latestTestResult, loincTest, getLocalizedDecimalFormat()).orElse(EMPTY);</span>
+    }
+
+    public @NotNull String formatLabResultWithoutNameAndRange(@NotNull TestResultDTO latestTestResult, @NotNull LoincTest loincTest) {
+<span class="fc" id="L741">        return labResultFormattingService.formattedLabResultWithoutName(loggedInUserUtil.getLoggedInUserType(),</span>
+<span class="fc" id="L742">                latestTestResult, loincTest, loggedInUserUtil.getLoggedInUserZoneId(),</span>
+<span class="fc" id="L743">                getLocale(), getLocalizedDecimalFormat(), false);</span>
+    }
+
+    public String viewPlan() {
+<span class="fc" id="L747">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L748">        logMethod(loggedInEHRRequestContext, &quot;viewPlan&quot;);</span>
+
+<span class="fc" id="L750">        contextUserId = loggedInEHRRequestContext.getContextOrAccessingUserId();</span>
+<span class="fc" id="L751">        noHeaderRequired = true;</span>
+<span class="fc" id="L752">        getPlan(loggedInEHRRequestContext, false);</span>
+
+        // A patient can view plans in DRAFT status only if self created
+<span class="fc bfc" id="L755" title="All 4 branches covered.">        if (loggedInEHRRequestContext.isPatient() &amp;&amp; loggedInEHRRequestContext.isUserInOwnAccount()) {</span>
+<span class="pc bpc" id="L756" title="1 of 4 branches missed.">            if (pHPlan.getStatus() == PlanStatus.INDRAFT &amp;&amp; (pHPlan.getLastEditorId() != null) &amp;&amp;</span>
+<span class="pc bpc" id="L757" title="1 of 2 branches missed.">                    !pHPlan.getLastEditorId().equals(loggedInEHRRequestContext.getAccessingUserId())) {</span>
+<span class="nc" id="L758">                addActionError(getText(&quot;managePlansAction.err.no_access_to_view_plan&quot;));</span>
+<span class="nc" id="L759">                return ERROR;</span>
+            }
+        }
+
+<span class="fc" id="L763">        getTemplateMetricsWithHistory();</span>
+
+<span class="fc bfc" id="L765" title="All 2 branches covered.">        if (pHPlan.getCreatorId() != null) {</span>
+<span class="fc" id="L766">            creator = userManager.getPKBPerson(pHPlan.getCreatorId());</span>
+        }
+<span class="fc" id="L768">        createdDate = pHPlan.getCreationDate().toInstant();</span>
+<span class="fc" id="L769">        activeVersionCount = (long) pHPlan.getActiveVersionCount();</span>
+
+<span class="pc bpc" id="L771" title="1 of 4 branches missed.">        if ((pHPlan.getLastEditedOn() != null) &amp;&amp; pHPlan.getLastEditedOn().after(pHPlan.getCreationDate())) {</span>
+<span class="fc bfc" id="L772" title="All 4 branches covered.">            if ((pHPlan.getCreatorId() != null) &amp;&amp; pHPlan.getCreatorId().equals(pHPlan.getLastEditorId())) {</span>
+<span class="fc" id="L773">                editor = creator;</span>
+<span class="fc" id="L774">                lastEditedDate = pHPlan.getLastEditedOn().toInstant();</span>
+            } else {
+<span class="fc" id="L776">                editor = userManager.getPKBPerson(pHPlan.getLastEditorId());</span>
+<span class="fc" id="L777">                lastEditedDate = pHPlan.getLastEditedOn().toInstant();</span>
+            }
+        } else {
+<span class="fc" id="L780">            editor = null;</span>
+<span class="fc" id="L781">            lastEditedDate = null;</span>
+        }
+<span class="fc" id="L783">        initViewPlanUrl();</span>
+<span class="fc" id="L784">        return Action.SUCCESS;</span>
+    }
+
+    private void initViewPlanUrl() {
+<span class="fc" id="L788">        ActionMapping actionMapping = ServletActionContext.getActionMapping();</span>
+<span class="fc" id="L789">        viewPlanLink = config.getBaseURL() + actionMapping.getNamespace() + &quot;/&quot; + actionMapping.getName() + &quot;.&quot; + actionMapping.getExtension() +</span>
+<span class="fc" id="L790">                &quot;?&quot; + request.getQueryString();</span>
+<span class="fc" id="L791">    }</span>
+
+    public String viewPlanHistory() {
+<span class="fc" id="L794">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L795">        logMethod(loggedInEHRRequestContext, &quot;viewPlanHistory&quot;);</span>
+
+<span class="fc" id="L797">        noHeaderRequired = true;</span>
+
+<span class="fc" id="L799">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L801">        Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="fc" id="L802">        List&lt;PHPlan&gt; planHistory = retrievePhPlanHistory(loggedInEHRRequestContext, patientAccountId, CREATOR_DETAILS, LAST_EDITOR_DEATILS);</span>
+<span class="fc" id="L803">        var deletableByUniqueIdMap = planManager.planIsDeletableBy(planHistory, loggedInUser.getId());</span>
+<span class="fc" id="L804">        plans = planHistory.stream()</span>
+<span class="fc" id="L805">                .map(ph -&gt; phPlanToPlanDtoConverter.convert(ph, loggedInUser, false, planManager.getPlanDeletableProvider(deletableByUniqueIdMap)))</span>
+<span class="fc" id="L806">                .collect(toList());</span>
+<span class="fc" id="L807">        return Action.SUCCESS;</span>
+    }
+
+    private List&lt;PHPlan&gt; retrievePhPlanHistory(LoggedInEHRRequestContext requestContext, Long patientAccountId, PHPlan.Lazy... fields) {
+<span class="fc" id="L811">        return planTransformer.transformPlan(planManager.getPHPlanHistory(requestContext, patientAccountId, selectedPlanUniqueId, fields));</span>
+    }
+
+    public String refreshEditedPlan() throws Exception {
+<span class="nc" id="L815">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="nc" id="L816">        logMethod(loggedInEHRRequestContext, &quot;refreshEditedPlan&quot;);</span>
+
+<span class="nc" id="L818">        getPlan(loggedInEHRRequestContext, true);</span>
+<span class="nc" id="L819">        PKBPerson editor = userManager.getPKBPerson(pHPlan.getLastEditorId());</span>
+<span class="nc" id="L820">        List&lt;Object&gt; args = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L821">        args.add(0, editor.getTitle());</span>
+<span class="nc" id="L822">        args.add(1, editor.getFirstName());</span>
+<span class="nc" id="L823">        args.add(2, editor.getLastName());</span>
+<span class="nc" id="L824">        addActionMessage(getText(&quot;managePlansAction.msg.plan_updated_by&quot;, args));</span>
+<span class="nc" id="L825">        return EDIT;</span>
+    }
+
+    private String getPlan(LoggedInEHRRequestContext loggedInEHRRequestContext, boolean edit) {
+        try {
+<span class="fc" id="L830">            ensureUsersLoaded(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L832">            patientId = patient.getId();</span>
+
+<span class="fc" id="L834">            Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+
+<span class="fc" id="L836">            loadPlandata(patientAccountId, patientId, loggedInUser.getId(), loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L838">            patientFullName = patient.getTitle() + &quot; &quot; + patient.getFirstName() + &quot; &quot; + patient.getLastName();</span>
+
+<span class="fc bfc" id="L840" title="All 2 branches covered.">            if (edit) {</span>
+                //TODO - this gets the latest plan by date for the given uniqueId. Should we be rather getting highest version for the given uniqueId?
+<span class="fc" id="L842">                pHPlan = retrievePhPlan(patientAccountId, selectedPlanUniqueId, loggedInEHRRequestContext);</span>
+<span class="fc" id="L843">                pHPlan.setVersion(pHPlan.getVersion() + 1);</span>
+<span class="fc" id="L844">                planId = pHPlan.getId(); // PATIENTS planId</span>
+<span class="fc bfc" id="L845" title="All 2 branches covered.">                if (loggedInEHRRequestContext.isPatient()) {</span>
+<span class="fc" id="L846">                    pHPlan.setApprovalStatus(ApprovalStatus.AWAITING_APPROVAL);</span>
+                }
+
+            } else {
+<span class="fc" id="L850">                pHPlan = retrievePhPlan(getLoggedInEHRRequestContext(), patientAccountId);</span>
+            }
+<span class="fc" id="L852">            logPlan(&quot;getPlan&quot;, pHPlan.getId(), pHPlan, getLoggedInEHRRequestContext());</span>
+
+<span class="fc" id="L854">            populateDisplayFieldFromPlan(edit);</span>
+
+<span class="fc" id="L856">            Long planTemplateId = pHPlan.getTemplateId();</span>
+
+<span class="fc" id="L858">            templateAttachments = planTemplateManager.getTemplateAttachments(planTemplateId);</span>
+<span class="fc" id="L859">            planAttachments = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L860">            attachments = new LinkedList&lt;&gt;();</span>
+<span class="fc" id="L861">            wantedAttachmentIds = new TreeSet&lt;&gt;();</span>
+<span class="fc bfc" id="L862" title="All 2 branches covered.">            for (PHPlanAttachment pkbAttachment : planManager.getAttachments(planId, getLoggedInEHRRequestContext(), patientAccountId)) {</span>
+
+<span class="fc" id="L864">                boolean isTemplateAttachment = false;</span>
+<span class="pc bpc" id="L865" title="1 of 2 branches missed.">                if (templateAttachments != null) {</span>
+<span class="fc bfc" id="L866" title="All 2 branches covered.">                    for (TemplateAttachment templateAttachment : templateAttachments) {</span>
+<span class="fc bfc" id="L867" title="All 2 branches covered.">                        if (templateAttachment.getName().equals(pkbAttachment.getName()) &amp;&amp;</span>
+<span class="pc bpc" id="L868" title="1 of 2 branches missed.">                                templateAttachment.getLabel().equals(pkbAttachment.getLabel())) {</span>
+<span class="fc" id="L869">                            isTemplateAttachment = true;</span>
+<span class="fc" id="L870">                            templateAttachment = ImmutableTemplateAttachment.copyOf(templateAttachment).withChecked(true);</span>
+<span class="fc" id="L871">                            wantedAttachmentIds.add(templateAttachment.getId());</span>
+<span class="fc" id="L872">                            break;</span>
+                        }
+<span class="fc" id="L874">                    }</span>
+                }
+
+<span class="fc bfc" id="L877" title="All 2 branches covered.">                if (!isTemplateAttachment) {</span>
+                    //these are user-uploaded attachments specific to this plan:
+<span class="fc" id="L879">                    attachments.add(pkbAttachment.getAttachment());</span>
+                }
+                // These are all the templateAttachments for a plan
+                // Used by viewPlan functionality
+<span class="fc" id="L883">                planAttachments.add(pkbAttachment);</span>
+
+<span class="fc" id="L885">            }</span>
+
+<span class="fc" id="L887">            fillPrivacyFlagsFrom(pHPlan);</span>
+<span class="fc bfc" id="L888" title="All 2 branches covered.">            actionPlanShow = !hasAttachmentAsActionPlanContent();</span>
+
+<span class="fc" id="L890">            return Action.SUCCESS;</span>
+<span class="nc" id="L891">        } catch (Exception exception) {</span>
+<span class="nc" id="L892">            throw new PKBException(&quot;Exception while getting plan-&quot; + planId + &quot; for patient-&quot; + patientId, exception);</span>
+        }
+    }
+
+    private PHPlan retrievePhPlan(Long patientAccountId, UUID selectedPlanUniqueId, LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc" id="L897">        return planTransformer.transformPlan(planManager.getPHPlanForAccountId(selectedPlanUniqueId, loggedInEHRRequestContext, patientAccountId));</span>
+    }
+
+    private void loadPlandata(Long patientAccountId, Long idOfPatient, long loggedInUserId, LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc" id="L901">        List&lt;Allergy&gt; allergies = allergyManager</span>
+<span class="fc" id="L902">                .getAllergies(loggedInEHRRequestContext, loggedInUserId, patientAccountId, 0, 0, false/*includeNegativeAllergies*/);</span>
+<span class="fc" id="L903">        List&lt;DataWithUIPermissions&lt;Allergy&gt;&gt; allergiesWithPermissions = allergies.stream().map(DataWithUIPermissions::new).collect(toList());</span>
+<span class="fc" id="L904">        allergyGroups = allergyGroupTransformer.groupByReverseLastActiveDateAndAlphabetical(allergiesWithPermissions);</span>
+<span class="fc" id="L905">        currentMedications = fetchAndSortMedicationDtos(loggedInUserId, patientAccountId, loggedInEHRRequestContext);</span>
+<span class="fc" id="L906">        currentDiagnosisGroups = loadCurrentDiagnosisGroups(idOfPatient, patientAccountId, loggedInEHRRequestContext);</span>
+<span class="fc" id="L907">    }</span>
+
+    private void getTemplateMetricsWithHistory() {
+<span class="fc" id="L910">        List&lt;TemplateMetric&gt; templateMetrics = pHPlan.getMetrics();</span>
+
+<span class="pc bpc" id="L912" title="1 of 4 branches missed.">        if ((templateMetrics != null) &amp;&amp; !templateMetrics.isEmpty()) {</span>
+<span class="fc" id="L913">            displayMetrics = true;</span>
+        } else {
+<span class="fc" id="L915">            displayMetrics = false;</span>
+<span class="fc" id="L916">            return;</span>
+        }
+<span class="fc" id="L918">        List&lt;MeasurementTypeId&gt; measurements = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L919">        List&lt;Long&gt; symptomIds = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L920">        List&lt;Long&gt; testIds = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L922" title="All 2 branches covered.">        for (TemplateMetric metric : templateMetrics) {</span>
+<span class="fc" id="L923">            long metricId = metric.getMetricId();</span>
+<span class="pc bpc" id="L924" title="1 of 4 branches missed.">            switch (metric.getMetricType()) {</span>
+                case MEASUREMENT:
+<span class="fc" id="L926">                    measurements.add(MeasurementTypeId.ofPredefinedTypeId(metricId));</span>
+
+<span class="fc bfc" id="L928" title="All 2 branches covered.">                    if (metricId == PredefinedMeasurementType.BMI.id().asInternalId().get()) {</span>
+<span class="fc" id="L929">                        measurements.add(PredefinedMeasurementType.HEIGHT.id());</span>
+<span class="fc" id="L930">                        measurements.add(PredefinedMeasurementType.WEIGHT.id());</span>
+                    }
+                    break;
+                case SYMPTOM:
+<span class="fc" id="L934">                    symptomIds.add(metricId);</span>
+<span class="fc" id="L935">                    break;</span>
+                case LAB_TEST:
+<span class="fc" id="L937">                    testIds.add(metricId);</span>
+<span class="fc" id="L938">                    break;</span>
+                default:
+                    break;
+            }
+<span class="fc" id="L942">        }</span>
+
+<span class="fc bfc" id="L944" title="All 2 branches covered.">        if (!measurements.isEmpty()) {</span>
+<span class="fc" id="L945">            getMeasurementHistory(measurements);</span>
+        }
+
+<span class="fc bfc" id="L948" title="All 2 branches covered.">        if (!symptomIds.isEmpty()) {</span>
+<span class="fc" id="L949">            getSymptoms(symptomIds);</span>
+        }
+
+<span class="fc bfc" id="L952" title="All 2 branches covered.">        if (!testIds.isEmpty()) {</span>
+<span class="fc" id="L953">            getTests(testIds);</span>
+        }
+<span class="fc" id="L955">    }</span>
+
+    private void getTests(List&lt;Long&gt; testIds) {
+<span class="pc bpc" id="L958" title="2 of 4 branches missed.">        if ((testIds == null) || testIds.isEmpty()) {</span>
+<span class="nc" id="L959">            return;</span>
+        }
+
+        try {
+            // Show 12 months worth of test data
+<span class="fc" id="L964">            testHistoryList = testManager.getTestHistoryList(getLoggedInEHRRequestContext(), patientId, testIds, 12, EXCLUDE_DELETED);</span>
+            // Retrieve the i18n name for the LoincTest and set it back into the object
+<span class="fc bfc" id="L966" title="All 2 branches covered.">            for (TestHistoryDTO testHistory : testHistoryList) {</span>
+<span class="fc" id="L967">                LoincTest loincTest = testHistory.getLoincTest();</span>
+<span class="pc bpc" id="L968" title="1 of 2 branches missed.">                if (loincTest != null) {</span>
+<span class="fc" id="L969">                    loincTest.setNameLocal(getText(loincTest.getNameKey()));</span>
+                }
+<span class="fc" id="L971">            }</span>
+
+            // Sort alphabetically post-18n
+<span class="fc" id="L974">            testHistoryList.sort(comparing(dto -&gt; dto.getLoincTest().getName()));</span>
+<span class="nc" id="L975">        } catch (PKBException e) {</span>
+<span class="nc" id="L976">            addActionError(getText(&quot;managePlansAction.err.getting_test_results&quot;));</span>
+<span class="nc" id="L977">            LOGGER.error(&quot;failed getting test metrics for plan {}&quot;, planId, e);</span>
+<span class="fc" id="L978">        }</span>
+<span class="fc" id="L979">    }</span>
+
+    private void getSymptoms(List&lt;Long&gt; symptoms) {
+<span class="fc" id="L982">        rangeDetails = RangeDetails.base().update(rangeWanted);</span>
+
+<span class="fc" id="L984">        boolean endToday = true;</span>
+<span class="fc" id="L985">        Calendar lastDayOfRange = timelineChartUtil.getLastDayOfRange(rangeDetails.getPeriod(), rangeDetails.getPeriodsBack(), endToday);</span>
+<span class="fc" id="L986">        Calendar firstDayOfRange = timelineChartUtil.getFirstDayOfRange(rangeDetails.getPeriod(), rangeDetails.getPeriodsToDisplay(), lastDayOfRange);</span>
+
+        // there's one history DTO per symptom; inside that is the list of reports.
+        try {
+<span class="fc" id="L990">            Long patientAccountId = userManager.getDefaultAccountId(patientId);</span>
+<span class="fc" id="L991">            symptomHistoryList = symptomReportManager.getSymptomReportHistoryList(getLoggedInEHRRequestContext(), symptoms, patientId, patientAccountId, firstDayOfRange.toInstant());</span>
+<span class="pc bpc" id="L992" title="1 of 2 branches missed.">            if (symptomHistoryList != null) {</span>
+<span class="fc" id="L993">                chartHeadings = timelineChartUtil.populateChartHeadings(firstDayOfRange, lastDayOfRange, rangeDetails.getRange(), getLocale(),</span>
+                        true);
+<span class="fc" id="L995">                chartRows = timelineChartUtil.populateSymptomRows(firstDayOfRange, lastDayOfRange, rangeDetails.getRange(), symptomHistoryList,</span>
+<span class="fc" id="L996">                        getLocale(), getDateAtTimeOutputFormatter().getZone());</span>
+            }
+<span class="nc" id="L998">        } catch (PKBException e) {</span>
+<span class="nc" id="L999">            addActionError(getText(&quot;managePlansAction.err.error_getting_symptoms&quot;));</span>
+<span class="nc" id="L1000">            LOGGER.error(&quot;Error getting symptom metrics for plan {}&quot;, planId, e);</span>
+<span class="fc" id="L1001">        }</span>
+<span class="fc" id="L1002">    }</span>
+
+    public String getSymptomsRangeText() {
+<span class="fc bfc" id="L1005" title="All 2 branches covered.">        if (rangeWanted == null) {</span>
+<span class="fc" id="L1006">            return getText(&quot;viewPlan.txt.6m&quot;);</span>
+        }
+
+<span class="fc" id="L1009">        return Range.findKeyByName(rangeWanted)</span>
+<span class="fc" id="L1010">                .map(this::getText)</span>
+<span class="pc" id="L1011">                .orElseThrow(() -&gt; new RuntimeException(&quot;Symptoms range wanted is not supported&quot;));</span>
+    }
+
+    private void getMeasurementHistory(List&lt;MeasurementTypeId&gt; measurements) {
+<span class="fc" id="L1015">        Instant sixMonthsAgo = dateTimeService.nowLocalDateTime().minusMonths(6L).atZone(APPLICATION_TZ).toInstant();</span>
+<span class="fc" id="L1016">        DateFilterDTO dateFilterDTO = new DateFilterDTO();</span>
+<span class="fc" id="L1017">        dateFilterDTO.setFromDate(sixMonthsAgo);</span>
+<span class="fc" id="L1018">        List&lt;MeasurementHistoryDTO&gt; measurementHistoryList = measurementManager.getMeasurementHistoryList(</span>
+<span class="fc" id="L1019">                getLoggedInEHRRequestContext(), measurements, patientId, dateFilterDTO, loggedInUserUtil.getLoggedInPerson());</span>
+<span class="fc" id="L1020">        measurementHistoryList.forEach(measurementHistory -&gt;</span>
+<span class="fc" id="L1021">                measurementHistory.getMeasurementList().sort(comparing(MeasurementDTO::getMeasureDate).thenComparing(MeasurementDTO::getId, nullsLast(naturalOrder()))));</span>
+<span class="fc" id="L1022">        measurementOverviewList = measurementMapper.historyToOverviewDtos(measurementHistoryList,</span>
+<span class="fc" id="L1023">                contextUserUtil.getContextUserId(), getLocale());</span>
+
+<span class="fc" id="L1025">    }</span>
+
+    private void populateDisplayFieldFromPlan(boolean edit)
+            throws Exception {
+<span class="fc" id="L1029">        planName = pHPlan.getName();</span>
+<span class="fc" id="L1030">        planId = pHPlan.getId();</span>
+<span class="fc" id="L1031">        selectedPlanUniqueId = pHPlan.getBaseFields().getUniqueId();</span>
+<span class="fc" id="L1032">        version = pHPlan.getVersion();</span>
+<span class="pc bpc" id="L1033" title="1 of 2 branches missed.">        if (pHPlan.getLastEditedOn() != null) {</span>
+<span class="fc" id="L1034">            updateLastEditedTimeStamp();</span>
+        } else {
+<span class="nc" id="L1036">            lastEditedTimestamp = getText(&quot;managePlansAction.txt.not_provided&quot;);</span>
+        }
+
+<span class="pc bpc" id="L1039" title="1 of 2 branches missed.">        if (pHPlan.getApprovalStatus() != null) {</span>
+<span class="fc" id="L1040">            approvalStatus = pHPlan.getApprovalStatus().toString();</span>
+<span class="fc" id="L1041">            approverId = pHPlan.getApproverId();</span>
+<span class="pc bpc" id="L1042" title="1 of 2 branches missed.">            if (approverId != null) {</span>
+<span class="nc" id="L1043">                approver = userManager.getPKBPerson(approverId);</span>
+            }
+        }
+<span class="fc" id="L1046">        creatorId = pHPlan.getCreatorId();</span>
+<span class="fc" id="L1047">        editable = pHPlan.getEditableStatus().toString();</span>
+<span class="fc bfc" id="L1048" title="All 2 branches covered.">        if (edit) {</span>
+<span class="fc" id="L1049">            var review = pHPlan.getReviewDate();</span>
+<span class="fc bfc" id="L1050" title="All 2 branches covered.">            if (review != null) {</span>
+<span class="fc" id="L1051">                reviewDate = dateToString(review, dateFormat);</span>
+            }
+<span class="fc" id="L1053">        } else {</span>
+<span class="fc bfc" id="L1054" title="All 2 branches covered.">            reviewDateDisplay = pHPlan.getReviewDate() == null ? null : pHPlan.getReviewDate().toInstant();</span>
+        }
+
+<span class="fc" id="L1057">        planTemplateId = pHPlan.getTemplateId();</span>
+<span class="fc bfc" id="L1058" title="All 2 branches covered.">        if (planTemplateId != null) {</span>
+            // Not an empty template
+<span class="fc" id="L1060">            planTemplateName = planTemplateManager.getPlainTemplate(planTemplateId)</span>
+<span class="fc" id="L1061">                    .map(com.pkb.datamodel.plantemplate.PHPlanTemplate::getName)</span>
+<span class="fc" id="L1062">                    .orElseGet(() -&gt; {</span>
+<span class="nc" id="L1063">                        LOGGER.info(&quot;No record found for templateId-{}&quot;, planTemplateId);</span>
+<span class="nc" id="L1064">                        return &quot;&quot;;</span>
+                    });
+        } else {
+<span class="fc" id="L1067">            planTemplateName = getText(&quot;managePlansAction.txt.empty&quot;);</span>
+        }
+
+<span class="fc" id="L1070">        List&lt;PlanField&gt; planFields = pHPlan.getPlanFields();</span>
+        String text;
+<span class="fc bfc" id="L1072" title="All 2 branches covered.">        if (planFields != null) {</span>
+<span class="fc bfc" id="L1073" title="All 2 branches covered.">            for (PlanField planField : planFields) {</span>
+<span class="fc" id="L1074">                text = planField.getText();</span>
+<span class="fc bfc" id="L1075" title="All 2 branches covered.">                if (isBlank(text)) {</span>
+<span class="fc" id="L1076">                    text = &quot;&quot;;</span>
+<span class="fc bfc" id="L1077" title="All 2 branches covered.">                } else if (edit) {</span>
+<span class="fc" id="L1078">                    text = customStyledHtmlFilter.filter(text);</span>
+<span class="fc bfc" id="L1079" title="All 2 branches covered.">                } else if (text.startsWith(&quot;&lt;div&quot;)) {</span>
+<span class="fc" id="L1080">                    text = customStyledHtmlFilter.filter(text);</span>
+<span class="fc" id="L1081">                    text = planWebBean.expandHtmlWidgets(text);</span>
+                } else {
+<span class="fc" id="L1083">                    text = newLineToBR(text);</span>
+<span class="fc" id="L1084">                    text = recoverAmpersand(text);</span>
+                }
+<span class="pc bpc" id="L1086" title="1 of 5 branches missed.">                switch (planField.getLabel()) {</span>
+                    case ACTION_PLAN:
+<span class="fc" id="L1088">                        actionPlanText = text;</span>
+<span class="fc" id="L1089">                        break;</span>
+                    case GREEN:
+<span class="fc" id="L1091">                        greenText = text;</span>
+<span class="fc" id="L1092">                        break;</span>
+                    case AMBER:
+<span class="fc" id="L1094">                        amberText = text;</span>
+<span class="fc" id="L1095">                        break;</span>
+                    case RED:
+<span class="fc" id="L1097">                        redText = text;</span>
+                        break;
+                }
+<span class="fc" id="L1100">            }</span>
+        }
+<span class="fc" id="L1102">    }</span>
+
+    public String autoSavePlan() {
+<span class="fc" id="L1105">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L1106">        logMethod(loggedInEHRRequestContext, &quot;autoSavePlan&quot;);</span>
+
+<span class="fc" id="L1108">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+
+        try {
+<span class="fc" id="L1111">            PlanAutosave plan = PLAN_READER.readValue(json);</span>
+<span class="fc" id="L1112">            BeanUtils.copyProperties(this, plan);</span>
+            // check if someone else has edited this plan since we started our draft:
+            // if there's a latest version with a different edit date than we expect from our last autosave
+<span class="fc" id="L1115">            Optional&lt;PHPlan&gt; dbLatestVersion = Optional.empty();</span>
+<span class="fc" id="L1116">            String dbLastEditTimestamp = null;</span>
+
+<span class="pc bpc" id="L1118" title="1 of 2 branches missed.">            if (selectedPlanUniqueId != null) {</span>
+<span class="fc" id="L1119">                dbLatestVersion = planManager.findPHPlanForAccountId(selectedPlanUniqueId, loggedInEHRRequestContext, patient.getId(), false/*includeDeleted*/);</span>
+<span class="pc bpc" id="L1120" title="1 of 2 branches missed.">                if (dbLatestVersion.isPresent()) {</span>
+
+<span class="nc" id="L1122">                    dbLastEditTimestamp = timestampFormat.format(dbLatestVersion.get().getLastEditedOn().toInstant());</span>
+                }
+            }
+
+<span class="pc bpc" id="L1126" title="3 of 4 branches missed.">            if (dbLatestVersion.isEmpty() || dbLastEditTimestamp.equals(lastEditedTimestamp)) {</span>
+<span class="fc" id="L1127">                LoggedInEHRRequestContext requestContext = loggedInEHRRequestContext.withAccessLogSuppressed(true);</span>
+<span class="fc" id="L1128">                loadPlanAndUpdateFromStruts(PlanStatus.INDRAFT, requestContext);</span>
+<span class="fc" id="L1129">                performSave(PlanStatus.INDRAFT, ALL, requestContext);</span>
+
+<span class="fc" id="L1131">                String newTimestamp = timestampFormat.format(pHPlan.getLastEditedOn().toInstant());</span>
+
+<span class="fc" id="L1133">                byte[] resultArray = (newTimestamp).getBytes(UTF_8);</span>
+<span class="fc" id="L1134">                autoSaveResult = new ByteArrayInputStream(resultArray);</span>
+<span class="fc" id="L1135">            } else {</span>
+                // edit date doesn't match what we expect = simultaneous edit by someone else
+                // this is bad for the user (they lose changes!) so log what happened in case we need to debug
+<span class="nc" id="L1138">                LOGGER.warn(&quot;Forcing plan page to refresh! {}/{}/ in {}: {}&quot;,</span>
+                        selectedPlanUniqueId, lastEditedTimestamp, dbLatestVersion, dbLastEditTimestamp);
+<span class="nc" id="L1140">                autoSaveResult = new ByteArrayInputStream(&quot;refresh&quot;.getBytes(UTF_8));</span>
+            }
+
+<span class="nc" id="L1143">        } catch (Exception e) {</span>
+<span class="nc" id="L1144">            LOGGER.error(&quot;problem with JSON autosave for {}&quot;, loggedInEHRRequestContext.getAccessingUserId(), e);</span>
+<span class="nc" id="L1145">            autoSaveResult = new ByteArrayInputStream(Action.ERROR.getBytes(UTF_8));</span>
+<span class="fc" id="L1146">        }</span>
+
+<span class="fc" id="L1148">        return Action.SUCCESS;</span>
+    }
+
+    public String saveDraftPlan() throws IOException {
+<span class="nc" id="L1152">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext().withAccessLogSuppressed(true);</span>
+<span class="nc" id="L1153">        logMethod(loggedInEHRRequestContext, &quot;saveDraftPlan&quot;);</span>
+<span class="nc" id="L1154">        loadPlanAndUpdateFromStruts(PlanStatus.INDRAFT, loggedInEHRRequestContext);</span>
+<span class="nc" id="L1155">        performSave(PlanStatus.INDRAFT, ALL, loggedInEHRRequestContext);</span>
+<span class="nc" id="L1156">        return &quot;editReload&quot;;</span>
+    }
+
+    public String savePlan() throws IOException {
+<span class="fc" id="L1160">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext().withAccessLogSuppressed(true);</span>
+<span class="fc" id="L1161">        logMethod(loggedInEHRRequestContext, &quot;savePlan&quot;);</span>
+
+<span class="fc bfc" id="L1163" title="All 2 branches covered.">        if (doPresaveChecks()) {</span>
+<span class="fc" id="L1164">            refillPrivacyFlags();</span>
+<span class="fc bfc" id="L1165" title="All 2 branches covered.">            noHeaderRequired = !createPlan;</span>
+<span class="fc" id="L1166">            return EDIT;</span>
+        }
+<span class="fc" id="L1168">        loadPlanAndUpdateFromStruts(PlanStatus.ACTIVE, loggedInEHRRequestContext);</span>
+<span class="fc" id="L1169">        performSave(PlanStatus.ACTIVE, ALL, loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L1171">        return RELOAD;</span>
+    }
+
+    private boolean doPresaveChecks() {
+<span class="fc bfc" id="L1175" title="All 2 branches covered.">        if (!validateFields()) {</span>
+<span class="pc bpc" id="L1176" title="1 of 2 branches missed.">            if (!EMPTY_TEMPLATE_ID.equals(planTemplateId)) {</span>
+<span class="fc" id="L1177">                Optional&lt;PHPlanTemplate&gt; planTemplate = planTemplateManager.getPHPlanTemplateOldStyleWithMetrics(planTemplateId);</span>
+<span class="fc" id="L1178">                loadMetrics(planTemplate.map(PHPlanTemplate::getMetrics).orElse(null), false);</span>
+            }
+<span class="fc" id="L1180">            return true;</span>
+        }
+
+<span class="fc bfc" id="L1183" title="All 4 branches covered.">        if (!EMPTY_TEMPLATE_ID.equals(planTemplateId) &amp;&amp; !validateMetrics()) {</span>
+<span class="fc" id="L1184">            Optional&lt;PHPlanTemplate&gt; planTemplate = planTemplateManager.getPHPlanTemplateOldStyleWithMetrics(planTemplateId);</span>
+<span class="fc" id="L1185">            loadMetrics(planTemplate.map(PHPlanTemplate::getMetrics).orElse(null), false);</span>
+<span class="fc" id="L1186">            return true;</span>
+        }
+<span class="fc" id="L1188">        return false;</span>
+    }
+
+    public String savePlanAndFreeze() throws IOException {
+<span class="nc" id="L1192">        LoggedInEHRRequestContext loggedInEHRRequestContext = getLoggedInEHRRequestContext().withAccessLogSuppressed(true);</span>
+<span class="nc" id="L1193">        logMethod(loggedInEHRRequestContext, &quot;savePlanAndFreeze&quot;);</span>
+
+<span class="nc bnc" id="L1195" title="All 2 branches missed.">        if (doPresaveChecks()) {</span>
+<span class="nc" id="L1196">            return EDIT;</span>
+        }
+
+<span class="nc" id="L1199">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+<span class="nc" id="L1200">        loadPlanAndUpdateFromStruts(PlanStatus.ACTIVE, loggedInEHRRequestContext);</span>
+<span class="nc" id="L1201">        performSave(PlanStatus.ACTIVE, PHPlan.EditableStatus.CREATOR, loggedInEHRRequestContext);</span>
+
+<span class="nc" id="L1203">        return RELOAD;</span>
+    }
+
+    private void loadPlanAndUpdateFromStruts(PlanStatus status, @NotNull LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc" id="L1207">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+<span class="fc" id="L1208">        Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="fc" id="L1209">        pHPlan = retrievePhPlan(loggedInEHRRequestContext, patientAccountId);</span>
+<span class="fc" id="L1210">        logPlan(&quot;loadPlanAndUpdateFromStruts&quot;, pHPlan.getId(), pHPlan, loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L1212">        populatePlanFieldsFromStruts(status, loggedInEHRRequestContext);</span>
+        // Get the list of selected templateAttachments
+<span class="fc" id="L1214">        wantedAttachmentIds = new TreeSet&lt;&gt;();</span>
+<span class="fc" id="L1215">        attachments = generateAttachmentsFromInputs();</span>
+
+        // Why get parameter values from the request like this?
+<span class="fc" id="L1218">        String[] attachmentWanted = getRequest().getParameterValues(&quot;attachmentWanted&quot;);</span>
+
+<span class="fc bfc" id="L1220" title="All 2 branches covered.">        if (attachmentWanted != null) {</span>
+<span class="fc bfc" id="L1221" title="All 2 branches covered.">            for (String anAttachmentWanted : attachmentWanted) {</span>
+<span class="fc" id="L1222">                wantedAttachmentIds.add(Long.parseLong(anAttachmentWanted));</span>
+            }
+        }
+        // Set consent
+<span class="fc" id="L1226">        fillPrivacyFlagIfSetIn(pHPlan);</span>
+<span class="fc" id="L1227">    }</span>
+
+    private PHPlan retrievePhPlan(LoggedInEHRRequestContext context, Long patientAccountId) {
+<span class="fc" id="L1230">        return planTransformer.transformPlan(planManager.getPHPlanForUserIdAccountIdPlanId(context, context.getAccessingUserId(), patientAccountId, planId, PHPlan.Lazy.ACTIVE_VERSION_COUNT));</span>
+    }
+
+    private void performSaveAndUpdateLastEditedTimestamp(PlanStatus status, PHPlan.EditableStatus editableStatus, LoggedInEHRRequestContext requestContext) throws IOException {
+<span class="nc" id="L1234">        performSave(status, editableStatus, requestContext);</span>
+<span class="nc" id="L1235">        updateLastEditedTimeStamp();</span>
+<span class="nc" id="L1236">    }</span>
+
+    private void performSave(PlanStatus status, PHPlan.EditableStatus editableStatus, LoggedInEHRRequestContext requestContext) throws IOException {
+
+<span class="fc" id="L1240">        ensureUsersLoaded(requestContext);</span>
+
+<span class="fc" id="L1242">        Instant rightNow = dateTimeService.now();</span>
+<span class="fc" id="L1243">        pHPlan.setStatus(status);</span>
+<span class="fc" id="L1244">        pHPlan.setLastEditedOn(Date.from(rightNow));</span>
+<span class="fc" id="L1245">        pHPlan.setLastEditorId(Long.parseLong(loggedInUser.getIdString()));</span>
+<span class="fc" id="L1246">        pHPlan.setEditableStatus(editableStatus);</span>
+        // If plan is being saved by a clinician it does not need approval
+<span class="fc bfc" id="L1248" title="All 2 branches covered.">        if (!loggedInUser.isPatient()) {</span>
+<span class="fc" id="L1249">            pHPlan.setApprovalStatus(ApprovalStatus.NULL);</span>
+<span class="fc" id="L1250">            pHPlan.setApproverId(null);</span>
+        }
+
+<span class="pc bpc" id="L1253" title="1 of 2 branches missed.">        if (attachments != null) {</span>
+<span class="fc" id="L1254">            LOGGER.info(&quot;planSpecificAttachments={}&quot;, attachments.size());</span>
+        }
+
+        // Save metrics
+<span class="fc" id="L1258">        List&lt;SymptomReportDTO&gt; symptomList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L1259">        List&lt;MeasurementDTO&gt; measurementList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L1260">        List&lt;TestResultDTO&gt; testList = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L1262" title="All 2 branches covered.">        if (status == PlanStatus.INDRAFT) {</span>
+<span class="fc" id="L1263">            LOGGER.info(&quot;avoiding saving metrics for draft plan&quot;);</span>
+        } else {
+
+<span class="fc" id="L1266">            getSymptomReportDtos().forEach(symptomList::add);</span>
+<span class="fc" id="L1267">            getMeasurementDtos(requestContext).forEach(measurementList::add);</span>
+<span class="fc" id="L1268">            getTestResultDtos(requestContext).forEach(testList::add);</span>
+
+        }
+
+<span class="fc bfc" id="L1272" title="All 2 branches covered.">        Activity.Action action = createPlan ? Activity.Action.ADDED_PLAN : Activity.Action.UPDATED_PLAN;</span>
+
+        // This can no longer participate in a single transaction whilst in both EJBs and Spring JPA repositories
+<span class="fc" id="L1275">        planId = planManager.savePlan(new SourceDetails(getEHRRequestContext()),</span>
+<span class="fc" id="L1276">                        requestContext, patient.getId(),</span>
+                        loggedInUser,
+<span class="fc" id="L1278">                        planTransformer.transformPlanView(pHPlan),</span>
+                        wantedAttachmentIds,
+                        attachments)
+<span class="fc" id="L1281">                .getCarePlanId(); // Nb planId of PATIENT copy</span>
+
+<span class="fc" id="L1283">        planManager.transactional(() -&gt; {</span>
+<span class="fc bfc" id="L1284" title="All 2 branches covered.">            if (isNotEmpty(symptomList)) {</span>
+<span class="fc" id="L1285">                symptomReportManager.saveSymptomReports(requestContext, symptomList, patient.getId());</span>
+            }
+
+<span class="fc bfc" id="L1288" title="All 2 branches covered.">            if (isNotEmpty(measurementList)) {</span>
+<span class="fc" id="L1289">                measurementManager.saveMeasurements(requestContext, measurementList, patient.getId());</span>
+            }
+
+<span class="fc bfc" id="L1292" title="All 2 branches covered.">            if (isNotEmpty(testList)) {</span>
+<span class="fc" id="L1293">                testManager.saveTestResults(requestContext, testList, patient.getId());</span>
+            }
+
+<span class="fc" id="L1296">            participantManager.saveParticipant(requestContext.getAccessingUserId(), requestContext.getTeamId().orElse(null),</span>
+<span class="fc" id="L1297">                    pHPlan.getBaseFields().getUniqueId());</span>
+
+<span class="fc bfc" id="L1299" title="All 4 branches covered.">            if ((!loggedInUser.isPatient())</span>
+                    &amp;&amp; (status != PlanStatus.INDRAFT)) {
+<span class="fc" id="L1301">                logActivityAndNotify(action, pHPlan);</span>
+            }
+<span class="fc" id="L1303">        });</span>
+
+<span class="fc" id="L1305">        logPlan(&quot;performSave&quot;, planId, pHPlan, requestContext);</span>
+<span class="fc" id="L1306">    }</span>
+
+    private void updateLastEditedTimeStamp() {
+<span class="fc" id="L1309">        lastEditedTimestamp = timestampFormat.format(pHPlan.getLastEditedOn().toInstant());</span>
+<span class="fc" id="L1310">    }</span>
+
+    @Nullable
+    private Instant parseUpdateDateTimeToInstant() {
+<span class="pc bpc" id="L1314" title="2 of 4 branches missed.">        if (updateDate == null || updateTime == null) {</span>
+<span class="nc" id="L1315">            return null;</span>
+        }
+
+<span class="fc" id="L1318">        return LocalDateTime.of(LocalDate.parse(updateDate, dateFormat), LocalTime.parse(updateTime))</span>
+<span class="fc" id="L1319">                .atZone(getZoneIdOfLoggedInUser())</span>
+<span class="fc" id="L1320">                .toInstant();</span>
+    }
+
+    private Stream&lt;SymptomReportDTO&gt; getSymptomReportDtos() {
+<span class="fc bfc" id="L1324" title="All 2 branches covered.">        if (symptomsResultSet2Value == null) {</span>
+<span class="fc" id="L1325">            return Stream.empty();</span>
+        }
+
+<span class="fc" id="L1328">        return symptomsResultSet2Value.stream()</span>
+<span class="fc" id="L1329">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L1330">                .map(value -&gt; convertToSymptomReportDto(</span>
+                        value,
+<span class="fc" id="L1332">                        parseUpdateDateTimeToInstant(),</span>
+                        GENERAL)); //See slack conversation https://patientsknowbest.slack.com/archives/CDJSGK7QX/p1547741069036600
+    }
+
+    private Stream&lt;MeasurementDTO&gt; getMeasurementDtos(EHRRequestContext requestContext) {
+<span class="fc bfc" id="L1337" title="All 2 branches covered.">        if (measurementValue == null) {</span>
+<span class="fc" id="L1338">            return Stream.empty();</span>
+        }
+
+<span class="fc" id="L1341">        return Arrays.stream(PredefinedMeasurementType.values())</span>
+<span class="fc" id="L1342">                .map(measurementType -&gt; {</span>
+<span class="fc" id="L1343">                    MeasurementTypeId id = measurementType.id();</span>
+<span class="fc" id="L1344">                    return convertToMeasurement(</span>
+<span class="fc" id="L1345">                            measurementValue.get(id.toString()),</span>
+<span class="fc" id="L1346">                            measurementValue2.get(id.toString()),</span>
+                            id,
+<span class="fc" id="L1348">                            parseUpdateDateTimeToInstant(),</span>
+                            requestContext);
+                })
+<span class="fc" id="L1351">                .filter(Optional::isPresent)</span>
+<span class="fc" id="L1352">                .map(Optional::get);</span>
+    }
+
+    private Stream&lt;TestResultDTO&gt; getTestResultDtos(EHRRequestContext requestContext) {
+<span class="fc bfc" id="L1356" title="All 2 branches covered.">        if (MapUtils.isEmpty(testIdToResult)) {</span>
+<span class="fc" id="L1357">            return Stream.empty();</span>
+        }
+<span class="fc" id="L1359">        Map&lt;Long, LoincTest&gt; loincTests = loincManager.loadLoincTestsByIds(testIdToResult);</span>
+<span class="fc" id="L1360">        return testIdToResult.entrySet().stream()</span>
+<span class="fc" id="L1361">                .filter(loincIdToResultTextEntry -&gt; isNotBlank(loincIdToResultTextEntry.getValue()))</span>
+<span class="fc" id="L1362">                .map(loincIdToResultTextEntry -&gt; {</span>
+<span class="fc" id="L1363">                    String resultString = loincIdToResultTextEntry.getValue();</span>
+<span class="fc" id="L1364">                    TestResultDTO dto = new TestResultDTO(new SourceDetails(requestContext));</span>
+<span class="fc" id="L1365">                    dto.setLoincTestId(loincIdToResultTextEntry.getKey());</span>
+<span class="fc" id="L1366">                    dto.setTestDate(parseUpdateDateTimeToInstant());</span>
+
+<span class="fc" id="L1368">                    LoincTest test = loincTests.get(loincIdToResultTextEntry.getKey());</span>
+<span class="pc bpc" id="L1369" title="1 of 2 branches missed.">                    if (test != null) {</span>
+<span class="fc bfc" id="L1370" title="All 2 branches covered.">                        if (test.expectsTextualValue()) {</span>
+<span class="fc" id="L1371">                            dto.setTextValue(resultString);</span>
+                        } else {
+<span class="pc bpc" id="L1373" title="1 of 2 branches missed.">                            if (NumberUtils.isNumber(resultString)) {</span>
+<span class="fc" id="L1374">                                dto.setValue(new Double(resultString));</span>
+                            } else {
+<span class="nc" id="L1376">                                dto.setTextValue(resultString);</span>
+                            }
+                        }
+                    }
+<span class="fc bfc" id="L1380" title="All 2 branches covered.">                    if (isNotBlank(testIdToMinimum.get(loincIdToResultTextEntry.getKey()))) {</span>
+<span class="fc" id="L1381">                        dto.setRangeLow(Double.parseDouble(testIdToMinimum.get(loincIdToResultTextEntry.getKey())));</span>
+<span class="fc" id="L1382">                        dto.setRangeHigh(Double.parseDouble(testIdToMaximum.get(loincIdToResultTextEntry.getKey())));</span>
+                    }
+                    //TODO: add privacy dropdown for every test row
+<span class="fc" id="L1385">                    dto.getBaseFields().setPrivacyFlag(GENERAL); //See slack conversation https://patientsknowbest.slack.com/archives/CDJSGK7QX/p1547741069036600</span>
+<span class="fc" id="L1386">                    return dto;</span>
+                });
+
+    }
+
+    private void populatePlanFieldsFromStruts(PlanStatus status, EHRRequestContext context) {
+
+<span class="fc" id="L1393">        pHPlan.setStatus(status);</span>
+<span class="fc bfc" id="L1394" title="All 2 branches covered.">        pHPlan.setReviewDate(isBlank(reviewDate) ? null : Date.from(parseToInstantWithFormatter(reviewDate, dateFormat)));</span>
+
+        // set new source values (override old!)
+<span class="fc" id="L1397">        pHPlan.getSource().init(null, null, null, null, Route.WEBAPP, null);</span>
+<span class="fc" id="L1398">        pHPlan.getSource().init(context);</span>
+
+        // Get the revised plan fields
+        List&lt;PlanField&gt; planFields;
+<span class="fc" id="L1402">        Long planTemplateId = pHPlan.getTemplateId();</span>
+<span class="fc bfc" id="L1403" title="All 2 branches covered.">        if (planTemplateId != null) {</span>
+<span class="fc" id="L1404">            planFields = populateTemplateFields(planTemplateId);</span>
+        } else {
+            // Populate default fields in the plan with empty template
+<span class="fc" id="L1407">            planFields = populateDefaultFields();</span>
+        }
+
+<span class="fc" id="L1410">        pHPlan.setPlanFields(planFields);</span>
+
+        // Stash any entered data values if we are saving a draft
+
+<span class="fc bfc" id="L1414" title="All 2 branches covered.">        if (status == PlanStatus.INDRAFT) {</span>
+
+<span class="fc bfc" id="L1416" title="All 2 branches covered.">            if (pHPlan.getMetricDraftData() != null) {</span>
+<span class="fc" id="L1417">                pHPlan.getMetricDraftData().clear();</span>
+            }
+
+<span class="pc bpc" id="L1420" title="1 of 2 branches missed.">            if (symptomsResultSet2Value != null) {</span>
+<span class="fc bfc" id="L1421" title="All 2 branches covered.">                for (Symptom symptom : Symptom.values()) {</span>
+<span class="fc" id="L1422">                    long symptomId = symptom.getId();</span>
+<span class="fc" id="L1423">                    Map&lt;Long, Integer&gt; symptomIdToSeverity = getSymptomIdToSeverityMap();</span>
+<span class="fc bfc" id="L1424" title="All 2 branches covered.">                    if (symptomIdToSeverity.get(symptomId) != null) {</span>
+<span class="fc" id="L1425">                        TemplateMetric draftData = new TemplateMetric();</span>
+<span class="fc" id="L1426">                        draftData.setMetricId(symptomId);</span>
+<span class="fc" id="L1427">                        draftData.setMetricType(TemplateMetric.MetricType.SYMPTOM);</span>
+<span class="fc" id="L1428">                        draftData.setSelectedMetricId(symptomId);</span>
+<span class="fc" id="L1429">                        draftData.setMetricDateString(updateDate);</span>
+<span class="fc" id="L1430">                        draftData.setMetricTimeString(updateTime);</span>
+<span class="fc" id="L1431">                        draftData.setValue1(symptomIdToSeverity.get(symptomId).toString());</span>
+<span class="fc" id="L1432">                        pHPlan.addMetricDraftData(draftData);</span>
+                    }
+                }
+            }
+
+<span class="pc bpc" id="L1437" title="1 of 2 branches missed.">            if (measurementValue != null) {</span>
+<span class="fc bfc" id="L1438" title="All 2 branches covered.">                for (PredefinedMeasurementType measurementType : PredefinedMeasurementType.values()) {</span>
+<span class="fc" id="L1439">                    MeasurementTypeId measurementId = measurementType.id();</span>
+<span class="fc" id="L1440">                    long longId = measurementId.asInternalId().get();</span>
+<span class="fc bfc" id="L1441" title="All 2 branches covered.">                    if (isNotBlank(measurementValue.get(measurementId.toString()))) {</span>
+<span class="fc" id="L1442">                        TemplateMetric draftData = new TemplateMetric();</span>
+<span class="fc" id="L1443">                        draftData.setMetricId(</span>
+<span class="pc bpc" id="L1444" title="1 of 2 branches missed.">                                (measurementType.getType().parentType().isEmpty()) ? longId : measurementType.getType().parentType().get().id().asInternalId().get());</span>
+<span class="fc" id="L1445">                        draftData.setMetricType(TemplateMetric.MetricType.MEASUREMENT);</span>
+<span class="fc" id="L1446">                        draftData.setSelectedMetricId(longId);</span>
+<span class="fc" id="L1447">                        draftData.setMetricDateString(updateDate);</span>
+<span class="fc" id="L1448">                        draftData.setMetricTimeString(updateTime);</span>
+<span class="fc" id="L1449">                        draftData.setValue1(measurementValue.get(measurementId.toString()));</span>
+<span class="fc" id="L1450">                        draftData.setValue2(measurementValue2.get(measurementId.toString()));</span>
+<span class="fc" id="L1451">                        pHPlan.addMetricDraftData(draftData);</span>
+                    }
+                }
+            }
+
+<span class="pc bpc" id="L1456" title="1 of 2 branches missed.">            if (testIdToResult != null) {</span>
+<span class="fc bfc" id="L1457" title="All 2 branches covered.">                for (LoincTest loincTest : loincManager.getAllLoincTests()) {</span>
+<span class="fc" id="L1458">                    long testId = loincTest.getId();</span>
+<span class="fc bfc" id="L1459" title="All 2 branches covered.">                    if (isNotBlank(testIdToResult.get(testId))) {</span>
+<span class="fc" id="L1460">                        TemplateMetric draftData = new TemplateMetric();</span>
+<span class="fc" id="L1461">                        draftData.setMetricId(testId);</span>
+<span class="fc" id="L1462">                        draftData.setMetricType(LAB_TEST);</span>
+<span class="fc" id="L1463">                        draftData.setSelectedMetricId(testId);</span>
+<span class="fc" id="L1464">                        draftData.setMetricDateString(updateDate);</span>
+<span class="fc" id="L1465">                        draftData.setMetricTimeString(updateTime);</span>
+<span class="fc" id="L1466">                        draftData.setValue1(testIdToResult.get(testId));</span>
+<span class="fc" id="L1467">                        draftData.setValue2(testIdToMinimum.get(testId));</span>
+<span class="fc" id="L1468">                        draftData.setValue3(testIdToMaximum.get(testId));</span>
+<span class="fc" id="L1469">                        pHPlan.addMetricDraftData(draftData);</span>
+                    }
+<span class="fc" id="L1471">                }</span>
+            }
+        }
+
+<span class="fc" id="L1475">    }</span>
+
+    private Map&lt;Long, Integer&gt; getSymptomIdToSeverityMap() {
+<span class="pc bpc" id="L1478" title="1 of 2 branches missed.">        return symptomsResultSet2Value != null ? symptomsResultSet2Value.stream().map(el -&gt; el.split(&quot;,&quot;))</span>
+<span class="pc" id="L1479">                .collect(Collectors.toMap(el -&gt; Long.parseLong(el[1]), el -&gt; Integer.parseInt(el[0]))) : Map.of();</span>
+    }
+
+    private List&lt;PlanField&gt; populateTemplateFields(Long planTemplateId) {
+<span class="fc" id="L1483">        List&lt;PlanField&gt; planFields = new LinkedList&lt;&gt;();</span>
+<span class="fc bfc" id="L1484" title="All 2 branches covered.">        for (TemplateField templateField : planTemplateManager</span>
+<span class="fc" id="L1485">                .getTemplateFieldList(planTemplateId)) {</span>
+<span class="fc" id="L1486">            PlanField planField = new PlanField();</span>
+<span class="fc" id="L1487">            planField.setPlanTemplateId(planTemplateId);</span>
+<span class="fc" id="L1488">            planField.setText(templateField.getText());</span>
+<span class="fc" id="L1489">            planField.setLabel(TemplateFieldLabel.valueOf(templateField.getLabel().name()));</span>
+<span class="fc" id="L1490">            planField.setSequence((long) templateField.getSequence());</span>
+
+
+<span class="pc bpc" id="L1493" title="1 of 5 branches missed.">            switch (templateField.getLabel()) {</span>
+                case ACTION_PLAN:
+<span class="fc" id="L1495">                    String templateActionPlanText = pHPlan.getPlanField(TemplateFieldLabel.ACTION_PLAN).getText();</span>
+<span class="fc" id="L1496">                    planField.setText(actionPlanText);</span>
+<span class="fc" id="L1497">                    break;</span>
+                case GREEN:
+<span class="fc" id="L1499">                    planField.setText(greenText);</span>
+<span class="fc" id="L1500">                    break;</span>
+                case AMBER:
+<span class="fc" id="L1502">                    planField.setText(amberText);</span>
+<span class="fc" id="L1503">                    break;</span>
+                case RED:
+<span class="fc" id="L1505">                    planField.setText(redText);</span>
+                    break;
+            }
+<span class="fc" id="L1508">            planFields.add(planField);</span>
+<span class="fc" id="L1509">        }</span>
+<span class="fc" id="L1510">        return planFields;</span>
+    }
+
+    private List&lt;PlanField&gt; populateDefaultFields() {
+<span class="fc" id="L1514">        List&lt;PlanField&gt; planFields = new LinkedList&lt;&gt;();</span>
+
+<span class="fc" id="L1516">        PlanField planField = new PlanField();</span>
+<span class="fc" id="L1517">        planField.setLabel(TemplateFieldLabel.ACTION_PLAN);</span>
+<span class="fc" id="L1518">        planField.setSequence(0L);</span>
+<span class="fc" id="L1519">        planField.setText(actionPlanText);</span>
+<span class="fc" id="L1520">        planFields.add(planField);</span>
+
+<span class="fc" id="L1522">        planField = new PlanField();</span>
+<span class="fc" id="L1523">        planField.setLabel(TemplateFieldLabel.GREEN);</span>
+<span class="fc" id="L1524">        planField.setSequence(1L);</span>
+<span class="fc" id="L1525">        planField.setText(greenText);</span>
+<span class="fc" id="L1526">        planFields.add(planField);</span>
+
+<span class="fc" id="L1528">        planField = new PlanField();</span>
+<span class="fc" id="L1529">        planField.setLabel(TemplateFieldLabel.AMBER);</span>
+<span class="fc" id="L1530">        planField.setSequence(2L);</span>
+<span class="fc" id="L1531">        planField.setText(amberText);</span>
+<span class="fc" id="L1532">        planFields.add(planField);</span>
+
+<span class="fc" id="L1534">        planField = new PlanField();</span>
+<span class="fc" id="L1535">        planField.setLabel(TemplateFieldLabel.RED);</span>
+<span class="fc" id="L1536">        planField.setSequence(3L);</span>
+<span class="fc" id="L1537">        planField.setText(redText);</span>
+<span class="fc" id="L1538">        planFields.add(planField);</span>
+
+<span class="fc" id="L1540">        return planFields;</span>
+    }
+
+    private void logActivityAndNotify(Activity.Action action, RequiresConsent consent) {
+<span class="pc bpc" id="L1544" title="1 of 2 branches missed.">        if (contextUserUtil.getContextUser() == null) {</span>
+<span class="nc" id="L1545">            logActivity(action, dateTimeService.now(), loggedInUserUtil.getLoggedInUserId(), true, consent);</span>
+        } else {
+<span class="fc" id="L1547">            logActivityByOthers(action, dateTimeService.now(), true, consent);</span>
+        }
+<span class="fc" id="L1549">    }</span>
+
+    public String discussPlan() {
+<span class="fc" id="L1552">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L1553">        logMethod(loggedInEHRRequestContext, &quot;discussPlan&quot;);</span>
+
+<span class="pc bpc" id="L1555" title="1 of 2 branches missed.">        if (selectedPlanUniqueId == null) {</span>
+<span class="nc" id="L1556">            addActionError(getText(&quot;managePlansAction.err.select_at_least_one&quot;));</span>
+<span class="nc" id="L1557">            return &quot;input&quot;;</span>
+        }
+
+<span class="fc" id="L1560">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+<span class="fc" id="L1561">        Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+
+<span class="fc" id="L1563">        String messageText = &quot;&quot;;</span>
+<span class="fc" id="L1564">        discussMessage = messageText;</span>
+<span class="fc" id="L1565">        discussTopic = ComposeMessageAction.TOPIC_PHPLAN;</span>
+
+        // Set the recipient id in session to be used by discuss feature
+<span class="fc" id="L1568">        sessionUtil.setContextRecipientId(getLoggedInEHRRequestContext());</span>
+
+<span class="fc" id="L1570">        originalContextUser = loggedInEHRRequestContext.getContextOrAccessingUserId();</span>
+<span class="fc" id="L1571">        boolean userIsClinician = loggedInEHRRequestContext.isPro();</span>
+<span class="fc bfc" id="L1572" title="All 2 branches covered.">        if (userIsClinician) {</span>
+            // switch context back to clinician for the sending the message
+<span class="fc" id="L1574">            contextUserUtil.clearContextUser();</span>
+        }
+
+<span class="fc bfc" id="L1577" title="All 2 branches covered.">        PHPlan selectedPlan = userIsClinician</span>
+<span class="fc" id="L1578">                ? planManager.findPHPlanForAccountId(selectedPlanUniqueId, getLoggedInEHRRequestContext(), patientAccountId, false/*includeDeleted*/).orElse(null)</span>
+<span class="fc" id="L1579">                : planManager.getLatestFinalizedPHPlan(getLoggedInEHRRequestContext(), patientAccountId, selectedPlanUniqueId);</span>
+
+<span class="pc bpc" id="L1581" title="1 of 2 branches missed.">        if (selectedPlan == null) {</span>
+<span class="nc" id="L1582">            addActionError(getText(&quot;managePlansAction.err.plan_is_draft_only&quot;));</span>
+<span class="nc" id="L1583">            return INPUT;</span>
+        }
+
+<span class="fc" id="L1586">        logPlan(&quot;discussPlan&quot;, selectedPlan.getId(), selectedPlan, getLoggedInEHRRequestContext());</span>
+
+<span class="fc" id="L1588">        selectedPlanVersion = selectedPlan.getVersion();</span>
+<span class="fc" id="L1589">        return DISCUSS;</span>
+    }
+
+    public String deletePlan() {
+<span class="fc" id="L1593">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L1594">        logMethod(loggedInEHRRequestContext, &quot;deletePlan&quot;);</span>
+
+<span class="pc bpc" id="L1596" title="1 of 2 branches missed.">        if (selectedPlanUniqueId == null) {</span>
+<span class="nc" id="L1597">            addActionError(getText(&quot;managePlansAction.err.select_at_least_one&quot;));</span>
+<span class="nc" id="L1598">            return &quot;input&quot;;</span>
+        }
+<span class="fc" id="L1600">        return &quot;confirmDeletePlan&quot;;</span>
+    }
+
+    public String confirmedDeletePlan() {
+<span class="fc" id="L1604">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L1605">        logMethod(loggedInEHRRequestContext, &quot;confirmedDeletePlan&quot;);</span>
+
+<span class="pc bpc" id="L1607" title="1 of 2 branches missed.">        if (selectedPlanUniqueId == null) {</span>
+<span class="nc" id="L1608">            addActionError(getText(&quot;managePlansAction.err.select_at_least_one&quot;));</span>
+<span class="nc" id="L1609">            return RELOAD;</span>
+        }
+
+<span class="fc" id="L1612">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+<span class="fc" id="L1613">        Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+
+<span class="pc bpc" id="L1615" title="1 of 2 branches missed.">        if (!planManager.deletePHPlan(loggedInEHRRequestContext, loggedInEHRRequestContext.getAccessingUserId(), patientAccountId, selectedPlanUniqueId)) {</span>
+<span class="nc" id="L1616">            addActionError(getText(&quot;managePlansAction.err.plans_can_only_be_deleted_by_creator&quot;));</span>
+<span class="nc" id="L1617">            return RELOAD;</span>
+        }
+
+<span class="fc" id="L1620">        logDelete(&quot;confirmedDeletePlan&quot;, selectedPlanUniqueId, loggedInEHRRequestContext);</span>
+<span class="fc" id="L1621">        return &quot;input&quot;;</span>
+    }
+
+    private boolean validateMetrics() {
+<span class="fc" id="L1625">        boolean valid = true;</span>
+
+<span class="pc bpc" id="L1627" title="1 of 6 branches missed.">        if (measurementValue != null || MapUtils.isNotEmpty(testIdToResult)</span>
+                || symptomsResultSet2Value != null) {
+<span class="pc bpc" id="L1629" title="1 of 2 branches missed.">            if (!validateMetricDate()) {</span>
+<span class="nc" id="L1630">                valid = false;</span>
+            }
+        }
+
+<span class="fc bfc" id="L1634" title="All 2 branches covered.">        if (measurementValue != null) {</span>
+<span class="fc bfc" id="L1635" title="All 2 branches covered.">            for (PredefinedMeasurementType measurementType : PredefinedMeasurementType.values()) {</span>
+<span class="fc" id="L1636">                MeasurementTypeId id = measurementType.id();</span>
+<span class="fc" id="L1637">                String value = measurementValue.get(id.toString());</span>
+<span class="pc bpc" id="L1638" title="1 of 2 branches missed.">                String value2 = measurementValue2 == null ? null : measurementValue2.get(id.toString());</span>
+<span class="fc bfc" id="L1639" title="All 4 branches covered.">                if (isNotBlank(value) || isNotBlank(value2)) {</span>
+<span class="pc bpc" id="L1640" title="1 of 4 branches missed.">                    valid = valid &amp;&amp; validateMeasurement(measurementType, value, value2, &quot;managePlansAction&quot;);</span>
+                }
+            }
+        }
+
+<span class="fc bfc" id="L1645" title="All 2 branches covered.">        if (MapUtils.isNotEmpty(testIdToResult)) {</span>
+<span class="fc" id="L1646">            Map&lt;Long, LoincTest&gt; loincTests = loincManager.loadLoincTestsByIds(testIdToResult);</span>
+<span class="fc bfc" id="L1647" title="All 2 branches covered.">            for (Map.Entry&lt;Long, String&gt; longStringEntry : testIdToResult.entrySet()) {</span>
+<span class="fc" id="L1648">                String resultString = longStringEntry.getValue();</span>
+<span class="fc bfc" id="L1649" title="All 2 branches covered.">                if (isNotBlank(resultString)) {</span>
+
+<span class="fc" id="L1651">                    LoincTest test = loincTests.get(longStringEntry.getKey());</span>
+<span class="pc bpc" id="L1652" title="1 of 2 branches missed.">                    if (test == null) {</span>
+<span class="nc" id="L1653">                        valid = false;</span>
+                    } else {
+                        // i18n - so getName() will be already localized
+<span class="fc" id="L1656">                        test.setNameLocal(getText(test.getNameKey()));</span>
+
+<span class="fc" id="L1658">                        String minString = testIdToMinimum.get(longStringEntry.getKey());</span>
+<span class="fc" id="L1659">                        String maxString = testIdToMaximum.get(longStringEntry.getKey());</span>
+
+<span class="fc" id="L1661">                        boolean validValue = NumberUtils.isNumber(resultString); // decimal string is always okay</span>
+<span class="fc bfc" id="L1662" title="All 2 branches covered.">                        if (!validValue) {</span>
+                            // lookup test -- maybe plaintext is ok?  Error if not.
+<span class="fc" id="L1664">                            ValueType expectedType = test.getExpectedValueType();</span>
+<span class="pc bpc" id="L1665" title="1 of 2 branches missed.">                            if (ValueType.NUMERIC == expectedType) {</span>
+<span class="nc" id="L1666">                                valid = false;</span>
+<span class="nc" id="L1667">                                addActionError(getText(&quot;managePlansAction.err.test_value_invalid&quot;, new String[]{test.getName()}));</span>
+                            } else {
+<span class="fc" id="L1669">                                validValue = true;</span>
+                            }
+                        }
+
+<span class="pc bpc" id="L1673" title="2 of 6 branches missed.">                        if (validValue &amp;&amp; (isNotBlank(minString) || isNotBlank(maxString))) {</span>
+<span class="pc bpc" id="L1674" title="1 of 2 branches missed.">                            if (!isDecimalNumber(minString)) {</span>
+<span class="nc" id="L1675">                                addActionError(getText(&quot;managePlansAction.err.test_min_invalid&quot;, new String[]{test.getName()}));</span>
+<span class="nc" id="L1676">                                valid = false;</span>
+                            }
+<span class="pc bpc" id="L1678" title="1 of 2 branches missed.">                            if (!isDecimalNumber(maxString)) {</span>
+<span class="nc" id="L1679">                                addActionError(getText(&quot;managePlansAction.err.test_max_invalid&quot;, new String[]{test.getName()}));</span>
+<span class="nc" id="L1680">                                valid = false;</span>
+                            }
+<span class="pc bpc" id="L1682" title="2 of 4 branches missed.">                            if (valid &amp;&amp; (Double.parseDouble(minString) &gt; Double.parseDouble(maxString))) {</span>
+<span class="nc" id="L1683">                                addActionError(getText(&quot;managePlansAction.err.test_max_lt_min&quot;, new String[]{test.getName()}));</span>
+<span class="nc" id="L1684">                                valid = false;</span>
+                            }
+                        }
+                    }
+                }
+<span class="fc" id="L1689">            }</span>
+        }
+
+<span class="fc" id="L1692">        return valid;</span>
+    }
+
+    private Optional&lt;LocalTime&gt; getValidMetricTime() {
+<span class="pc bpc" id="L1696" title="1 of 2 branches missed.">        if (isBlank(updateTime)) {</span>
+<span class="nc" id="L1697">            addActionError(getText(&quot;managePlansAction.err.enter_update_time&quot;));</span>
+<span class="nc" id="L1698">            return Optional.empty();</span>
+        }
+
+        try {
+<span class="fc" id="L1702">            return Optional.of(LocalTime.parse(updateTime));</span>
+<span class="nc" id="L1703">        } catch (Exception ignored) {</span>
+<span class="nc" id="L1704">            addActionError(getText(&quot;managePlansAction.err.update_time_invalid&quot;));</span>
+        }
+
+<span class="nc" id="L1707">        return Optional.empty();</span>
+    }
+
+    @VisibleForTesting
+    boolean validateMetricDate() {
+<span class="pc bpc" id="L1712" title="1 of 2 branches missed.">        if (isBlank(updateDate)) {</span>
+<span class="nc" id="L1713">            addActionError(getText(&quot;managePlansAction.err.enter_update_date&quot;));</span>
+<span class="nc" id="L1714">            return false;</span>
+        }
+<span class="fc" id="L1716">        LocalDate validDate = null;</span>
+        try {
+<span class="fc" id="L1718">            validDate = LocalDate.parse(updateDate, dateFormat);</span>
+<span class="nc" id="L1719">        } catch (Exception ignored) {</span>
+<span class="nc" id="L1720">            addActionError(getText(&quot;managePlansAction.err.update_date_invalid&quot;));</span>
+<span class="nc" id="L1721">            return false;</span>
+<span class="fc" id="L1722">        }</span>
+
+<span class="fc" id="L1724">        Optional&lt;LocalTime&gt; validTime = getValidMetricTime();</span>
+<span class="pc bpc" id="L1725" title="1 of 2 branches missed.">        if (validTime.isPresent()) {</span>
+<span class="fc" id="L1726">            LocalDateTime updateDateTime = LocalDateTime.of(validDate, validTime.get());</span>
+<span class="pc bpc" id="L1727" title="1 of 2 branches missed.">            if (updateDateTime.isAfter(dateTimeService.convertNowToLocalDateAtTimezone(getZoneIdOfLoggedInUser()))) {</span>
+<span class="nc" id="L1728">                addActionError(getText(&quot;managePlansAction.err.update_date_must_be_in_past&quot;));</span>
+<span class="nc" id="L1729">                return false;</span>
+            }
+<span class="fc" id="L1731">        } else {</span>
+<span class="nc" id="L1732">            return false;</span>
+        }
+
+<span class="fc" id="L1735">        return true;</span>
+    }
+
+    private boolean validateFields() {
+<span class="fc" id="L1739">        boolean validationPassed = true;</span>
+
+<span class="fc bfc" id="L1741" title="All 2 branches covered.">        if (isNotBlank(reviewDate)) {</span>
+            try {
+<span class="fc" id="L1743">                getGlobalDateInputFormatter(false).parse(reviewDate);</span>
+<span class="fc" id="L1744">            } catch (Exception ignored) {</span>
+<span class="fc" id="L1745">                addFieldError(&quot;reviewDate&quot;, getText(&quot;managePlansAction.err.review_date_invalid&quot;));</span>
+<span class="fc" id="L1746">                validationPassed = false;</span>
+<span class="fc" id="L1747">            }</span>
+        }
+
+        // use &quot;false&quot; if any of these return false:
+<span class="pc bpc" id="L1751" title="1 of 4 branches missed.">        validationPassed = validationPassed &amp;&amp; validateField(actionPlanText, &quot;Action plan&quot;, &quot;actionPlanText&quot;);</span>
+<span class="pc bpc" id="L1752" title="1 of 4 branches missed.">        validationPassed = validationPassed &amp;&amp; validateField(greenText, &quot;Green&quot;, &quot;greenText&quot;);</span>
+<span class="pc bpc" id="L1753" title="1 of 4 branches missed.">        validationPassed = validationPassed &amp;&amp; validateField(amberText, &quot;Amber&quot;, &quot;amberText&quot;);</span>
+<span class="pc bpc" id="L1754" title="1 of 4 branches missed.">        validationPassed = validationPassed &amp;&amp; validateField(redText, &quot;Red&quot;, &quot;redText&quot;);</span>
+
+<span class="fc" id="L1756">        return validationPassed;</span>
+    }
+
+    private boolean validateField(String fieldText, String fieldDisplayName, String fieldName) {
+<span class="fc bfc" id="L1760" title="All 4 branches covered.">        if ((fieldText == null) || !fieldText.startsWith(&quot;&lt;div&quot;)) {</span>
+<span class="fc" id="L1761">            return true;</span>
+        }
+
+        try {
+<span class="fc" id="L1765">            List&lt;String&gt; errors = planManager.validateXhtml(actionPlanText, fieldDisplayName, false);</span>
+<span class="pc bpc" id="L1766" title="1 of 2 branches missed.">            if (!errors.isEmpty()) {</span>
+<span class="nc bnc" id="L1767" title="All 2 branches missed.">                for (String err : errors) {</span>
+                    //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L1769">                    addFieldError(fieldName, err);</span>
+<span class="nc" id="L1770">                }</span>
+
+<span class="nc" id="L1772">                return false;</span>
+            }
+<span class="nc" id="L1774">        } catch (PKBException e) {</span>
+            //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L1776">            addFieldError(fieldName, e.getMessage());</span>
+<span class="nc" id="L1777">            return false;</span>
+<span class="fc" id="L1778">        }</span>
+<span class="fc" id="L1779">        return true;</span>
+    }
+
+    public String cancel() {
+<span class="nc" id="L1783">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="nc" id="L1784">        logMethod(loggedInEHRRequestContext, &quot;cancel&quot;);</span>
+<span class="nc bnc" id="L1785" title="All 2 branches missed.">        if (planId == null) {</span>
+            // No plan, so definitely don't want to reload
+<span class="nc" id="L1787">            return &quot;input&quot;;</span>
+        }
+<span class="nc bnc" id="L1789" title="All 2 branches missed.">        return createPlan ? &quot;input&quot; : RELOAD;</span>
+    }
+
+    public boolean hasSecondaryMedicationTextAndInstructions(MedicationDTO medication) {
+<span class="fc" id="L1793">        return isNotBlank(medication.getSecondaryMedicationTextAndInstructions());</span>
+    }
+
+    public Long getPlanId() {
+<span class="fc" id="L1797">        return planId;</span>
+    }
+
+    public void setPlanId(Long planId) {
+<span class="fc" id="L1801">        this.planId = planId;</span>
+<span class="fc" id="L1802">    }</span>
+
+    public Long getPatientId() {
+<span class="fc" id="L1805">        return patientId;</span>
+    }
+
+    public void setPatientId(Long patientId) {
+<span class="fc" id="L1809">        this.patientId = patientId;</span>
+<span class="fc" id="L1810">    }</span>
+
+    public String getPatientFullName() {
+<span class="fc" id="L1813">        return patientFullName;</span>
+    }
+
+    public void setPatientFullName(String patientFullName) {
+<span class="fc" id="L1817">        this.patientFullName = patientFullName;</span>
+<span class="fc" id="L1818">    }</span>
+
+    public String editPrivacyForm() {
+<span class="fc" id="L1821">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L1822">        logMethod(loggedInEHRRequestContext, &quot;editPrivacyForm&quot;);</span>
+<span class="fc" id="L1823">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+
+<span class="fc" id="L1825">        Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="fc" id="L1826">        PHPlan plan = planManager.getPHPlanForAccountId(dataPointUniqueId, loggedInEHRRequestContext, patientAccountId);</span>
+<span class="fc" id="L1827">        logPlan(&quot;editPrivacyForm&quot;, plan.getId(), plan, loggedInEHRRequestContext);</span>
+<span class="pc bpc" id="L1828" title="1 of 2 branches missed.">        if (hasNotPermissionsToEditPrivacyLabels(plan, loggedInEHRRequestContext)) {</span>
+<span class="nc" id="L1829">            return CANCEL;</span>
+        }
+<span class="fc" id="L1831">        fillPrivacyFlagsFrom(plan);</span>
+<span class="fc" id="L1832">        return INPUT;</span>
+
+    }
+
+    @SkipValidation
+    public String editPrivacySave() {
+<span class="fc" id="L1838">        var loggedInEHRRequestContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L1839">        logMethod(loggedInEHRRequestContext, &quot;editPrivacySave&quot;);</span>
+
+        // check if it is in session
+<span class="fc" id="L1842">        ensureUsersLoaded(loggedInEHRRequestContext);</span>
+<span class="fc" id="L1843">        Long patientAccountId = userManager.getDefaultAccountId(patient.getId());</span>
+<span class="fc" id="L1844">        PHPlan plan = planManager.getPHPlanForAccountId(dataPointUniqueId, loggedInEHRRequestContext, patientAccountId);</span>
+<span class="fc" id="L1845">        logPlan(&quot;editPrivacySave&quot;, plan.getId(), plan, loggedInEHRRequestContext);</span>
+<span class="pc bpc" id="L1846" title="1 of 2 branches missed.">        if (hasNotPermissionsToEditPrivacyLabels(plan, loggedInEHRRequestContext)) {</span>
+<span class="nc" id="L1847">            return CANCEL;</span>
+        }
+<span class="fc" id="L1849">        privacyService.handlePrivacyChange(plan, MenuDataType.phplan, getNewFlag(), loggedInEHRRequestContext, patientAccountId, patient, loggedInUser);</span>
+<span class="fc" id="L1850">        return SUCCESS;</span>
+    }
+
+    @SkipValidation
+    public String editPrivacyCancel() {
+<span class="nc" id="L1855">        return CANCEL;</span>
+    }
+
+    public boolean isShowPatientDetails() {
+<span class="fc bfc" id="L1859" title="All 2 branches covered.">        return !isLoggedInUserProfessional();</span>
+    }
+
+    public boolean hasMeasurementHistory() {
+<span class="fc" id="L1863">        return isNotEmpty(measurementOverviewList);</span>
+    }
+
+    public boolean hasTestHistory() {
+<span class="fc" id="L1867">        return isNotEmpty(testHistoryList);</span>
+    }
+
+    public boolean hasSymptomHistory() {
+<span class="fc" id="L1871">        return isNotEmpty(symptomHistoryList);</span>
+    }
+
+    public boolean hasAnyTrafficLightTexts() {
+<span class="pc bpc" id="L1875" title="1 of 6 branches missed.">        return hasGreenText() || hasAmberText() || hasRedText();</span>
+    }
+
+    public boolean hasGreenText() {
+<span class="fc" id="L1879">        return isNotBlank(greenText);</span>
+    }
+
+    public boolean hasAmberText() {
+<span class="fc" id="L1883">        return isNotBlank(amberText);</span>
+    }
+
+    public boolean hasRedText() {
+<span class="fc" id="L1887">        return isNotBlank(redText);</span>
+    }
+
+    public boolean isEditable() {
+<span class="fc bfc" id="L1891" title="All 2 branches covered.">        return !historic &amp;&amp;</span>
+<span class="pc bpc" id="L1892" title="3 of 4 branches missed.">                (pHPlan.getEditableStatus() == ALL || creator.getId() == loggedInUserUtil.getLoggedInUserId()) &amp;&amp;</span>
+<span class="fc bfc" id="L1893" title="All 2 branches covered.">                isSharingEnabled();</span>
+    }
+
+    public boolean hasActionPlan() {
+<span class="fc bfc" id="L1897" title="All 4 branches covered.">        return hasActionPlanText() || hasAttachmentAsActionPlanContent();</span>
+    }
+
+    public boolean hasActionPlanText() {
+<span class="fc" id="L1901">        return isNotBlank(actionPlanText);</span>
+    }
+
+    public boolean hasAttachmentAsActionPlanContent() {
+<span class="fc bfc" id="L1905" title="All 2 branches covered.">        return pHPlan.getAttachmentAsActionPlanContent() != null;</span>
+    }
+
+    public boolean hasPlanAttachments() {
+<span class="fc" id="L1909">        return isNotEmpty(planAttachments);</span>
+    }
+
+    public String getPlanName() {
+<span class="fc" id="L1913">        return planName;</span>
+    }
+
+    public void setPlanName(String planName) {
+<span class="fc" id="L1917">        this.planName = planName;</span>
+<span class="fc" id="L1918">    }</span>
+
+    public PHPlan getpHPlan() {
+<span class="fc" id="L1921">        return pHPlan;</span>
+    }
+
+    public void setpHPlan(PHPlan pHPlan) {
+<span class="nc" id="L1925">        this.pHPlan = pHPlan;</span>
+<span class="nc" id="L1926">    }</span>
+
+    public TeamUserManager getTeamUserManager() {
+<span class="fc" id="L1929">        return teamUserManager;</span>
+    }
+
+    public void setTeamUserManager(TeamUserManager teamUserManager) {
+<span class="fc" id="L1933">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L1934">    }</span>
+
+    public String getPlanTemplateName() {
+<span class="nc" id="L1937">        return planTemplateName;</span>
+    }
+
+    public void setPlanTemplateName(String planTemplateName) {
+<span class="nc" id="L1941">        this.planTemplateName = planTemplateName;</span>
+<span class="nc" id="L1942">    }</span>
+
+    public String getActionPlanText() {
+<span class="fc" id="L1945">        return actionPlanText;</span>
+    }
+
+    public void setActionPlanText(String actionPlanText) {
+<span class="fc" id="L1949">        this.actionPlanText = actionPlanText;</span>
+<span class="fc" id="L1950">    }</span>
+
+    public String getGreenText() {
+<span class="fc" id="L1953">        return greenText;</span>
+    }
+
+    public void setGreenText(String greenText) {
+<span class="fc" id="L1957">        this.greenText = greenText;</span>
+<span class="fc" id="L1958">    }</span>
+
+    public Long getActiveVersionCount() {
+<span class="fc" id="L1961">        return activeVersionCount;</span>
+    }
+
+    public void setActiveVersionCount(Long activeVersionCount) {
+<span class="nc" id="L1965">        this.activeVersionCount = activeVersionCount;</span>
+<span class="nc" id="L1966">    }</span>
+
+    public String getAmberText() {
+<span class="fc" id="L1969">        return amberText;</span>
+    }
+
+    public void setAmberText(String amberText) {
+<span class="fc" id="L1973">        this.amberText = amberText;</span>
+<span class="fc" id="L1974">    }</span>
+
+    public String getRedText() {
+<span class="fc" id="L1977">        return redText;</span>
+    }
+
+    public void setRedText(String redText) {
+<span class="fc" id="L1981">        this.redText = redText;</span>
+<span class="fc" id="L1982">    }</span>
+
+    public List&lt;TemplateAttachment&gt; getTemplateAttachments() {
+<span class="fc" id="L1985">        return templateAttachments;</span>
+    }
+
+    public void setTemplateAttachments(List&lt;TemplateAttachment&gt; attachments) {
+<span class="nc" id="L1989">        this.templateAttachments = attachments;</span>
+<span class="nc" id="L1990">    }</span>
+
+    public PlanTemplateManager getPlanTemplateManager() {
+<span class="nc" id="L1993">        return planTemplateManager;</span>
+    }
+
+    public void setPlanTemplateManager(PlanTemplateManager planTemplateManager) {
+<span class="fc" id="L1997">        this.planTemplateManager = planTemplateManager;</span>
+<span class="fc" id="L1998">    }</span>
+
+    public PlanManager getPlanManager() {
+<span class="fc" id="L2001">        return planManager;</span>
+    }
+
+    public void setPlanManager(PlanManager planManager) {
+<span class="fc" id="L2005">        this.planManager = planManager;</span>
+<span class="fc" id="L2006">    }</span>
+
+    public ParticipantManager getParticipantManager() {
+<span class="fc" id="L2009">        return participantManager;</span>
+    }
+
+    public void setParticipantManager(ParticipantManager participantManager) {
+<span class="fc" id="L2013">        this.participantManager = participantManager;</span>
+<span class="fc" id="L2014">    }</span>
+
+    public List&lt;com.pkb.datamodel.plantemplate.PHPlanTemplate&gt; getPlanTemplates() {
+<span class="fc" id="L2017">        return planTemplates;</span>
+    }
+
+    public void setPlanTemplates(List&lt;com.pkb.datamodel.plantemplate.PHPlanTemplate&gt; planTemplates) {
+<span class="nc" id="L2021">        this.planTemplates = planTemplates;</span>
+<span class="nc" id="L2022">    }</span>
+
+    public Long getPlanTemplateId() {
+<span class="fc" id="L2025">        return planTemplateId;</span>
+    }
+
+    // Workaround struts bug - if the value - which should be irrelevant - is in Arabic the id comes back as a String instead of a Long
+    public void setPlanTemplateId(String value) {
+<span class="fc bfc" id="L2030" title="All 2 branches covered.">        if (!isEmpty(value)) {</span>
+<span class="fc" id="L2031">            planTemplateId = Long.parseLong(value);</span>
+        }
+<span class="fc" id="L2033">    }</span>
+
+    public List&lt;PHPlanDTO&gt; getPlans() {
+<span class="fc" id="L2036">        return plans;</span>
+    }
+
+    public void setPlans(List&lt;PHPlanDTO&gt; plans) {
+<span class="nc" id="L2040">        this.plans = plans;</span>
+<span class="nc" id="L2041">    }</span>
+
+    public UUID getSelectedPlanUniqueId() {
+<span class="fc" id="L2044">        return selectedPlanUniqueId;</span>
+    }
+
+    public void setSelectedPlanUniqueId(UUID selectedPlanUniqueId) {
+<span class="fc" id="L2048">        this.selectedPlanUniqueId = selectedPlanUniqueId;</span>
+<span class="fc" id="L2049">    }</span>
+
+    public List&lt;PHPlanAttachment&gt; getPlanAttachments() {
+<span class="fc" id="L2052">        return planAttachments;</span>
+    }
+
+    public void setPlanAttachments(List&lt;PHPlanAttachment&gt; planAttachments) {
+<span class="nc" id="L2056">        this.planAttachments = planAttachments;</span>
+<span class="nc" id="L2057">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L2060">        return tab;</span>
+    }
+
+    public String getSubTab() {
+<span class="fc" id="L2064">        return subTab;</span>
+    }
+
+    public void setSubTab(String subTab) {
+<span class="fc" id="L2068">        this.subTab = subTab;</span>
+<span class="fc" id="L2069">    }</span>
+
+    public Instant getCreatedDate() {
+<span class="fc" id="L2072">        return createdDate;</span>
+    }
+
+    public void setCreatedDate(Instant createdDate) {
+<span class="nc" id="L2076">        this.createdDate = createdDate;</span>
+<span class="nc" id="L2077">    }</span>
+
+    public Instant getLastEditedDate() {
+<span class="fc" id="L2080">        return lastEditedDate;</span>
+    }
+
+    public void setLastEditedDate(Instant lastEditedDate) {
+<span class="nc" id="L2084">        this.lastEditedDate = lastEditedDate;</span>
+<span class="nc" id="L2085">    }</span>
+
+    public boolean isCreatePlan() {
+<span class="fc" id="L2088">        return createPlan;</span>
+    }
+
+    public void setCreatePlan(boolean createPlan) {
+<span class="fc" id="L2092">        this.createPlan = createPlan;</span>
+<span class="fc" id="L2093">    }</span>
+
+    public String getAttachmentName() {
+<span class="nc" id="L2096">        return attachmentName;</span>
+    }
+
+    public void setAttachmentName(String attachmentName) {
+<span class="nc" id="L2100">        this.attachmentName = attachmentName;</span>
+<span class="nc" id="L2101">    }</span>
+
+    public String getJson() {
+<span class="fc" id="L2104">        return json;</span>
+    }
+
+    public void setJson(String json) {
+<span class="fc" id="L2108">        this.json = json;</span>
+<span class="fc" id="L2109">    }</span>
+
+    public InputStream getAutoSaveResult() {
+<span class="fc" id="L2112">        return autoSaveResult;</span>
+    }
+
+    public void setAutoSaveResult(InputStream autoSaveResult) {
+<span class="nc" id="L2116">        this.autoSaveResult = autoSaveResult;</span>
+<span class="nc" id="L2117">    }</span>
+
+    public Long getSelectedPlanVersion() {
+<span class="fc" id="L2120">        return selectedPlanVersion;</span>
+    }
+
+    public void setSelectedPlanVersion(Long selectedPlanVersion) {
+<span class="nc" id="L2124">        this.selectedPlanVersion = selectedPlanVersion;</span>
+<span class="nc" id="L2125">    }</span>
+
+    public Long getVersion() {
+<span class="nc" id="L2128">        return version;</span>
+    }
+
+    public void setVersion(Long version) {
+<span class="nc" id="L2132">        this.version = version;</span>
+<span class="nc" id="L2133">    }</span>
+
+    public boolean getHistoric() {
+<span class="fc" id="L2136">        return historic;</span>
+    }
+
+    public void setHistoric(boolean historic) {
+<span class="fc" id="L2140">        this.historic = historic;</span>
+<span class="fc" id="L2141">    }</span>
+
+    public PKBPerson getEditor() {
+<span class="fc" id="L2144">        return editor;</span>
+    }
+
+    public void setEditor(PKBPerson editor) {
+<span class="nc" id="L2148">        this.editor = editor;</span>
+<span class="nc" id="L2149">    }</span>
+
+    public String getLastEditedTimestamp() {
+<span class="fc" id="L2152">        return lastEditedTimestamp;</span>
+    }
+
+    public void setLastEditedTimestamp(String lastEditedTimestamp) {
+<span class="fc" id="L2156">        this.lastEditedTimestamp = lastEditedTimestamp;</span>
+<span class="fc" id="L2157">    }</span>
+
+    public MeasurementManager getMeasurementManager() {
+<span class="nc" id="L2160">        return measurementManager;</span>
+    }
+
+    public void setMeasurementManager(MeasurementManager measurementManager) {
+<span class="fc" id="L2164">        this.measurementManager = measurementManager;</span>
+<span class="fc" id="L2165">    }</span>
+
+    public List&lt;PredefinedMeasurementType&gt; getMeasurementTypeList() {
+<span class="fc" id="L2168">        return measurementTypeList;</span>
+    }
+
+    public void setMeasurementTypeList(List&lt;PredefinedMeasurementType&gt; measurementTypeList) {
+<span class="nc" id="L2172">        this.measurementTypeList = measurementTypeList;</span>
+<span class="nc" id="L2173">    }</span>
+
+    public Map&lt;String, String&gt; getMeasurementValue() {
+<span class="fc" id="L2176">        return measurementValue;</span>
+    }
+
+    public void setMeasurementValue(Map&lt;String, String&gt; measurementValue) {
+<span class="fc" id="L2180">        this.measurementValue = measurementValue;</span>
+<span class="fc" id="L2181">    }</span>
+
+    public Map&lt;String, String&gt; getMeasurementValue2() {
+<span class="fc" id="L2184">        return measurementValue2;</span>
+    }
+
+    public void setMeasurementValue2(Map&lt;String, String&gt; measurementValue2) {
+<span class="fc" id="L2188">        this.measurementValue2 = measurementValue2;</span>
+<span class="fc" id="L2189">    }</span>
+
+    public boolean getDisplayMetrics() {
+<span class="fc" id="L2192">        return displayMetrics;</span>
+    }
+
+    public void setDisplayMetrics(boolean displayMetrics) {
+<span class="nc" id="L2196">        this.displayMetrics = displayMetrics;</span>
+<span class="nc" id="L2197">    }</span>
+
+    public List&lt;SymptomReportHistoryDTO&gt; getSymptomHistoryList() {
+<span class="nc" id="L2200">        return symptomHistoryList;</span>
+    }
+
+    public void setSymptomHistoryList(
+            List&lt;SymptomReportHistoryDTO&gt; symptomHistoryList) {
+<span class="nc" id="L2205">        this.symptomHistoryList = symptomHistoryList;</span>
+<span class="nc" id="L2206">    }</span>
+
+    public List&lt;ChartHeading&gt; getChartHeadings() {
+<span class="fc" id="L2209">        return chartHeadings;</span>
+    }
+
+    public void setChartHeadings(List&lt;ChartHeading&gt; chartHeadings) {
+<span class="nc" id="L2213">        this.chartHeadings = chartHeadings;</span>
+<span class="nc" id="L2214">    }</span>
+
+    public List&lt;ChartRow&lt;ChartCell&gt;&gt; getChartRows() {
+<span class="fc" id="L2217">        return chartRows;</span>
+    }
+
+    public void setChartRows(List&lt;ChartRow&lt;ChartCell&gt;&gt; chartRows) {
+<span class="nc" id="L2221">        this.chartRows = chartRows;</span>
+<span class="nc" id="L2222">    }</span>
+
+    public String getUpdateDate() {
+<span class="fc" id="L2225">        return updateDate;</span>
+    }
+
+    public void setUpdateDate(String updateDate) {
+<span class="fc" id="L2229">        this.updateDate = updateDate;</span>
+<span class="fc" id="L2230">    }</span>
+
+    public String getUpdateTime() {
+<span class="fc" id="L2233">        return updateTime;</span>
+    }
+
+    public void setUpdateTime(String updateTime) {
+<span class="fc" id="L2237">        this.updateTime = updateTime;</span>
+<span class="fc" id="L2238">    }</span>
+
+    public List&lt;Symptom&gt; getSymptomList() {
+<span class="fc" id="L2241">        return symptomList;</span>
+    }
+
+    public void setSymptomList(List&lt;Symptom&gt; symptomList) {
+<span class="nc" id="L2245">        this.symptomList = symptomList;</span>
+<span class="nc" id="L2246">    }</span>
+
+    public SymptomReportManager getSymptomReportManager() {
+<span class="nc" id="L2249">        return symptomReportManager;</span>
+    }
+
+    public void setSymptomReportManager(SymptomReportManager symptomReportManager) {
+<span class="fc" id="L2253">        this.symptomReportManager = symptomReportManager;</span>
+<span class="fc" id="L2254">    }</span>
+
+    public List&lt;LoincTest&gt; getLoincTestList() {
+<span class="fc" id="L2257">        return loincTestList;</span>
+    }
+
+    public void setLoincTestList(List&lt;LoincTest&gt; loincTestList) {
+<span class="nc" id="L2261">        this.loincTestList = loincTestList;</span>
+<span class="nc" id="L2262">    }</span>
+
+    public Map&lt;Long, String&gt; getTestIdToResult() {
+<span class="fc" id="L2265">        return testIdToResult;</span>
+    }
+
+    public void setTestIdToResult(Map&lt;Long, String&gt; testIdToResult) {
+<span class="fc" id="L2269">        this.testIdToResult = testIdToResult;</span>
+<span class="fc" id="L2270">    }</span>
+
+    public Map&lt;Long, String&gt; getTestIdToMinimum() {
+<span class="fc" id="L2273">        return testIdToMinimum;</span>
+    }
+
+    public void setTestIdToMinimum(Map&lt;Long, String&gt; testIdToMinimum) {
+<span class="fc" id="L2277">        this.testIdToMinimum = testIdToMinimum;</span>
+<span class="fc" id="L2278">    }</span>
+
+    public Map&lt;Long, String&gt; getTestIdToMaximum() {
+<span class="fc" id="L2281">        return testIdToMaximum;</span>
+    }
+
+    public void setTestIdToMaximum(Map&lt;Long, String&gt; testIdToMaximum) {
+<span class="fc" id="L2285">        this.testIdToMaximum = testIdToMaximum;</span>
+<span class="fc" id="L2286">    }</span>
+
+    public TestManager getTestManager() {
+<span class="nc" id="L2289">        return testManager;</span>
+    }
+
+    public void setTestManager(TestManager testManager) {
+<span class="fc" id="L2293">        this.testManager = testManager;</span>
+<span class="fc" id="L2294">    }</span>
+
+    public List&lt;TestHistoryDTO&gt; getTestHistoryList() {
+<span class="fc" id="L2297">        return testHistoryList;</span>
+    }
+
+    public void setTestHistoryList(List&lt;TestHistoryDTO&gt; testHistoryList) {
+<span class="nc" id="L2301">        this.testHistoryList = testHistoryList;</span>
+<span class="nc" id="L2302">    }</span>
+
+    public String getReviewDate() {
+<span class="fc" id="L2305">        return reviewDate;</span>
+    }
+
+    public void setReviewDate(String reviewDate) {
+<span class="fc" id="L2309">        this.reviewDate = reviewDate;</span>
+<span class="fc" id="L2310">    }</span>
+
+    public Instant getReviewDateDisplay() {
+<span class="fc" id="L2313">        return reviewDateDisplay;</span>
+    }
+
+    public void setReviewDateDisplay(Instant reviewDateDisplay) {
+<span class="nc" id="L2317">        this.reviewDateDisplay = reviewDateDisplay;</span>
+<span class="nc" id="L2318">    }</span>
+
+    public List&lt;PKBPerson&gt; getApprovers() {
+<span class="nc" id="L2321">        return approvers;</span>
+    }
+
+    public void setApprovers(List&lt;PKBPerson&gt; approvers) {
+<span class="nc" id="L2325">        this.approvers = approvers;</span>
+<span class="nc" id="L2326">    }</span>
+
+    public Long getApproverId() {
+<span class="fc" id="L2329">        return approverId;</span>
+    }
+
+    public void setApproverId(Long approverId) {
+<span class="fc" id="L2333">        this.approverId = approverId;</span>
+<span class="fc" id="L2334">    }</span>
+
+    public PKBPerson getApprover() {
+<span class="nc" id="L2337">        return approver;</span>
+    }
+
+    public void setApprover(PKBPerson approver) {
+<span class="nc" id="L2341">        this.approver = approver;</span>
+<span class="nc" id="L2342">    }</span>
+
+    public String getApprovalStatus() {
+<span class="nc" id="L2345">        return approvalStatus;</span>
+    }
+
+    public void setApprovalStatus(String approvalStatus) {
+<span class="nc" id="L2349">        this.approvalStatus = approvalStatus;</span>
+<span class="nc" id="L2350">    }</span>
+
+    public PKBEmailMessageManager getPkbEmailMessageManager() {
+<span class="nc" id="L2353">        return pkbEmailMessageManager;</span>
+    }
+
+    public void setPkbEmailMessageManager(
+            PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L2358">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L2359">    }</span>
+
+    public PKBPerson getCreator() {
+<span class="fc" id="L2362">        return creator;</span>
+    }
+
+    public void setCreator(PKBPerson creator) {
+<span class="nc" id="L2366">        this.creator = creator;</span>
+<span class="nc" id="L2367">    }</span>
+
+    public IPlanWebBean getPlanWebBean() {
+<span class="nc" id="L2370">        return planWebBean;</span>
+    }
+
+    public void setPlanWebBean(IPlanWebBean planWebBean) {
+<span class="fc" id="L2374">        this.planWebBean = planWebBean;</span>
+<span class="fc" id="L2375">    }</span>
+
+    public Long getOriginalContextUser() {
+<span class="fc" id="L2378">        return originalContextUser;</span>
+    }
+
+    public void setOriginalContextUser(Long originalContextUser) {
+<span class="nc" id="L2382">        this.originalContextUser = originalContextUser;</span>
+<span class="nc" id="L2383">    }</span>
+
+    public PKBPerson getPatient() {
+<span class="fc" id="L2386">        return patient;</span>
+    }
+
+    public void setPatient(PKBPerson patient) {
+<span class="nc" id="L2390">        this.patient = patient;</span>
+<span class="nc" id="L2391">    }</span>
+
+    public DiagnosisManager getDiagnosisManager() {
+<span class="nc" id="L2394">        return diagnosisManager;</span>
+    }
+
+    public void setDiagnosisManager(DiagnosisManager diagnosisManager) {
+<span class="fc" id="L2398">        this.diagnosisManager = diagnosisManager;</span>
+<span class="fc" id="L2399">    }</span>
+
+    public List&lt;MedicationDTO&gt; getCurrentMedications() {
+<span class="fc" id="L2402">        return currentMedications;</span>
+    }
+
+    public MedicationManager getMedicationManager() {
+<span class="nc" id="L2406">        return medicationManager;</span>
+    }
+
+    public void setMedicationManager(MedicationManager medicationManager) {
+<span class="fc" id="L2410">        this.medicationManager = medicationManager;</span>
+<span class="fc" id="L2411">    }</span>
+
+    public String getEditable() {
+<span class="nc" id="L2414">        return editable;</span>
+    }
+
+    public void setEditable(String editable) {
+<span class="nc" id="L2418">        this.editable = editable;</span>
+<span class="nc" id="L2419">    }</span>
+
+    public Long getCreatorId() {
+<span class="nc" id="L2422">        return creatorId;</span>
+    }
+
+    public void setCreatorId(Long creatorId) {
+<span class="nc" id="L2426">        this.creatorId = creatorId;</span>
+<span class="nc" id="L2427">    }</span>
+
+    public List&lt;DiagnosisGroupDto&gt; getCurrentDiagnosisGroups() {
+<span class="fc" id="L2430">        return currentDiagnosisGroups;</span>
+    }
+
+    public List&lt;String&gt; getCurrentDiagnosisGroupDisplayTexts() {
+<span class="fc" id="L2434">        return currentDiagnosisGroups.stream()</span>
+<span class="fc" id="L2435">                .map(diagnosisGroup -&gt; diagnosisGroup.getDiagnosisConcept().getTextForDisplay())</span>
+<span class="fc" id="L2436">                .collect(toList());</span>
+    }
+
+    public List&lt;String&gt; getAllergyGroupDisplayTexts() {
+<span class="fc" id="L2440">        return allergyGroups.stream()</span>
+<span class="pc bpc" id="L2441" title="1 of 2 branches missed.">                .map(allergyGroup -&gt; allergyGroup.hasDisorderData() ? allergyGroup.getDisorder() : allergyGroup.getAllergen())</span>
+<span class="fc" id="L2442">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L2443">                .map(CodeableConcept::getTextForDisplay)</span>
+<span class="fc" id="L2444">                .collect(toList());</span>
+    }
+
+    private void logMethod(LoggedInEHRRequestContext loggedInEHRRequestContext, String methodName) {
+<span class="fc" id="L2448">        LOGGER.info(&quot;ManagePlansAction-{} accessingUser-{} contextUser-{} RequestContext = {}&quot;,</span>
+<span class="fc" id="L2449">                methodName, loggedInEHRRequestContext.getAccessingUserId(), loggedInEHRRequestContext.getContextOrAccessingUserId(), loggedInEHRRequestContext);</span>
+<span class="fc" id="L2450">    }</span>
+
+    private void logPlan(String methodName, Long planId, PHPlan plan, LoggedInEHRRequestContext context) {
+<span class="fc" id="L2453">        LOGGER.info(&quot;ManagePlansAction-{} planId-{} planUniqueId-{} status-{} editable-{} accessingUser-{} contextUser-{} RequestContext = {}&quot;,</span>
+<span class="fc" id="L2454">                methodName, planId, plan.getBaseFields().getUniqueId(), plan.getStatus(), plan.getEditableStatus(), context.getAccessingUserId(), context.getContextOrAccessingUserId(), context);</span>
+<span class="fc" id="L2455">    }</span>
+
+    private void logDelete(String methodName, UUID uniqueId, LoggedInEHRRequestContext context) {
+<span class="fc" id="L2458">        LOGGER.info(&quot;ManagePlansAction-{} planUniqueId-{} accessingUser-{} contextUser-{} RequestContext = {}&quot;,</span>
+<span class="fc" id="L2459">                methodName, uniqueId, context.getAccessingUserId(), context.getContextOrAccessingUserId(), context);</span>
+<span class="fc" id="L2460">    }</span>
+
+    public List&lt;AllergyGroupDto&gt; getAllergyGroups() {
+<span class="fc" id="L2463">        return allergyGroups;</span>
+    }
+
+    public void setAllergyManager(AllergyManager allergyManager) {
+<span class="fc" id="L2467">        this.allergyManager = allergyManager;</span>
+<span class="fc" id="L2468">    }</span>
+
+    public void setMedicationWebBean(IMedicationWebBean medicationWebBean) {
+<span class="fc" id="L2471">        this.medicationWebBean = medicationWebBean;</span>
+<span class="fc" id="L2472">    }</span>
+
+    @Override
+    public void prepare() throws Exception {
+<span class="fc" id="L2476">        super.prepare();</span>
+<span class="fc" id="L2477">        dateFormat = getGlobalDateInputFormatter();</span>
+<span class="fc" id="L2478">    }</span>
+
+    public String getViewPlanLink() {
+<span class="fc" id="L2481">        return viewPlanLink;</span>
+    }
+
+    public UUID getDataPointUniqueId() {
+<span class="fc" id="L2485">        return dataPointUniqueId;</span>
+    }
+
+    public void setDataPointUniqueId(UUID dataPointUniqueId) {
+<span class="fc" id="L2489">        this.dataPointUniqueId = dataPointUniqueId;</span>
+<span class="fc" id="L2490">    }</span>
+
+    public &lt;T&gt; boolean isListUnavailable(List&lt;T&gt; list) {
+<span class="fc" id="L2493">        return isEmpty(list);</span>
+    }
+
+    public String getDiscussMessage() {
+<span class="fc" id="L2497">        return discussMessage;</span>
+    }
+
+    public void setDiscussMessage(String discussMessage) {
+<span class="nc" id="L2501">        this.discussMessage = discussMessage;</span>
+<span class="nc" id="L2502">    }</span>
+
+    public String getDiscussTopic() {
+<span class="fc" id="L2505">        return discussTopic;</span>
+    }
+
+    public void setDiscussTopic(String discussTopic) {
+<span class="nc" id="L2509">        this.discussTopic = discussTopic;</span>
+<span class="nc" id="L2510">    }</span>
+
+    public void setPhPlanToPlanDtoConverter(PhPlanToPlanDtoConverter phPlanToPlanDtoConverter) {
+<span class="fc" id="L2513">        this.phPlanToPlanDtoConverter = phPlanToPlanDtoConverter;</span>
+<span class="fc" id="L2514">    }</span>
+
+    public void setDiagnosisHelper(DiagnosisHelper diagnosisHelper) {
+<span class="fc" id="L2517">        this.diagnosisHelper = diagnosisHelper;</span>
+<span class="fc" id="L2518">    }</span>
+
+    @Override
+    public List&lt;String&gt; getSymptomsResultSet2Value() {
+<span class="fc" id="L2522">        return symptomsResultSet2Value;</span>
+    }
+
+    public void setSymptomsResultSet2Value(List&lt;String&gt; symptomsResultSet2Value) {
+<span class="fc" id="L2526">        this.symptomsResultSet2Value = symptomsResultSet2Value;</span>
+<span class="fc" id="L2527">    }</span>
+
+    @Override
+    public String getCustomStyle() {
+<span class="fc bfc" id="L2531" title="All 2 branches covered.">        return noHeaderRequired ? MOBILE_OPTIMIZED_STYLE + &quot; &quot; + NO_HEADER_STYLE : MOBILE_OPTIMIZED_STYLE;</span>
+    }
+
+    public List&lt;MeasurementOverviewDto&gt; getMeasurementOverviewList() {
+<span class="fc" id="L2535">        return measurementOverviewList;</span>
+    }
+
+    public void setMeasurementOverviewList(List&lt;MeasurementOverviewDto&gt; measurementOverviewList) {
+<span class="nc" id="L2539">        this.measurementOverviewList = measurementOverviewList;</span>
+<span class="nc" id="L2540">    }</span>
+
+    public RangeDetails getRangeDetails() {
+<span class="fc" id="L2543">        return rangeDetails;</span>
+    }
+
+    public String getRangeWanted() {
+<span class="nc" id="L2547">        return rangeWanted;</span>
+    }
+
+    public void setRangeWanted(String rangeWanted) {
+<span class="fc" id="L2551">        this.rangeWanted = rangeWanted;</span>
+<span class="fc" id="L2552">    }</span>
+
+    public boolean isActionPlanShow() {
+<span class="fc" id="L2555">        return actionPlanShow;</span>
+    }
+
+    public boolean isHeaderColourCustomised() {
+<span class="fc" id="L2559">        Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="pc bpc" id="L2560" title="1 of 4 branches missed.">        return team != null &amp;&amp; isNotBlank(team.getDashboardButtonColour());</span>
+    }
+
+    @Override
+    public String getNamespace() {
+<span class="fc" id="L2565">        return NAMESPACE_AUTH;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

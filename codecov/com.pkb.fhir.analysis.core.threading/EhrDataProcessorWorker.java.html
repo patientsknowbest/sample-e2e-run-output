@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EhrDataProcessorWorker.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.analysis.core.threading</a> &gt; <span class="el_source">EhrDataProcessorWorker.java</span></div><h1>EhrDataProcessorWorker.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.analysis.core.threading;
+
+import com.pkb.fhir.analysis.core.domain.EhrDataProcessingContext;
+import com.pkb.fhir.analysis.core.domain.LocalEhrDataProcessingState;
+import com.pkb.fhir.analysis.process.check.AlreadyProcessedDataChecker;
+import com.pkb.fhir.analysis.process.collect.EhrDataCollector;
+import com.pkb.fhir.analysis.process.domain.EhrDataCollectionParameters;
+import com.pkb.fhir.analysis.process.perform.EhrDataProcessor;
+import com.pkb.fhir.common.EhrDataProcessingResult;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static java.lang.invoke.MethodHandles.lookup;
+
+/**
+ * This is a core part of the application.
+ * The workers are created by the factory {@link EhrDataProcessingWorkerFactory} based on the selected process and given parameters.
+ * It orchestrates three procedures:
+ *   1) collects data within the given id interval
+ *   2) checks already processed data and skips them (if override functionality was not utilized)
+ *   3) processes the data which can be decryption, transformation, validation or storing on FHIR server
+ * The given number of threads starts reading pages of data on id according to the given page size filtering by the given datatype.
+ * Each started thread works on the page it retrieved, the latest read id is shared between the threads (so that consecutive pages are processed by each started thread).
+ * The result of each process will be stored in the target database.
+ */
+public class EhrDataProcessorWorker extends Thread {
+<span class="fc" id="L31">    private static final Logger LOG = LoggerFactory.getLogger(lookup().lookupClass());</span>
+    private final EhrDataProcessor processor;
+    private final EhrDataProcessingContext context;
+    private final EhrDataCollector ehrDataCollector;
+    private final AlreadyProcessedDataChecker processedDataChecker;
+<span class="fc" id="L36">    private boolean cancelled = false;</span>
+
+    public EhrDataProcessorWorker(String name, EhrDataProcessor processor, EhrDataProcessingContext context, EhrDataCollector ehrDataCollector, AlreadyProcessedDataChecker processedDataChecker) {
+<span class="fc" id="L39">        super(name);</span>
+<span class="fc" id="L40">        this.processor = processor;</span>
+<span class="fc" id="L41">        this.context = context;</span>
+<span class="fc" id="L42">        this.ehrDataCollector = ehrDataCollector;</span>
+<span class="fc" id="L43">        this.processedDataChecker = processedDataChecker;</span>
+<span class="fc" id="L44">    }</span>
+
+    @Override
+    public void run() {
+<span class="fc" id="L48">        List&lt;Long&gt; idsToProcess = null;</span>
+<span class="fc" id="L49">        boolean finished = false;</span>
+<span class="fc bfc" id="L50" title="All 4 branches covered.">        while (!cancelled &amp;&amp; !finished) {</span>
+            try {
+<span class="fc" id="L52">                idsToProcess = collectDataFeed(context);</span>
+<span class="fc bfc" id="L53" title="All 2 branches covered.">                if (idsToProcess.isEmpty()) {</span>
+<span class="fc" id="L54">                    finished = true;</span>
+                } else {
+<span class="pc bpc" id="L56" title="1 of 2 branches missed.">                    if (!context.isOverrideExisting()) {</span>
+<span class="fc" id="L57">                        idsToProcess = skipExisting(idsToProcess);</span>
+                    }
+<span class="pc bpc" id="L59" title="1 of 2 branches missed.">                    if (idsToProcess.isEmpty()) {</span>
+<span class="nc" id="L60">                        LOG.info(&quot;Worker: {} - Skipping all, already existing&quot;, getName());</span>
+                    } else {
+<span class="fc" id="L62">                        LOG.info(&quot;Worker: {} - Processing {} records of ehr data in id interval [{}, {}]&quot;, getName(), idsToProcess.size(), idsToProcess.get(0), idsToProcess.get(idsToProcess.size() - 1));</span>
+<span class="fc" id="L63">                        List&lt;? extends EhrDataProcessingResult&gt; result = processData(idsToProcess);</span>
+<span class="fc" id="L64">                        updateProcessingState(context, idsToProcess, result);</span>
+<span class="fc" id="L65">                        LOG.info(&quot;Worker: {} - DONE: Processing {} records of ehr data in id interval [{}, {}]&quot;, getName(), idsToProcess.size(), idsToProcess.get(0), idsToProcess.get(idsToProcess.size() - 1));</span>
+                    }
+                }
+<span class="nc" id="L68">            } catch (Exception e) {</span>
+<span class="nc" id="L69">                String unknown = &quot;unknown&quot;;</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">                String itemCount = idsToProcess == null ? unknown : String.valueOf(idsToProcess.size());</span>
+<span class="nc bnc" id="L71" title="All 4 branches missed.">                String intervalStart = idsToProcess == null || idsToProcess.isEmpty() ? unknown : String.valueOf(idsToProcess.get(0));</span>
+<span class="nc bnc" id="L72" title="All 4 branches missed.">                String intervalEnd = idsToProcess == null || idsToProcess.isEmpty() ? unknown : String.valueOf(idsToProcess.get(idsToProcess.size() - 1));</span>
+<span class="nc" id="L73">                LOG.error(&quot;Worker: {} - FAILED to process {} records of ehr data in id interval [{}, {}]&quot;, getName(), itemCount, intervalStart, intervalEnd, e);</span>
+<span class="nc bnc" id="L74" title="All 2 branches missed.">                if(idsToProcess != null){</span>
+<span class="nc" id="L75">                    updateProcessingState(context, idsToProcess, null);</span>
+                }
+<span class="pc" id="L77">            }</span>
+        }
+<span class="fc bfc" id="L79" title="All 2 branches covered.">        if (cancelled) {</span>
+<span class="fc" id="L80">            LOG.info(&quot;Worker: {} - Stopping due to cancellation.&quot;, getName());</span>
+        } else {
+<span class="fc" id="L82">            LOG.info(&quot;Worker: {} - No more menu data to process. Stopping.&quot;, getName());</span>
+        }
+<span class="fc" id="L84">    }</span>
+
+    private List&lt;Long&gt; skipExisting(List&lt;Long&gt; idsToProcess) {
+<span class="fc" id="L87">        List&lt;Long&gt; result = new ArrayList&lt;&gt;(idsToProcess);</span>
+<span class="fc" id="L88">        result.removeAll(processedDataChecker.findExistingSucceededData(idsToProcess));</span>
+<span class="fc" id="L89">        return result;</span>
+    }
+
+    private void updateProcessingState(EhrDataProcessingContext context, List&lt;Long&gt; idsToProcess, List&lt;? extends EhrDataProcessingResult&gt; resultList) {
+<span class="fc" id="L93">        LocalEhrDataProcessingState localState = context.getState().getLocalState(getName());</span>
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">        if (resultList == null) {</span>
+<span class="nc" id="L95">            localState.addFailure((long) idsToProcess.size());</span>
+        } else {
+<span class="fc" id="L97">            resultList.forEach(processedEhrData -&gt; {</span>
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">                if (processedEhrData.isFailure()) {</span>
+<span class="nc" id="L99">                    localState.incrementFailure();</span>
+                } else {
+<span class="fc" id="L101">                    localState.incrementSuccess();</span>
+                }
+<span class="fc" id="L103">            });</span>
+        }
+<span class="fc" id="L105">        context.getState().getLocalState(getName()).addProcessed((long) idsToProcess.size());</span>
+<span class="fc" id="L106">        context.getState().getLocalState(getName()).incrementIteration();</span>
+<span class="fc" id="L107">    }</span>
+
+    private List&lt;? extends EhrDataProcessingResult&gt; processData(List&lt;Long&gt; idsToProcess) {
+<span class="fc" id="L110">        return processor.process(idsToProcess);</span>
+    }
+
+    @NotNull
+    private List&lt;Long&gt; collectDataFeed(EhrDataProcessingContext context) {
+<span class="fc" id="L115">        LOG.info(&quot;Worker: {} - Attempt to collect next batch&quot;, getName());</span>
+<span class="fc" id="L116">        synchronized (ehrDataCollector) {</span>
+<span class="fc" id="L117">            LOG.info(&quot;Worker: {} - Collecting next batch with minid {}&quot;, getName(), context.getState().getLatestProcessedEhrId());</span>
+<span class="fc" id="L118">            List&lt;Long&gt; idsToProcess = ehrDataCollector.collect(new EhrDataCollectionParameters(context.getMenuDataType(), context.getDataPageSize(), context.getMaxId(), context.getState().getLatestProcessedEhrId()));</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">            if (!idsToProcess.isEmpty()) {</span>
+<span class="fc" id="L120">                context.getState().setLatestProcessedEhrId(idsToProcess.get(idsToProcess.size() - 1));</span>
+            }
+<span class="fc" id="L122">            LOG.info(&quot;Worker: {} - Next batch collected&quot;, getName());</span>
+<span class="fc" id="L123">            return idsToProcess;</span>
+        }
+    }
+
+    public void cancel() {
+<span class="fc" id="L128">        cancelled = true;</span>
+<span class="fc" id="L129">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

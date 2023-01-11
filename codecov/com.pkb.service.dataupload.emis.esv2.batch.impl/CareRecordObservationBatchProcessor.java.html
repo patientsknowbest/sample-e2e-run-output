@@ -1,0 +1,364 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CareRecordObservationBatchProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.batch.impl</a> &gt; <span class="el_source">CareRecordObservationBatchProcessor.java</span></div><h1>CareRecordObservationBatchProcessor.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.batch.impl;
+
+import com.google.common.collect.Table;
+import com.pkb.app.dto.DataPointSaveResult;
+import com.pkb.coding.entity.CodeableConcept;
+import com.pkb.coding.entity.CodingReceived;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.dto.AccountKeysDTO;
+import com.pkb.dataupload.emis.esv2.EmisEsProcessedRow;
+import com.pkb.entities.enums.CodingDataType;
+import com.pkb.externalid.service.ExternalIdService;
+import com.pkb.institute.OrgMergeHelper;
+import com.pkb.kms.client.core.Kms;
+import com.pkb.service.dataupload.emis.esv2.EmisEsManager;
+import com.pkb.service.dataupload.emis.esv2.EmisEsProcessedRowService;
+import com.pkb.service.dataupload.emis.esv2.EmisEsStatusService;
+import com.pkb.service.dataupload.emis.esv2.EmisOrgHelper;
+import com.pkb.service.dataupload.emis.esv2.EmisPersonStatHelper;
+import com.pkb.service.dataupload.emis.esv2.batch.EmisProcessorAborter;
+import com.pkb.service.dataupload.emis.esv2.batch.impl.observation.ObservationHandler;
+import com.pkb.service.dataupload.emis.esv2.model.AdminPatient;
+import com.pkb.service.dataupload.emis.esv2.model.AdminUserInRole;
+import com.pkb.service.dataupload.emis.esv2.model.CareRecordObservation;
+import com.pkb.service.dataupload.emis.esv2.model.CodingWrapper;
+import com.pkb.service.dataupload.emis.esv2.model.EmisFileType;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutableCodingWrapper;
+import com.pkb.service.dataupload.emis.esv2.model.PKBPersonInfo;
+import com.pkb.service.dataupload.emis.esv2.sorting.ResultWithId;
+import com.pkb.service.notification.impl.tolven.INotificationManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.test.entity.LoincMapping;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Function1;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.collection.HashMap;
+import io.vavr.collection.Map;
+import io.vavr.collection.Seq;
+import io.vavr.collection.Set;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.collections4.CollectionUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.Serializable;
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+import static com.pkb.service.dataupload.emis.esv2.batch.FileProcessor.ProcessorType.NORMAL;
+import static com.pkb.service.dataupload.emis.esv2.batch.impl.ProcessingError.Severity.FATAL;
+
+public class CareRecordObservationBatchProcessor extends BatchingBatchDataProcessor&lt;CareRecordObservation&gt; implements BatchProcessorHelperMixin&lt;CareRecordObservation&gt; {
+
+<span class="fc" id="L60">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private static final String OLDER_RECORD_DELETE_COUNTER_NAME = &quot;pkb_phr_integration_emis_csv_old_version_delete&quot;;
+<span class="fc" id="L63">    private static final Counter OLDER_RECORD_DELETE_COUNTER = Counter.builder(OLDER_RECORD_DELETE_COUNTER_NAME)</span>
+<span class="fc" id="L64">            .description(&quot;Number of rows soft deleted due to being replaced with a more recent version&quot;)</span>
+<span class="fc" id="L65">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L67">    private static final EmisFileType TYPE = EmisFileType.CARE_RECORD_OBSERVATION;</span>
+
+    private final java.util.Set&lt;ObservationHandler&gt; handlers;
+
+    private final TolvenBeanFactory beanFactory;
+
+    private final UserManager userManager;
+
+    private final EmisPersonStatHelper emisPersonStatHelper;
+
+    private final EmisTestResultObservationHelper emisTestResultObservationHelper;
+
+    public CareRecordObservationBatchProcessor(EmisEsProcessedRowService emisEsProcessedRowService, EmisEsManager emisEsManager, EmisProcessorAborter emisProcessAborter, Kms kmsClient,
+                                               PhrConfig config, DateTimeService dateTimeService, ExternalIdService externalIdService, INotificationManager notificationManager,
+                                               java.util.Set&lt;ObservationHandler&gt; handlers, TolvenBeanFactory beanFactory, UserManager userManager, EmisEsStatusService emisEsStatusService,
+                                               EmisOrgHelper emisOrgHelper, EmisPersonStatHelper emisPersonStatHelper, EmisTestResultObservationHelper emisTestResultObservationHelper) {
+<span class="fc" id="L83">        super(emisEsProcessedRowService, emisEsManager, emisProcessAborter, kmsClient, config, dateTimeService, externalIdService, notificationManager, emisEsStatusService, emisOrgHelper);</span>
+<span class="fc" id="L84">        this.handlers = handlers;</span>
+<span class="fc" id="L85">        this.beanFactory = beanFactory;</span>
+<span class="fc" id="L86">        this.userManager = userManager;</span>
+<span class="fc" id="L87">        this.emisPersonStatHelper = emisPersonStatHelper;</span>
+<span class="fc" id="L88">        this.emisTestResultObservationHelper = emisTestResultObservationHelper;</span>
+<span class="fc" id="L89">    }</span>
+
+    @Override
+    public Class&lt;CareRecordObservation&gt; interfaceClass() {
+<span class="fc" id="L93">        return CareRecordObservation.class;</span>
+    }
+
+    @Override
+    public boolean canProcess(@NotNull EmisFileType fileType) {
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">        return fileType == TYPE;</span>
+    }
+
+    @SuppressWarnings({&quot;resource&quot;, &quot;ReuseOfLocalVariable&quot;})
+    @Override
+    public boolean process(List&lt;ResultWithId&lt;CareRecordObservation, Long&gt;&gt; rows, EmisEsProcessedRow fileState) {
+<span class="fc" id="L104">        rows.forEach(r -&gt; emisProcessAborter.executeTestControl(TYPE, r.getRowId().getId()));</span>
+<span class="fc" id="L105">        io.vavr.collection.List&lt;ResultWithId&lt;CareRecordObservation, Long&gt;&gt; records = io.vavr.collection.List.ofAll(rows);</span>
+
+        // Fetch data needed for further processing
+<span class="fc" id="L108">        var recordToOrgMergeHelper = getRecordToOrgMergeHelperMapTimed(records, CareRecordObservation::organisationGuid);</span>
+
+<span class="fc" id="L110">        Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, AdminPatient&gt;&gt; adminPatientsOrFailures = fetchAdminPatientsTimed(recordToOrgMergeHelper);</span>
+<span class="fc" id="L111">        Seq&lt;ProcessingError&lt;CareRecordObservation&gt;&gt; failures = extractFailures(adminPatientsOrFailures).values();</span>
+<span class="fc" id="L112">        Map&lt;CareRecordObservation, AdminPatient&gt; adminPatients = extractSuccesses(adminPatientsOrFailures);</span>
+<span class="fc" id="L113">        Set&lt;CareRecordObservation&gt; saveableRecords = adminPatients.keySet();</span>
+
+<span class="fc" id="L115">        var recordToSurvivorOrg = recordToOrgMergeHelper.mapValues(OrgMergeHelper::getOrg);</span>
+
+<span class="fc" id="L117">        Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, PKBPersonInfo&gt;&gt; pkbPersonsOrFailures = fetchPkbPersonsTimed(</span>
+<span class="fc" id="L118">                adminPatients.map((k, v) -&gt; Tuple.of(k, Tuple.of(recordToSurvivorOrg.apply(k), v))));</span>
+<span class="fc" id="L119">        failures = failures.appendAll(extractFailures(pkbPersonsOrFailures).values());</span>
+<span class="fc" id="L120">        Map&lt;CareRecordObservation, PKBPersonInfo&gt; pkbPersons = extractSuccesses(pkbPersonsOrFailures);</span>
+<span class="fc" id="L121">        saveableRecords = saveableRecords.intersect(pkbPersons.keySet());</span>
+
+<span class="fc" id="L123">        Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, Long&gt;&gt; defaultAccountIdsOrFailures = fetchDefaultAccountIdsTimed(</span>
+<span class="fc" id="L124">                restrict(pkbPersons, saveableRecords));</span>
+<span class="fc" id="L125">        Map&lt;CareRecordObservation, Long&gt; defaultAccountIds = extractSuccesses(defaultAccountIdsOrFailures);</span>
+<span class="fc" id="L126">        failures = failures.appendAll(extractFailures(defaultAccountIdsOrFailures).values());</span>
+<span class="fc" id="L127">        saveableRecords = saveableRecords.intersect(defaultAccountIds.keySet());</span>
+<span class="fc" id="L128">        Set&lt;CareRecordObservation&gt; deletableRecords = saveableRecords.filter(epdp -&gt; epdp.isHandleAsDeleted(adminPatients.get(epdp).getOrNull()));</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">        saveableRecords = saveableRecords.filter(epdp -&gt; !epdp.isHandleAsDeleted(adminPatients.get(epdp).getOrNull()));</span>
+
+<span class="fc" id="L131">        Map&lt;CareRecordObservation, AdminUserInRole&gt; adminUserInRoles = fetchAdminUserInRolesTimed(recordToSurvivorOrg, CareRecordObservation::enteredByUserInRoleGuid);</span>
+
+<span class="fc" id="L133">        Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt;&gt; codingReceiveds = fetchCodingReceivedTimed(restrict(recordToOrgMergeHelper, saveableRecords), CareRecordObservation::uniqueKey);</span>
+<span class="fc" id="L134">        Map&lt;CareRecordObservation, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt; codingReceivedSuccesses = extractSuccesses(codingReceiveds);</span>
+<span class="fc" id="L135">        failures = failures.appendAll(extractFailures(codingReceiveds).values());</span>
+
+<span class="fc" id="L137">        Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, LoincMapping&gt;&gt; recordsToLoincMappingOrFailures = emisTestResultObservationHelper.retrieveLoincMappingsForTestRecords(codingReceivedSuccesses);</span>
+<span class="fc" id="L138">        Map&lt;CareRecordObservation, LoincMapping&gt; recordsToLoincMapping = extractSuccesses(recordsToLoincMappingOrFailures);</span>
+<span class="fc" id="L139">        failures = failures.appendAll(extractFailures(recordsToLoincMappingOrFailures).values());</span>
+<span class="fc" id="L140">        Map&lt;CareRecordObservation, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt; codingReceivedSuccessesAndTestResultsWithLoincMapping = filterTestResultObservationsWhichNotHaveLoincMapping(</span>
+                codingReceivedSuccesses, recordsToLoincMapping);
+
+<span class="fc" id="L143">        saveableRecords = saveableRecords.intersect(codingReceivedSuccessesAndTestResultsWithLoincMapping.keySet());</span>
+
+        @SuppressWarnings(&quot;Convert2MethodRef&quot;)
+<span class="fc" id="L146">        Map&lt;CodingDataType, Map&lt;CareRecordObservation, Tuple2&lt;CodingReceived, CodeableConcept&gt;&gt;&gt; byDataType = codingReceivedSuccessesAndTestResultsWithLoincMapping</span>
+<span class="fc" id="L147">                .groupBy(t -&gt; t._2._2.codingReceived().getCodingDataType())</span>
+<span class="fc" id="L148">                .map((k, v) -&gt; Tuple.of(k, v.mapValues(m -&gt; new Tuple2&lt;&gt;(m._2.codingReceived(), m._1))));</span>
+
+<span class="fc" id="L150">        failures</span>
+<span class="fc" id="L151">                .groupBy(ProcessingError::getSeverity)</span>
+<span class="fc" id="L152">                .forEach(f -&gt; {</span>
+<span class="fc" id="L153">                    Seq&lt;ProcessingError&lt;CareRecordObservation&gt;&gt; errors = f._2;</span>
+
+<span class="fc bfc" id="L155" title="All 2 branches covered.">                    if (f._1 == FATAL) {</span>
+<span class="fc" id="L156">                        incrementProcessedRowsCounter(ProcessedRowStatus.FAILED, errors.size());</span>
+<span class="fc" id="L157">                        String errorString = errors.map(ProcessingError::getMessage).collect(Collectors.joining(&quot;\n&quot;));</span>
+<span class="fc" id="L158">                        LOGGER.error(&quot;Failed to process {} observations:\n{}&quot;, errors.size(), errorString);</span>
+<span class="fc" id="L159">                    } else {</span>
+<span class="fc" id="L160">                        incrementProcessedRowsCounter(ProcessedRowStatus.SKIPPED, errors.size());</span>
+<span class="fc" id="L161">                        String samples = errors.distinctBy(ProcessingError::getMessageKey).map(ProcessingError::getMessage).collect(Collectors.joining(&quot;\n&quot;));</span>
+<span class="fc" id="L162">                        LOGGER.warn(&quot;Skipping {} observations,\nmessages with samples:\n{}&quot;, errors.size(), samples);</span>
+                    }
+<span class="fc" id="L164">                });</span>
+
+<span class="fc" id="L166">        Table&lt;String, UUID, UUID&gt; observationGuidToUniqueId = getOrCreateExternalIdsTimed(saveableRecords, deletableRecords, CareRecordObservation::observationGuid, recordToSurvivorOrg);</span>
+<span class="fc" id="L167">        java.util.Map&lt;String, Long&gt; internalIdCounts = observationGuidToUniqueId.cellSet().stream().collect(Collectors.groupingBy(Table.Cell::getRowKey, Collectors.counting()));</span>
+
+<span class="fc" id="L169">        Set&lt;CareRecordObservation&gt; finalSaveableRecords = saveableRecords;</span>
+
+        //noinspection deprecation
+<span class="fc" id="L172">        var deletionResults = handleDeletableRecordsTimed(deletableRecords,</span>
+                CareRecordObservation::observationGuid,
+<span class="fc" id="L174">                uuidAndAccountPairs -&gt; beanFactory.getEhrRemote().deleteAllForUniqueForSystemProcessWithoutAuditRow(uuidAndAccountPairs),</span>
+                observationGuidToUniqueId,
+                recordToSurvivorOrg,
+                defaultAccountIds);
+
+<span class="fc" id="L179">        notifyAboutDeletion(deletableRecords, deletionResults, CareRecordObservation::observationGuid, recordToSurvivorOrg, observationGuidToUniqueId, pkbPersons);</span>
+
+<span class="fc" id="L181">        Map&lt;Long, AccountKeysDTO&gt; accountIdToAccountKeys = getRevelantAccountKeys(defaultAccountIds, byDataType);</span>
+
+<span class="fc" id="L183">        recordTime(&quot;save&quot;, () -&gt; handlers.forEach(handler -&gt; {</span>
+            // We can only process records for which all of the necessary info is available
+<span class="fc" id="L185">            java.util.Set&lt;CareRecordObservation&gt; saveable = byDataType</span>
+<span class="fc" id="L186">                    .getOrElse(handler.getHandledDataType(), HashMap.empty()).keySet()</span>
+<span class="fc" id="L187">                    .intersect(finalSaveableRecords)</span>
+<span class="fc" id="L188">                    .toJavaSet(); // Doing this because we want the set to be mutable</span>
+
+<span class="fc bfc" id="L190" title="All 2 branches covered.">            if (saveable.isEmpty()) {</span>
+<span class="fc" id="L191">                return;</span>
+            }
+
+<span class="fc" id="L194">            DataPointSaveResult saveResult = handler.handle(</span>
+                    saveable,
+                    recordToOrgMergeHelper,
+                    pkbPersons,
+                    adminPatients,
+                    defaultAccountIds,
+                    accountIdToAccountKeys,
+                    adminUserInRoles,
+<span class="fc" id="L202">                    codingReceivedSuccessesAndTestResultsWithLoincMapping.mapValues(v -&gt; v._2.codingReceived()), codingReceivedSuccessesAndTestResultsWithLoincMapping.mapValues(v -&gt; v._1),</span>
+                    recordsToLoincMapping,
+                    fileState,
+                    observationGuidToUniqueId
+            );
+
+<span class="fc" id="L208">            Map&lt;ProcessedRowStatus, Integer&gt; saveCounts = HashMap.of(</span>
+<span class="fc" id="L209">                    ProcessedRowStatus.SAVED, saveResult.persistedDataPointIds().size(),</span>
+<span class="fc" id="L210">                    ProcessedRowStatus.EXCLUDED_BY_CODE, saveResult.getExcludedDataPoints().size());</span>
+
+<span class="fc" id="L212">            saveCounts</span>
+<span class="fc bfc" id="L213" title="All 2 branches covered.">                    .filter((status, count) -&gt; count &gt; 0)</span>
+<span class="fc" id="L214">                    .forEach((status, count) -&gt; {</span>
+<span class="fc" id="L215">                        incrementProcessedCodedDataCounter(status, handler.getHandledDataType().toString(), count);</span>
+<span class="fc" id="L216">                        incrementProcessedRowsCounter(status, count);</span>
+<span class="fc" id="L217">                    }); // SAVED and EXCLUDED_BY_CODE</span>
+
+            //noinspection deprecation
+<span class="fc" id="L220">            deleteOldGpDatapointsToPreventDuplicates(saveable,</span>
+                    CareRecordObservation::observationGuid,
+<span class="fc" id="L222">                    uuidsWithAccountId -&gt; beanFactory.getEhrRemote().deleteAllForUniqueForSystemProcessWithoutAuditRow(uuidsWithAccountId),</span>
+                    observationGuidToUniqueId,
+                    recordToSurvivorOrg,
+                    defaultAccountIds);
+
+<span class="fc" id="L227">            deleteOldVersionsOfSavedRecordsToPreventMultipleDatatypes(saveResult);</span>
+
+<span class="fc" id="L229">            io.vavr.collection.HashSet.ofAll(saveable)</span>
+<span class="fc" id="L230">                    .groupBy(o -&gt; codingReceivedSuccessesAndTestResultsWithLoincMapping.get(o).map(t -&gt; t._2.codingReceived().getCodingDataType()).getOrElse(CodingDataType.UNMAPPED))</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">                    .filterKeys(codingDataType -&gt; codingDataType != CodingDataType.UNMAPPED)</span>
+<span class="fc" id="L232">                    .forEach(((codingDataType, updatedObservations) -&gt; updatedObservations</span>
+<span class="fc bfc" id="L233" title="All 2 branches covered.">                            .filter(obs -&gt; !addedDueToGpChange(obs, CareRecordObservation::observationGuid, internalIdCounts))</span>
+<span class="fc" id="L234">                            .map(observation -&gt; Tuple.of(pkbPersons.apply(observation), recordToSurvivorOrg.apply(observation)))</span>
+<span class="fc" id="L235">                            .forEach(t -&gt; notify(t._1, t._2, UPDATE_ACTION_MAP.get(codingDataType)))));</span>
+<span class="fc" id="L236">        }));</span>
+
+<span class="fc bfc" id="L238" title="All 2 branches covered.">        return failures.find(f -&gt; f.getSeverity() == FATAL).isEmpty();</span>
+    }
+
+    private Map&lt;Long, AccountKeysDTO&gt; getRevelantAccountKeys(Map&lt;CareRecordObservation, Long&gt; defaultAccountIds, Map&lt;CodingDataType, Map&lt;CareRecordObservation, Tuple2&lt;CodingReceived, CodeableConcept&gt;&gt;&gt; byDataType) {
+<span class="fc" id="L242">        io.vavr.collection.List&lt;Long&gt; accountIdsWeRequireKeysFor = handlers.stream()</span>
+<span class="fc" id="L243">                .map(ObservationHandler::getHandledDataType)</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">                .filter(codingDataType -&gt; codingDataType != CodingDataType.UNMAPPED) //unmapped records don't do anything, no need to get account keys</span>
+<span class="fc" id="L245">                .map(datatype -&gt; byDataType.getOrElse(datatype, HashMap.empty()).keySet())</span>
+<span class="fc" id="L246">                .flatMap(Set::toJavaStream)</span>
+<span class="fc" id="L247">                .map(defaultAccountIds::get)</span>
+<span class="fc" id="L248">                .map(Option::get)</span>
+<span class="fc" id="L249">                .collect(io.vavr.collection.List.collector());</span>
+
+<span class="fc" id="L251">        return attemptKeyLookup(accountIdsWeRequireKeysFor);</span>
+    }
+
+    /**
+     * delete any previous versions of the same uniqueid.
+     * this may be required if we're processing a rebulk, and e.g. we've since made a change to our codingmatches that mean
+     * an observation is now processed by a different handler. Don't want to end up with multiple non-deleted records
+     * for the same uniqueid if they are for different datatypes, this could cause other code to break.
+     * &lt;p&gt;
+     * No need to audit these deletions, the new record serves as the audit.
+     *
+     * @param saveResult
+     */
+    private void deleteOldVersionsOfSavedRecordsToPreventMultipleDatatypes(DataPointSaveResult saveResult) {
+<span class="fc" id="L265">        List&lt;Long&gt; deletedIds = beanFactory.getEhrRemote().deleteAnyOtherForSameUniqueId(saveResult.persistedDataPointIds());</span>
+<span class="fc bfc" id="L266" title="All 2 branches covered.">        if (CollectionUtils.isNotEmpty(deletedIds)) {</span>
+<span class="fc" id="L267">            Metrics.counter(OLDER_RECORD_DELETE_COUNTER_NAME).increment(deletedIds.size());</span>
+        }
+<span class="fc" id="L269">    }</span>
+
+    @Override
+    public int getBatchSize() {
+<span class="fc" id="L273">        return config.getEmisEsProcessingBatchSize();</span>
+    }
+
+    private &lt;K extends Serializable&gt; Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt;&gt; fetchCodingReceivedTimed(
+            Map&lt;CareRecordObservation, OrgMergeHelper&gt; observations, Function1&lt;CareRecordObservation, K&gt; uniqueKeyExtractor) {
+<span class="fc" id="L278">        return recordTime(&quot;codingReceiveds&quot;, () -&gt; fetchCodingReceived(observations, uniqueKeyExtractor));</span>
+    }
+
+    private &lt;K extends Serializable&gt; Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt;&gt; fetchCodingReceived(
+            Map&lt;CareRecordObservation, OrgMergeHelper&gt; observations, Function1&lt;CareRecordObservation, K&gt; uniqueKeyExtractor) {
+<span class="fc" id="L283">        Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, CodingWrapper&gt;&gt; constructedCodingReceived = constructCodingReceived(</span>
+                observations, uniqueKeyExtractor);
+<span class="fc" id="L285">        Map&lt;CareRecordObservation, CodingWrapper&gt; successes = extractSuccesses(</span>
+                constructedCodingReceived);
+<span class="fc" id="L287">        Map&lt;CareRecordObservation, ProcessingError&lt;CareRecordObservation&gt;&gt; failures = extractFailures(constructedCodingReceived);</span>
+<span class="fc" id="L288">        Map&lt;CareRecordObservation, CodingReceived&gt; successfulCodingReceiveds = successes.mapValues(CodingWrapper::codingReceived);</span>
+<span class="fc" id="L289">        Map&lt;K, CareRecordObservation&gt; keyLookup = successfulCodingReceiveds.toMap(kv -&gt; Tuple.of(uniqueKeyExtractor.apply(kv._1), kv._1));</span>
+<span class="fc" id="L290">        Map&lt;K, CodingReceived&gt; uniqueKeyToCodingReceived = successfulCodingReceiveds.mapKeys(uniqueKeyExtractor);</span>
+<span class="fc" id="L291">        Map&lt;K, CodingReceived&gt; uniqueKeyToEnsuredCodingReceived = getEmisEsManager()</span>
+<span class="fc" id="L292">                .ensureCodingReceivedIfMatched(uniqueKeyToCodingReceived);</span>
+<span class="fc" id="L293">        Map&lt;CareRecordObservation, CodingReceived&gt; matchedCRs = uniqueKeyToEnsuredCodingReceived.mapKeys(keyLookup);</span>
+<span class="fc" id="L294">        Map&lt;CareRecordObservation, CodingWrapper&gt; noMatch = successes</span>
+<span class="fc" id="L295">                .removeAll(matchedCRs.keySet());</span>
+<span class="fc" id="L296">        Map&lt;CareRecordObservation, ProcessingError&lt;CareRecordObservation&gt;&gt; noMatchErrors = noMatch</span>
+<span class="fc" id="L297">                .map((k, v) -&gt; Tuple.of(k, new ProcessingError&lt;&gt;(k, getUnmatchedCodingErrorSeverity(), &quot;Missing codingMatch for codingReceived=[%s]&quot;, v.lazyBuilder())));</span>
+<span class="fc" id="L298">        noMatch.forEach((k, v) -&gt; emisEsManager.trackUnmatchedCodingReceived(v.codingReceived()));</span>
+
+<span class="fc" id="L300">        failures = failures.merge(noMatchErrors);</span>
+<span class="fc" id="L301">        successes = successes.removeAll(failures.keySet());</span>
+<span class="fc" id="L302">        return failures</span>
+<span class="fc" id="L303">                .map((k, v) -&gt; Tuple.of(k,</span>
+<span class="fc" id="L304">                        Either.&lt;ProcessingError&lt;CareRecordObservation&gt;, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt;left(v)))</span>
+<span class="fc" id="L305">                .merge(successes.map((k, v) -&gt; Tuple.of(k, Either.right(Tuple.of(v.lazyBuilder().apply(matchedCRs.apply(k)), ImmutableCodingWrapper.builder()</span>
+<span class="fc" id="L306">                                                                                                        .codingReceived(matchedCRs.apply(k))</span>
+<span class="fc" id="L307">                                                                                                        .codingClinicalCode(v.codingClinicalCode())</span>
+<span class="fc" id="L308">                                                                                                        .lazyBuilder(v.lazyBuilder())</span>
+<span class="fc" id="L309">                                                                                                        .org(v.org()).build())))));</span>
+
+
+    }
+
+    private Map&lt;CareRecordObservation, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt; filterTestResultObservationsWhichNotHaveLoincMapping(Map&lt;CareRecordObservation, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt; careRecordObservations,
+                                                                                            Map&lt;CareRecordObservation, LoincMapping&gt; testResultObservationsWithLoincMapping) {
+<span class="fc" id="L316">        return careRecordObservations.filter((cro, coding) -&gt; {</span>
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">            if (coding._2.codingReceived().getCodingDataType() == CodingDataType.TEST) {</span>
+<span class="nc" id="L318">                return testResultObservationsWithLoincMapping.containsKey(cro);</span>
+            }
+<span class="fc" id="L320">            return true;</span>
+        });
+    }
+
+    @Override
+    public EmisEsManager getEmisEsManager() {
+<span class="fc" id="L326">        return emisEsManager;</span>
+    }
+
+    @Override
+    public UserManager getUserManager() {
+<span class="fc" id="L331">        return userManager;</span>
+    }
+
+    @Override
+    public PhrConfig getConfig() {
+<span class="fc" id="L336">        return config;</span>
+    }
+
+    @Override
+    public EmisPersonStatHelper getEmisPersonStatHelper() {
+<span class="fc" id="L341">        return emisPersonStatHelper;</span>
+    }
+
+    @Override
+    public boolean isPostProcessingRequired() {
+<span class="fc" id="L346">        return false;</span>
+    }
+
+    @Override
+    protected boolean doPostProcess(EmisEsProcessedRow rowState) {
+<span class="nc" id="L351">        return true;</span>
+    }
+
+    @Override
+    public EmisFileType getSupportedType() {
+<span class="fc" id="L356">        return TYPE;</span>
+    }
+
+    @Override
+    public ProcessorType getProcessorType() {
+<span class="fc" id="L361">        return NORMAL;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

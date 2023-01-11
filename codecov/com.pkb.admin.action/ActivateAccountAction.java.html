@@ -1,0 +1,487 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ActivateAccountAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.admin.action</a> &gt; <span class="el_source">ActivateAccountAction.java</span></div><h1>ActivateAccountAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+// $Id: ActivateAccountAction.java Jun 17, 2010 11:57:57 AM anamikac$
+//
+//------------------------------------------------------------------------------
+package com.pkb.admin.action;
+
+import com.google.common.collect.Lists;
+import com.opensymphony.xwork2.Action;
+import com.pkb.VersionDetails;
+import com.pkb.action.BaseAction;
+import com.pkb.domain.events.ImmutablePersonRelationshipsChangedEvent;
+import com.pkb.entities.enums.NationalIdType;
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.entities.enums.VerificationStatus;
+import com.pkb.exception.MailException;
+import com.pkb.exception.PKBException;
+import com.pkb.institute.entity.Team;
+import com.pkb.institute.entity.Team.PatientIdSupport;
+import com.pkb.service.emailmessage.impl.PKBEmailMessageManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.team.TeamUserManager;
+import com.pkb.service.user.impl.UserAccessManager;
+import com.pkb.user.entity.IdentityVerification;
+import com.pkb.user.entity.NationalId;
+import com.pkb.user.entity.OrgLevelId;
+import com.pkb.user.entity.OrgLevelIdType;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.TeamLevelId;
+import com.pkb.user.entity.TeamLevelIdType;
+import com.pkb.util.PersonAmbiguityHandler;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
+
+import javax.naming.NamingException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.SortedSet;
+
+import static org.apache.commons.lang3.StringUtils.isNotBlank;
+
+/**
+ * Team admin activates patient and clinician's account
+ * with identity verification documents.
+ *
+ * @author anamikac
+ */
+<span class="fc" id="L61">public class ActivateAccountAction extends BaseAction {</span>
+
+    private static final String BACK_TO_PATIENTS = &quot;backToPatients&quot;;
+
+    private static final String BACK_TO_CLINICIANS = &quot;backToClinicians&quot;;
+
+    private static final long serialVersionUID = 1L;
+
+<span class="fc" id="L69">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+    private IdentityVerification verification;
+
+    private String nationalId;
+    private String nationalIdName;
+
+    private List&lt;String&gt; groupedOrgLevelIds;
+    private List&lt;OrgLevelIdType&gt; orgLevelIdTypes;
+    private List&lt;String&gt; groupedTeamLevelIds;
+    private List&lt;TeamLevelIdType&gt; teamLevelIdTypes;
+
+    private TeamUserManager teamUserManager;
+
+    private TeamManager teamManager;
+
+    private PKBEmailMessageManager pkbEmailMessageManager;
+
+    private UserAccessManager userAccessManager;
+
+    @Autowired
+    private ApplicationEventPublisher applicationEventPublisher;
+
+    private Long userId;
+
+    private String icode;
+
+    private PKBPerson user;
+
+    private Map&lt;String, String&gt; photoIdTypes;
+
+    private String tab;
+
+    /**
+     * Team admin activates patient/clinician account after completing the
+     * identification process which need user photo identity and a consent form
+     * signed by the user.
+     */
+    @Override
+    public String execute() throws NamingException {
+
+<span class="fc" id="L110">        LOGGER.info(&quot;&gt;&gt;&gt; execute&quot;);</span>
+
+        try {
+<span class="fc" id="L113">            LOGGER.info(&quot;verification [{}]&quot;, verification.getPhotoIdType());</span>
+
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">            if (verification.getPhotoIdType() == null) {</span>
+<span class="nc" id="L116">                addFieldError(&quot;verification.photoIdType&quot;,</span>
+<span class="nc" id="L117">                        getText(&quot;err.required.photoIdType&quot;));</span>
+<span class="nc" id="L118">                return Action.INPUT;</span>
+            }
+
+<span class="fc" id="L121">            prepopulateOrgLevelIdTypes();</span>
+<span class="fc" id="L122">            prepopulateTeamLevelIdTypes();</span>
+
+<span class="fc" id="L124">            PKBPerson verifier = loggedInUserUtil.getLoggedInPerson();</span>
+<span class="fc" id="L125">            Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="fc" id="L126">            PKBPerson person = userManager.getPKBPerson(userId, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="fc" id="L127">            verification.setPersonId(person.getId());</span>
+<span class="fc" id="L128">            verification.setVerifierId(verifier.getId());</span>
+<span class="fc" id="L129">            Instant now = dateTimeService.now();</span>
+<span class="fc" id="L130">            verification.setVerificationDate(Date.from(now));</span>
+<span class="fc" id="L131">            verification.setStatus(VerificationStatus.VERIFIED);</span>
+<span class="fc" id="L132">            verification.setSignedConsentForm(true);</span>
+<span class="fc" id="L133">            verification.setVerifyingTeam(team);</span>
+
+<span class="fc" id="L135">            teamUserManager.beginTransaction();</span>
+<span class="fc" id="L136">            teamUserManager.activateUserAccount(userId, team.getId(), verification);</span>
+
+<span class="fc" id="L138">            applicationEventPublisher.publishEvent(ImmutablePersonRelationshipsChangedEvent.of(userId));</span>
+
+<span class="fc" id="L140">            boolean updated = false;</span>
+            // save the nationalId.. if there is one
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">            if (StringUtils.isNotBlank(nationalId)) {</span>
+<span class="nc" id="L143">                String instituteCountry = team.getCountry();</span>
+<span class="nc" id="L144">                Optional&lt;ValidNationalId&gt; maybeValidNationalId = NationalIdType.getPrimaryNationalIdTypeFromCountryCode(instituteCountry)</span>
+<span class="nc" id="L145">                        .flatMap(n -&gt; n.getValidNationalIdAndType(nationalId));</span>
+<span class="nc bnc" id="L146" title="All 2 branches missed.">                if (maybeValidNationalId.isPresent()) {</span>
+<span class="nc" id="L147">                    NationalId setId = new NationalId(maybeValidNationalId.get(), VersionDetails.of(getEHRRequestContext()));</span>
+<span class="nc" id="L148">                    setId.setPerson(person);</span>
+<span class="nc" id="L149">                    setId.setEditDate(Date.from(now));</span>
+
+<span class="nc" id="L151">                    person.addOrUpdateNationalId(getEHRRequestContext(), setId, now);</span>
+
+<span class="nc" id="L153">                    updated = true;</span>
+                }
+            }
+
+            // Org level IDs
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">            for (OrgLevelId olid : combineOrgLevelIds()) {</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">                if (person.addOrgLevelId(getEHRRequestContext(), olid, now)) {</span>
+<span class="nc" id="L160">                    updated = true;</span>
+                }
+<span class="nc" id="L162">            }</span>
+
+            // Team level IDs
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">            for (TeamLevelId tlid : combineTeamLevelIds()) {</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">                if (person.addTeamLevelId(getEHRRequestContext(), tlid, now)) {</span>
+<span class="nc" id="L167">                    updated = true;</span>
+                }
+<span class="nc" id="L169">            }</span>
+
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">            if (updated) {</span>
+                // done updating national and local-level IDs
+<span class="nc" id="L173">                userManager.updateUser(getEHRRequestContext(), person);</span>
+            }
+
+<span class="fc" id="L176">            teamUserManager.commitTransaction();</span>
+
+            try {
+<span class="fc" id="L179">                Map&lt;Long, PKBPerson&gt; pkbPersonMap = userManager.getPKBPersonMapById(Arrays.asList(verification.getPersonId(), verification.getVerifierId()));</span>
+<span class="fc" id="L180">                PKBPerson targetPerson = pkbPersonMap.get(verification.getPersonId());</span>
+<span class="fc" id="L181">                PKBPerson verifierPerson = pkbPersonMap.get(verification.getVerifierId());</span>
+<span class="fc" id="L182">                pkbEmailMessageManager.notifyAccountActivationToUser(targetPerson, team,</span>
+                        verifierPerson);
+<span class="nc" id="L184">            } catch (MailException e) {</span>
+                // If there is a mail exception it does not need to show up to user or considered as error
+                // This handling can be refined but for now only logging the exception
+<span class="nc" id="L187">                LOGGER.error(&quot;Error while sending notification for activated account to user-{}&quot;, userId, e);</span>
+<span class="fc" id="L188">            }</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">            if (person.isPatient()) {</span>
+<span class="fc" id="L190">                return &quot;activatedPatient&quot;;</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">            } else if (person.isTeamCoordinator()) {</span>
+<span class="nc" id="L192">                return &quot;activatedCoordinator&quot;;</span>
+            } else {
+<span class="fc" id="L194">                return &quot;activatedClinician&quot;;</span>
+            }
+<span class="nc" id="L196">        } catch (PKBException e) {</span>
+<span class="nc" id="L197">            LOGGER.error(&quot;Error while activating the account for {}&quot;, userId, e);</span>
+        } finally {
+<span class="fc" id="L199">            teamUserManager.rollbackIfNotCommitted();</span>
+        }
+<span class="nc" id="L201">        return Action.ERROR;</span>
+    }
+
+    @Override
+    public String input() {
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">        if (userId == null) {</span>
+<span class="nc" id="L207">            addActionError(getText(&quot;global.err.activation.no_user&quot;));</span>
+<span class="nc" id="L208">            return BACK_TO_PATIENTS;</span>
+        }
+
+        try {
+<span class="fc" id="L212">            user = userManager.getPKBPerson(userId, PKBPerson.Lazy.NATIONAL_AND_LOCAL_IDS);</span>
+<span class="fc" id="L213">            Team team = teamManager.getTeam(getLoggedInEHRRequestContext().getTeamId().orElse(null));</span>
+
+<span class="fc" id="L215">            prepopulateOrgLevelIdTypes();</span>
+<span class="fc" id="L216">            prepopulateTeamLevelIdTypes();</span>
+
+<span class="fc" id="L218">            String backResult = null;</span>
+<span class="fc bfc" id="L219" title="All 2 branches covered.">            if (user.isPatient()) {</span>
+<span class="fc" id="L220">                photoIdTypes = pkbWebUtil.getPhotoIdTypesForPatient(Locale.getDefault());</span>
+
+<span class="fc" id="L222">                String instituteCountry = teamManager.getTeam(team.getId()).getCountry();</span>
+<span class="fc" id="L223">                Optional&lt;NationalIdType&gt; maybeTeamNationalIdType = NationalIdType.getPrimaryNationalIdTypeFromCountryCode(instituteCountry);</span>
+
+<span class="fc" id="L225">                maybeTeamNationalIdType.ifPresent(nidt -&gt; nationalIdName = nidt.getName());</span>
+<span class="fc" id="L226">                maybeTeamNationalIdType.flatMap(user::getNationalIdAnyTypeValidForSameCountryAsType)</span>
+<span class="fc" id="L227">                        .ifPresent(nid -&gt; {</span>
+<span class="nc" id="L228">                            nationalIdName = nid.getType().getName();</span>
+<span class="nc" id="L229">                            nationalId = nid.getValue();</span>
+<span class="nc" id="L230">                        });</span>
+
+<span class="fc" id="L232">                backResult = BACK_TO_PATIENTS;</span>
+<span class="fc" id="L233">            } else {</span>
+<span class="fc" id="L234">                photoIdTypes = pkbWebUtil.getPhotoIdTypesForClinician(Locale.getDefault());</span>
+<span class="fc" id="L235">                backResult = BACK_TO_CLINICIANS;</span>
+            }
+
+<span class="fc" id="L238">            boolean isVerified = teamUserManager.isUserIdentified(userId);</span>
+<span class="fc bfc" id="L239" title="All 2 branches covered.">            if (isVerified) {</span>
+                // patient: activate and notify
+<span class="fc bfc" id="L241" title="All 2 branches covered.">                if (user.isPatient()) {</span>
+<span class="fc" id="L242">                    activatePatient(team);</span>
+<span class="fc" id="L243">                    backResult = BACK_TO_PATIENTS;</span>
+                }
+                // clinician (or anything else): only allowed ONE team. error msg (how to handle record?)
+                else {
+
+<span class="fc" id="L248">                    boolean activeTeamUser = teamManager.isActiveTeamUser(userId);</span>
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">                    if (activeTeamUser) {</span>
+<span class="nc" id="L250">                        addActionError(getText(&quot;user.already.activated&quot;, new String[]{user.getTitle(), user.getLastName()}));</span>
+                    } else {
+<span class="fc" id="L252">                        activateClinician(team);</span>
+<span class="fc" id="L253">                        backResult = BACK_TO_CLINICIANS;</span>
+                    }
+                }
+<span class="fc" id="L256">                return backResult;</span>
+            } else {
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">                if (verification != null) {</span>
+<span class="nc" id="L259">                    IdentityVerification oldVerification = verification;</span>
+<span class="nc" id="L260">                    verification = new IdentityVerification();</span>
+<span class="nc" id="L261">                    verification.setPhotoIdNumber(oldVerification.getPhotoIdNumber());</span>
+<span class="nc" id="L262">                    verification.setPhotoIdType(oldVerification.getPhotoIdType());</span>
+<span class="nc" id="L263">                } else {</span>
+<span class="fc" id="L264">                    verification = new IdentityVerification();</span>
+                }
+<span class="fc" id="L266">                return Action.SUCCESS;</span>
+            }
+<span class="nc" id="L268">        } catch (PKBException e) {</span>
+<span class="nc" id="L269">            throw new PKBException(&quot;Error while activating the account for &quot; + userId, e);</span>
+        }
+    }
+
+    private void prepopulateOrgLevelIdTypes() {
+<span class="fc" id="L274">        orgLevelIdTypes = new ArrayList&lt;&gt;();</span>
+        // Viewing a patient's data, load just the IDs I'm allowed to see
+<span class="fc" id="L276">        Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">        if (!usesTeamLevelIdsOnly(team)) {</span>
+<span class="fc" id="L278">            orgLevelIdTypes.addAll(team.getOrg().getOrgLevelIdTypes());</span>
+        }
+<span class="fc" id="L280">    }</span>
+
+    private void prepopulateTeamLevelIdTypes() {
+<span class="fc" id="L283">        teamLevelIdTypes = new ArrayList&lt;&gt;();</span>
+        // Viewing a patient's data, load just the IDs I'm allowed to see
+<span class="fc" id="L285">        Team team = loggedInUserUtil.getLoggedInUserPrimaryTeam();</span>
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">        if (!usesOrgLevelIdsOnly(team)) {</span>
+<span class="nc" id="L287">            teamLevelIdTypes.addAll(team.getTeamLevelIdTypes());</span>
+        }
+<span class="fc" id="L289">    }</span>
+
+    private boolean usesOrgLevelIdsOnly(Team team) {
+<span class="fc" id="L292">        PatientIdSupport idSupport = team.getPatientIdSupport();</span>
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">        return idSupport == PatientIdSupport.ORG_LEVEL_ONLY;</span>
+    }
+
+    private boolean usesTeamLevelIdsOnly(Team team) {
+<span class="fc" id="L297">        PatientIdSupport idSupport = team.getPatientIdSupport();</span>
+<span class="pc bpc" id="L298" title="1 of 2 branches missed.">        return idSupport == PatientIdSupport.TEAM_LEVEL_ONLY;</span>
+    }
+
+    private SortedSet&lt;OrgLevelId&gt; combineOrgLevelIds() {
+<span class="fc" id="L302">        return OrgLevelId.combineOrgLevelIds(orgLevelIdTypes, groupedOrgLevelIds);</span>
+    }
+
+    private SortedSet&lt;TeamLevelId&gt; combineTeamLevelIds() {
+<span class="fc" id="L306">        return TeamLevelId.combineTeamLevelIds(teamLevelIdTypes, groupedTeamLevelIds);</span>
+    }
+
+    private void activateClinician(Team team) {
+<span class="fc" id="L310">        userAccessManager.reactivateProAccount(userId, team.getId());</span>
+<span class="fc" id="L311">        addActionMessage(getText(&quot;user.activation.success&quot;, new String[]{user.getTitle(), user.getLastName()}));</span>
+<span class="fc" id="L312">    }</span>
+
+    private void activatePatient(Team team) {
+        try {
+            // Make sure that sponsorship status is ACTIVE
+<span class="fc" id="L317">            userManager.beginTransaction();</span>
+<span class="fc" id="L318">            teamUserManager.updateStatus(team.getId(), userId, SponsorshipStatus.ACTIVE);</span>
+<span class="fc" id="L319">            userManager.commitTransaction();</span>
+            // return to list; user already verified
+<span class="fc" id="L321">            addActionMessage(getText(&quot;global.activation.complete_no_ident&quot;));</span>
+        } finally {
+<span class="fc" id="L323">            userManager.rollbackIfNotCommitted();</span>
+        }
+<span class="fc" id="L325">    }</span>
+
+    @Override
+    public void validate() {
+        try {
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">            if (isNotBlank(nationalId)) {</span>
+<span class="nc" id="L331">                Optional&lt;ValidNationalId&gt; maybeValidNationalId = NationalIdType.getNationalIdTypeFromName(nationalIdName)</span>
+<span class="nc" id="L332">                        .flatMap(n -&gt; n.getValidNationalIdAndType(nationalId));</span>
+
+<span class="nc" id="L334">                maybeValidNationalId.ifPresentOrElse(validNationalId -&gt; {</span>
+<span class="nc" id="L335">                    Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; sameIdPerson = userManager.getPKBPersonByNationalId(validNationalId);</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">                    if (PersonAmbiguityHandler.personWithIdExists(sameIdPerson)) {</span>
+<span class="nc" id="L337">                        addActionError(getText(&quot;global.err.activation.national_id_already_used&quot;, new String[]{nationalIdName}));</span>
+                    }
+<span class="nc" id="L339">                }, () -&gt; addFieldError(&quot;nationalId&quot;, getText(&quot;global.err.activation.invalid_national_id&quot;, new String[]{nationalIdName})));</span>
+
+            }
+
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">            for (OrgLevelId olid : combineOrgLevelIds()) {</span>
+<span class="nc" id="L344">                Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; sameIdPerson = userManager.getPKBPersonByOrgLevelId(olid);</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">                if (PersonAmbiguityHandler.personWithIdExists(sameIdPerson)) {</span>
+<span class="nc" id="L346">                    addActionError(getText(&quot;global.err.activation.id_already_in_use&quot;, Lists.newArrayList(olid.getType().getName(), olid.getValue())));</span>
+                }
+<span class="nc" id="L348">            }</span>
+
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">            for (TeamLevelId tlid : combineTeamLevelIds()) {</span>
+<span class="nc" id="L351">                Either&lt;Option&lt;PKBPerson&gt;, List&lt;PKBPerson&gt;&gt; sameIdPerson = userManager.getPKBPersonByTeamLevelId(tlid);</span>
+<span class="nc bnc" id="L352" title="All 2 branches missed.">                if (PersonAmbiguityHandler.personWithIdExists(sameIdPerson)) {</span>
+<span class="nc" id="L353">                    addActionError(getText(&quot;global.err.activation.id_already_in_use&quot;, Lists.newArrayList(tlid.getType().getName(), tlid.getValue())));</span>
+                }
+<span class="nc" id="L355">            }</span>
+<span class="nc" id="L356">        } catch (PKBException e) {</span>
+<span class="nc" id="L357">            LOGGER.error(&quot;error validating national/local IDs for activating patient {}&quot;, userId, e);</span>
+            // don't throw error within validation
+<span class="fc" id="L359">        }</span>
+<span class="fc" id="L360">    }</span>
+
+    public IdentityVerification getVerification() {
+<span class="fc" id="L363">        return verification;</span>
+    }
+
+    public void setVerification(IdentityVerification verification) {
+<span class="fc" id="L367">        this.verification = verification;</span>
+<span class="fc" id="L368">    }</span>
+
+    public Long getUserId() {
+<span class="fc" id="L371">        return userId;</span>
+    }
+
+    public void setUserId(Long userId) {
+<span class="fc" id="L375">        this.userId = userId;</span>
+<span class="fc" id="L376">    }</span>
+
+    public String getIcode() {
+<span class="fc" id="L379">        return icode;</span>
+    }
+
+    public void setIcode(String icode) {
+<span class="fc" id="L383">        this.icode = icode;</span>
+<span class="fc" id="L384">    }</span>
+
+    public TeamUserManager getTeamUserManager() {
+<span class="nc" id="L387">        return teamUserManager;</span>
+    }
+
+    public void setTeamUserManager(
+            TeamUserManager teamUserManager) {
+<span class="fc" id="L392">        this.teamUserManager = teamUserManager;</span>
+<span class="fc" id="L393">    }</span>
+
+    public TeamManager getTeamManager() {
+<span class="nc" id="L396">        return teamManager;</span>
+    }
+
+    public void setTeamManager(TeamManager teamManager) {
+<span class="fc" id="L400">        this.teamManager = teamManager;</span>
+<span class="fc" id="L401">    }</span>
+
+    public PKBPerson getUser() {
+<span class="fc" id="L404">        return user;</span>
+    }
+
+    public void setUser(PKBPerson user) {
+<span class="nc" id="L408">        this.user = user;</span>
+<span class="nc" id="L409">    }</span>
+
+    public Map&lt;String, String&gt; getPhotoIdTypes() {
+<span class="fc" id="L412">        return photoIdTypes;</span>
+    }
+
+    public void setPhotoIdTypes(Map&lt;String, String&gt; photoIdTypes) {
+<span class="nc" id="L416">        this.photoIdTypes = photoIdTypes;</span>
+<span class="nc" id="L417">    }</span>
+
+    public void setPkbEmailMessageManager(PKBEmailMessageManager pkbEmailMessageManager) {
+<span class="fc" id="L420">        this.pkbEmailMessageManager = pkbEmailMessageManager;</span>
+<span class="fc" id="L421">    }</span>
+
+    public String getNationalId() {
+<span class="fc" id="L424">        return nationalId;</span>
+    }
+
+    public void setNationalId(String nationalId) {
+<span class="fc" id="L428">        this.nationalId = nationalId;</span>
+<span class="fc" id="L429">    }</span>
+
+    public String getTab() {
+<span class="fc" id="L432">        return tab;</span>
+    }
+
+    public void setTab(String tab) {
+<span class="fc" id="L436">        this.tab = tab;</span>
+<span class="fc" id="L437">    }</span>
+
+    public UserAccessManager getUserAccessManager() {
+<span class="nc" id="L440">        return userAccessManager;</span>
+    }
+
+    public void setUserAccessManager(UserAccessManager userAccessManager) {
+<span class="fc" id="L444">        this.userAccessManager = userAccessManager;</span>
+<span class="fc" id="L445">    }</span>
+
+    public String getNationalIdName() {
+<span class="fc" id="L448">        return nationalIdName;</span>
+    }
+
+    public void setNationalIdName(String nationalIdName) {
+<span class="fc" id="L452">        this.nationalIdName = nationalIdName;</span>
+<span class="fc" id="L453">    }</span>
+
+    public List&lt;String&gt; getGroupedOrgLevelIds() {
+<span class="fc" id="L456">        return groupedOrgLevelIds;</span>
+    }
+
+    public void setGroupedOrgLevelIds(List&lt;String&gt; groupedOrgLevelIds) {
+<span class="fc" id="L460">        this.groupedOrgLevelIds = groupedOrgLevelIds;</span>
+<span class="fc" id="L461">    }</span>
+
+    public List&lt;OrgLevelIdType&gt; getOrgLevelIdTypes() {
+<span class="fc" id="L464">        return orgLevelIdTypes;</span>
+    }
+
+    public void setOrgLevelIdTypes(List&lt;OrgLevelIdType&gt; orgLevelIdTypes) {
+<span class="nc" id="L468">        this.orgLevelIdTypes = orgLevelIdTypes;</span>
+<span class="nc" id="L469">    }</span>
+
+    public List&lt;String&gt; getGroupedTeamLevelIds() {
+<span class="nc" id="L472">        return groupedTeamLevelIds;</span>
+    }
+
+    public void setGroupedTeamLevelIds(List&lt;String&gt; groupedTeamLevelIds) {
+<span class="nc" id="L476">        this.groupedTeamLevelIds = groupedTeamLevelIds;</span>
+<span class="nc" id="L477">    }</span>
+
+    public List&lt;TeamLevelIdType&gt; getTeamLevelIdTypes() {
+<span class="fc" id="L480">        return teamLevelIdTypes;</span>
+    }
+
+    public void setTeamLevelIdTypes(List&lt;TeamLevelIdType&gt; teamLevelIdTypes) {
+<span class="nc" id="L484">        this.teamLevelIdTypes = teamLevelIdTypes;</span>
+<span class="nc" id="L485">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

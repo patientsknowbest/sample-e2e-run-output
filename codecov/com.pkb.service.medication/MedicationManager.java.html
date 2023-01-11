@@ -1,0 +1,318 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MedicationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.medication</a> &gt; <span class="el_source">MedicationManager.java</span></div><h1>MedicationManager.java</h1><pre class="source lang-java linenums">package com.pkb.service.medication;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.dto.DataPointSaveResult;
+import com.pkb.app.entity.EHRData;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.app.entity.EHRSearch;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.app.entity.PKBFilter;
+import com.pkb.app.entity.SourceDetails;
+import com.pkb.app.interfaces.EncryptedDataPoint;
+import com.pkb.app.interfaces.IBaseDTO;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.dataupload.entity.UploadedData;
+import com.pkb.document.entity.Attachment;
+import com.pkb.medication.entity.Medication;
+import com.pkb.medication.entity.Medication.MedicationStatus;
+import com.pkb.medication.entity.MedicationUnit;
+import com.pkb.service.SynchableManager;
+import com.pkb.service.dataupload.processor.UploadedDataService;
+import com.pkb.service.file.ChunkedDocManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.vavr.control.Either;
+import org.apache.commons.lang3.time.DateUtils;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+
+import static com.pkb.service.dataupload.processor.ImmutableLoggedInUploadedDataProcessingContext.loggedInUploadedDataProcessingContext;
+import static java.util.stream.Collectors.toList;
+import static java.util.stream.Collectors.toSet;
+import static org.apache.commons.collections4.CollectionUtils.isNotEmpty;
+
+public class MedicationManager extends TransactionManager implements SynchableManager {
+<span class="fc" id="L51">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+    private static final String PATIENT_ON_MEDICATION = &quot;boolean01&quot;;
+
+    private final UploadedDataService uploadedDataService;
+    private final ChunkedDocManager chunkedDocManager;
+    private final EHRMedicationManager ehrMedicationManager;
+
+    public MedicationManager(PhrConfig config,
+                             TolvenBeanFactory beanFactory,
+                             DateTimeService dateTimeService,
+                             UUIDProvider uuidProvider,
+                             UploadedDataService uploadedDataService,
+                             ChunkedDocManager chunkedDocManager,
+                             EHRMedicationManager ehrMedicationManager) {
+<span class="fc" id="L65">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L66">        this.uploadedDataService = uploadedDataService;</span>
+<span class="fc" id="L67">        this.chunkedDocManager = chunkedDocManager;</span>
+<span class="fc" id="L68">        this.ehrMedicationManager = ehrMedicationManager;</span>
+<span class="fc" id="L69">    }</span>
+
+    public Either&lt;String, UUID&gt; addMedication(LoggedInEHRRequestContext requestContext, Medication medication) {
+        try {
+<span class="pc bpc" id="L73" title="1 of 2 branches missed.">            if (medication.getOrderDate() == null) {</span>
+<span class="fc" id="L74">                medication.setOrderDate(Date.from(dateTimeService.now()));</span>
+            }
+<span class="fc" id="L76">            var saveResult = ehrMedicationManager.saveMedication(requestContext, medication);</span>
+<span class="pc bpc" id="L77" title="1 of 2 branches missed.">            medication = isNotEmpty(saveResult.persistedDataPoints()) ? saveResult.persistedDataPoints().get(0) : medication;</span>
+<span class="fc" id="L78">            var maybeMedicationPublicUUID = checkDataPointExcluded(saveResult, medication);</span>
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">            if (maybeMedicationPublicUUID.isRight()) {</span>
+<span class="fc" id="L80">                addAttachments(requestContext, saveResult, medication);</span>
+            }
+<span class="fc" id="L82">            return maybeMedicationPublicUUID;</span>
+<span class="nc" id="L83">        } catch (Exception exception) {</span>
+<span class="nc" id="L84">            throw new RuntimeException(&quot;Error while creating Medications. Accessing user &quot;</span>
+<span class="nc" id="L85">                    + requestContext.getMaybeAccessingUser()</span>
+<span class="nc" id="L86">                    + &quot;, accountId &quot; + medication.getPatientAccountId(), exception);</span>
+        }
+    }
+
+    public void addMedications(EHRRequestContext requestContext, List&lt;Medication&gt; medicationList) {
+<span class="fc" id="L91">        Set&lt;Long&gt; accountIdSet = new HashSet&lt;&gt;();</span>
+        try {
+<span class="fc bfc" id="L93" title="All 2 branches covered.">            for (Medication medication : medicationList) {</span>
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">                if (medication.getOrderDate() == null) {</span>
+<span class="fc" id="L95">                    medication.setOrderDate(Date.from(dateTimeService.now()));</span>
+                }
+<span class="fc" id="L97">                medication.setStatus(MedicationStatus.ACTIVE);</span>
+<span class="fc" id="L98">                accountIdSet.add(medication.getPatientAccountId());</span>
+<span class="fc" id="L99">            }</span>
+
+<span class="fc" id="L101">            ehrMedicationManager.save(requestContext, medicationList);</span>
+<span class="nc" id="L102">        } catch (Exception exception) {</span>
+<span class="nc" id="L103">            throw new RuntimeException(&quot;Error while adding medications. Accessing user &quot;</span>
+<span class="nc" id="L104">                    + requestContext.getMaybeAccessingUser()</span>
+<span class="nc" id="L105">                    + &quot;, accountIds &quot; + Arrays.toString(accountIdSet.toArray()), exception);</span>
+<span class="fc" id="L106">        }</span>
+<span class="fc" id="L107">    }</span>
+
+    public Either&lt;String, UUID&gt; updateMedication(LoggedInEHRRequestContext requestContext, Medication existingMedication) {
+        try {
+<span class="fc" id="L111">            var saveResult = ehrMedicationManager.updateMedication(requestContext, existingMedication);</span>
+<span class="fc" id="L112">            var maybeMedicationPublicUUID = checkDataPointExcluded(saveResult, existingMedication);</span>
+<span class="pc bpc" id="L113" title="1 of 2 branches missed.">            if (maybeMedicationPublicUUID.isRight()) {</span>
+<span class="fc" id="L114">                addAttachments(requestContext, saveResult, existingMedication);</span>
+            }
+<span class="fc" id="L116">            return maybeMedicationPublicUUID;</span>
+<span class="nc" id="L117">        } catch (Exception exception) {</span>
+<span class="nc" id="L118">            throw new RuntimeException(&quot;Error in Medication update. Accessing user &quot;</span>
+<span class="nc" id="L119">                    + requestContext.getMaybeAccessingUser()</span>
+<span class="nc" id="L120">                    + &quot;, accountId &quot; + existingMedication.getPatientAccountId(), exception);</span>
+        }
+    }
+
+    public List&lt;Medication&gt; deleteMedications(LoggedInEHRRequestContext requestContext, Long patientAccountId,
+                                              List&lt;Long&gt; medicationIds, SourceDetails deletedBy) {
+<span class="fc" id="L126">        return ehrMedicationManager</span>
+<span class="fc" id="L127">                .deleteByIds(requestContext, patientAccountId, medicationIds, deletedBy, dateTimeService.now());</span>
+    }
+
+    /**
+     * Retrieves the list of blobs attached to the medication entry.
+     */
+    public List&lt;Attachment&gt; getMedicationAttachmentsWithoutContents(EHRRequestContext requestContext, long medicationId) {
+        try {
+<span class="fc" id="L135">            return chunkedDocManager.findAttachmentsAsAttachment(medicationId);</span>
+<span class="nc" id="L136">        } catch (Exception exception) {</span>
+<span class="nc" id="L137">            throw new RuntimeException(&quot;Error while retrieving attachments for Medication &quot;</span>
+<span class="nc" id="L138">                    + medicationId + &quot;, accessing user &quot; + requestContext.getMaybeAccessingUser(), exception);</span>
+        }
+    }
+
+    /**
+     * Retrieve a specific medication - the owner of the Medication must be
+     * logged in
+     *
+     * @param currentUserId    The id of the owner (Long ldapUID stored in a
+     *                         String)
+     * @param patientAccountId The accountId of the owner
+     * @param medicationId     The medicationId of the medication to be retrieved
+     * @return the Medication object requested, or null if it does not exist
+     */
+    public Optional&lt;Medication&gt; findMedication(@NotNull LoggedInEHRRequestContext requestContext, Long patientAccountId, Long medicationId) {
+        try {
+<span class="fc" id="L154">            return Optional.ofNullable(ehrMedicationManager.getById(requestContext, medicationId));</span>
+<span class="nc" id="L155">        } catch (Exception exception) {</span>
+<span class="nc" id="L156">            throw new RuntimeException(&quot;Exception while retrieving medication &quot; + medicationId</span>
+<span class="nc" id="L157">                    + &quot; for user &quot; + requestContext.getMaybeAccessingUserId() + &quot; account &quot; + patientAccountId, exception);</span>
+        }
+    }
+
+    public Medication getMedication(@NotNull LoggedInEHRRequestContext requestContext, Long patientAccountId, Long medicationId) {
+<span class="fc" id="L162">        return findMedication(requestContext, patientAccountId, medicationId)</span>
+<span class="pc" id="L163">                .orElseThrow(() -&gt; new IllegalStateException(&quot;Can't find existing medication for id: &quot; + medicationId));</span>
+    }
+
+    /**
+     * Retrieve all current medications
+     */
+    public List&lt;Medication&gt; getCurrentMedications(@NotNull LoggedInEHRRequestContext requestContext, long patientId, Long patientAccountId, boolean includeMedicationsNotTaken) {
+        try {
+<span class="fc" id="L171">            var today = DateUtils.truncate(Date.from(dateTimeService.now()), Calendar.DATE); // today @ midnight TODO not timezone-smart</span>
+<span class="fc" id="L172">            var fullMedicationList = getAllMedications(requestContext, patientId, patientAccountId, includeMedicationsNotTaken);</span>
+<span class="fc" id="L173">            return fullMedicationList.stream().filter(medication -&gt; medication.isCurrent(today)).collect(toList());</span>
+<span class="nc" id="L174">        } catch (Exception exception) {</span>
+<span class="nc" id="L175">            throw new RuntimeException(&quot;Exception while retrieving current medications for patientId-&quot;</span>
+                    + patientId + &quot; accountId-&quot; + patientAccountId, exception);
+        }
+    }
+
+    /**
+     * Retrieves all medications
+     */
+    public List&lt;Medication&gt; getAllMedications(@NotNull LoggedInEHRRequestContext requestContext, long patientId, Long patientAccountId, boolean includeMedicationsNotTaken) {
+        try {
+<span class="fc" id="L185">            return getMedications(requestContext, patientId, patientAccountId, includeMedicationsNotTaken, Collections.emptyList());</span>
+<span class="nc" id="L186">        } catch (Exception exception) {</span>
+<span class="nc" id="L187">            throw new RuntimeException(&quot;Exception while retrieving all medications for patientId-&quot; + patientId + &quot; accountId-&quot; + patientAccountId, exception);</span>
+        }
+    }
+
+    public List&lt;Medication&gt; getMedications(@NotNull LoggedInEHRRequestContext requestContext,
+                                           long patientId,
+                                           long patientAccountId,
+                                           boolean includeMedicationsNotTaken,
+                                           List&lt;Long&gt; ids) {
+        try {
+<span class="fc" id="L197">            synchUploadedData(requestContext, patientId);</span>
+<span class="fc" id="L198">            var ehrBean = beanFactory.getEhrRemote();</span>
+<span class="fc" id="L199">            var search = new EHRSearch&lt;&gt;(patientAccountId, Medication.class, Medication.MS_PATH);</span>
+<span class="fc" id="L200">            search.setLatestPerTypeFilter(EHRData.ENTERED_DATE, EHRData.UNIQUE_ID);</span>
+<span class="fc" id="L201">            search.setIncludeDeleted(false);</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">            if (isNotEmpty(ids.stream().filter(Objects::nonNull).collect(toList()))) {</span>
+<span class="fc" id="L203">                search.addFilter(new PKBFilter(&quot;id&quot;, PKBFilter.Operator.IN, ids));</span>
+            }
+<span class="fc" id="L205">            addMedicationNotTakenFilter(includeMedicationsNotTaken, search);</span>
+<span class="fc" id="L206">            List&lt;Medication&gt; medicationList = ehrBean.queryDecryptAndPopulateData(search, requestContext);</span>
+<span class="fc" id="L207">            var medicationIds = medicationList.stream()</span>
+<span class="fc" id="L208">                    .map(Medication::getId)</span>
+<span class="fc" id="L209">                    .collect(toSet());</span>
+<span class="fc" id="L210">            Map&lt;Long, List&lt;Attachment&gt;&gt; attachments = chunkedDocManager.findAttachmentsAsAttachment(medicationIds);</span>
+<span class="fc" id="L211">            medicationList.forEach(medication -&gt; medication.setAttachments(attachments.get(medication.getId())));</span>
+<span class="fc" id="L212">            return medicationList;</span>
+<span class="nc" id="L213">        } catch (Exception exception) {</span>
+<span class="nc" id="L214">            throw new RuntimeException(&quot;Exception while retrieving all medications for patientId-&quot; + patientId, exception);</span>
+        }
+    }
+
+    private void addMedicationNotTakenFilter(boolean includeMedicationNotTaken, EHRSearch search) {
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">        if (!includeMedicationNotTaken) {</span>
+<span class="fc" id="L220">            search.addFilter(new PKBFilter(PATIENT_ON_MEDICATION, PKBFilter.Operator.TRUE_AND_IS_NOT_NULL, null, false/*applyWhenChoosingLatest*/));</span>
+        }
+<span class="fc" id="L222">    }</span>
+
+    /**
+     * Uses transactions, and commits after each UploadedData is processed... if
+     * this needs to be called from within a transaction in the action, we'll
+     * need some fancier coding here (maybe programmatically merge the messages
+     * and submit at once?).
+     * &lt;p&gt;
+     * Doesn't catch/handle any exceptions; just logs errors and sometimes lets
+     * them flow out (but more often just logs)
+     */
+    private void synchUploadedData(@NotNull LoggedInEHRRequestContext requestContext, long patientId) throws Exception {
+<span class="fc" id="L234">        uploadedDataService.synchUploadedData(</span>
+<span class="fc" id="L235">                loggedInUploadedDataProcessingContext()</span>
+<span class="fc" id="L236">                        .requestContext(requestContext.withPiggyback(true))</span>
+<span class="fc" id="L237">                        .patientId(patientId)</span>
+<span class="fc" id="L238">                        .destination(UploadedData.Destination.MEDICATION_UPDATE)</span>
+<span class="fc" id="L239">                        .build());</span>
+<span class="fc" id="L240">    }</span>
+
+    @Override
+    public void syncUploadedData(LoggedInEHRRequestContext requestContext, Collection&lt;Long&gt; targetPersonIds) {
+<span class="fc" id="L244">        targetPersonIds.forEach(patientId -&gt; {</span>
+            try {
+<span class="fc" id="L246">                synchUploadedData(requestContext, patientId);</span>
+<span class="nc" id="L247">            } catch (Exception e) {</span>
+<span class="nc" id="L248">                LOGGER.error(&quot;Error syncing uploaded data for patient: {}&quot;, patientId, e);</span>
+<span class="fc" id="L249">            }</span>
+<span class="fc" id="L250">        });</span>
+<span class="fc" id="L251">    }</span>
+
+    /**
+     * Retrieve a list of supply/dose units in a given language
+     *
+     * @param language Code such as 'en_GB'
+     * @return A list of MedicationUnit objects
+     */
+    public List&lt;MedicationUnit&gt; getMedicationUnits() {
+<span class="fc" id="L260">        return MedicationUnit.list();</span>
+    }
+
+    /**
+     * Retrieve a single Medication by unique Id
+     */
+    public Medication getMedicationByUniqueId(@NotNull LoggedInEHRRequestContext requestContext,
+                                              Long patientAccountId, UUID uniqueId) {
+        try {
+<span class="nc" id="L269">            return ehrMedicationManager.getByUniqueId(requestContext, patientAccountId, uniqueId);</span>
+<span class="nc" id="L270">        } catch (Exception exception) {</span>
+<span class="nc" id="L271">            throw new RuntimeException(&quot;Error while retrieving Medication by uniqueId-&quot; + uniqueId,</span>
+                    exception);
+        }
+    }
+
+    /**
+     * Get Medication by code and updated Since date
+     *
+     * @param updatedSinceDateOrNull - if present, only include results that
+     *                               have been recorded since this date
+     *                               medications
+     * @param onlyCurrent            - whether to only include active medications or all
+     */
+    public List&lt;Medication&gt; getMedications(@NotNull LoggedInEHRRequestContext requestContext,
+                                           long patientId,
+                                           long patientAccountId,
+                                           boolean onlyCurrent,
+                                           boolean includeMedicationsNotTaken) {
+        try {
+<span class="fc" id="L290">            synchUploadedData(requestContext, patientId);</span>
+
+<span class="fc" id="L292">            return ehrMedicationManager.getMedications(requestContext, patientAccountId, onlyCurrent, includeMedicationsNotTaken);</span>
+<span class="nc" id="L293">        } catch (Exception exception) {</span>
+<span class="nc" id="L294">            throw new RuntimeException(&quot;Error while retrieving Medications&quot;, exception);</span>
+        }
+    }
+
+    @VisibleForTesting
+    void addAttachments(LoggedInEHRRequestContext requestContext, DataPointSaveResult&lt;Medication&gt; saveResult, Medication medication) {
+<span class="fc" id="L300">        saveResult.persistedDataPointIds()</span>
+<span class="fc" id="L301">                .stream()</span>
+<span class="fc" id="L302">                .findFirst()</span>
+<span class="fc" id="L303">                .ifPresent(dataPointId -&gt; chunkedDocManager.createAttachments(dataPointId,</span>
+<span class="fc" id="L304">                        medication.getAttachments(),</span>
+<span class="fc" id="L305">                        requestContext.getAccessingUserId(),</span>
+<span class="fc" id="L306">                        medication.getPatientAccountId()));</span>
+<span class="fc" id="L307">    }</span>
+
+    @VisibleForTesting
+    &lt;T extends EncryptedDataPoint &amp; IBaseDTO&gt; Either&lt;String, UUID&gt; checkDataPointExcluded(DataPointSaveResult&lt;T&gt; saveResult, T dataPoint) {
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">        if (saveResult.getExcludedDataPoints().contains(dataPoint)) {</span>
+<span class="nc" id="L312">            return Either.left(&quot;Data point excluded via CodingMatch entry&quot;);</span>
+        } else {
+<span class="fc" id="L314">            return Either.right(dataPoint.getBaseFields().getUniqueId());</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

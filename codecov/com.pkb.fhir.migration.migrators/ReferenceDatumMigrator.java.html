@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReferenceDatumMigrator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.fhir.migration.migrators</a> &gt; <span class="el_source">ReferenceDatumMigrator.java</span></div><h1>ReferenceDatumMigrator.java</h1><pre class="source lang-java linenums">package com.pkb.fhir.migration.migrators;
+
+import com.pkb.entities.enums.PrivacyFlag;
+import com.pkb.entities.enums.ReferenceDataType;
+import com.pkb.entities.pub.PublicFhirStoreSync;
+import com.pkb.entities.pub.PublicReferenceDatum;
+import com.pkb.fhir.common.exception.MigrationEntityNotFoundException;
+import com.pkb.fhir.common.exception.MigrationException;
+import com.pkb.fhir.common.service.OrgService;
+import com.pkb.fhir.common.service.PersonService;
+import com.pkb.fhir.common.service.TeamService;
+import com.pkb.fhir.migration.service.Hl7PartnerService;
+import com.pkb.fhir.migration.service.ReferenceDatumService;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.apache.commons.lang3.StringUtils;
+import org.hl7.fhir.instance.model.api.IBaseResource;
+import org.hl7.fhir.r4.model.CodeSystem;
+import org.hl7.fhir.r4.model.Coding;
+import org.hl7.fhir.r4.model.Enumerations;
+import org.hl7.fhir.r4.model.Extension;
+import org.hl7.fhir.r4.model.ValueSet;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.List;
+import java.util.UUID;
+
+import static com.pkb.entities.enums.PrivacyFlag.GENERAL;
+import static com.pkb.entities.enums.PrivacyFlag.MENTAL_HEALTH;
+import static com.pkb.entities.enums.PrivacyFlag.SEXUAL_HEALTH;
+import static com.pkb.entities.enums.PrivacyFlag.SOCIAL_CARE;
+import static com.pkb.fhir.migration.migrators.BaseFhirMigrator.ResourceAndOperation.FhirServerOperation.CREATE_OR_UPDATE;
+
+/**
+ * ReferenceDatum is home to org-specific code lookups. In HL7 we often get given the codes and then we look up the
+ * display to persist or render at some point. So org A might map &quot;300&quot; to &quot;Opthamology&quot;, and org B
+ * might map it to &quot;Child Opthamology&quot;, for example.
+ *
+ * Provide this information in FHIR so we can easily get at it for FHIR resource enrichment, as well as, one day,
+ * making it available to customers to control via FHIR APIs.
+ *
+ * ReferenceDatum ultimately becomes two resources: CodeSystem and ValueSet.
+ * A ValueSet holds a list of codes under a compose element which are all tied together for a common purpose.
+ * A CodeSystem is a reference to what that ValueSet's purpose actually is:
+ * e.g. &quot;hospital service type code lookups for org A&quot;
+ */
+public class ReferenceDatumMigrator extends BaseFhirMigrator {
+
+    private static final String PRIVACY_LABEL_STRUCTUREDEFINITION_URL = &quot;http://fhir.patientsknowbest.com/structuredefinition/privacy-label&quot;;
+
+    private static final String SPECIALTY_CODE_SYSTEM_URL_PREFIX = &quot;http://fhir.patientsknowbest.com/codesystem/specialty&quot;;
+    private static final String SPECIALTY_VALUE_SET_URL_PREFIX = &quot;http://fhir.patientsknowbest.com/valueset/specialty&quot;;
+
+    private ReferenceDatumService referenceDatumService;
+
+    public ReferenceDatumMigrator(PersonService personService, TeamService teamService, OrgService orgService,
+                                  Hl7PartnerService hl7PartnerService, ReferenceDatumService referenceDatumService) {
+<span class="fc" id="L58">        super(personService, teamService, orgService, hl7PartnerService);</span>
+<span class="fc" id="L59">        this.referenceDatumService = referenceDatumService;</span>
+<span class="fc" id="L60">    }</span>
+
+    @Override
+    Either&lt;MigrationException, List&lt;ResourceAndOperation&gt;&gt; migrate(@NotNull PublicFhirStoreSync fhirStoreSync) {
+<span class="pc bpc" id="L64" title="1 of 2 branches missed.">        if (fhirStoreSync.isDeleteOperation()) {</span>
+            //Follow-up in PHR-11107; handle this manually for now
+<span class="nc" id="L66">            throw new RuntimeException(&quot;DELETE operations are not handled for ReferenceDatum. Tried to delete for following id: &quot;</span>
+<span class="nc" id="L67">                    + fhirStoreSync.getSyncDetails().getSourceTableId());</span>
+        }
+
+<span class="fc" id="L70">        return Option.ofOptional(referenceDatumService.findByIdFetchOrg(fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="pc" id="L71">                .toEither(() -&gt; (MigrationException)new MigrationEntityNotFoundException(&quot;Failed to sync reference datum to fhir store for source table &quot;</span>
+<span class="nc" id="L72">                        + fhirStoreSync.getSyncDetails().getSourceTable() +</span>
+<span class="nc" id="L73">                        &quot; and source id &quot; + fhirStoreSync.getSyncDetails().getSourceTableId()))</span>
+<span class="fc" id="L74">                .map(referenceDatum -&gt; ResourceAndOperation.all(transformReferenceDatumToFhir(referenceDatum), CREATE_OR_UPDATE));</span>
+    }
+
+    private List&lt;IBaseResource&gt; transformReferenceDatumToFhir(PublicReferenceDatum referenceDatum) {
+<span class="fc" id="L78">        String codeSystemUrl = constructReferenceSetUrl(referenceDatum, SPECIALTY_CODE_SYSTEM_URL_PREFIX);</span>
+
+        //The id is a deterministic UUID derived from the code of the org and the type of reference datum. Neither
+        // of these values can change on the ReferenceDatum.
+<span class="fc" id="L82">        String id = String.valueOf(UUID.nameUUIDFromBytes(codeSystemUrl.getBytes()));</span>
+
+<span class="fc" id="L84">        CodeSystem codeSystem = new CodeSystem();</span>
+<span class="fc" id="L85">        codeSystem.setId(id);</span>
+<span class="fc" id="L86">        codeSystem.setUrl(codeSystemUrl);</span>
+<span class="fc" id="L87">        codeSystem.setStatus(Enumerations.PublicationStatus.ACTIVE);</span>
+<span class="fc" id="L88">        codeSystem.setTitle(&quot;CodeSystem for &quot; + referenceDatum.getDataType().name() + &quot; for org &quot; + referenceDatum.getOrg().getCode());</span>
+<span class="fc" id="L89">        codeSystem.setContent(CodeSystem.CodeSystemContentMode.COMPLETE);</span>
+<span class="fc" id="L90">        codeSystem.setExperimental(false);</span>
+
+<span class="fc" id="L92">        ValueSet valueSet = reconstructValueSet(referenceDatum, codeSystemUrl, id);</span>
+<span class="fc" id="L93">        return List.of(codeSystem, valueSet);</span>
+    }
+
+    @NotNull
+    private ValueSet reconstructValueSet(PublicReferenceDatum referenceDatum, String codeSystemUrl, String id) {
+        //A ValueSet actually contains all the codes.
+<span class="fc" id="L99">        ValueSet valueSet = new ValueSet();</span>
+<span class="fc" id="L100">        valueSet.setId(id); //It's fine for both these resources to share an id, although this won't be true for user-sourced data.</span>
+<span class="fc" id="L101">        valueSet.setStatus(Enumerations.PublicationStatus.ACTIVE);</span>
+<span class="fc" id="L102">        valueSet.setUrl(constructReferenceSetUrl(referenceDatum, SPECIALTY_VALUE_SET_URL_PREFIX));</span>
+
+        //A ValueSet has 1..* compose elements, which are the definition of the set. Each compose is for a different CodeSystem.
+        // The values included from a single CodeSystm are a ConceptSetComponent.
+        // Then each value within that concept set is a ConceptReferenceComponent.
+<span class="fc" id="L107">        ValueSet.ValueSetComposeComponent composeComponent = new ValueSet.ValueSetComposeComponent();</span>
+<span class="fc" id="L108">        ValueSet.ConceptSetComponent component = new ValueSet.ConceptSetComponent();</span>
+<span class="fc" id="L109">        component.setSystem(codeSystemUrl);</span>
+
+        //A single ReferenceDatum is a single component within a ValueSet. The cheapest and cleanest thing to do here is to regenerate
+        // the entire resource from current state. These lookups are not changed or added to often.
+<span class="fc" id="L113">        List&lt;PublicReferenceDatum&gt; datumsForOrgAndType =</span>
+<span class="fc" id="L114">                referenceDatumService.getReferenceDatumsForOrgAndType(referenceDatum.getOrg().getId(), referenceDatum.getDataType());</span>
+
+        //It is syntactically valid to have an include component without any concepts. This is how we denote a ValueSet
+        // which has had all its underlying ReferenceDatums deleted.
+<span class="fc" id="L118">        datumsForOrgAndType.forEach(referenceDatumFromList -&gt; {</span>
+<span class="fc" id="L119">            ValueSet.ConceptReferenceComponent conceptReferenceComponent = new ValueSet.ConceptReferenceComponent();</span>
+<span class="fc" id="L120">            conceptReferenceComponent.setCode(referenceDatumFromList.getDataId());</span>
+<span class="fc" id="L121">            conceptReferenceComponent.setDisplay(referenceDatumFromList.getDataText());</span>
+
+            //We add the privacy flags on as extensions to this concept reference component.
+<span class="fc" id="L124">            addPrivacyFlagExtensionsToValueSet(conceptReferenceComponent, referenceDatumFromList);</span>
+
+<span class="fc" id="L126">            component.addConcept(conceptReferenceComponent);</span>
+<span class="fc" id="L127">        });</span>
+
+<span class="fc" id="L129">        composeComponent.addInclude(component); //A compose can have include and exclude components. We only deal in includes.</span>
+
+<span class="fc" id="L131">        valueSet.setCompose(composeComponent);</span>
+<span class="fc" id="L132">        return valueSet;</span>
+    }
+
+    private void addPrivacyFlagExtensionsToValueSet(ValueSet.ConceptReferenceComponent conceptReferenceComponent,
+                                                    PublicReferenceDatum referenceDatum) {
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">        if (referenceDatum.getGeneralHealthConsentRequired()) {</span>
+<span class="fc" id="L138">            addPrivacyFlagExtension(conceptReferenceComponent, GENERAL);</span>
+        }
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">        if (referenceDatum.getMentalHealthConsentRequired()) {</span>
+<span class="nc" id="L141">            addPrivacyFlagExtension(conceptReferenceComponent, MENTAL_HEALTH);</span>
+        }
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">        if (referenceDatum.getSexualHealthConsentRequired()) {</span>
+<span class="nc" id="L144">            addPrivacyFlagExtension(conceptReferenceComponent, SEXUAL_HEALTH);</span>
+        }
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">        if (referenceDatum.getSocialCareConsentRequired()) {</span>
+<span class="nc" id="L147">            addPrivacyFlagExtension(conceptReferenceComponent, SOCIAL_CARE);</span>
+        }
+<span class="fc" id="L149">    }</span>
+
+    private void addPrivacyFlagExtension(ValueSet.ConceptReferenceComponent conceptReferenceComponent, PrivacyFlag privacyFlag) {
+<span class="fc" id="L152">        Coding coding = new Coding();</span>
+<span class="fc" id="L153">        coding.setCode(privacyFlag.getExternalDesc());</span>
+
+<span class="fc" id="L155">        coding.setSystem(PRIVACY_LABEL_CODESYSTEM_URL);</span>
+
+<span class="fc" id="L157">        Extension extension = new Extension();</span>
+<span class="fc" id="L158">        extension.setUrl(PRIVACY_LABEL_STRUCTUREDEFINITION_URL);</span>
+<span class="fc" id="L159">        extension.setValue(coding);</span>
+<span class="fc" id="L160">        conceptReferenceComponent.addExtension(extension);</span>
+<span class="fc" id="L161">    }</span>
+
+    /**
+     * A code system and value set are both specific to a particular reference data type at a particular org.
+     *
+     * Using the code from the org means:
+     * 1. This is comprehensible to end users, as this is a piece of data they have access to and make human sense
+     * 2. This does not change between upstreams/downstreams or, typically, between envs either.
+     */
+    private String constructReferenceSetUrl(PublicReferenceDatum referenceDatum, String urlPrefix) {
+<span class="fc" id="L171">        String orgCode = referenceDatum.getOrg().getCode();</span>
+<span class="pc bpc" id="L172" title="1 of 2 branches missed.">        if (StringUtils.isBlank(orgCode)) {</span>
+<span class="nc" id="L173">            throw new MigrationException(&quot;Attempting to migrate ReferenceDatum for org without org_code set. id: &quot; + referenceDatum.getOrg().getId());</span>
+        }
+
+<span class="fc" id="L176">        ReferenceDataType referenceDataType = referenceDatum.getDataType();</span>
+
+<span class="fc" id="L178">        return urlPrefix + &quot;-&quot; + orgCode + &quot;-&quot; + referenceDataType.name();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

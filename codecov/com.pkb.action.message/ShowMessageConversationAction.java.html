@@ -1,0 +1,499 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ShowMessageConversationAction.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.action.message</a> &gt; <span class="el_source">ShowMessageConversationAction.java</span></div><h1>ShowMessageConversationAction.java</h1><pre class="source lang-java linenums">//------------------------------------------------------------------------------
+//
+// Copyright (c) 2009 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: $
+//
+//------------------------------------------------------------------------------
+
+package com.pkb.action.message;
+
+import com.opensymphony.xwork2.Action;
+import com.pkb.app.entity.LoggedInEHRRequestContext;
+import com.pkb.bean.IUserWebBean;
+import com.pkb.document.entity.Attachment;
+import com.pkb.encounter.entity.Encounter;
+import com.pkb.entities.enums.EncounterClass;
+import com.pkb.service.reference.ReferenceDataManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.user.entity.PKBPerson;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.time.Instant;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.UUID;
+
+import static com.pkb.user.entity.PKBPerson.Lazy.CONTACTS;
+import static java.util.Objects.requireNonNullElse;
+import static org.apache.commons.lang3.StringUtils.isBlank;
+import static org.apache.commons.lang3.StringUtils.isNotEmpty;
+
+/**
+ * Gets all the messages in a conversation using conversation Id
+ * &lt;p&gt;
+ * variables passed in from redirects, JSP links, email links:
+ * clinicianId (BROKEN: not passed from anywhere... seems intended to show prev/next conv by correspondant)
+ * contextUserId (BROKEN: this is passed in, but OVERWRITTEN in execute()
+ * conversationId OK: which conversation to show
+ * fileUploadErrorMessage (TODO: set as a normal field error message, not a custom variable)
+ * message (TODO: we're passing possibly huge text as a GET variable! fix this ASAP)
+ * messageStatus OK: used in markAsRead(). But why? Isn't message status IN the message?
+ * &lt;p&gt;
+ * Fixing where message CONTENT is passed in redirect... here are the problem actions:
+ *
+ * &lt;action name=&quot;replyMessage&quot; class=&quot;com.pkb.action.ReplyMessageAction&quot;&gt;
+ * &lt;result type=&quot;redirectAction&quot; name=&quot;attachmentSuccess&quot;&gt;
+ * &lt;param name=&quot;actionName&quot;&gt;showConversation&lt;/param&gt;
+ * &lt;param name=&quot;conversationId&quot;&gt;${conversationId}&lt;/param&gt;
+ * &lt;param name=&quot;message&quot;&gt;${message}&lt;/param&gt;
+ * &lt;param name=&quot;fileUploadErrorMessage&quot;&gt;${fileUploadErrorMessage}&lt;/param&gt;
+ * &lt;/result&gt;
+ * &lt;result type=&quot;redirectAction&quot; name=&quot;input&quot;&gt;
+ * &lt;param name=&quot;actionName&quot;&gt;showConversation&lt;/param&gt;
+ * &lt;param name=&quot;conversationId&quot;&gt;${conversationId}&lt;/param&gt;
+ * &lt;param name=&quot;message&quot;&gt;${message}&lt;/param&gt;
+ * &lt;/result&gt;
+ * &lt;action name=&quot;removeMessageAttachment&quot; class=&quot;com.pkb.action.ComposeMessageAction&quot;
+ * method=&quot;removeAttachment&quot;&gt;
+ * &lt;result name=&quot;success&quot;&gt;/WEB-INF/view/discussionCenterComposeMessage.jsp&lt;/result&gt;
+ * &lt;result type=&quot;redirectAction&quot; name=&quot;successReplyMessage&quot;&gt;
+ * &lt;param name=&quot;actionName&quot;&gt;showConversation&lt;/param&gt;
+ * &lt;param name=&quot;conversationId&quot;&gt;${conversationId}&lt;/param&gt;
+ * &lt;param name=&quot;message&quot;&gt;${message}&lt;/param&gt;
+ * &lt;/result&gt;
+ * &lt;/action&gt;
+ * &lt;action name=&quot;getInbox&quot; class=&quot;com.pkb.action.GetMessagesAction&quot;
+ * method=&quot;getInboxMessages&quot;&gt;
+ * &lt;result name=&quot;success&quot;&gt;/WEB-INF/view/discussionCenterInbox.jsp&lt;/result&gt;
+ * &lt;result type=&quot;redirectAction&quot; name=&quot;removeAttachmentSuccess&quot;&gt;
+ * &lt;param name=&quot;actionName&quot;&gt;showConversation&lt;/param&gt;
+ * &lt;param name=&quot;conversationId&quot;&gt;${conversationId}&lt;/param&gt;
+ * &lt;/result&gt;
+ */
+<span class="fc" id="L80">public class ShowMessageConversationAction extends MessageBaseAction {</span>
+
+    private static final String ERROR_MESSAGE = &quot;errorMessage&quot;;
+
+    private static final long serialVersionUID = 1L;
+<span class="fc" id="L85">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+<span class="fc" id="L86">    private static final String CONVERSATION_PAGE_STYLE = String.join(&quot; &quot;, &quot;message-conversation&quot;,</span>
+            MOBILE_OPTIMIZED_STYLE, NO_HEADER_STYLE);
+<span class="fc" id="L88">    private static final String NHS_CONVERSATION_PAGE_STYLE =  String.join(&quot; &quot;, CONVERSATION_PAGE_STYLE, &quot;nhs-style&quot;);</span>
+    private static final String FILE_UPLOAD_BUTTON_TEXT_PROPERTY = &quot;discussionCenter.txt.add_attachment&quot;;
+    private static final String MULTIPLE_FILE_UPLOAD_BUTTON_TEXT_PROPERTY = &quot;discussionCenter.txt.add_another_attachment&quot;;
+
+    private UUID conversationId;
+    private String documentId;
+    private UUID encounterEventUniqueId;
+    private boolean reshowMessage; // After failure in ReplyMessageAction
+
+    /**
+     * message id of current draft
+     */
+    private String messageId;
+    /**
+     * id of the patient referred in the conversation
+     */
+    private String patientId;
+    /**
+     * message content of current draft
+     */
+    private String message;
+    /**
+     * privacy setting from the first message - passed along behind the scenes
+     **/
+    private boolean privateMessage;
+    /**
+     * error passed back from ReplyMessageAction; should be normal struts field error!
+     */
+    private String fileUploadErrorMessage;
+    /**
+     * needed for showing headers
+     */
+    private String imageBaseUrl;
+    private PKBPerson contextUser;
+
+    private TeamManager teamManager;
+    private IUserWebBean userWebBean;
+<span class="fc" id="L125">    private boolean currentParticipant = false;</span>
+    private String errorMessage;
+    private ReferenceDataManager referenceDataManager;
+<span class="fc" id="L128">    private boolean disableReply = false; // by default show the reply section</span>
+    private Integer workflowOptimisticLock;
+
+<span class="fc" id="L131">    private UnreadableDocumentDTO unreadableDocument = new UnreadableDocumentDTO();</span>
+    private String customStyle;
+
+    private static class UnreadableDocumentDTO {
+        private long reportDocumentId;
+        private String externalMessageId;
+        private String postalDate;
+        private long orgId;
+    }
+
+    @Autowired
+    private ShowMessageConversationService showMessageConversationService;
+
+    @Override
+    public String execute() {
+<span class="fc bfc" id="L146" title="All 2 branches covered.">        customStyle = sessionUtil.renderNhsStyle() ? NHS_CONVERSATION_PAGE_STYLE : CONVERSATION_PAGE_STYLE;</span>
+<span class="fc" id="L147">        fileUploadButtonTextProperty = FILE_UPLOAD_BUTTON_TEXT_PROPERTY;</span>
+<span class="fc" id="L148">        multipleFileUploadButtonTextProperty = MULTIPLE_FILE_UPLOAD_BUTTON_TEXT_PROPERTY;</span>
+<span class="fc" id="L149">        loggedinContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L150">        imageBaseUrl = getConfig().getInstituteLogoBaseDir();</span>
+<span class="fc bfc" id="L151" title="All 4 branches covered.">        if (conversationId == null &amp;&amp; isBlank(documentId)) {</span>
+<span class="fc" id="L152">            LOGGER.debug(&quot;Both conversationId and documentId is blank&quot;);</span>
+<span class="fc" id="L153">            return INPUT;</span>
+        }
+
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        if (conversationId == null) {</span>
+<span class="fc" id="L157">            Either&lt;String, UUID&gt; resultNameOrConversationId = showMessageConversationService.findConversationIdForDocumentId(loggedinContext.withoutAccessLog(), UUID.fromString(documentId));</span>
+
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">            if (resultNameOrConversationId.isLeft()) {</span>
+<span class="nc" id="L160">                return resultNameOrConversationId.getLeft();</span>
+            }
+
+<span class="fc" id="L163">            conversationId = resultNameOrConversationId.get();</span>
+        }
+
+        try {
+<span class="fc" id="L167">            Optional&lt;MessageScreenDto&gt; maybeResult = showMessageConversationService.buildMessageScreenDto(loggedinContext, conversationId, message, getLocale(), this::getText);</span>
+<span class="fc" id="L168">            maybeResult.ifPresentOrElse(msd -&gt; {</span>
+<span class="fc" id="L169">                messageScreenDto = msd;</span>
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">                if (isNotEmpty(errorMessage = (String) session.get(ERROR_MESSAGE))) {</span>
+                    //noinspection StrutsI18nError,SSBasedInspection
+<span class="nc" id="L172">                    addActionError(errorMessage);</span>
+<span class="nc" id="L173">                    session.remove(ERROR_MESSAGE);</span>
+                }
+<span class="pc" id="L175">            }, () -&gt; disableReply = true);</span>
+<span class="fc" id="L176">            loggedinContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L177">            attachments = generateAttachmentsFromInputs();</span>
+<span class="fc" id="L178">            return getActionResult(messageScreenDto);</span>
+<span class="nc" id="L179">        } catch (Exception exception) {</span>
+<span class="nc" id="L180">            throw new RuntimeException(&quot;Error while loading conversation &quot; + conversationId, exception);</span>
+        }
+    }
+
+    public String assignToMe() {
+<span class="fc" id="L185">        loggedinContext = getLoggedInEHRRequestContext();</span>
+        try {
+<span class="fc" id="L187">            var teamId = getTeamId(loggedinContext);</span>
+<span class="fc" id="L188">            encounterManager.transactional(() -&gt; trustedConversationWorkflowService.assignConversationToPersonId(conversationId, teamId, loggedinContext.getAccessingUserId(),</span>
+<span class="fc" id="L189">                    getWorkflowOptimisticLockAsOptionalInt()));</span>
+<span class="fc" id="L190">            addActionMessage(getText(&quot;message.workflow.assign.success.message&quot;));</span>
+<span class="fc" id="L191">            return SUCCESS;</span>
+<span class="nc" id="L192">        } catch (Exception ignored) {</span>
+<span class="nc" id="L193">            addActionError(getText(&quot;message.workflow.assign.failure.message&quot;));</span>
+<span class="nc" id="L194">            return ERROR;</span>
+        }
+    }
+
+    public String unAssign() {
+<span class="fc" id="L199">        loggedinContext = getLoggedInEHRRequestContext();</span>
+        try {
+<span class="fc" id="L201">            var teamId = getTeamId(loggedinContext);</span>
+<span class="fc" id="L202">            encounterManager.transactional(() -&gt; trustedConversationWorkflowService.unassignConversation(conversationId, teamId, loggedinContext.getAccessingUserId(),</span>
+<span class="fc" id="L203">                    getWorkflowOptimisticLockAsOptionalInt()));</span>
+<span class="fc" id="L204">            addActionMessage(getText(&quot;message.workflow.unassign.success.message&quot;));</span>
+<span class="fc" id="L205">            return SUCCESS;</span>
+<span class="nc" id="L206">        } catch (Exception ignored) {</span>
+<span class="nc" id="L207">            addActionError(getText(&quot;message.workflow.unassign.failure.message&quot;));</span>
+<span class="nc" id="L208">            return ERROR;</span>
+        }
+    }
+
+    public String archive() {
+<span class="fc" id="L213">        loggedinContext = getLoggedInEHRRequestContext();</span>
+        try {
+<span class="fc" id="L215">            var teamId = getTeamId(loggedinContext);</span>
+<span class="fc" id="L216">            encounterManager.transactional(() -&gt; trustedConversationWorkflowService.archiveConversation(conversationId, teamId, loggedinContext.getAccessingUserId(),</span>
+<span class="fc" id="L217">                    getWorkflowOptimisticLockAsOptionalInt()));</span>
+<span class="fc" id="L218">            addActionMessage(getText(&quot;message.workflow.archive.success.message&quot;));</span>
+<span class="fc" id="L219">            return SUCCESS;</span>
+<span class="nc" id="L220">        } catch (Exception ignored) {</span>
+<span class="nc" id="L221">            addActionError(getText(&quot;message.workflow.archive.failure.message&quot;));</span>
+<span class="nc" id="L222">            return ERROR;</span>
+        }
+    }
+
+    @NotNull
+    private OptionalInt getWorkflowOptimisticLockAsOptionalInt() {
+<span class="fc bfc" id="L228" title="All 2 branches covered.">        return workflowOptimisticLock != null ? OptionalInt.of(workflowOptimisticLock) : OptionalInt.empty();</span>
+    }
+
+    public String unArchive() {
+<span class="fc" id="L232">        loggedinContext = getLoggedInEHRRequestContext();</span>
+        try {
+<span class="fc" id="L234">            var teamId = getTeamId(loggedinContext);</span>
+<span class="fc" id="L235">            encounterManager.transactional(() -&gt; trustedConversationWorkflowService.unarchiveConversation(conversationId, teamId, loggedinContext.getAccessingUserId(),</span>
+<span class="fc" id="L236">                    getWorkflowOptimisticLockAsOptionalInt()));</span>
+<span class="fc" id="L237">            addActionMessage(getText(&quot;message.workflow.unarchive.success.message&quot;));</span>
+<span class="fc" id="L238">            return SUCCESS;</span>
+<span class="nc" id="L239">        } catch (Exception ignored) {</span>
+<span class="nc" id="L240">            addActionError(getText(&quot;message.workflow.unarchive.failure.message&quot;));</span>
+<span class="nc" id="L241">            return ERROR;</span>
+        }
+    }
+
+    private long getTeamId(LoggedInEHRRequestContext loggedInEHRRequestContext) {
+<span class="fc" id="L246">        return loggedInEHRRequestContext.getTeamId()</span>
+<span class="pc" id="L247">                .orElseThrow(() -&gt; new RuntimeException(&quot;loggedInEHRRequestContext does not have teamId&quot;));</span>
+    }
+
+    public String editPrivacyForm() {
+<span class="fc" id="L251">        customStyle = NO_CUSTOM_STYLE;</span>
+<span class="fc" id="L252">        loggedinContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L253">        contextUserId = contextUserUtil.getContextOrLoggedInUserId();</span>
+
+<span class="fc" id="L255">        String result = Action.SUCCESS;</span>
+
+        try {
+<span class="fc" id="L258">            Encounter message = encounterManager.getEncounterByEncounterEventUniqueId(loggedinContext, contextUserId.toString(), encounterEventUniqueId, false, this::getText);</span>
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">            if (message != null) {</span>
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">                if (hasNotPermissionsToEditPrivacyLabels(message, loggedInUserUtil.getLoggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam())) {</span>
+<span class="nc" id="L261">                    return CANCEL;</span>
+                }
+<span class="fc" id="L263">                fillPrivacyFlagsFrom(message);</span>
+            }
+<span class="nc" id="L265">        } catch (Exception e) {</span>
+<span class="nc" id="L266">            result = Action.ERROR;</span>
+<span class="nc" id="L267">            LOGGER.error(&quot;Error while loading conversation to edit privacy flag &quot;, e);</span>
+<span class="nc" id="L268">            addActionError(getText(&quot;discussionCenter.err.unable_to_load_conversation&quot;));</span>
+<span class="fc" id="L269">        }</span>
+<span class="fc" id="L270">        return result;</span>
+    }
+
+    public String editPrivacySave() {
+<span class="fc" id="L274">        loggedinContext = getLoggedInEHRRequestContext();</span>
+<span class="fc" id="L275">        var users = getContextAndLoggedInUsers(CONTACTS);</span>
+<span class="fc" id="L276">        contextUserId = users.contextUser().getId();</span>
+<span class="fc" id="L277">        Long patientAccountId = userManager.getDefaultAccountId(contextUserId);</span>
+
+<span class="fc" id="L279">        Encounter message = encounterManager.getEncounterByEncounterEventUniqueId(loggedinContext, contextUserId.toString(), encounterEventUniqueId, false, this::getText);</span>
+
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">        if (message != null) {</span>
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">            if (hasNotPermissionsToEditPrivacyLabels(message, users.loggedInUser(), loggedInUserUtil.getLoggedInUserPrimaryTeam())) {</span>
+<span class="nc" id="L283">                return CANCEL;</span>
+            }
+<span class="fc" id="L285">            privacyService.handlePrivacyChange(message, getType(message), getNewFlag(), loggedinContext, patientAccountId, users.contextUser(), users.loggedInUser());</span>
+        }
+<span class="fc" id="L287">        return Action.SUCCESS;</span>
+    }
+
+    public String editPrivacyCancel() {
+<span class="nc" id="L291">        return CANCEL;</span>
+    }
+
+    public String reportDocument() {
+<span class="fc" id="L295">        String result = SUCCESS;</span>
+
+        try {
+<span class="fc" id="L298">            UUID patientId = userManager.getPKBPerson(getLoggedInEHRRequestContext().getContextOrAccessingUserId()).getPublicId();</span>
+<span class="fc" id="L299">            Attachment document = encounterManager.getAttachmentContent(getLoggedInEHRRequestContext(), unreadableDocument.reportDocumentId);</span>
+<span class="fc" id="L300">            encounterManager.analysePDFandReport(getLoggedInEHRRequestContext(), unreadableDocument.externalMessageId, document);</span>
+
+<span class="fc" id="L302">            Instant postalInstant = null;</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">            if (unreadableDocument.postalDate != null) {</span>
+<span class="fc" id="L304">                postalInstant = Instant.parse(unreadableDocument.postalDate);</span>
+            }
+<span class="pc bpc" id="L306" title="1 of 4 branches missed.">            if (postalInstant != null &amp;&amp; dateTimeService.now().isBefore(postalInstant)) {</span>
+<span class="fc" id="L307">                addActionMessage(getText(&quot;discussionCenter.txt.letter_will_be_sent_via_post_with_date&quot;,</span>
+<span class="fc" id="L308">                        new String[] { formatDateToGlobalOutputFormat(postalInstant) }));</span>
+            } else {
+<span class="fc" id="L310">                addActionMessage(getText(&quot;discussionCenter.txt.fed_back_to_trust&quot;,</span>
+<span class="fc" id="L311">                        new String[] { Objects.requireNonNull(teamManager.getOrg(unreadableDocument.orgId).orElse(null)).getName() }));</span>
+            }
+
+<span class="fc" id="L314">            LOGGER.info(&quot;PHR-7407 Reported document {} for user {} in {}&quot;,</span>
+<span class="fc" id="L315">                    unreadableDocument.reportDocumentId,</span>
+                    patientId,
+<span class="fc" id="L317">                    userAgentAnalyzerBean.getUserAgent(request).getUserAgentString());</span>
+<span class="nc" id="L318">        } catch (Exception e) {</span>
+<span class="nc" id="L319">            result = ERROR;</span>
+<span class="nc" id="L320">            addActionError(getText(&quot;discussionCenter.txt.report_error&quot;));</span>
+<span class="nc" id="L321">            recordValidationErrors();</span>
+<span class="nc" id="L322">            LOGGER.error(&quot;PHR-7407 Unable to report document {} for user {} in {}&quot;,</span>
+<span class="nc" id="L323">                    unreadableDocument.reportDocumentId,</span>
+                    patientId,
+<span class="nc" id="L325">                    userAgentAnalyzerBean.getUserAgent(request).getUserAgentString(),</span>
+                    e);
+<span class="fc" id="L327">        }</span>
+
+<span class="fc" id="L329">        return result;</span>
+    }
+
+    @Override
+    public String getCustomStyle() {
+<span class="fc" id="L334">        return customStyle;</span>
+    }
+
+    public boolean isDocumentReported(long documentId) {
+<span class="fc" id="L338">        return encounterManager.isDocumentReported(documentId);</span>
+    }
+
+    public boolean isPrivateMessage() {
+<span class="nc" id="L342">        return privateMessage;</span>
+    }
+
+    public boolean getPrivateMessage() {
+<span class="nc" id="L346">        return privateMessage;</span>
+    }
+
+    public void setPrivateMessage(boolean privateMessage) {
+<span class="nc" id="L350">        this.privateMessage = privateMessage;</span>
+<span class="nc" id="L351">    }</span>
+
+    public UUID getConversationId() {
+<span class="fc" id="L354">        return conversationId;</span>
+    }
+
+    public void setConversationId(UUID conversationId) {
+<span class="fc" id="L358">        this.conversationId = conversationId;</span>
+<span class="fc" id="L359">    }</span>
+
+    public void setDocumentId(String documentId) {
+<span class="fc" id="L362">        this.documentId = documentId;</span>
+<span class="fc" id="L363">    }</span>
+
+    public UUID getEncounterEventUniqueId() {
+<span class="fc" id="L366">        return encounterEventUniqueId;</span>
+    }
+
+    public void setEncounterEventUniqueId(UUID encounterEventUniqueId) {
+<span class="fc" id="L370">        this.encounterEventUniqueId = encounterEventUniqueId;</span>
+<span class="fc" id="L371">    }</span>
+
+    public IUserWebBean getUserWebBean() {
+<span class="nc" id="L374">        return userWebBean;</span>
+    }
+
+    public void setUserWebBean(IUserWebBean userWebBean) {
+<span class="fc" id="L378">        this.userWebBean = userWebBean;</span>
+<span class="fc" id="L379">    }</span>
+
+    public String getMessage() {
+<span class="fc" id="L382">        return message;</span>
+    }
+
+    public void setMessage(String message) {
+<span class="nc" id="L386">        this.message = message;</span>
+<span class="nc" id="L387">    }</span>
+
+    public String getFileUploadErrorMessage() {
+<span class="nc" id="L390">        return fileUploadErrorMessage;</span>
+    }
+
+    public void setFileUploadErrorMessage(String fileUploadErrorMessage) {
+<span class="nc" id="L394">        this.fileUploadErrorMessage = fileUploadErrorMessage;</span>
+<span class="nc" id="L395">    }</span>
+
+    public String getImageBaseUrl() {
+<span class="nc" id="L398">        return imageBaseUrl;</span>
+    }
+
+    public String getTab() {
+<span class="fc" id="L402">        return &quot;messages&quot;;</span>
+    }
+
+    public String getMessageId() {
+<span class="fc" id="L406">        return messageId;</span>
+    }
+
+    public void setMessageId(String messageId) {
+<span class="fc" id="L410">        this.messageId = messageId;</span>
+<span class="fc" id="L411">    }</span>
+
+    public String getPatientId() {
+<span class="nc" id="L414">        return patientId;</span>
+    }
+
+    public void setPatientId(String patientId) {
+<span class="nc" id="L418">        this.patientId = patientId;</span>
+<span class="nc" id="L419">    }</span>
+
+    public String getErrorMessage() {
+<span class="nc" id="L422">        return errorMessage;</span>
+    }
+
+    public void setErrorMessage(String errorMessage) {
+<span class="nc" id="L426">        this.errorMessage = errorMessage;</span>
+<span class="nc" id="L427">    }</span>
+
+    public void setWorkflowOptimisticLock(int workflowOptimisticLock) {
+<span class="fc" id="L430">        this.workflowOptimisticLock = workflowOptimisticLock;</span>
+<span class="fc" id="L431">    }</span>
+
+    public boolean isCurrentParticipant() {
+<span class="nc" id="L434">        return currentParticipant;</span>
+    }
+
+    public void setCurrentParticipant(boolean currentParticipant) {
+<span class="nc" id="L438">        this.currentParticipant = currentParticipant;</span>
+<span class="nc" id="L439">    }</span>
+
+    public PKBPerson getContextUser() {
+<span class="nc" id="L442">        return contextUser;</span>
+    }
+
+    public void setContextUser(PKBPerson contextUser) {
+<span class="nc" id="L446">        this.contextUser = contextUser;</span>
+<span class="nc" id="L447">    }</span>
+
+    public void setTeamManager(TeamManager teamManager) {
+<span class="fc" id="L450">        this.teamManager = teamManager;</span>
+<span class="fc" id="L451">    }</span>
+
+    public ReferenceDataManager getReferenceDataManager() {
+<span class="nc" id="L454">        return referenceDataManager;</span>
+    }
+
+    public void setReferenceDataManager(ReferenceDataManager referenceDataManager) {
+<span class="fc" id="L458">        this.referenceDataManager = referenceDataManager;</span>
+<span class="fc" id="L459">    }</span>
+
+    public boolean isDisableReply() {
+<span class="nc" id="L462">        return disableReply;</span>
+    }
+
+    public void setDisableReply(boolean disableReply) {
+<span class="nc" id="L466">        this.disableReply = disableReply;</span>
+<span class="nc" id="L467">    }</span>
+
+    public void setReportDocumentId(long reportDocumentId) {
+<span class="fc" id="L470">        this.unreadableDocument.reportDocumentId = reportDocumentId;</span>
+<span class="fc" id="L471">    }</span>
+
+    public void setExternalMessageId(String externalMessageId) {
+<span class="fc" id="L474">        this.unreadableDocument.externalMessageId = externalMessageId;</span>
+<span class="fc" id="L475">    }</span>
+
+    public void setPostalDate(String postalDate) {
+<span class="fc" id="L478">        this.unreadableDocument.postalDate = postalDate;</span>
+<span class="fc" id="L479">    }</span>
+
+    public void setOrgId(long orgId) {
+<span class="fc" id="L482">        this.unreadableDocument.orgId = orgId;</span>
+<span class="fc" id="L483">    }</span>
+
+    public boolean isReshowMessage() {
+<span class="fc" id="L486">        return reshowMessage;</span>
+    }
+
+    public void setReshowMessage(boolean reshowMessage) {
+<span class="fc" id="L490">        this.reshowMessage = reshowMessage;</span>
+<span class="fc" id="L491">    }</span>
+
+    // TODO: PHR-11218 check if it is a valid state or a bug that encounterClass == null
+    @NotNull
+    public EncounterClass getEncounterClassOrDefault(@Nullable EncounterClass encounterClass) {
+<span class="fc" id="L496">        return requireNonNullElse(encounterClass, EncounterClass.VIRTUAL);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

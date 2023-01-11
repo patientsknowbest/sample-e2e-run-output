@@ -1,0 +1,489 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>NotificationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.notification.impl.tolven</a> &gt; <span class="el_source">NotificationManager.java</span></div><h1>NotificationManager.java</h1><pre class="source lang-java linenums">//---------------------------------------------------------------------------
+//
+// Copyright (c) 2009-2013 PatientsKnowBest, Inc. All Rights Reserved.
+//
+// $Id: NotificationManager.java Aug 23, 2011 4:49:07 PM pravinam$
+//
+//---------------------------------------------------------------------------
+
+package com.pkb.service.notification.impl.tolven;
+
+import com.google.common.annotations.VisibleForTesting;
+import com.pkb.app.entity.EHRRequestContext;
+import com.pkb.common.config.PhrConfig;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.datamodel.consent.PatientConsentDTO;
+import com.pkb.datamodel.consent.RequiresConsent;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.Message;
+import com.pkb.exception.FormattingException;
+import com.pkb.exception.MailException;
+import com.pkb.exception.NotificationFailureException;
+import com.pkb.institute.entity.Org;
+import com.pkb.notification.entity.Activity;
+import com.pkb.service.emailmessage.IAddressInfoProvider;
+import com.pkb.service.emailmessage.NotificationTask;
+import com.pkb.service.emailmessage.impl.AddressInfo;
+import com.pkb.service.emailmessage.impl.EmailManager;
+import com.pkb.service.emailmessage.impl.TemplateParamsFactory;
+import com.pkb.service.patientconsent.PatientConsentManager;
+import com.pkb.service.team.TeamManager;
+import com.pkb.service.user.impl.UserManager;
+import com.pkb.service.uuid.UUIDProvider;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.user.entity.PKBPerson.Lazy;
+import com.pkb.util.AppResourceBundle;
+import com.pkb.util.PKBConstants;
+import com.pkb.util.tolven.TolvenBeanFactory;
+import com.pkb.util.tolven.TransactionManager;
+import io.prometheus.client.Summary;
+import io.vavr.collection.Stream;
+import org.apache.commons.lang3.StringUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
+
+import javax.mail.internet.InternetAddress;
+import java.util.Arrays;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.BiPredicate;
+import java.util.stream.Collectors;
+
+import static com.pkb.entities.enums.Message.NOTIFY_PATIENT_OF_DOCUMENT_RECEIVED;
+import static com.pkb.util.AppResourceBundle.ACTION_LABELS_BUNDLE_NAME;
+import static com.pkb.util.EmailUtil.getActionAlternativeText;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static java.lang.String.format;
+
+/**
+ * Manager to save the activity log and handle all kinds of email notifications to users
+ * E.g -
+ * 1. Notifying the patient about PH Plan created by clinician
+ * 2. Notifying the user about access revoke
+ *
+ * @author pravinam
+ */
+public class NotificationManager extends TransactionManager implements INotificationManager {
+
+<span class="fc" id="L78">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L80">    private static final Summary notifyUserAboutActivityByOtherUserStatistics = Summary.build()</span>
+<span class="fc" id="L81">            .name(&quot;pkb_phr_notificationmanager_notifyuseraboutactivitybyotheruser&quot;)</span>
+<span class="fc" id="L82">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L83">            .quantile(0.95, 0.01)</span>
+<span class="fc" id="L84">            .help(&quot;Notify user about activity by other user seconds&quot;)</span>
+<span class="fc" id="L85">            .register();</span>
+
+<span class="fc" id="L87">    private enum RecipientsToReturn {</span>
+<span class="fc" id="L88">        ALL,</span>
+<span class="fc" id="L89">        ONLY_ALTERNATE,</span>
+<span class="fc" id="L90">        EXCLUDE_ALTERNATE</span>
+
+    }
+
+    private EmailManager emailManager;
+
+    private final UserManager userManager;
+
+    private final TeamManager teamManager;
+
+    private final PatientConsentManager patientConsentManager;
+
+    private final IAddressInfoProvider formatter;
+
+    private final ThreadPoolTaskExecutor taskExecutor;
+
+
+    private final TemplateParamsFactory templateParamsFactory;
+
+    public NotificationManager(PhrConfig config, TolvenBeanFactory beanFactory, DateTimeService dateTimeService, UUIDProvider uuidProvider, EmailManager emailManager,
+                               UserManager userManager, TeamManager teamManager, PatientConsentManager patientConsentManager, IAddressInfoProvider formatter,
+                               ThreadPoolTaskExecutor taskExecutor, TemplateParamsFactory templateParamsFactory) {
+<span class="fc" id="L112">        super(config, beanFactory, dateTimeService, uuidProvider);</span>
+<span class="fc" id="L113">        this.emailManager = emailManager;</span>
+<span class="fc" id="L114">        this.userManager = userManager;</span>
+<span class="fc" id="L115">        this.teamManager = teamManager;</span>
+<span class="fc" id="L116">        this.patientConsentManager = patientConsentManager;</span>
+<span class="fc" id="L117">        this.formatter = formatter;</span>
+<span class="fc" id="L118">        this.taskExecutor = taskExecutor;</span>
+<span class="fc" id="L119">        this.templateParamsFactory = templateParamsFactory;</span>
+<span class="fc" id="L120">    }</span>
+
+    //Integration tests fiddle with it...
+    @VisibleForTesting
+    public void setEmailManager(EmailManager emailManager) {
+<span class="nc" id="L125">        this.emailManager = emailManager;</span>
+<span class="nc" id="L126">    }</span>
+
+    public ThreadPoolTaskExecutor getTaskExecutor() {
+<span class="nc" id="L129">        return this.taskExecutor;</span>
+    }
+
+    private Optional&lt;Org&gt; getOrg(Activity activity) {
+<span class="fc bfc" id="L133" title="All 2 branches covered.">        return activity.getOrgId() == null</span>
+<span class="fc" id="L134">                ? Optional.empty()</span>
+<span class="fc" id="L135">                : teamManager.getOrg(activity.getOrgId());</span>
+    }
+
+    private void notifyPatientAboutActivityByOtherUser(EHRRequestContext requestContext, Activity activity,
+                                                       boolean sendNotificationAsync, RequiresConsent consentRequired,
+                                                       Long... altActionTextPersonIds) throws NotificationFailureException {
+        try {
+<span class="fc" id="L142">            PKBPerson patient = getTarget(activity);</span>
+<span class="fc" id="L143">            Optional&lt;PKBPerson&gt; actor = getActor(activity);</span>
+<span class="fc" id="L144">            Map&lt;String, Object&gt; properties = templateParamsFactory.createWithSiteProps();</span>
+<span class="fc" id="L145">            addPatientAndOptionalCarerNameDetails(patient, null, properties);</span>
+<span class="fc" id="L146">            properties.put(PKBConstants.USER_QUERY_PATH, activity.getAction().getUserQueryPath());</span>
+<span class="fc" id="L147">            properties.put(PKBConstants.USER_QUERY_PARAMS, activity.getActionUserQueryParams());</span>
+<span class="fc bfc" id="L148" title="All 2 branches covered.">            properties.put(PKBConstants.ACTION_URL, activity.getUrl() == null ? StringUtils.EMPTY : activity.getUrl().toString());</span>
+<span class="fc" id="L149">            properties.put(PKBConstants.ACTION_TEXT, AppResourceBundle.getPropertyValue(activity.getAction().toString(), patient.getLocale(), ACTION_LABELS_BUNDLE_NAME));</span>
+<span class="fc" id="L150">            properties.put(PKBConstants.CONTEXT_USER_ID, patient.getId());</span>
+<span class="fc" id="L151">            addActorAndOrgDetails(requestContext, activity, properties);</span>
+<span class="fc" id="L152">            AddressInfo contacts = formatter.getConfirmedOnlyPrimaryAndSecondaryContacts(patient, consentRequired);</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">            RecipientsToReturn recipientsToReturn = altActionTextPersonIds.length &gt; 0 ? RecipientsToReturn.EXCLUDE_ALTERNATE : RecipientsToReturn.ALL;</span>
+<span class="fc" id="L154">            AddressInfo confirmedRecipientList = Optional.of(getRecipientList(contacts, recipientsToReturn, altActionTextPersonIds))</span>
+<span class="fc bfc" id="L155" title="All 4 branches covered.">                    .filter(info -&gt; actor.isEmpty() || !patient.getId().equals(actor.get().getId()))</span>
+<span class="fc" id="L156">                    .orElse(null);</span>
+<span class="fc" id="L157">            Optional&lt;AddressInfo&gt; altActionTextRecipients = Optional.of(getRecipientList(contacts, RecipientsToReturn.ONLY_ALTERNATE, altActionTextPersonIds))</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">                    .filter(info -&gt; altActionTextPersonIds.length &gt; 0);</span>
+<span class="fc" id="L159">            Message actualMessage = activity.getAction().getActualMessage(Message.ACTIVITY_NOTIFICATION_TO_PATIENT_V2);</span>
+<span class="fc" id="L160">            Optional&lt;Org&gt; org = getOrg(activity);</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">            if (sendNotificationAsync) {</span>
+<span class="fc" id="L162">                notifyPatientAboutActivityByOtherUserAsync(actualMessage, actor.orElse(null), confirmedRecipientList, patient, properties, activity, org.orElse(null));</span>
+<span class="fc" id="L163">                altActionTextRecipients.ifPresent(recipients -&gt; {</span>
+<span class="nc" id="L164">                    properties.put(PKBConstants.ACTION_TEXT,</span>
+<span class="nc" id="L165">                            AppResourceBundle.getPropertyValue(getActionAlternativeText(activity.getAction()), patient.getLocale(), ACTION_LABELS_BUNDLE_NAME));</span>
+<span class="nc" id="L166">                    notifyPatientAboutActivityByOtherUserAsync(actualMessage, actor.orElse(null), recipients, patient, properties,</span>
+<span class="nc" id="L167">                            activity, org.orElse(null));</span>
+<span class="nc" id="L168">                });</span>
+            } else {
+<span class="fc" id="L170">                notifyPatientAboutActivityByOtherUserSync(actualMessage, actor.orElse(null), confirmedRecipientList, patient, properties, activity, org.orElse(null));</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">                if (altActionTextRecipients.isPresent()) {</span>
+<span class="fc" id="L172">                    properties.put(PKBConstants.ACTION_TEXT,</span>
+<span class="fc" id="L173">                            AppResourceBundle.getPropertyValue(getActionAlternativeText(activity.getAction()), patient.getLocale(), ACTION_LABELS_BUNDLE_NAME));</span>
+<span class="fc" id="L174">                    notifyPatientAboutActivityByOtherUserSync(actualMessage, actor.orElse(null), altActionTextRecipients.get(), patient, properties,</span>
+<span class="fc" id="L175">                            activity, org.orElse(null));</span>
+                }
+            }
+<span class="nc" id="L178">        } catch (Exception e) {</span>
+<span class="nc" id="L179">            throw new NotificationFailureException(e.getMessage(), e, activity);</span>
+<span class="fc" id="L180">        }</span>
+<span class="fc" id="L181">    }</span>
+
+    private void notifyPatientAboutActivityByOtherUserAsync(Message message, PKBPerson actor, AddressInfo recipients,
+            PKBPerson patient, Map&lt;String, Object&gt; properties, Activity activity, @Nullable Org org) {
+<span class="pc bpc" id="L185" title="1 of 2 branches missed.">        if (org != null) {</span>
+<span class="fc" id="L186">            taskExecutor.execute(new NotificationTask(emailManager, message, actor,</span>
+<span class="fc" id="L187">                    recipients, patient, properties, patient.getLocale(),</span>
+<span class="fc" id="L188">                    activity.getAction(), activity.getActorId(), org));</span>
+        } else {
+<span class="nc" id="L190">            taskExecutor.execute(new NotificationTask(emailManager, message, actor,</span>
+<span class="nc" id="L191">                    recipients, patient, properties, patient.getLocale(),</span>
+<span class="nc" id="L192">                    activity.getAction()));</span>
+        }
+<span class="fc" id="L194">    }</span>
+
+    private void notifyPatientAboutActivityByOtherUserSync(Message message, PKBPerson actor, AddressInfo recipients,
+            PKBPerson patient, Map&lt;String, Object&gt; properties, Activity activity, @Nullable Org org) throws MailException {
+<span class="fc" id="L198">        emailManager.sendMessage(message, actor, recipients, patient, properties, patient.getLocale(),</span>
+<span class="fc" id="L199">                activity.getAction(), activity.getActorId(), org, null);</span>
+<span class="fc" id="L200">    }</span>
+
+    private AddressInfo getRecipientList(AddressInfo info, RecipientsToReturn recipientsToReturn, Long... altActionTextPersonIds) {
+<span class="fc" id="L203">        return Match(recipientsToReturn).of(</span>
+<span class="fc" id="L204">                Case($(RecipientsToReturn.ALL), info),</span>
+<span class="fc" id="L205">                Case($(RecipientsToReturn.ONLY_ALTERNATE), () -&gt; new AddressInfo(null, getCarersFromRecipients(info, recipientsToReturn, altActionTextPersonIds))),</span>
+<span class="fc" id="L206">                Case($(RecipientsToReturn.EXCLUDE_ALTERNATE),</span>
+<span class="fc" id="L207">                        () -&gt; new AddressInfo(info.getPrimaryAddress(), getCarersFromRecipients(info, recipientsToReturn, altActionTextPersonIds))));</span>
+    }
+
+    private Map&lt;InternetAddress, PKBPerson&gt; getCarersFromRecipients(AddressInfo info, RecipientsToReturn recipientsToReturn, Long... altActionTextPersonIds) {
+<span class="fc" id="L211">        List&lt;PKBPerson&gt; users = getUsersFromIds(Arrays.asList(altActionTextPersonIds));</span>
+<span class="fc" id="L212">        BiPredicate&lt;RecipientsToReturn, PKBPerson&gt; include = (toReturn, person) -&gt; Match(toReturn).of(</span>
+<span class="fc" id="L213">                Case($(RecipientsToReturn.ONLY_ALTERNATE), users.contains(person)),</span>
+<span class="fc bfc" id="L214" title="All 2 branches covered.">                Case($(RecipientsToReturn.EXCLUDE_ALTERNATE), !users.contains(person)));</span>
+<span class="fc" id="L215">        return Stream.ofAll(info.getSecondaryAddressesAndPersons().entrySet())</span>
+<span class="fc" id="L216">                .filter(entry -&gt; include.test(recipientsToReturn, entry.getValue()))</span>
+<span class="fc" id="L217">                .toMap(Map.Entry::getKey, Map.Entry::getValue)</span>
+<span class="fc" id="L218">                .toJavaMap();</span>
+    }
+
+    private List&lt;PKBPerson&gt; getUsersFromIds(List&lt;Long&gt; ids) {
+<span class="fc" id="L222">        return ids.stream().map(userManager::getPKBPerson)</span>
+<span class="fc" id="L223">                .filter(Objects::nonNull)</span>
+<span class="fc" id="L224">                .collect(Collectors.toList());</span>
+    }
+
+    private String getOrgNameIfActorIsMissing(@NotNull EHRRequestContext requestContext, Activity activity) {
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">        Long orgId = activity.getOrgId() != null ? activity.getOrgId() : requestContext.getOrgId().orElse(null);</span>
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">        return orgId != null ? teamManager.getOrg(orgId).map(Org::getName).orElse(&quot;&quot;) : &quot;&quot;;</span>
+    }
+
+    private PKBPerson getTarget(Activity activity) {
+<span class="fc" id="L233">        return userManager.getPKBPerson(activity.getTargetId());</span>
+    }
+
+    private Optional&lt;PKBPerson&gt; getActor(Activity activity, Lazy ...lazies) {
+        // e.g., HL7 API call w/ no PKBPerson involved as actor
+<span class="fc bfc" id="L238" title="All 2 branches covered.">        if (activity.getActorId() == null) {</span>
+<span class="fc" id="L239">            return Optional.empty();</span>
+        }
+<span class="fc" id="L241">        return Optional.of(userManager.getPKBPerson(Long.parseLong(activity.getActorId()), lazies));</span>
+    }
+
+    private Optional&lt;PKBPerson&gt; getActorWithContacts(Activity activity) {
+<span class="fc" id="L245">        return getActor(activity, Lazy.CONTACTS);</span>
+    }
+
+    private void notifyClinicianAboutActivityByOtherUser(Activity activity, boolean sendNotificationAsync,
+            RequiresConsent consentRequired)
+            throws NotificationFailureException {
+        try {
+<span class="pc bpc" id="L252" title="1 of 2 branches missed.">            if (LOGGER.isDebugEnabled()) {</span>
+<span class="nc" id="L253">                LOGGER.debug(&quot;Enter notifyClinicianAboutActivityByOtherUser&quot;);</span>
+            }
+
+<span class="fc" id="L256">            Optional&lt;PKBPerson&gt; actor = getActor(activity);</span>
+<span class="fc" id="L257">            PKBPerson clinician = getTarget(activity);</span>
+<span class="fc" id="L258">            Map&lt;String, Object&gt; properties = templateParamsFactory.createWithSiteProps();</span>
+<span class="fc" id="L259">            properties.put(PKBConstants.CLINICIAN_TITLE, clinician.getTitle());</span>
+<span class="fc" id="L260">            properties.put(PKBConstants.CLINICIAN_FIRST_NAME, clinician.getFirstName());</span>
+<span class="fc" id="L261">            properties.put(PKBConstants.CLINICIAN_LAST_NAME, clinician.getLastName());</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">            properties.put(PKBConstants.ACTION_URL, (activity.getUrl() == null) ? &quot;&quot; : activity.getUrl().toString());</span>
+<span class="fc" id="L263">            properties.put(PKBConstants.ACTOR_TITLE, actor.map(PKBPerson::getTitle).orElse(&quot;&quot;));</span>
+<span class="fc" id="L264">            properties.put(PKBConstants.ACTOR_FIRST_NAME, actor.map(PKBPerson::getFirstName).orElse(&quot;&quot;));</span>
+<span class="fc" id="L265">            properties.put(PKBConstants.ACTOR_LAST_NAME, actor.map(PKBPerson::getLastName).orElse(&quot;&quot;));</span>
+
+<span class="fc" id="L267">            String actionText = AppResourceBundle.getPropertyValue(activity.getAction().toString(), clinician.getLocale(), ACTION_LABELS_BUNDLE_NAME);</span>
+<span class="fc" id="L268">            properties.put(PKBConstants.ACTION_TEXT, actionText);</span>
+
+<span class="fc" id="L270">            AddressInfo confirmedRecipientList = formatter.getConfirmedOnlyPrimaryAndSecondaryContacts(clinician,</span>
+                    consentRequired);
+
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">            if (sendNotificationAsync) {</span>
+<span class="nc" id="L274">                taskExecutor.execute(new NotificationTask(emailManager, Message.ACTIVITY_NOTIFICATION_TO_CLINICIAN, actor.orElse(null),</span>
+<span class="nc" id="L275">                        confirmedRecipientList, clinician, properties, clinician.getLocale()));</span>
+            } else {
+<span class="fc" id="L277">                emailManager.sendMessage(Message.ACTIVITY_NOTIFICATION_TO_CLINICIAN, actor.orElse(null), confirmedRecipientList, clinician,</span>
+<span class="fc" id="L278">                        properties, clinician.getLocale(), null, activity.getActorId(), teamManager.getOrg(activity.getOrgId()).orElse(null), null);</span>
+            }
+
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">            if (LOGGER.isDebugEnabled()) {</span>
+<span class="nc" id="L282">                LOGGER.info(&quot;Exiting notifyClinicianAboutActivityByOtherUser&quot;);</span>
+            }
+
+<span class="nc" id="L285">        } catch (Exception e) {</span>
+<span class="nc" id="L286">            throw new NotificationFailureException(e.getMessage(), e, activity);</span>
+<span class="fc" id="L287">        }</span>
+
+<span class="fc" id="L289">    }</span>
+
+    @Override
+    public void notifyUserAboutActivityByOtherUser(EHRRequestContext requestContext, Activity activity,
+                                                   RequiresConsent consentRequired, Long... altActionTextPersonIds) {
+<span class="fc" id="L294">        notifyUserAboutActivityByOtherUser(requestContext, activity, false/*sendAsync*/, consentRequired, altActionTextPersonIds);</span>
+<span class="fc" id="L295">    }</span>
+
+    @Override
+    public void notifyUserAboutActivityByOtherUser(EHRRequestContext requestContext, Activity activity, boolean sendNotificationAsync,
+                                                   RequiresConsent consentRequired, Long... altActionTextPersonIds) {
+<span class="fc" id="L300">        Summary.Timer timer = notifyUserAboutActivityByOtherUserStatistics.startTimer();</span>
+        try {
+<span class="fc" id="L302">            PKBPerson user = getTarget(activity);</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">            if (user.isPatient()) {</span>
+<span class="fc" id="L304">                notifyPatientAboutActivityByOtherUser(requestContext, activity, sendNotificationAsync, consentRequired, altActionTextPersonIds);</span>
+<span class="fc bfc" id="L305" title="All 2 branches covered.">            } else if (user.isPro()) {</span>
+<span class="fc" id="L306">                notifyClinicianAboutActivityByOtherUser(activity, sendNotificationAsync, consentRequired);</span>
+            }
+        } finally {
+<span class="fc" id="L309">            timer.observeDuration();</span>
+        }
+<span class="fc" id="L311">    }</span>
+
+    @Override
+    public void notifyCarersAboutActivityByPatient(EHRRequestContext requestContext, long patientId, Activity activity,
+            RequiresConsent consentRequired)
+            throws NotificationFailureException {
+        try {
+<span class="fc" id="L318">            var consentLinks = patientConsentManager.getConsentLinks(requestContext, patientId, false, EnumSet.of(AccessingEntityType.CARER));</span>
+
+<span class="fc bfc" id="L320" title="All 2 branches covered.">            for (PKBPerson carer : consentLinks.getCarers()) {</span>
+
+<span class="fc" id="L322">                PatientConsentDTO consent = Optional.ofNullable(consentLinks.getCarerConsents().get(carer.getId())).orElseThrow();</span>
+
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">                if (consent.isEntityVisible(consentRequired)) {</span>
+<span class="fc" id="L325">                    Optional&lt;PKBPerson&gt; actor = getActor(activity);</span>
+<span class="fc" id="L326">                    Map&lt;String, Object&gt; properties = templateParamsFactory.createWithSiteProps();</span>
+<span class="fc" id="L327">                    properties.put(PKBConstants.CARER_TITLE, carer.getTitle());</span>
+<span class="fc" id="L328">                    properties.put(PKBConstants.CARER_FIRST_NAME, carer.getFirstName());</span>
+<span class="fc" id="L329">                    properties.put(PKBConstants.CARER_LAST_NAME, carer.getLastName());</span>
+<span class="fc" id="L330">                    properties.put(PKBConstants.ACTOR_TITLE, actor.map(PKBPerson::getTitle).orElse(&quot;&quot;));</span>
+<span class="fc" id="L331">                    properties.put(PKBConstants.ACTOR_FIRST_NAME, actor.map(PKBPerson::getFirstName).orElse(&quot;&quot;));</span>
+<span class="fc" id="L332">                    properties.put(PKBConstants.ACTOR_LAST_NAME, actor.map(PKBPerson::getLastName).orElse(&quot;&quot;));</span>
+<span class="fc" id="L333">                    properties.put(PKBConstants.ACTION_URL, activity.getUrl().toString());</span>
+
+<span class="fc" id="L335">                    String actionText = AppResourceBundle.getPropertyValue(activity.getAction().toString(), carer.getLocale(), ACTION_LABELS_BUNDLE_NAME);</span>
+<span class="fc" id="L336">                    properties.put(PKBConstants.ACTION_TEXT, actionText);</span>
+
+<span class="fc" id="L338">                    AddressInfo confirmedRecipientList = formatter.getConfirmedOnlyPrimaryAndSecondaryContacts(carer,</span>
+                            consentRequired);
+
+<span class="fc" id="L341">                    Optional&lt;Org&gt; org = getOrg(activity);</span>
+<span class="pc bpc" id="L342" title="1 of 2 branches missed.">                    if (org.isPresent()) {</span>
+<span class="nc" id="L343">                        taskExecutor.execute(new NotificationTask(emailManager, Message.ACTIVITY_NOTIFICATION_TO_CARER, null,</span>
+<span class="nc" id="L344">                                confirmedRecipientList, carer, properties, carer.getLocale(), activity.getAction(), activity.getActorId(),</span>
+<span class="nc" id="L345">                                org.get()));</span>
+                    } else {
+<span class="fc" id="L347">                        taskExecutor.execute(new NotificationTask(emailManager, Message.ACTIVITY_NOTIFICATION_TO_CARER, null,</span>
+<span class="fc" id="L348">                                confirmedRecipientList, carer, properties, carer.getLocale(), activity.getAction()));</span>
+                    }
+                }
+<span class="fc" id="L351">            }</span>
+<span class="nc" id="L352">        } catch (Exception e) {</span>
+<span class="nc" id="L353">            LOGGER.error(&quot;Exception while notifying carers of patient-{} of activity-{}&quot;, patientId, activity.getAction(), e);</span>
+<span class="fc" id="L354">        }</span>
+<span class="fc" id="L355">    }</span>
+
+    @Override
+    public void notifySelf(EHRRequestContext requestContext, long userId, Activity activity,
+            RequiresConsent consentRequired) {
+        try {
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">            if (LOGGER.isDebugEnabled()) {</span>
+<span class="nc" id="L362">                LOGGER.debug(&quot;Enter notifySelf&quot;);</span>
+            }
+<span class="fc" id="L364">            Optional&lt;PKBPerson&gt; actor = getActorWithContacts(activity);</span>
+<span class="fc" id="L365">            Map&lt;String, Object&gt; properties = templateParamsFactory.createWithSiteProps();</span>
+<span class="fc" id="L366">            properties.put(PKBConstants.ACTOR_TITLE, actor.map(PKBPerson::getTitle).orElse(&quot;&quot;));</span>
+<span class="fc" id="L367">            properties.put(PKBConstants.ACTOR_FIRST_NAME, actor.map(PKBPerson::getFirstName).orElse(&quot;&quot;));</span>
+<span class="fc" id="L368">            properties.put(PKBConstants.ACTOR_LAST_NAME, actor.map(PKBPerson::getLastName).orElse(&quot;&quot;));</span>
+<span class="fc" id="L369">            properties.put(PKBConstants.USER_QUERY_PATH, activity.getAction().getUserQueryPath());</span>
+<span class="fc" id="L370">            properties.put(PKBConstants.USER_QUERY_PARAMS, &quot;&quot;);</span>
+<span class="fc" id="L371">            properties.put(PKBConstants.ACTION_TEXT, AppResourceBundle.getPropertyValue(activity.getAction().toString(),</span>
+<span class="fc" id="L372">                    actor.map(PKBPerson::getLocale).orElse(Locale.ENGLISH), ACTION_LABELS_BUNDLE_NAME));</span>
+
+<span class="fc" id="L374">            Message actualMessage = activity.getAction().getActualMessage(Message.ACTIVITY_NOTIFICATION_TO_SELF);</span>
+<span class="fc" id="L375">            actor.ifPresent(person -&gt; person.getContacts().forEach(</span>
+                    contact -&gt; {
+<span class="fc bfc" id="L377" title="All 2 branches covered.">                        if (contact.isConfirmed()) {</span>
+<span class="fc" id="L378">                            Optional&lt;Org&gt; org = getOrg(activity);</span>
+                            try {
+<span class="fc bfc" id="L380" title="All 2 branches covered.">                                if (org.isPresent()) {</span>
+<span class="fc" id="L381">                                    taskExecutor.execute(new NotificationTask(emailManager, actualMessage, null,</span>
+<span class="fc" id="L382">                                            formatter.getContact(person.getFirstName(), person.getLastName(), contact.getContactIfEmail().getOrNull()).getOrNull(),</span>
+<span class="fc" id="L383">                                            person, properties, actor.map(PKBPerson::getLocale).orElse(Locale.ENGLISH), activity.getAction(), activity.getActorId(),</span>
+<span class="fc" id="L384">                                            org.get()));</span>
+                                } else {
+<span class="fc" id="L386">                                    taskExecutor.execute(new NotificationTask(emailManager, actualMessage, null,</span>
+<span class="fc" id="L387">                                            formatter.getContact(person.getFirstName(), person.getLastName(), contact.getContactIfEmail().getOrNull()).getOrNull(),</span>
+<span class="fc" id="L388">                                            person, properties, actor.map(PKBPerson::getLocale).orElse(Locale.ENGLISH), activity.getAction()));</span>
+                                }
+<span class="nc" id="L390">                            } catch (FormattingException e) {</span>
+<span class="nc" id="L391">                                LOGGER.error(format(&quot;FormattingException while notifying contact (id=%d) of self activity (%s)&quot;, contact.getId(), activity.getAction()), e);</span>
+<span class="fc" id="L392">                            }</span>
+                        }
+<span class="fc" id="L394">                    }));</span>
+
+<span class="pc bpc" id="L396" title="1 of 4 branches missed.">            if (actor.isPresent() &amp;&amp; actor.get().isPatient()) {</span>
+<span class="fc" id="L397">                notifyCarersAboutActivityByPatient(requestContext, actor.get().getId(), activity, consentRequired);</span>
+            }
+
+<span class="pc bpc" id="L400" title="1 of 2 branches missed.">            if (LOGGER.isDebugEnabled()) {</span>
+<span class="nc" id="L401">                LOGGER.debug(&quot;Exiting notifySelf&quot;);</span>
+            }
+<span class="nc" id="L403">        } catch (Exception e) {</span>
+<span class="nc" id="L404">            throw new NotificationFailureException(e.getMessage(), e, activity);</span>
+<span class="fc" id="L405">        }</span>
+<span class="fc" id="L406">    }</span>
+
+    @Override
+    public void notifyPatientAboutBeingDischarged(EHRRequestContext context, Org org, PKBPerson patient) {
+<span class="fc" id="L410">        Map&lt;String, Object&gt; properties = templateParamsFactory.createWithSiteProps();</span>
+<span class="fc" id="L411">        addPatientAndOptionalCarerNameDetails(patient, null, properties);</span>
+<span class="fc" id="L412">        properties.put(PKBConstants.CONTEXT_USER_ID, patient.getId());</span>
+<span class="fc" id="L413">        properties.put(PKBConstants.ORGANIZATION_NAME, org.getName());</span>
+<span class="fc" id="L414">        Optional&lt;AddressInfo&gt; info = formatter.getPrimaryContactOnly(patient);</span>
+<span class="fc" id="L415">        info.map(i -&gt; new NotificationTask(emailManager, Message.NOTIFY_PATIENT_DISCHARGE_FROM_ORG, null,</span>
+<span class="fc" id="L416">                i, patient, properties, patient.getLocale()))</span>
+<span class="fc" id="L417">                .ifPresent(taskExecutor::execute);</span>
+<span class="fc" id="L418">    }</span>
+
+    @Override
+    public void notifyCarerAboutPatientBeingDischarged(EHRRequestContext context, Org org, PKBPerson patient, PKBPerson carer) {
+<span class="fc" id="L422">        Map&lt;String, Object&gt; properties = templateParamsFactory.createWithSiteProps();</span>
+<span class="fc" id="L423">        addPatientAndOptionalCarerNameDetails(patient, carer, properties);</span>
+<span class="fc" id="L424">        properties.put(PKBConstants.CONTEXT_USER_ID, patient.getId());</span>
+<span class="fc" id="L425">        properties.put(PKBConstants.ORGANIZATION_NAME, org.getName());</span>
+
+<span class="fc" id="L427">        Optional&lt;AddressInfo&gt; info = formatter.getPrimaryContactOnly(carer);</span>
+<span class="fc" id="L428">        info.map(i -&gt; new NotificationTask(emailManager, Message.NOTIFY_CARER_OF_PATIENT_DISCHARGE_FROM_ORG, null,</span>
+<span class="fc" id="L429">                i, carer, properties, carer.getLocale()))</span>
+<span class="fc" id="L430">                .ifPresent(taskExecutor::execute);</span>
+<span class="fc" id="L431">    }</span>
+
+    @Override
+    public void notifyPatientOfDocumentReceived(Activity activity, UUID conversationId, RequiresConsent consentRequired) {
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">        if (LOGGER.isDebugEnabled()) {</span>
+<span class="nc" id="L436">            LOGGER.debug(&quot;Entering notifyPatientOfDocumentReceived&quot;);</span>
+        }
+<span class="fc" id="L438">        PKBPerson patient = getTarget(activity);</span>
+<span class="pc" id="L439">        Org org = getOrg(activity).orElseThrow(() -&gt; new RuntimeException(&quot;Missing organisation in notifyPatientOfDocumentReceived&quot;));</span>
+<span class="fc" id="L440">        Map&lt;String, Object&gt; properties = templateParamsFactory.createWithSiteProps();</span>
+<span class="fc" id="L441">        addPatientAndOptionalCarerNameDetails(patient, null, properties);</span>
+<span class="fc" id="L442">        properties.put(PKBConstants.CONTEXT_USER_ID, patient.getId());</span>
+<span class="fc" id="L443">        properties.put(PKBConstants.ORGANIZATION_NAME, org.getName());</span>
+<span class="fc" id="L444">        properties.put(PKBConstants.CONVERSATION_ID, conversationId);</span>
+        try {
+<span class="fc" id="L446">            AddressInfo confirmedRecipientList = formatter.getConfirmedOnlyPrimaryAndSecondaryContacts(patient, consentRequired);</span>
+<span class="fc" id="L447">            taskExecutor.execute(new NotificationTask(emailManager,</span>
+                    NOTIFY_PATIENT_OF_DOCUMENT_RECEIVED,
+                    null,
+                    confirmedRecipientList,
+                    patient,
+                    properties,
+<span class="fc" id="L453">                    patient.getLocale(),</span>
+<span class="fc" id="L454">                    activity.getAction(),</span>
+<span class="fc" id="L455">                    activity.getActorId(),</span>
+                    org));
+        } finally {
+<span class="pc bpc" id="L458" title="1 of 2 branches missed.">            if (LOGGER.isDebugEnabled()) {</span>
+<span class="nc" id="L459">                LOGGER.debug(&quot;Exiting notifyPatientOfDocumentReceived&quot;);</span>
+            }
+        }
+<span class="fc" id="L462">    }</span>
+
+    private void addPatientAndOptionalCarerNameDetails(@NotNull PKBPerson patient, @Nullable PKBPerson carer, @NotNull Map&lt;String, Object&gt; properties) {
+<span class="fc" id="L465">        properties.put(PKBConstants.PATIENT_TITLE, patient.getTitle());</span>
+<span class="fc" id="L466">        properties.put(PKBConstants.PATIENT_FIRST_NAME, patient.getFirstName());</span>
+<span class="fc" id="L467">        properties.put(PKBConstants.PATIENT_LAST_NAME, patient.getLastName());</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">        if (carer != null) {</span>
+<span class="fc" id="L469">            properties.put(PKBConstants.CARER_TITLE, carer.getTitle());</span>
+<span class="fc" id="L470">            properties.put(PKBConstants.CARER_FIRST_NAME, carer.getFirstName());</span>
+<span class="fc" id="L471">            properties.put(PKBConstants.CARER_LAST_NAME, carer.getLastName());</span>
+        }
+<span class="fc" id="L473">    }</span>
+
+    private void addActorAndOrgDetails(@NotNull EHRRequestContext requestContext, @NotNull Activity activity, @NotNull Map&lt;String, Object&gt; properties) {
+        // actor is null for HL7 API notifications
+<span class="fc" id="L477">        Optional&lt;PKBPerson&gt; actor = getActor(activity);</span>
+<span class="fc" id="L478">        properties.put(PKBConstants.ACTOR_TITLE, actor.map(PKBPerson::getTitle).orElse(&quot;&quot;));</span>
+<span class="fc" id="L479">        properties.put(PKBConstants.ACTOR_FIRST_NAME, actor.map(PKBPerson::getFirstName).orElse(&quot;&quot;));</span>
+<span class="fc" id="L480">        properties.put(PKBConstants.ACTOR_LAST_NAME, actor.map(PKBPerson::getLastName).orElse(&quot;&quot;));</span>
+<span class="fc bfc" id="L481" title="All 2 branches covered.">        properties.put(PKBConstants.ORGANIZATION_NAME, actor.filter(person -&gt; !person.isPatient())</span>
+<span class="fc" id="L482">                .map(PKBPerson::getOrganizationName)</span>
+<span class="fc bfc" id="L483" title="All 2 branches covered.">                .orElse(actor.isEmpty() ? getOrgNameIfActorIsMissing(requestContext, activity) : &quot;&quot;));</span>
+<span class="fc bfc" id="L484" title="All 2 branches covered.">        actor.ifPresent(person -&gt; properties.put(PKBConstants.ACTOR_ROLE, (person.isPatient()</span>
+<span class="fc" id="L485">                ? AppResourceBundle.getPropertyValue(&quot;CARER&quot;, person.getLocale(), ACTION_LABELS_BUNDLE_NAME)</span>
+<span class="fc" id="L486">                : AppResourceBundle.getPropertyValue(person.getUserType().toString(), person.getLocale(), ACTION_LABELS_BUNDLE_NAME))));</span>
+<span class="fc" id="L487">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SciStoreClient.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.integration.sciStore</a> &gt; <span class="el_source">SciStoreClient.java</span></div><h1>SciStoreClient.java</h1><pre class="source lang-java linenums">package com.pkb.integration.sciStore;
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.exception.PKBException;
+import io.prometheus.client.Summary;
+import io.vavr.Tuple;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import uk.nhs.scot.show.isd.scistore.ArrayOfSubscriptionFieldInfo;
+import uk.nhs.scot.show.isd.scistore.FindPatientCriteria;
+import uk.nhs.scot.show.isd.scistore.FindPatientIDCriteria;
+import uk.nhs.scot.show.isd.scistore.FindPatientItem;
+import uk.nhs.scot.show.isd.scistore.FindResultCriteria;
+import uk.nhs.scot.show.isd.scistore.FindResultItem;
+import uk.nhs.scot.show.isd.scistore.InvestigationReportMessageType;
+import uk.nhs.scot.show.isd.scistore.Login;
+import uk.nhs.scot.show.isd.scistore.LoginTokenResponse;
+import uk.nhs.scot.show.isd.scistore.SubscriptionFieldInfo;
+import uk.nhs.scot.show.isd.scistore.SubscriptionInfo;
+import uk.nhs.scot.show.isd.scistore.headers.Credentials;
+import uk.nhs.scot.show.isd.scistore.messages.AddSubscription;
+import uk.nhs.scot.show.isd.scistore.messages.AddSubscriptionResponse;
+import uk.nhs.scot.show.isd.scistore.messages.FindPatientResponse;
+import uk.nhs.scot.show.isd.scistore.messages.FindResultResponse;
+import uk.nhs.scot.show.isd.scistore.messages.FindSubscriptions;
+import uk.nhs.scot.show.isd.scistore.messages.FindSubscriptionsResponse;
+import uk.nhs.scot.show.isd.scistore.messages.GetNotifications;
+import uk.nhs.scot.show.isd.scistore.messages.GetNotificationsResponse;
+import uk.nhs.scot.show.isd.scistore.messages.GetResult;
+import uk.nhs.scot.show.isd.scistore.messages.GetResultResponse;
+import uk.nhs.scot.show.isd.scistore.webservices.SCIStoreServices;
+import uk.nhs.scot.show.isd.scistore.webservices.SCIStoreServicesPort;
+
+import java.math.BigInteger;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.util.List;
+import java.util.Optional;
+import java.util.stream.Collectors;
+
+public class SciStoreClient implements ISciStoreClient {
+
+    public static final String PATIENT = &quot;Patient&quot;;
+    public static final String CHI = &quot;CHI&quot;;
+
+<span class="fc" id="L46">    private static Summary REQUEST_STATISTICS = Summary.build()</span>
+<span class="fc" id="L47">            .name(&quot;pkb_integrations_scistore_requests&quot;)</span>
+<span class="fc" id="L48">            .labelNames(&quot;method&quot;)</span>
+<span class="fc" id="L49">            .quantile(0.5, 0.05)</span>
+<span class="fc" id="L50">            .quantile(0.95, 0.01)</span>
+<span class="fc" id="L51">            .help(&quot;SciStore request timing&quot;)</span>
+<span class="fc" id="L52">            .register();</span>
+
+    private PhrConfig config;
+    private SCIStoreServices sciStoreService;
+
+    private Credentials credentials;
+    private long credentialsValidUntilMillis;
+
+    private static final int NOTIFICATION_BATCH_SIZE = 10;
+
+    // PKB local user - must be supplied with every request apart from Login
+    private final static String PKB_USERNAME = &quot;PKB&quot;;
+    private final static String PKB_FRIENDLY_NAME = &quot;PKB&quot;;
+    private final static String PKB_SYSTEM_CODE = &quot;PKB&quot;;
+    private final static String PKB_SYSTEM_LOCATION = &quot;PKB&quot;;
+
+<span class="fc" id="L68">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L70">    public SciStoreClient(PhrConfig config) {</span>
+<span class="fc" id="L71">        this.config = config;</span>
+<span class="fc" id="L72">    }</span>
+
+    public synchronized Credentials getCredentials() {
+<span class="pc bpc" id="L75" title="1 of 4 branches missed.">        if (credentials != null &amp;&amp; credentialsValidUntilMillis &gt; System.currentTimeMillis()) {</span>
+<span class="fc" id="L76">            return credentials;</span>
+        }
+<span class="fc" id="L78">        Login login = new Login();</span>
+<span class="fc" id="L79">        login.setUsername(config.getSciStoreUsername());</span>
+<span class="fc" id="L80">        login.setPassword(config.getSciStorePassword());</span>
+        LoginTokenResponse loginResponse;
+        @SuppressWarnings(&quot;AccessToStaticFieldLockedOnInstance&quot;)
+<span class="fc" id="L83">        Summary.Timer t = REQUEST_STATISTICS.labels(&quot;login&quot;).startTimer();</span>
+        try {
+<span class="fc" id="L85">            loginResponse = getSciStoreService().login(login);</span>
+        } finally {
+<span class="fc" id="L87">            t.observeDuration();</span>
+        }
+<span class="fc" id="L89">        credentials = new Credentials();</span>
+<span class="fc" id="L90">        String token = loginResponse.getToken();</span>
+<span class="fc" id="L91">        credentials.setToken(token);</span>
+<span class="fc" id="L92">        Credentials.UserInfo userInfo = new Credentials.UserInfo();</span>
+<span class="fc" id="L93">        userInfo.setFriendlyName(PKB_FRIENDLY_NAME);</span>
+<span class="fc" id="L94">        userInfo.setSystemCode(PKB_SYSTEM_CODE);</span>
+<span class="fc" id="L95">        userInfo.setSystemLocation(PKB_SYSTEM_LOCATION);</span>
+<span class="fc" id="L96">        userInfo.setUserName(PKB_USERNAME);</span>
+<span class="fc" id="L97">        credentials.setUserInfo(userInfo);</span>
+<span class="fc" id="L98">        long nineMinutes = 9 * 60 * 1000; // SciStore tokens expire in 10 mins, so we renew after 9</span>
+<span class="fc" id="L99">        credentialsValidUntilMillis = System.currentTimeMillis() + nineMinutes;</span>
+<span class="fc" id="L100">        return credentials;</span>
+    }
+
+    /* (non-Javadoc)
+     * @see com.pkb.integration.sciStore.ISciStoreClient#findPatient(java.lang.String, java.lang.String)
+     */
+    @Override
+    public Optional&lt;FindPatientItem&gt; findPatient(String chiNumber) {
+<span class="fc" id="L108">        FindPatientCriteria findPatientCriteria = new FindPatientCriteria();</span>
+<span class="fc" id="L109">        findPatientCriteria.setIncludeInactiveDemographics(true);</span>
+<span class="fc" id="L110">        findPatientCriteria.setIncludeAnonymous(false);</span>
+<span class="fc" id="L111">        FindPatientIDCriteria findPatientIDCriteria = new FindPatientIDCriteria();</span>
+<span class="fc" id="L112">        findPatientIDCriteria.setID(chiNumber);</span>
+<span class="fc" id="L113">        findPatientCriteria.setIds(findPatientIDCriteria);</span>
+<span class="fc" id="L114">        Summary.Timer t = REQUEST_STATISTICS.labels(&quot;findPatient&quot;).startTimer();</span>
+        FindPatientResponse response;
+        try {
+<span class="fc" id="L117">            response = getSciStoreService().findPatient(findPatientCriteria, getCredentials());</span>
+        } finally {
+<span class="fc" id="L119">            t.observeDuration();</span>
+        }
+
+<span class="fc" id="L122">        List&lt;FindPatientItem&gt; patients = response.getPatients().getPatient();</span>
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">        if (patients.size() &gt; 1) {</span>
+<span class="nc" id="L124">            throw new RuntimeException(&quot;Found more than 1 user with the same CHI ID, that should not happen&quot;);</span>
+        } else {
+<span class="fc" id="L126">            return patients.stream().findFirst();</span>
+        }
+    }
+
+    /* (non-Javadoc)
+     * @see com.pkb.integration.sciStore.ISciStoreClient#findResults(java.lang.String, java.lang.String)
+     */
+    @Override
+    public List&lt;SciStoreTestSummary&gt; findResults(String sciStorePatientId) {
+<span class="fc" id="L135">        FindResultCriteria criteria = new FindResultCriteria();</span>
+<span class="fc" id="L136">        criteria.setPatientID(sciStorePatientId);</span>
+<span class="fc" id="L137">        Summary.Timer t = REQUEST_STATISTICS.labels(&quot;findResult&quot;).startTimer();</span>
+        FindResultResponse response;
+        try {
+<span class="fc" id="L140">            response = getSciStoreService().findResult(criteria, getCredentials());</span>
+        } finally {
+<span class="fc" id="L142">            t.observeDuration();</span>
+        }
+
+        // Steve says: stripping duplicate Discipline/TestReportID pairs - which do happen - is necessary
+<span class="fc" id="L146">        return response</span>
+<span class="fc" id="L147">                .getResults()</span>
+<span class="fc" id="L148">                .getResult()</span>
+<span class="fc" id="L149">                .stream()</span>
+<span class="fc" id="L150">                .map(this::toTestSummary)</span>
+<span class="fc" id="L151">                .collect(Collectors.groupingBy(</span>
+<span class="fc" id="L152">                        ts -&gt; Tuple.of(ts.getTestReportId(), ts.getDiscipline())))</span>
+<span class="fc" id="L153">                .values()</span>
+<span class="fc" id="L154">                .stream()</span>
+<span class="fc" id="L155">                .map(l -&gt; l.get(0))</span>
+<span class="fc" id="L156">                .collect(Collectors.toList());</span>
+    }
+
+    public SciStoreTestSummary toTestSummary(FindResultItem result) {
+<span class="fc" id="L160">        SciStoreTestSummary summary = new SciStoreTestSummary();</span>
+<span class="fc" id="L161">        summary.setTestReportId(String.valueOf(result.getReportDetails().getTestReportID()));</span>
+<span class="fc" id="L162">        summary.setTestReportIdentifier(result.getReportDetails().getReportIdentifier());</span>
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">        if (result.getSampleDetails().getDateTimeSampled() != null) {</span>
+<span class="fc" id="L164">            summary.setDateSampled(result.getSampleDetails().getDateTimeSampled().toGregorianCalendar().getTime());</span>
+        }
+<span class="fc" id="L166">        summary.setDescription(result.getSetDetails().getSetDescription());</span>
+<span class="fc" id="L167">        summary.setDiscipline(result.getReportDetails().getDiscipline());</span>
+<span class="pc bpc" id="L168" title="1 of 2 branches missed.">        summary.setNormal(!result.getSetDetails().isSetAbnormal());</span>
+<span class="fc" id="L169">        return summary;</span>
+    }
+
+    /* (non-Javadoc)
+     * @see com.pkb.integration.sciStore.ISciStoreClient#getResult(java.lang.String, java.lang.String)
+     */
+    @Override
+    public InvestigationReportMessageType getResult(String resultId) throws PKBException {
+<span class="fc" id="L177">        GetResult getResult = new GetResult();</span>
+<span class="fc" id="L178">        getResult.setResultID(new BigInteger(resultId));</span>
+
+<span class="fc" id="L180">        Summary.Timer t = REQUEST_STATISTICS.labels(&quot;getResult&quot;).startTimer();</span>
+        GetResultResponse result;
+        try {
+<span class="fc" id="L183">            result = getSciStoreService().getResult(getResult, getCredentials());</span>
+        } finally {
+<span class="fc" id="L185">            t.observeDuration();</span>
+        }
+<span class="fc" id="L187">        return result.getInvestigationReport().getReportData();</span>
+    }
+
+    /* (non-Javadoc)
+     * @see com.pkb.integration.sciStore.ISciStoreClient#addSubscription(java.lang.String, java.lang.String)
+     */
+    @Override
+    public String addSubscription(String CHINumber) {
+<span class="nc" id="L195">        AddSubscription addSubscription = new AddSubscription();</span>
+<span class="nc" id="L196">        SubscriptionInfo subscriptionInfo = new SubscriptionInfo();</span>
+<span class="nc" id="L197">        subscriptionInfo.setSubscriptionType(PATIENT);</span>
+<span class="nc" id="L198">        ArrayOfSubscriptionFieldInfo fieldList = new ArrayOfSubscriptionFieldInfo();</span>
+<span class="nc" id="L199">        SubscriptionFieldInfo fieldInfo = new SubscriptionFieldInfo();</span>
+<span class="nc" id="L200">        fieldInfo.setSubscriptionField(CHI);</span>
+<span class="nc" id="L201">        fieldInfo.setSubscriptionValue(CHINumber);</span>
+<span class="nc" id="L202">        fieldList.getSubscriptionFieldInfo().add(fieldInfo);</span>
+<span class="nc" id="L203">        subscriptionInfo.setSubscriptionFieldList(fieldList);</span>
+
+<span class="nc" id="L205">        addSubscription.setSubscriptionInfo(subscriptionInfo);</span>
+<span class="nc" id="L206">        Summary.Timer t = REQUEST_STATISTICS.labels(&quot;addSubscription&quot;).startTimer();</span>
+        AddSubscriptionResponse response;
+        try {
+<span class="nc" id="L209">            response = getSciStoreService().addSubscription(addSubscription, getCredentials());</span>
+        } finally {
+<span class="nc" id="L211">            t.observeDuration();</span>
+        }
+<span class="nc" id="L213">        return response.getSubscriptionID();</span>
+    }
+
+    @Override
+    public Optional&lt;String&gt; findSubscriptionForPatient(String CHINumber) {
+<span class="fc" id="L218">        FindSubscriptions findSubscriptions = new FindSubscriptions();</span>
+<span class="fc" id="L219">        findSubscriptions.setSubscriptionType(PATIENT);</span>
+<span class="fc" id="L220">        Summary.Timer t = REQUEST_STATISTICS.labels(&quot;findSubscriptions&quot;).startTimer();</span>
+        FindSubscriptionsResponse result;
+        try {
+<span class="fc" id="L223">            result = getSciStoreService().findSubscriptions(findSubscriptions, getCredentials());</span>
+        } finally {
+<span class="fc" id="L225">            t.observeDuration();</span>
+        }
+<span class="fc" id="L227">        return result.getSubscriptions()</span>
+<span class="fc" id="L228">                .getSubscription()</span>
+<span class="fc" id="L229">                .stream()</span>
+<span class="fc" id="L230">                .filter(s -&gt; s.getSubscriptionFieldList()</span>
+<span class="fc" id="L231">                        .getSubscriptionFieldInfo()</span>
+<span class="fc" id="L232">                        .stream()</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">                        .anyMatch(f -&gt; CHI.equalsIgnoreCase(f.getSubscriptionField()) &amp;&amp; f.getSubscriptionValue()</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">                                .equalsIgnoreCase(CHINumber)))</span>
+<span class="fc" id="L235">                .findFirst()</span>
+<span class="fc" id="L236">                .map(SubscriptionInfo::getSubscriptionID);</span>
+    }
+
+    /* (non-Javadoc)
+     * @see com.pkb.integration.sciStore.ISciStoreClient#getNotifications(java.lang.String)
+     */
+    @Override
+    public List&lt;SciStoreNotification&gt; getNotifications() {
+<span class="fc" id="L244">        GetNotifications getNotifications = new GetNotifications();</span>
+<span class="fc" id="L245">        getNotifications.setNotificationType(PATIENT);</span>
+<span class="fc" id="L246">        getNotifications.setTotalNotificationsToReturn(NOTIFICATION_BATCH_SIZE);</span>
+<span class="fc" id="L247">        Summary.Timer t = REQUEST_STATISTICS.labels(&quot;getNotifications&quot;).startTimer();</span>
+        GetNotificationsResponse response;
+        try {
+<span class="fc" id="L250">            response = getSciStoreService().getNotifications(getNotifications, getCredentials());</span>
+        } finally {
+<span class="fc" id="L252">            t.observeDuration();</span>
+        }
+<span class="fc" id="L254">        return response</span>
+<span class="fc" id="L255">                .getNotificationList()</span>
+<span class="fc" id="L256">                .getNotification()</span>
+<span class="fc" id="L257">                .stream()</span>
+<span class="fc" id="L258">                .map(m -&gt; {</span>
+<span class="fc" id="L259">                    SciStoreNotification notification = new SciStoreNotification();</span>
+<span class="fc" id="L260">                    notification.setCHINumber(m.getNotificationDetail().getPatientNotificationInfo().getCHI());</span>
+<span class="fc" id="L261">                    notification.setRecordKey(m.getNotificationDetail().getPatientNotificationInfo().getRecordKey());</span>
+<span class="fc" id="L262">                    return notification;</span>
+                })
+<span class="fc" id="L264">                .collect(Collectors.toList());</span>
+    }
+
+    private synchronized SCIStoreServices getSciStoreService() {
+<span class="fc bfc" id="L268" title="All 2 branches covered.">        if (sciStoreService == null) {</span>
+            try {
+<span class="fc" id="L270">                sciStoreService = new SCIStoreServicesPort(new URL(config.getSciStoreEndpoint() + &quot;?WSDL&quot;))</span>
+<span class="fc" id="L271">                        .getSCIStoreServices();</span>
+<span class="nc" id="L272">            } catch (MalformedURLException e) {</span>
+<span class="nc" id="L273">                throw new RuntimeException(e);</span>
+<span class="fc" id="L274">            }</span>
+        }
+<span class="fc" id="L276">        return sciStoreService;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

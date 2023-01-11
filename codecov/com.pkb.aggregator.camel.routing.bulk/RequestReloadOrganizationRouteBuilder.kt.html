@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestReloadOrganizationRouteBuilder.kt</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.aggregator.camel.routing.bulk</a> &gt; <span class="el_source">RequestReloadOrganizationRouteBuilder.kt</span></div><h1>RequestReloadOrganizationRouteBuilder.kt</h1><pre class="source lang-java linenums">package com.pkb.aggregator.camel.routing.bulk
+
+import com.pkb.aggregator.camel.ORGANIZATION_PAGE_LINKS_PROPERTY
+import com.pkb.aggregator.camel.ORGANIZATION_PROPERTY
+import com.pkb.aggregator.camel.bean.process.OrganizationDeleter
+import com.pkb.aggregator.camel.bean.process.OrganizationProcessor
+import com.pkb.aggregator.camel.bean.search.OrganizationSearch
+import com.pkb.aggregator.camel.beanMethod
+import com.pkb.aggregator.camel.parallelFhirSearch
+import com.pkb.aggregator.camel.routing.AbstractAggregatorRouteBuilder
+import com.pkb.aggregator.camel.routing.createFhirSearchRoute
+import com.pkb.aggregator.camel.routing.createFhirTransactionRoute
+import com.pkb.aggregator.camel.strategy.BodyMutableListBundleAggregationStrategy
+import com.pkb.aggregator.configuration.FhirConfiguration
+import com.pkb.aggregator.service.FHIR_TYPE_ORGANIZATION
+import com.pkb.aggregator.service.FHIR_TYPE_PRACTITIONER_ROLE
+import com.pkb.common.testcontrol.services.PubSubNamespaceService
+import org.hl7.fhir.instance.model.api.IAnyResource
+import org.springframework.stereotype.Component
+
+/**
+ * Defines camel routes for performing full reloads of organization resources.
+ */
+@Component
+<span class="fc" id="L25">class RequestReloadOrganizationRouteBuilder(</span>
+<span class="fc" id="L26">    private val fhirConfiguration: FhirConfiguration,</span>
+<span class="fc" id="L27">    private val bundleAggregationStrategy: BodyMutableListBundleAggregationStrategy,</span>
+    pubSubNamespaceService: PubSubNamespaceService,
+<span class="fc" id="L29">) : AbstractAggregatorRouteBuilder(pubSubNamespaceService) {</span>
+
+    companion object {
+        const val REQUEST_ORGANIZATION_RELOAD = &quot;direct:aggregator/reload/organization&quot;
+        
+        private const val ROUTE_ID = &quot;organization-reload&quot;
+    }
+
+    override fun configure() {
+
+        // Register routes for loading organization resources from upstream (blocking and non-blocking)
+<span class="fc" id="L40">        val upstreamRoutes = fhirConfiguration.upstream.endpoints.map { createFhirSearchRoute(it) }</span>
+
+<span class="fc" id="L42">        val orgSearch = simple(&quot;$FHIR_TYPE_ORGANIZATION?identifier=\${body}&quot; +</span>
+                &quot;&amp;_sort=name&quot; +
+<span class="fc" id="L44">                &quot;&amp;_revinclude=$FHIR_TYPE_PRACTITIONER_ROLE:organization&quot; +</span>
+<span class="fc" id="L45">                &quot;&amp;_include:iterate=$FHIR_TYPE_PRACTITIONER_ROLE:practitioner&quot;)</span>
+
+<span class="fc" id="L47">        from(REQUEST_ORGANIZATION_RELOAD).routeId(ROUTE_ID)</span>
+            // Set placeholder properties
+<span class="pc" id="L49">            .setProperty(ORGANIZATION_PROPERTY) { mutableListOf&lt;IAnyResource&gt;() }.id(&quot;$ROUTE_ID-create-resource-exchangeproperty&quot;)</span>
+<span class="pc" id="L50">            .setProperty(ORGANIZATION_PAGE_LINKS_PROPERTY) { mutableListOf&lt;String&gt;() }.id(&quot;$ROUTE_ID-create-resource-pagelinks-exchangeproperty&quot;)</span>
+            // Construct search query from all known identifiers
+<span class="fc" id="L52">            .beanMethod(OrganizationSearch::createSearchUrl).id(&quot;$ROUTE_ID-identifier-search&quot;)</span>
+            // Perform organization search in parallel across all upstreams using criteria from previous step
+<span class="fc" id="L54">            .parallelFhirSearch(orgSearch, upstreamRoutes, bundleAggregationStrategy).id(&quot;$ROUTE_ID-upstream-search&quot;)</span>
+            // Get extra pages if needed
+<span class="fc" id="L56">            .dynamicRouter(beanMethod(OrganizationSearch::paginate)).id(&quot;$ROUTE_ID-paginate&quot;)</span>
+            // Aggregate all the information into a single bundle
+<span class="fc" id="L58">            .beanMethod(OrganizationProcessor::aggregate).id(&quot;$ROUTE_ID-aggregate&quot;)</span>
+            // Remove all data from downstream prior to writing the new info
+<span class="fc" id="L60">            .beanMethod(OrganizationDeleter::hardDelete).id(&quot;$ROUTE_ID-downstream-delete&quot;)</span>
+            // Post transaction bundle to downstream
+<span class="fc" id="L62">            .to(createFhirTransactionRoute(fhirConfiguration.downstream.endpoint)).id(&quot;$ROUTE_ID-downstream-push&quot;)</span>
+            // Log info
+<span class="fc" id="L64">            .beanMethod(OrganizationProcessor::logOutcome).id(&quot;${ROUTE_ID}-log-outcome&quot;)</span>
+<span class="fc" id="L65">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

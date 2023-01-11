@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>LetterInvitationService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.letterinvitation</a> &gt; <span class="el_source">LetterInvitationService.java</span></div><h1>LetterInvitationService.java</h1><pre class="source lang-java linenums">package com.pkb.domain.letterinvitation;
+
+
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.crypto.AccountPrivateKey;
+import com.pkb.crypto.javasecurityutil.KeyUtil;
+import com.pkb.crypto.util.RandomUtil;
+import com.pkb.datamodel.ImmutableLetterInvitationNew;
+import com.pkb.datamodel.ImmutableLetterInvitationTokenDTO;
+import com.pkb.datamodel.LetterInvitation;
+import com.pkb.datamodel.LetterInvitationTokenDTO;
+import com.pkb.datamodel.crypto.CryptoService;
+import com.pkb.datamodel.entity.mapper.LetterInvitationMapper;
+import com.pkb.domain.config.LetterInvitationProperties;
+import com.pkb.domain.internal.repository.AccountUserRepository;
+import com.pkb.domain.internal.repository.UserAccountKeyLinkRepository;
+import com.pkb.domain.repository.LetterInvitationRepository;
+import com.pkb.domain.repository.OrgRepository;
+import com.pkb.domain.repository.PersonDemographicsRepository;
+import com.pkb.entities.core.UserAccountKeyLink;
+import com.pkb.entities.embeddables.EncodedEncryptedPrivateKeyInfo;
+import com.pkb.entities.embeddables.EncodedEncryptedPrivateKeyInfoWithSecretDeriv;
+import com.pkb.entities.enums.ValidNationalId;
+import com.pkb.entities.pub.PublicOrg;
+import com.pkb.entities.pub.PublicPKBPerson;
+import com.pkb.entities.pub.PublicTeam;
+import io.vavr.control.Either;
+import org.jetbrains.annotations.NotNull;
+
+import javax.crypto.EncryptedPrivateKeyInfo;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
+import javax.transaction.Transactional;
+import java.io.IOException;
+import java.security.GeneralSecurityException;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.time.Instant;
+import java.util.NoSuchElementException;
+
+import static com.pkb.crypto.CryptoConstants.ACCESS_TOKEN_SECRET_KEY_DATA_LENGTH;
+import static com.pkb.crypto.CryptoConstants.ACCESS_TOKEN_SECRET_KEY_DERIV_ALGORITHM;
+import static com.pkb.crypto.CryptoConstants.ACCESS_TOKEN_SECRET_KEY_DERIV_ITERATIONS;
+import static com.pkb.crypto.CryptoConstants.ACCESS_TOKEN_SECRET_KEY_DERIV_SALT_LENGTH;
+import static com.pkb.crypto.CryptoConstants.DESEDE_ALGORITHM;
+import static io.vavr.control.Either.left;
+import static io.vavr.control.Either.right;
+import static java.text.MessageFormat.format;
+
+public class LetterInvitationService {
+    private final DateTimeService dateTimeService;
+    private final LetterInvitationRepository letterInvitationRepository;
+    private final LetterInvitationMapper letterInvitationMapper;
+    private final LetterInvitationValidatorService letterInvitationValidatorService;
+    private final PersonDemographicsRepository personDemographicsRepository;
+    private final AccountUserRepository accountUserRepo;
+    private final LetterInvitationTokenService tokenService;
+    private final CryptoService cryptoService;
+    private final UserAccountKeyLinkRepository userAccountKeyLinkRepository;
+    private final LetterInvitationProperties config;
+    private final OrgRepository orgRepository;
+
+    public LetterInvitationService(DateTimeService dateTimeService,
+                                   LetterInvitationRepository letterInvitationRepository,
+                                   LetterInvitationMapper letterInvitationMapper,
+                                   LetterInvitationValidatorService letterInvitationValidatorService,
+                                   PersonDemographicsRepository personDemographicsRepository,
+                                   AccountUserRepository accountUserRepo,
+                                   LetterInvitationTokenService tokenService,
+                                   CryptoService cryptoService,
+                                   UserAccountKeyLinkRepository userAccountKeyLinkRepository,
+                                   LetterInvitationProperties config,
+<span class="fc" id="L74">                                   OrgRepository orgRepository) {</span>
+<span class="fc" id="L75">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L76">        this.letterInvitationRepository = letterInvitationRepository;</span>
+<span class="fc" id="L77">        this.letterInvitationMapper = letterInvitationMapper;</span>
+<span class="fc" id="L78">        this.letterInvitationValidatorService = letterInvitationValidatorService;</span>
+<span class="fc" id="L79">        this.personDemographicsRepository = personDemographicsRepository;</span>
+<span class="fc" id="L80">        this.accountUserRepo = accountUserRepo;</span>
+<span class="fc" id="L81">        this.tokenService = tokenService;</span>
+<span class="fc" id="L82">        this.cryptoService = cryptoService;</span>
+<span class="fc" id="L83">        this.userAccountKeyLinkRepository = userAccountKeyLinkRepository;</span>
+<span class="fc" id="L84">        this.config = config;</span>
+<span class="fc" id="L85">        this.orgRepository = orgRepository;</span>
+<span class="fc" id="L86">    }</span>
+
+    @Transactional
+    public Either&lt;String, LetterInvitationTokenDTO&gt; createLetterInvitation(
+            @NotNull ValidNationalId validNationalId,
+            @NotNull AccountPrivateKey orgAccountKey,
+            @NotNull Long orgId) {
+<span class="fc" id="L93">        return personDemographicsRepository.findByNationalId(validNationalId)</span>
+<span class="fc" id="L94">                .map(pkbPerson -&gt; letterInvitationValidatorService.validatePerson(pkbPerson)</span>
+<span class="fc" id="L95">                        .map(Either::&lt;String, LetterInvitationTokenDTO&gt;left)</span>
+<span class="fc" id="L96">                        .getOrElse(() -&gt; createWithAccountQueries(validNationalId, orgAccountKey, orgId, pkbPerson)))</span>
+<span class="fc" id="L97">                .getOrElse(left(format(&quot;Person is not found for NationalId: {0}&quot;, validNationalId.value())));</span>
+    }
+
+    @NotNull
+    private Either&lt;String, LetterInvitationTokenDTO&gt; createWithAccountQueries(@NotNull ValidNationalId nationalId,
+                                                                              @NotNull AccountPrivateKey orgAccountKey,
+                                                                              @NotNull Long orgId,
+                                                                              PublicPKBPerson pkbPerson) {
+<span class="fc" id="L105">        return accountUserRepo.findDefaultAccountUserByAccountId(pkbPerson.getDefaultAccountId())</span>
+<span class="fc" id="L106">                .map(accountUser -&gt; {</span>
+                    try {
+<span class="fc" id="L108">                        Long defaultTeamId = getDefaultTeamIdForOrg(orgId);</span>
+<span class="fc" id="L109">                        UserAccountKeyLink accountKeyLink = userAccountKeyLinkRepository.getAccountKeyLinkOrg(accountUser.getAccountId(), orgId);</span>
+<span class="fc" id="L110">                        EncodedEncryptedPrivateKeyInfo encryptedAccountPrivateKey = accountKeyLink.getAccountPrivateKey();</span>
+
+<span class="fc" id="L112">                        return createLetterInvitationDTO(nationalId, orgAccountKey, encryptedAccountPrivateKey, accountUser.getId(), defaultTeamId);</span>
+<span class="nc" id="L113">                    } catch (NoSuchElementException ignored) {</span>
+<span class="nc" id="L114">                        return Either.&lt;String, LetterInvitationTokenDTO&gt;left(format(&quot;Default team is not found for Org: {0}&quot;, orgId));</span>
+<span class="fc" id="L115">                    } catch (Exception ignored) {</span>
+<span class="fc" id="L116">                        return Either.&lt;String, LetterInvitationTokenDTO&gt;left(format(&quot;AccountKeyLink is not found for NationalId: {0}&quot;, nationalId.value()));</span>
+                    }
+                })
+<span class="fc" id="L119">                .getOrElse(left(format(&quot;AccountUser is not found for NationalId: {0}&quot;, nationalId.value())));</span>
+    }
+
+    @NotNull
+    private Either&lt;String, LetterInvitationTokenDTO&gt; createLetterInvitationDTO(@NotNull ValidNationalId nationalId,
+                                                                               @NotNull AccountPrivateKey orgAccountKey,
+                                                                               @NotNull EncodedEncryptedPrivateKeyInfo encryptedAccountPrivateKey,
+                                                                               @NotNull Long accountUserId,
+                                                                               @NotNull Long defaultTeamId) {
+        //Decrypt accountPrivateKey
+        try {
+<span class="fc" id="L130">            AccountPrivateKey clearPrivateKey = cryptoService.decryptAccountPrivateKey(Either.right(orgAccountKey), encryptedAccountPrivateKey);</span>
+<span class="fc" id="L131">            String token = tokenService.generateToken(config.getTokenSize());</span>
+
+<span class="fc" id="L133">            byte[] keyDerivSalt = RandomUtil.randomBytes(ACCESS_TOKEN_SECRET_KEY_DERIV_SALT_LENGTH);</span>
+<span class="fc" id="L134">            EncryptedPrivateKeyInfo encryptedPrivateKeyInfo = encryptPrivateKey(clearPrivateKey, token, keyDerivSalt);</span>
+
+<span class="fc" id="L136">            ImmutableLetterInvitationNew letterInvitationNew = getLetterInvitationNew(encryptedAccountPrivateKey.getPrivateKeySize(),</span>
+                    keyDerivSalt, encryptedPrivateKeyInfo, accountUserId, defaultTeamId);
+<span class="fc" id="L138">            return right(mapLetterInvitationToTokenDTO(letterInvitationNew, token, nationalId));</span>
+<span class="nc" id="L139">        } catch (GeneralSecurityException | IOException ignored) {</span>
+<span class="nc" id="L140">            return left(&quot;Private key encryption error.&quot;);</span>
+        }
+    }
+
+    @NotNull
+    private ImmutableLetterInvitationNew getLetterInvitationNew(int privateKeySize,
+                                                                byte[] keyDerivSalt,
+                                                                @NotNull EncryptedPrivateKeyInfo encryptedPrivateKeyInfo,
+                                                                @NotNull Long accountUserId,
+                                                                @NotNull Long defaultTeamId)
+            throws IOException {
+
+<span class="fc" id="L152">        EncodedEncryptedPrivateKeyInfoWithSecretDeriv newPrivateKey = new EncodedEncryptedPrivateKeyInfoWithSecretDeriv(</span>
+<span class="fc" id="L153">                encryptedPrivateKeyInfo.getEncoded(),</span>
+                privateKeySize,
+<span class="fc" id="L155">                encryptedPrivateKeyInfo.getAlgName(),</span>
+                null,
+                DESEDE_ALGORITHM,
+                ACCESS_TOKEN_SECRET_KEY_DERIV_ALGORITHM,
+<span class="fc" id="L159">                ACCESS_TOKEN_SECRET_KEY_DATA_LENGTH,</span>
+                keyDerivSalt,
+<span class="fc" id="L161">                ACCESS_TOKEN_SECRET_KEY_DERIV_ITERATIONS);</span>
+<span class="fc" id="L162">        String code = tokenService.generateAccessCode(config.getAccessCodeSize());</span>
+<span class="fc" id="L163">        Instant created = dateTimeService.now();</span>
+<span class="fc" id="L164">        Instant expiry = tokenService.calculateTokenExpiry(created, config.getTokenExpiry());</span>
+<span class="fc" id="L165">        ImmutableLetterInvitationNew letterInvitationNew = ImmutableLetterInvitationNew.builder()</span>
+<span class="fc" id="L166">                .code(code)</span>
+<span class="fc" id="L167">                .inviteeId(accountUserId)</span>
+<span class="fc" id="L168">                .teamId(defaultTeamId)</span>
+<span class="fc" id="L169">                .created(created)</span>
+<span class="fc" id="L170">                .expiration(expiry)</span>
+<span class="fc" id="L171">                .invalidated(false)</span>
+<span class="fc" id="L172">                .accountPrivateKey(newPrivateKey)</span>
+<span class="fc" id="L173">                .build();</span>
+
+<span class="fc" id="L175">        letterInvitationRepository.save(letterInvitationMapper.newDataModelToNewEntity(letterInvitationNew));</span>
+<span class="fc" id="L176">        return letterInvitationNew;</span>
+    }
+
+    @NotNull
+    private EncryptedPrivateKeyInfo encryptPrivateKey(AccountPrivateKey clearPrivateKey, String token, byte[] keyDerivSalt) throws GeneralSecurityException {
+<span class="fc" id="L181">        PrivateKey privateKey = KeyFactory.getInstance(clearPrivateKey.getAlgorithm())</span>
+<span class="fc" id="L182">                .generatePrivate(new PKCS8EncodedKeySpec(clearPrivateKey.getKeyBytes()));</span>
+<span class="fc" id="L183">        SecretKey derivedKey = KeyUtil.deriveSecretKey(ACCESS_TOKEN_SECRET_KEY_DERIV_ALGORITHM,</span>
+<span class="fc" id="L184">                token.toCharArray(),</span>
+                keyDerivSalt,
+                ACCESS_TOKEN_SECRET_KEY_DERIV_ITERATIONS,
+                ACCESS_TOKEN_SECRET_KEY_DATA_LENGTH);
+<span class="fc" id="L188">        SecretKey secretKey = new SecretKeySpec(derivedKey.getEncoded(), DESEDE_ALGORITHM);</span>
+<span class="fc" id="L189">        return KeyUtil.encryptPrivateKeyWithSecretKey(privateKey, secretKey);</span>
+    }
+
+    private LetterInvitationTokenDTO mapLetterInvitationToTokenDTO(LetterInvitation letterInvitation, String token, ValidNationalId natId) {
+<span class="fc" id="L193">        return ImmutableLetterInvitationTokenDTO.builder()</span>
+<span class="fc" id="L194">                .token(token)</span>
+<span class="fc" id="L195">                .code(letterInvitation.getCode())</span>
+<span class="fc" id="L196">                .expiry(letterInvitation.getExpiration())</span>
+<span class="fc" id="L197">                .validNationalId(natId)</span>
+<span class="fc" id="L198">                .build();</span>
+    }
+
+    private Long getDefaultTeamIdForOrg(@NotNull Long orgId) {
+<span class="pc" id="L202">        PublicOrg org = orgRepository.findOptionalById(orgId).getOrElseThrow(() -&gt; new NoSuchElementException(&quot;No org is found.&quot;));</span>
+
+<span class="fc" id="L204">        PublicTeam defaultTeam = org.getTeams()</span>
+<span class="fc" id="L205">                .stream()</span>
+<span class="pc bpc" id="L206" title="3 of 6 branches missed.">                .filter(team -&gt; org.getHl7NewPatientTeamCode() != null &amp;&amp; team.getCode() != null &amp;&amp; team.getCode().equals(org.getHl7NewPatientTeamCode()))</span>
+<span class="fc" id="L207">                .findFirst()</span>
+<span class="pc" id="L208">                .orElseThrow(() -&gt; new NoSuchElementException(&quot;No default team is found.&quot;));</span>
+
+<span class="fc" id="L210">        return defaultTeam.getId();</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

@@ -1,0 +1,241 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>EmisTestResultObservationHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.service.dataupload.emis.esv2.batch.impl</a> &gt; <span class="el_source">EmisTestResultObservationHelper.java</span></div><h1>EmisTestResultObservationHelper.java</h1><pre class="source lang-java linenums">package com.pkb.service.dataupload.emis.esv2.batch.impl;
+
+import com.pkb.coding.entity.CodeableConcept;
+import com.pkb.coding.entity.CodingTranslationCodingFields;
+import com.pkb.common.datetime.DateTimeService;
+import com.pkb.entities.enums.CodingDataType;
+import com.pkb.service.dataupload.emis.es.util.EmisEsUnitUtil;
+import com.pkb.service.dataupload.emis.esv2.CodeSystems;
+import com.pkb.service.dataupload.emis.esv2.EmisEsManager;
+import com.pkb.service.dataupload.emis.esv2.model.CareRecordObservation;
+import com.pkb.service.dataupload.emis.esv2.model.CodeAndUnitMatchWrapper;
+import com.pkb.service.dataupload.emis.esv2.model.CodingWrapper;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutableCodeAndUnitMatchWrapper;
+import com.pkb.service.dataupload.emis.esv2.model.ImmutableOrgIdSnomedCTCodeAndUnit;
+import com.pkb.service.dataupload.emis.esv2.model.LoincCodeAndUnit;
+import com.pkb.service.dataupload.emis.esv2.model.OrgIdSnomedCTCodeAndUnit;
+import com.pkb.test.entity.LoincMapping;
+import com.pkb.test.entity.LoincTest;
+import com.pkb.test.entity.TestResultType;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.vavr.Tuple;
+import io.vavr.Tuple2;
+import io.vavr.collection.Map;
+import io.vavr.control.Either;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+
+import static com.pkb.service.dataupload.emis.esv2.batch.impl.ProcessingError.Severity.NON_FATAL;
+import static java.util.function.Function.identity;
+import static java.util.stream.Collectors.toMap;
+
+public class EmisTestResultObservationHelper {
+
+    private final EmisEsManager emisEsManager;
+
+    private final DateTimeService dateTimeService;
+
+<span class="fc" id="L47">    private static final Logger LOGGER = LoggerFactory.getLogger(java.lang.invoke.MethodHandles.lookup().lookupClass());</span>
+
+<span class="fc" id="L49">    private static final Counter MISSING_UNITS_OR_VALUES_OR_EFFECTIVE_DATE = Counter.builder(&quot;pkb_phr_emis_care_record_observation_missing_units_values_and_effective_date&quot;)</span>
+<span class="fc" id="L50">            .description(&quot;Count the Test type CareRecordObservation which doesn't have unit/value/effective date&quot;)</span>
+<span class="fc" id="L51">            .register(Metrics.globalRegistry);</span>
+
+<span class="fc" id="L53">    private final java.util.Map&lt;String, String&gt; croWithNoUnitOrValueOrEffectiveDateAlreadySeen = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+<span class="fc" id="L56">    public EmisTestResultObservationHelper(EmisEsManager emisEsManager, DateTimeService dateTimeService) {</span>
+<span class="fc" id="L57">        this.emisEsManager = emisEsManager;</span>
+<span class="fc" id="L58">        this.dateTimeService = dateTimeService;</span>
+<span class="fc" id="L59">    }</span>
+
+    public Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, LoincMapping&gt;&gt; retrieveLoincMappingsForTestRecords(Map&lt;CareRecordObservation, Tuple2&lt;CodeableConcept, CodingWrapper&gt;&gt; observations) {
+
+<span class="fc" id="L63">        Map&lt;CareRecordObservation, CodingWrapper&gt; testResultObservations = observations</span>
+<span class="pc bpc" id="L64" title="1 of 2 branches missed.">                .filterValues(value -&gt; value._2.codingReceived().getCodingDataType() == CodingDataType.TEST)</span>
+<span class="pc" id="L65">                .mapValues(value -&gt; value._2);</span>
+
+<span class="fc" id="L67">        Map&lt;CareRecordObservation, CodingWrapper&gt; filteredRecordsByUnitAndValueAndEffectiveDatePresent = filterRecordsByUnitAndValueAndEffectiveDatePresent(testResultObservations);</span>
+
+<span class="fc" id="L69">        java.util.Map&lt;String, CodingTranslationCodingFields&gt; codingTranslations = lookupCodingTranslations(filteredRecordsByUnitAndValueAndEffectiveDatePresent</span>
+<span class="fc" id="L70">                .values()</span>
+<span class="pc" id="L71">                .map(codingWrapper -&gt; codingWrapper</span>
+<span class="nc" id="L72">                        .codingClinicalCode()</span>
+<span class="nc" id="L73">                        .snomedCTConceptId()</span>
+<span class="nc" id="L74">                        .toString())</span>
+<span class="fc" id="L75">                .collect(Collectors.toSet()));</span>
+
+<span class="fc" id="L77">        Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; recordsToCodeAndUnitMatchWrapper = mapCodingWrapperToCodeAndUnitMatchWrapper(filteredRecordsByUnitAndValueAndEffectiveDatePresent, codingTranslations);</span>
+
+<span class="fc" id="L79">        java.util.Map&lt;LoincCodeAndUnit, LoincTest&gt; loincTests = lookupForLoincTests(recordsToCodeAndUnitMatchWrapper</span>
+<span class="fc" id="L80">                .values()</span>
+<span class="fc" id="L81">                .map(CodeAndUnitMatchWrapper::loincCodeAndUnit)</span>
+<span class="fc" id="L82">                .collect(Collectors.toSet()));</span>
+
+<span class="fc" id="L84">        Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; filteredRecordsByHavingLoincTest = filterRecordsByLoincTest(recordsToCodeAndUnitMatchWrapper, loincTests);</span>
+
+<span class="fc" id="L86">        java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; retrievedLoincMappings = lookupForLoincMappings(filteredRecordsByHavingLoincTest</span>
+<span class="fc" id="L87">                .values()</span>
+<span class="fc" id="L88">                .map(CodeAndUnitMatchWrapper::orgIdSnomedCTCodeAndUnit)</span>
+<span class="fc" id="L89">                .collect(Collectors.toSet()));</span>
+
+<span class="fc" id="L91">        List&lt;LoincMapping&gt; missingLoincMappings = collectMissingLoincMappings(retrievedLoincMappings, filteredRecordsByHavingLoincTest, loincTests);</span>
+
+<span class="fc" id="L93">        java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; savedLoincMappings = saveMissingLoincMappings(missingLoincMappings);</span>
+
+<span class="fc" id="L95">        java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; savedAndRetrievedLoincMappings = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L96">        savedAndRetrievedLoincMappings.putAll(savedLoincMappings);</span>
+<span class="fc" id="L97">        savedAndRetrievedLoincMappings.putAll(retrievedLoincMappings);</span>
+
+<span class="fc" id="L99">        Map&lt;CareRecordObservation, LoincMapping&gt; recordsToLoincMappings = pairLoincMappingToCareRecordObservation(filteredRecordsByHavingLoincTest, savedAndRetrievedLoincMappings);</span>
+
+<span class="fc" id="L101">        return processResults(recordsToCodeAndUnitMatchWrapper, filteredRecordsByHavingLoincTest, recordsToLoincMappings, filteredRecordsByUnitAndValueAndEffectiveDatePresent);</span>
+    }
+
+    private Map&lt;CareRecordObservation, CodingWrapper&gt; filterRecordsByUnitAndValueAndEffectiveDatePresent(Map&lt;CareRecordObservation, CodingWrapper&gt; testResultObservations) {
+<span class="fc" id="L105">        return testResultObservations.filter((cro, cw) -&gt; {</span>
+<span class="nc bnc" id="L106" title="All 6 branches missed.">            if (cro.numericUnit().isPresent() &amp;&amp; cro.effectiveDate().isPresent() &amp;&amp; cro.value().isPresent()) {</span>
+<span class="nc" id="L107">                String numericUnit = cro.numericUnit().get();</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">                if (EmisEsUnitUtil.sanitizeUnit(numericUnit).isEmpty()) {</span>
+<span class="nc" id="L109">                    reportObservationMissingUnitOrValueOrEffectiveDate(cw.codingClinicalCode().snomedCTConceptId().toString(), cro.observationGuid());</span>
+<span class="nc" id="L110">                    return false;</span>
+                }
+<span class="nc" id="L112">                return true;</span>
+            }
+<span class="nc" id="L114">            reportObservationMissingUnitOrValueOrEffectiveDate(cw.codingClinicalCode().snomedCTConceptId().toString(), cro.observationGuid());</span>
+<span class="nc" id="L115">            return false;</span>
+        });
+    }
+
+    private java.util.Map&lt;String, CodingTranslationCodingFields&gt; lookupCodingTranslations(Collection&lt;String&gt; snomedCodes) {
+<span class="fc" id="L120">        return emisEsManager.lookupCodingTranslations(snomedCodes);</span>
+    }
+
+    private Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; mapCodingWrapperToCodeAndUnitMatchWrapper(Map&lt;CareRecordObservation, CodingWrapper&gt; testResultObservations,
+                                                                                                          java.util.Map&lt;String, CodingTranslationCodingFields&gt; codingTranslations) {
+<span class="fc" id="L125">        return testResultObservations.map((cro, codingWrapper) -&gt; {</span>
+<span class="nc" id="L126">            CodingTranslationCodingFields codingTranslation = codingTranslations.get(codingWrapper.codingClinicalCode().snomedCTConceptId().toString());</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">            if (codingTranslation == null) {</span>
+<span class="nc" id="L128">                throw new IllegalStateException(&quot;No CodingTranslation for SNOMED_CT: &quot; + codingWrapper.codingClinicalCode().snomedCTConceptId().toString());</span>
+            }
+<span class="nc" id="L130">            String unit = cro.numericUnit().map(EmisEsUnitUtil::sanitizeUnit) .orElseThrow(() -&gt; new IllegalStateException(&quot;No unit for CareRecordObservation record: &quot; + cro));</span>
+<span class="nc" id="L131">            return Tuple.of(cro, ImmutableCodeAndUnitMatchWrapper.builder()</span>
+<span class="nc" id="L132">                    .codingTranslation(codingTranslation)</span>
+<span class="nc" id="L133">                    .org(codingWrapper.org())</span>
+<span class="nc" id="L134">                    .unit(unit)</span>
+<span class="nc" id="L135">                    .build());</span>
+        });
+    }
+
+    private java.util.Map&lt;LoincCodeAndUnit, LoincTest&gt; lookupForLoincTests(Collection&lt;LoincCodeAndUnit&gt; loincCodesAndUnits) {
+<span class="fc" id="L140">        return emisEsManager.lookupLoincTests(loincCodesAndUnits);</span>
+    }
+
+    private Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; filterRecordsByLoincTest(Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; testResultObservations,
+                                                                                         java.util.Map&lt;LoincCodeAndUnit, LoincTest&gt; loincTests) {
+<span class="pc" id="L145">        return testResultObservations.filterValues(codeAndUnitMatchWrapper -&gt; loincTests.containsKey(codeAndUnitMatchWrapper.loincCodeAndUnit()));</span>
+    }
+
+    private java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; lookupForLoincMappings(Set&lt;OrgIdSnomedCTCodeAndUnit&gt; orgIdsSnomedCodesAndUnits) {
+<span class="fc" id="L149">        return emisEsManager.lookupLoincMappings(orgIdsSnomedCodesAndUnits);</span>
+    }
+
+    private List&lt;LoincMapping&gt; collectMissingLoincMappings(java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; loincMappings,
+                                                           Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; filteredRecordsByLoincTest,
+                                                           java.util.Map&lt;LoincCodeAndUnit, LoincTest&gt; loincTests) {
+<span class="fc" id="L155">        java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; missingLoincMappings = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L157">        filteredRecordsByLoincTest.forEach((cro, codeAndUnitMatchWrapper) -&gt; {</span>
+
+<span class="nc" id="L159">            OrgIdSnomedCTCodeAndUnit orgIdSnomedCTCodeAndUnit = codeAndUnitMatchWrapper.orgIdSnomedCTCodeAndUnit();</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">            if (!loincMappings.containsKey(orgIdSnomedCTCodeAndUnit)) {</span>
+<span class="nc" id="L161">                missingLoincMappings.computeIfAbsent(orgIdSnomedCTCodeAndUnit, k -&gt; createMissingLoincMapping(codeAndUnitMatchWrapper, loincTests));</span>
+                }
+<span class="nc" id="L163">            });</span>
+
+<span class="fc" id="L165">        return new ArrayList&lt;&gt;(missingLoincMappings.values());</span>
+    }
+
+    private LoincMapping createMissingLoincMapping(CodeAndUnitMatchWrapper codeAndUnitMatchWrapper,
+                                                   java.util.Map&lt;LoincCodeAndUnit, LoincTest&gt; loincTests) {
+<span class="nc" id="L170">        LoincTest loincTest = loincTests.get(codeAndUnitMatchWrapper.loincCodeAndUnit());</span>
+<span class="nc bnc" id="L171" title="All 2 branches missed.">        if (loincTest == null) {</span>
+<span class="nc" id="L172">            throw new IllegalStateException(&quot;No LoincTest LoincCode: &quot; + codeAndUnitMatchWrapper.loincCodeAndUnit().loincCode() + &quot; and unit: &quot; + codeAndUnitMatchWrapper.loincCodeAndUnit().loincCode());</span>
+        }
+<span class="nc" id="L174">        LoincMapping loincMapping = new LoincMapping();</span>
+<span class="nc" id="L175">        loincMapping.setOrg(codeAndUnitMatchWrapper.org());</span>
+<span class="nc" id="L176">        loincMapping.setTestCode(codeAndUnitMatchWrapper.orgIdSnomedCTCodeAndUnit().snomedCTCode());</span>
+<span class="nc" id="L177">        loincMapping.setUnit(codeAndUnitMatchWrapper.orgIdSnomedCTCodeAndUnit().unit());</span>
+<span class="nc" id="L178">        loincMapping.setTestCodingSystem(CodeSystems.SNOMED_CT);</span>
+<span class="nc" id="L179">        loincMapping.setExpectedValueType(TestResultType.ValueType.NUMERIC);</span>
+<span class="nc" id="L180">        loincMapping.setLoincTest(loincTest);</span>
+<span class="nc" id="L181">        loincMapping.setLastUpdated(dateTimeService.now());</span>
+<span class="nc" id="L182">        loincMapping.setEnteredDate(dateTimeService.now());</span>
+<span class="nc" id="L183">        return loincMapping;</span>
+    }
+
+    private java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; saveMissingLoincMappings(List&lt;LoincMapping&gt; missingLoincMappings) {
+<span class="fc" id="L187">        return emisEsManager.saveMissingLoincMappings(missingLoincMappings).stream()</span>
+<span class="pc" id="L188">                .collect(toMap(lm -&gt; ImmutableOrgIdSnomedCTCodeAndUnit.builder()</span>
+<span class="nc" id="L189">                        .orgId(lm.getOrg().getId())</span>
+<span class="nc" id="L190">                        .snomedCTCode(lm.getTestCode())</span>
+<span class="nc" id="L191">                        .unit(lm.getUnit())</span>
+<span class="pc" id="L192">                        .build(), identity()));</span>
+    }
+
+    private Map&lt;CareRecordObservation, LoincMapping&gt; pairLoincMappingToCareRecordObservation(Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; testResultObservations,
+                                                                                             java.util.Map&lt;OrgIdSnomedCTCodeAndUnit, LoincMapping&gt; savedAndRetrievedLoincMappings) {
+<span class="fc" id="L197">        return testResultObservations.map((cro, codeAndUnitMatchWrapper) -&gt; {</span>
+<span class="nc" id="L198">            OrgIdSnomedCTCodeAndUnit orgIdSnomedCTCodeAndUnit = codeAndUnitMatchWrapper.orgIdSnomedCTCodeAndUnit();</span>
+<span class="nc" id="L199">            LoincMapping loincMapping = savedAndRetrievedLoincMappings.get(orgIdSnomedCTCodeAndUnit);</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">            if (loincMapping == null) {</span>
+<span class="nc" id="L201">                throw new IllegalStateException(&quot;No LoincMapping record for CareRecordObservation: &quot; + cro + &quot; &quot; +</span>
+<span class="nc" id="L202">                        &quot;orgId: &quot; + orgIdSnomedCTCodeAndUnit.orgId() + &quot; SNOMED_CT: &quot; + orgIdSnomedCTCodeAndUnit.snomedCTCode() + &quot; unit: &quot; + orgIdSnomedCTCodeAndUnit.unit());</span>
+            }
+<span class="nc" id="L204">            return Tuple.of(cro, loincMapping);</span>
+        });
+    }
+
+    private Map&lt;CareRecordObservation, Either&lt;ProcessingError&lt;CareRecordObservation&gt;, LoincMapping&gt;&gt; processResults(
+                                                                                                    Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; recordsToCodeAndUnitMatchWrapper,
+                                                                                                    Map&lt;CareRecordObservation, CodeAndUnitMatchWrapper&gt; filteredRecordsByHavingLoincTest,
+                                                                                                    Map&lt;CareRecordObservation, LoincMapping&gt; recordsToLoincMappings,
+                                                                                                    Map&lt;CareRecordObservation, CodingWrapper&gt; filteredRecordsByUnitAndValueAndEffectiveDatePresent
+                                                                                                                    ) {
+<span class="fc" id="L214">        return filteredRecordsByUnitAndValueAndEffectiveDatePresent.map((cro, cw) -&gt; {</span>
+<span class="nc" id="L215">            LoincMapping loincMapping = recordsToLoincMappings.get(cro).getOrNull();</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">            if (loincMapping != null) {</span>
+<span class="nc" id="L217">                return Tuple.of(cro, Either.right(loincMapping));</span>
+            }
+<span class="nc" id="L219">            CodeAndUnitMatchWrapper codeAndUnitMatchWrapper = recordsToCodeAndUnitMatchWrapper.get(cro).getOrNull();</span>
+<span class="nc bnc" id="L220" title="All 2 branches missed.">            if (codeAndUnitMatchWrapper == null) {</span>
+<span class="nc" id="L221">                throw new IllegalStateException(&quot;No CodeAndUnitMatchWrapper for record: &quot; + cro);</span>
+            }
+<span class="nc bnc" id="L223" title="All 2 branches missed.">            if (!filteredRecordsByHavingLoincTest.containsKey(cro)) {</span>
+<span class="nc" id="L224">                LoincCodeAndUnit loincCodeAndUnit = codeAndUnitMatchWrapper.loincCodeAndUnit();</span>
+<span class="nc" id="L225">                emisEsManager.trackMissingLoincTest(loincCodeAndUnit);</span>
+<span class="nc" id="L226">                return Tuple.of(cro, Either.left(new ProcessingError&lt;&gt;(cro, NON_FATAL, &quot;No LoincTest for Unit: %s and LoincCode: %s&quot;, loincCodeAndUnit.unit(), loincCodeAndUnit.loincCode())));</span>
+            }
+<span class="nc" id="L228">            throw new IllegalStateException(&quot;No LoincMapping, LoincTest, CodingTranslation for CareRecordObservation: &quot; + cro.observationGuid());</span>
+        });
+    }
+
+    private void reportObservationMissingUnitOrValueOrEffectiveDate(String snomedCTCode, String observationGuid) {
+<span class="nc bnc" id="L233" title="All 4 branches missed.">        if (snomedCTCode != null &amp;&amp; observationGuid != null) {</span>
+<span class="nc" id="L234">            MISSING_UNITS_OR_VALUES_OR_EFFECTIVE_DATE.increment();</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">            if (croWithNoUnitOrValueOrEffectiveDateAlreadySeen.putIfAbsent(snomedCTCode, observationGuid) == null) {</span>
+<span class="nc" id="L236">                LOGGER.warn(&quot;There is no unit/value/effectiveDate provided for CareRecordObservation Guid: '{}' with SnomedCTCode: '{}'&quot;, observationGuid, snomedCTCode);</span>
+            }
+        }
+<span class="nc" id="L239">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

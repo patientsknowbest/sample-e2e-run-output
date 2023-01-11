@@ -1,0 +1,452 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DocumentMessageRepository.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.domain.repository</a> &gt; <span class="el_source">DocumentMessageRepository.java</span></div><h1>DocumentMessageRepository.java</h1><pre class="source lang-java linenums">package com.pkb.domain.repository;
+
+import com.google.common.base.Stopwatch;
+import com.pkb.annotation.EHRField;
+import com.pkb.authentication.principal.client.ApiClient;
+import com.pkb.authentication.principal.team.BaseTeam;
+import com.pkb.authentication.principal.user.AuthenticatedIndividualProfessional;
+import com.pkb.authentication.principal.user.AuthenticatedPatient;
+import com.pkb.authentication.principal.user.AuthenticatedSystemUser;
+import com.pkb.authentication.principal.user.AuthenticatedTeamProfessional;
+import com.pkb.authentication.principal.user.AuthenticatedUser;
+import com.pkb.authz.TargetMeta;
+import com.pkb.authz.data.AuthorizationInputs;
+import com.pkb.datamodel.AccountKeys;
+import com.pkb.datamodel.AppMenuDataWithSourceObjects;
+import com.pkb.datamodel.DocumentMessage;
+import com.pkb.datamodel.ImmutableDocumentMessage;
+import com.pkb.datamodel.ReferenceDatumCache;
+import com.pkb.datamodel.authorization.TargetOwnerData;
+import com.pkb.datamodel.consent.PatientConsent;
+import com.pkb.datamodel.entity.mapper.DocumentMessageMapper;
+import com.pkb.datamodel.user.Patient;
+import com.pkb.datamodel.user.Person;
+import com.pkb.domain.config.FhirPkbDomainRepositoryProperties;
+import com.pkb.domain.criteria.LowerBound;
+import com.pkb.domain.criteria.Restriction;
+import com.pkb.domain.criteria.UpperBound;
+import com.pkb.domain.internal.repository.AbstractMenuDataRepository;
+import com.pkb.domain.internal.repository.AppMenuDataRepository;
+import com.pkb.domain.internal.repository.ReferenceDatumRepository;
+import com.pkb.domain.repository.util.AccessFilters;
+import com.pkb.ehrdata.AccessFilter;
+import com.pkb.ehrdata.Filter;
+import com.pkb.ehrdata.ImmutableOrderBy;
+import com.pkb.ehrdata.ImmutablePageFilter;
+import com.pkb.ehrdata.ImmutableSearchSpec;
+import com.pkb.ehrdata.SearchSpec;
+import com.pkb.entities.app.AppMenuData;
+import com.pkb.entities.enums.AccessingEntityType;
+import com.pkb.entities.enums.ReferenceDataType;
+import io.vavr.API;
+import io.vavr.collection.List;
+import io.vavr.collection.Map;
+import io.vavr.control.Option;
+import org.jetbrains.annotations.NotNull;
+import org.slf4j.Logger;
+
+import java.time.Duration;
+import java.time.LocalDate;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+import static com.pkb.annotation.EHRField.QueryField.date01;
+import static com.pkb.annotation.EHRField.QueryField.persistedDate;
+import static com.pkb.annotation.EHRField.QueryField.sourceOrgId;
+import static com.pkb.annotation.EHRField.QueryField.string04;
+import static com.pkb.annotation.EHRField.QueryField.string14;
+import static com.pkb.authz.action.Action.READ;
+import static com.pkb.ehrdata.Filter.Operator.EQUAL;
+import static com.pkb.ehrdata.Filter.Operator.GREATER_OR_EQUAL;
+import static com.pkb.ehrdata.Filter.Operator.IS_NOT_NULL;
+import static com.pkb.ehrdata.Filter.Operator.LESS;
+import static com.pkb.ehrdata.Filter.filter;
+import static com.pkb.ehrdata.LatestFilterFields.defaultLatestFields;
+import static com.pkb.ehrdata.OrderBy.Direction.Asc;
+import static com.pkb.entities.enums.MenuDataType.encounterEvent;
+import static com.pkb.entities.enums.MenuDataType.message;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.List;
+import static io.vavr.API.Match;
+import static io.vavr.API.None;
+import static io.vavr.API.Some;
+import static io.vavr.API.Tuple;
+import static io.vavr.Predicates.instanceOf;
+import static io.vavr.collection.List.ofAll;
+import static java.lang.Math.min;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static java.util.Comparator.comparing;
+import static java.util.function.Function.identity;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class DocumentMessageRepository extends AbstractMenuDataRepository {
+<span class="fc" id="L86">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+
+<span class="fc" id="L88">    private static Function&lt;TargetOwnerData, Person&gt; GET_PERSON = TargetOwnerData::person;</span>
+<span class="fc" id="L89">    private static Function&lt;TargetOwnerData, Long&gt; PERSON_ID = GET_PERSON.andThen(Person::getId);</span>
+<span class="fc" id="L90">    private static Function&lt;TargetOwnerData, Patient&gt; GET_PATIENT = GET_PERSON.andThen(Patient.class::cast);</span>
+
+    private static class TargetDetails {
+        final List&lt;TargetOwnerData&gt; targetOwners;
+        final Map&lt;Long, AccessFilter&gt; accessFiltersByPatientPrivateId;
+
+        private TargetDetails(List&lt;TargetOwnerData&gt; targetOwners, 
+<span class="fc" id="L97">                              Map&lt;Long, AccessFilter&gt; accessFiltersByPatientPrivateId) {</span>
+<span class="fc" id="L98">            this.accessFiltersByPatientPrivateId = accessFiltersByPatientPrivateId;</span>
+<span class="fc" id="L99">            this.targetOwners = targetOwners;</span>
+<span class="fc" id="L100">        }</span>
+
+        List&lt;Long&gt; targetAccountIds() {
+<span class="fc" id="L103">            return targetOwners</span>
+<span class="fc" id="L104">                    .map(targetOwnerData -&gt; targetOwnerData.account().getId())</span>
+<span class="fc" id="L105">                    .distinct()</span>
+<span class="fc" id="L106">                    .toList();</span>
+        }
+
+        boolean isEmpty() {
+<span class="nc" id="L110">            return targetOwners.isEmpty();</span>
+        }
+    }
+
+    private static class BatchArguments extends TargetDetails {
+        final SearchSpec searchSpec;
+
+        private BatchArguments(SearchSpec searchSpec, Map&lt;Long, AccessFilter&gt; accessFilters, List&lt;TargetOwnerData&gt; targetOwnerData) {
+<span class="fc" id="L118">            super(targetOwnerData, accessFilters);</span>
+<span class="fc" id="L119">            this.searchSpec = searchSpec;</span>
+<span class="fc" id="L120">        }</span>
+
+        /** Target Owners are always Patients (as the Patient is THE owner - source can be a team or another person, though). */
+        List&lt;Patient&gt; patients() {
+<span class="fc" id="L124">            return targetOwners.map(GET_PATIENT);</span>
+        }
+    }
+
+    /**
+     * &lt;pre&gt;
+     * There are a handful of optional arguments that can be provided during a call to fetch Documents.
+     *
+     * While applying restrictions as {@link SearchSpec} filters we might short-curcuit the call,
+     * because we can be certain that the data layer can never return us any data. E.g.: Provided Org private ID maps to no valid Org.
+     *
+     * Other filter might never end up short-circuiting the call chain. They can be thought of pure functions that take
+     *
+     * This is a common interface for {@link NonTerminableFilteringStep} and {@link TerminableFilteringStep}.
+     * &lt;/pre&gt;
+     */
+    @FunctionalInterface
+    private interface FilteringStep&lt;T&gt; extends Function&lt;ImmutableSearchSpec.Builder, T&gt; { }
+
+    @FunctionalInterface
+    private interface NonTerminableFilteringStep extends FilteringStep&lt;ImmutableSearchSpec.Builder&gt; {
+        @Override
+        default ImmutableSearchSpec.Builder apply(ImmutableSearchSpec.Builder builder) {
+<span class="fc" id="L147">            listFilters().forEach(builder::addFilter);</span>
+<span class="fc" id="L148">            return builder;</span>
+        }
+
+        List&lt;Filter&gt; listFilters();
+    }
+
+    @FunctionalInterface
+    private interface TerminableFilteringStep extends FilteringStep&lt;Option&lt;ImmutableSearchSpec.Builder&gt;&gt; {
+        @Override
+        default Option&lt;ImmutableSearchSpec.Builder&gt; apply(ImmutableSearchSpec.Builder builder) {
+<span class="fc" id="L158">            return findFilters()</span>
+<span class="fc" id="L159">                    .map(filters -&gt; {</span>
+<span class="fc" id="L160">                        filters.forEach(builder::addFilter);</span>
+<span class="fc" id="L161">                        return builder;</span>
+                    });
+        }
+
+        Option&lt;List&lt;Filter&gt;&gt; findFilters();
+    }
+
+    @FunctionalInterface
+    private interface FinalStep extends FilteringStep&lt;Option&lt;BatchArguments&gt;&gt; {}
+    
+    private final DocumentMessageMapper mapper;
+    private final OrgRepository orgRepository;
+    private final MenuDataTargetOwnerFinder menuDataTargetOwnerFinder;
+    private final AccessFilters accessFilters;
+    private final FhirPkbDomainRepositoryProperties config;
+
+    public DocumentMessageRepository(AppMenuDataRepository menuDataRepository,
+                                     ReferenceDatumRepository referenceDatumRepository,
+                                     DocumentMessageMapper mapper,
+                                     OrgRepository orgRepository,
+                                     MenuDataTargetOwnerFinder menuDataTargetOwnerFinder,
+                                     AccessFilters accessFilters,
+                                     FhirPkbDomainRepositoryProperties config,
+                                     PersonRepository personRepository) {
+<span class="fc" id="L185">        super(menuDataRepository, referenceDatumRepository, personRepository);</span>
+<span class="fc" id="L186">        this.mapper = mapper;</span>
+<span class="fc" id="L187">        this.orgRepository = orgRepository;</span>
+<span class="fc" id="L188">        this.menuDataTargetOwnerFinder = menuDataTargetOwnerFinder;</span>
+<span class="fc" id="L189">        this.accessFilters = accessFilters;</span>
+<span class="fc" id="L190">        this.config = config;</span>
+<span class="fc" id="L191">    }</span>
+
+    public List&lt;DocumentMessage&gt; findDocumentMessagesByFilters(@NotNull MessageQuery query) {
+
+<span class="fc" id="L195">        Stopwatch stopwatch = Stopwatch.createStarted();</span>
+<span class="fc" id="L196">        List&lt;DocumentMessage&gt; result = queryToBatchArguments(query)</span>
+<span class="fc" id="L197">                .map(findDocuments(query))</span>
+<span class="fc" id="L198">                .getOrElse(List());</span>
+<span class="fc" id="L199">        Duration elapsed = stopwatch.elapsed();</span>
+
+<span class="pc bpc" id="L201" title="1 of 2 branches missed.">        if (isSlowQuery(elapsed)) {</span>
+<span class="nc" id="L202">            LOGGER.warn(&quot;GDE-1662 slow docref query info: inputs={}, synertec client id={} results={}, timing={}ms&quot;,</span>
+<span class="nc" id="L203">                    query.authData().inputs(),</span>
+<span class="nc" id="L204">                    config.getSynertecApiClientId(),</span>
+<span class="nc" id="L205">                    result.size(),</span>
+<span class="nc" id="L206">                    elapsed.toMillis());</span>
+        }
+
+<span class="fc" id="L209">        return result;</span>
+    }
+
+    private Option&lt;BatchArguments&gt; queryToBatchArguments(MessageQuery query) {
+<span class="fc" id="L213">        ImmutableSearchSpec.Builder initialSearchSpec = ImmutableSearchSpec.builder()</span>
+<span class="fc" id="L214">                .addDataTypes(message.name(), encounterEvent.name())</span>
+<span class="fc" id="L215">                .addFilter(filter(string14.name(), IS_NOT_NULL)) // Hack to exclude documents - see GDE-80</span>
+<span class="fc" id="L216">                .latestFilter(defaultLatestFields())</span>
+<span class="fc" id="L217">                .orderBy(ImmutableOrderBy.builder().direction(Asc).field(date01.name()).build())</span>
+                // We overfetch with one item to see if we violate capsize restriction.
+<span class="fc" id="L219">                .pageFilter(ImmutablePageFilter.builder().startPosition(0).count(query.capsize() + 1).build());</span>
+
+<span class="fc" id="L221">        return Some(initialSearchSpec)</span>
+<span class="fc" id="L222">                .map(applyIndexedDateRestrictions(query))</span>
+<span class="fc" id="L223">                .map(applyCreatedDateRestrictions(query))</span>
+<span class="fc" id="L224">                .map(applyMessageStatusRestrictions(query))</span>
+<span class="fc" id="L225">                .flatMap(applySourceOrgRestrictions(query))</span>
+<span class="fc" id="L226">                .flatMap(applyPatientRestrictions(query));</span>
+    }
+
+    private Function&lt;BatchArguments, List&lt;DocumentMessage&gt;&gt; findDocuments(MessageQuery query) {
+<span class="fc" id="L230">        AuthenticatedUser authenticatedUser = query.authData().inputs().authenticatedUser();</span>
+<span class="fc" id="L231">        int capsize = query.capsize();</span>
+
+<span class="fc" id="L233">        return batchArguments -&gt; {</span>
+            // 1st or n+1th db roundtrip
+<span class="fc" id="L235">            List&lt;Long&gt; matchingDocumentIds = findBatch(</span>
+                    batchArguments.searchSpec,
+                    batchArguments.accessFiltersByPatientPrivateId);
+
+<span class="fc bfc" id="L239" title="All 2 branches covered.">            if (matchingDocumentIds.isEmpty()) {</span>
+<span class="fc" id="L240">                return List();</span>
+            }
+
+            // 2nd or n+2th db roundtrip
+<span class="fc" id="L244">            List&lt;AppMenuDataWithSourceObjects&gt; matchingDocuments = findMenuDatasByIds(matchingDocumentIds);</span>
+
+            // get all documents with same encounterIds because there is no other way to calculate 'status' in DocumentMessage
+<span class="fc" id="L247">            List&lt;UUID&gt; distinctEncounterIds = ofAll(matchingDocuments)</span>
+<span class="fc" id="L248">                    .map(md -&gt; md.getAppMenuData().getUuid01())</span>
+<span class="fc" id="L249">                    .distinct();</span>
+
+<span class="fc" id="L251">            List&lt;AppMenuData&gt; allRecordsWithTheSameEncounterId = List();</span>
+<span class="pc bpc" id="L252" title="1 of 2 branches missed.">            if (distinctEncounterIds.nonEmpty()) {</span>
+                // 3rd or n+3th db roundtrip
+<span class="fc" id="L254">                allRecordsWithTheSameEncounterId = findByConversationIds(distinctEncounterIds);</span>
+            }
+
+<span class="fc" id="L257">            List&lt;Patient&gt; patients = batchArguments.patients();</span>
+
+<span class="fc" id="L259">            Map&lt;Long, AccountKeys&gt; accountKeysByAccountId = batchArguments.targetOwners</span>
+<span class="fc" id="L260">                    .groupBy(t -&gt; t.account().getId())</span>
+<span class="fc" id="L261">                    .mapValues(List::head)</span>
+<span class="fc" id="L262">                    .mapValues(TargetOwnerData::accountKeys)</span>
+<span class="fc" id="L263">                    .filterValues(Option::isDefined)</span>
+<span class="fc" id="L264">                    .mapValues(Option::get);</span>
+
+<span class="fc" id="L266">            ReferenceDatumCache specialtyCache = getReferenceDatumCache(matchingDocuments, ReferenceDataType.HOSPITAL_SERVICE);</span>
+
+<span class="fc" id="L268">            List&lt;DocumentMessage&gt; documents = mapper.menuDataToDocumentMessage(</span>
+                    matchingDocuments,
+                    accountKeysByAccountId,
+                    specialtyCache,
+                    patients,
+                    allRecordsWithTheSameEncounterId);
+
+<span class="fc" id="L275">            List&lt;DocumentMessage&gt; sortedDocuments = doFilteringAndSorting(documents,</span>
+<span class="fc" id="L276">                    getExternalMessageFilter(authenticatedUser));</span>
+
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">            if (sortedDocuments.size() &gt; capsize) {</span>
+<span class="nc" id="L279">                LOGGER.error(&quot;Capsize restriction is violated in DocumentMessage (capsize=[{}])&quot;, capsize);</span>
+            }
+
+<span class="fc" id="L282">            return sortedDocuments.take(min(capsize, sortedDocuments.size()));</span>
+        };
+    }
+
+    private NonTerminableFilteringStep applyIndexedDateRestrictions(MessageQuery query) {
+<span class="fc" id="L287">        return () -&gt; query.indexed()</span>
+<span class="fc" id="L288">                .map(indexed -&gt; List(</span>
+<span class="fc" id="L289">                        filter(persistedDate.name(), GREATER_OR_EQUAL, indexed.getValue()),</span>
+<span class="fc" id="L290">                        filter(persistedDate.name(), LESS, indexed.getValue().plusDays(1))))</span>
+<span class="fc" id="L291">                .getOrElse(List());</span>
+    }
+
+    private NonTerminableFilteringStep applyCreatedDateRestrictions(MessageQuery query) {
+<span class="fc" id="L295">        return () -&gt; query.created()</span>
+<span class="fc" id="L296">                .map(created -&gt; {</span>
+<span class="fc" id="L297">                    var lbFilter = created.getLowerBound()</span>
+<span class="fc" id="L298">                            .map(bound -&gt; getLowerBoundDateFilter(date01, bound));</span>
+<span class="fc" id="L299">                    var ubFilter = created.getUpperBound()</span>
+<span class="fc" id="L300">                            .map(bound -&gt; getUpperBoundDateFilter(date01, bound));</span>
+<span class="fc" id="L301">                    return List(lbFilter, ubFilter).filter(Option::isDefined).map(Option::get);</span>
+                })
+<span class="fc" id="L303">                .getOrElse(List());</span>
+    }
+
+    private Filter getUpperBoundDateFilter(EHRField.QueryField field, Restriction&lt;UpperBound, LocalDate&gt; restriction) {
+<span class="pc bpc" id="L307" title="1 of 3 branches missed.">        switch (restriction.getConstraint()) {</span>
+
+        case LESS:
+<span class="fc" id="L310">            return filter(field.name(), com.pkb.ehrdata.Filter.Operator.LESS, restriction.getValue().atStartOfDay());</span>
+
+        case LESS_OR_EQUAL:
+<span class="fc" id="L313">            return filter(field.name(), com.pkb.ehrdata.Filter.Operator.LESS,</span>
+<span class="fc" id="L314">                    restriction.getValue().atStartOfDay().plusDays(1L));</span>
+
+        default:
+<span class="nc" id="L317">            throw new RuntimeException(format(&quot;Unsupported constraint [%s]&quot;, restriction.getConstraint().name()));</span>
+        }
+    }
+
+    private Filter getLowerBoundDateFilter(EHRField.QueryField field, Restriction&lt;LowerBound, LocalDate&gt; restriction) {
+<span class="pc bpc" id="L322" title="1 of 3 branches missed.">        switch (restriction.getConstraint()) {</span>
+
+        case GREATER_OR_EQUAL:
+<span class="fc" id="L325">            return filter(field.name(), com.pkb.ehrdata.Filter.Operator.GREATER_OR_EQUAL,</span>
+<span class="fc" id="L326">                    restriction.getValue().atStartOfDay());</span>
+
+        case GREATER:
+<span class="fc" id="L329">            return filter(field.name(), com.pkb.ehrdata.Filter.Operator.GREATER_OR_EQUAL,</span>
+<span class="fc" id="L330">                    restriction.getValue().atStartOfDay().plusDays(1L));</span>
+
+        default:
+<span class="nc" id="L333">            throw new RuntimeException(format(&quot;Unsupported constraint [%s]&quot;, restriction.getConstraint().name()));</span>
+        }
+    }
+
+    private NonTerminableFilteringStep applyMessageStatusRestrictions(MessageQuery query) {
+<span class="fc" id="L338">        return () -&gt; query.messageStatus()</span>
+<span class="pc" id="L339">                .map(messageStatus -&gt; filter(string04.name(), EQUAL, messageStatus))</span>
+<span class="fc" id="L340">                .toList();</span>
+    }
+
+    private TerminableFilteringStep applySourceOrgRestrictions(MessageQuery query) {
+<span class="fc" id="L344">        return () -&gt; query.sourceOrganisationId()</span>
+<span class="fc" id="L345">                .toEither(Some(API.&lt;Filter&gt; List()))</span>
+<span class="fc" id="L346">                .fold(identity(), orgPublicId -&gt; (orgRepository.findOptionalByPublicId(orgPublicId)</span>
+<span class="fc" id="L347">                        .map(org -&gt; List(filter(sourceOrgId.name(), EQUAL, org.getId())))</span>
+<span class="fc" id="L348">                        .orElse(None())));</span>
+    }
+
+    private FinalStep applyPatientRestrictions(MessageQuery query) {
+<span class="fc" id="L352">        return searchSpecBuilder -&gt; findTargetOwnersWithAccessFilters(query, searchSpecBuilder::build)</span>
+<span class="fc" id="L353">                .map(targetDetails -&gt; {</span>
+<span class="fc" id="L354">                    searchSpecBuilder.addAllAccountIds(targetDetails.targetAccountIds());</span>
+
+<span class="fc" id="L356">                    return new BatchArguments(searchSpecBuilder.build(), targetDetails.accessFiltersByPatientPrivateId, targetDetails.targetOwners);</span>
+                });
+    }
+
+    /** This must be the last step so potential search works with the most specific {@link SearchSpec} possible to determine Target Owners. */
+    // might or might not requires several db roundtrips
+    private Option&lt;TargetDetails&gt; findTargetOwnersWithAccessFilters(MessageQuery query, Supplier&lt;SearchSpec&gt; searchSpec) {
+<span class="fc" id="L363">        Map&lt;TargetMeta&lt;?&gt;, TargetOwnerData&gt; allowedTargetOwnersByTargets = query.authData().targetOwnerData();</span>
+
+<span class="fc bfc" id="L365" title="All 2 branches covered.">        if (allowedTargetOwnersByTargets.isEmpty()) {</span>
+            // This is most likely a search where patient id was not part of the query: e.g.: indexed=2019-01-29
+            // We need to determine target owners (aka Patients) that actor is authorized to execute given operation.
+<span class="fc" id="L368">            LOGGER.info(&quot;Search without Target Owners is in progress. Determining list of account ids of associated Patients&quot;);</span>
+<span class="fc" id="L369">            allowedTargetOwnersByTargets = menuDataTargetOwnerFinder.findAllowedTargetOwnersByTargets(searchSpec.get(), query.authData().inputs(), READ);</span>
+        }
+
+<span class="fc" id="L372">        List&lt;TargetOwnerData&gt; allowedTargetOwners = allowedTargetOwnersByTargets.values()</span>
+<span class="fc" id="L373">                .distinctBy(PERSON_ID)</span>
+<span class="fc" id="L374">                .toList();</span>
+
+<span class="fc bfc" id="L376" title="All 2 branches covered.">        if (allowedTargetOwners.isEmpty()) {</span>
+<span class="fc" id="L377">            return None();</span>
+        }
+
+<span class="fc" id="L380">        AuthorizationInputs inputs = query.authData().inputs();</span>
+
+<span class="fc" id="L382">        return Some(new TargetDetails(allowedTargetOwners, convertToAccessFilterByPatientId(allowedTargetOwners, inputs)));</span>
+    }
+
+    private Function&lt;DocumentMessage, DocumentMessage&gt; getExternalMessageFilter(AuthenticatedUser authenticatedUser) {
+<span class="fc" id="L386">        return Match(authenticatedUser).of(</span>
+<span class="fc" id="L387">                Case($(instanceOf(AuthenticatedPatient.class)), (ap) -&gt; this.filterOutExternalMessage()),</span>
+<span class="fc" id="L388">                Case($(instanceOf(AuthenticatedTeamProfessional.class)), (teamProfessional) -&gt; filterOutExternalMessage(teamProfessional.getTeam().getOrgId())),</span>
+<span class="fc" id="L389">                Case($(instanceOf(AuthenticatedIndividualProfessional.class)), (ip) -&gt; this.filterOutExternalMessage()),</span>
+<span class="pc" id="L390">                Case($(instanceOf(AuthenticatedSystemUser.class)), (su) -&gt; this.filterOutExternalMessage()));</span>
+    }
+
+    private Option&lt;BaseTeam&gt; getUsersTeam(AuthorizationInputs inputs) {
+<span class="fc" id="L394">        return inputs.authenticatedUserTeam();</span>
+    }
+
+    private Map&lt;Long, AccessFilter&gt; convertToAccessFilterByPatientId(List&lt;TargetOwnerData&gt; targetOwnerData, AuthorizationInputs inputs) {
+<span class="fc" id="L398">        Option&lt;Long&gt; actorId = inputs.findAuthenticatedUserWithActorId();</span>
+<span class="fc" id="L399">        Option&lt;BaseTeam&gt; usersTeam = getUsersTeam(inputs);</span>
+<span class="fc" id="L400">        Option&lt;ApiClient&gt; apiClient = inputs.authenticatedIdentity().apiClient();</span>
+
+        // introduced by PHR-4930
+<span class="pc bpc" id="L403" title="2 of 6 branches missed.">        if (apiClient.isDefined() &amp;&amp; apiClient.get().getId().equals(config.getSynertecApiClientId()) &amp;&amp; inputs.accessingEntityType() == AccessingEntityType.TEAM) {</span>
+<span class="fc" id="L404">            LOGGER.info(&quot;Using read-receipt access filter for {}&quot;, apiClient);</span>
+<span class="fc" id="L405">            return targetOwnerData</span>
+<span class="fc" id="L406">                    .toMap(t -&gt; Tuple(t.person().getId(), accessFilters.createReadReceiptAccessFilter(actorId.get(), usersTeam.get().getOrgId())));</span>
+        }
+        // introduced by PHR-4930
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">        else if (inputs.authenticatedSystemUser().isDefined()) {</span>
+<span class="nc" id="L410">            AuthenticatedSystemUser authenticatedSystemUser = inputs.requireAuthenticatedSystemUser();</span>
+<span class="nc" id="L411">            return targetOwnerData</span>
+<span class="nc" id="L412">                    .toMap(t -&gt; Tuple(t.person().getId(), accessFilters.createSystemUserAccessFilter(authenticatedSystemUser.getOrgId())));</span>
+        } else {
+<span class="fc" id="L414">            return targetOwnerData</span>
+<span class="fc" id="L415">                    .toMap(PERSON_ID, TargetOwnerData::consent)</span>
+<span class="fc" id="L416">                    .flatMap((targetPersonId, maybeConsent) -&gt; maybeConsent</span>
+<span class="fc bfc" id="L417" title="All 2 branches covered.">                            .map(consent -&gt; List(Tuple(targetPersonId, targetPersonId.equals(actorId.get()) ?</span>
+<span class="fc" id="L418">                                    accessFilters.createSelfAccessFiler(actorId.get()) : </span>
+<span class="fc" id="L419">                                    accessFilters.createAccessFilter(actorId.get(), usersTeam, Option.of(consent)))))</span>
+<span class="fc" id="L420">                            .getOrElse(List()));</span>
+        }
+    }
+
+    private List&lt;DocumentMessage&gt; doFilteringAndSorting(List&lt;DocumentMessage&gt; messages, Function&lt;DocumentMessage, DocumentMessage&gt; filter) {
+<span class="fc" id="L425">        return messages</span>
+<span class="fc" id="L426">                .map(filter)</span>
+<span class="fc" id="L427">                .sorted(comparing(DocumentMessage::getId));</span>
+    }
+
+    private Function&lt;DocumentMessage, DocumentMessage&gt; filterOutExternalMessage() {
+<span class="fc" id="L431">        return message -&gt; message.getExternalMessageId().map(id -&gt; DocumentMessage.class.cast(ImmutableDocumentMessage.builder().from(message).externalMessageId(Option.none()).build()))</span>
+<span class="fc" id="L432">                .getOrElse(message);</span>
+    }
+
+    private Function&lt;DocumentMessage, DocumentMessage&gt; filterOutExternalMessage(long orgId) {
+<span class="fc" id="L436">        return message -&gt; message.getSource().getOrg()</span>
+<span class="fc bfc" id="L437" title="All 2 branches covered.">                .filter(org -&gt; org.getId() != orgId)</span>
+<span class="fc" id="L438">                .map(org -&gt; ImmutableDocumentMessage.builder().from(message).externalMessageId(Option.none()).build())</span>
+<span class="fc" id="L439">                .map(DocumentMessage.class::cast)</span>
+<span class="fc" id="L440">                .getOrElse(message);</span>
+    }
+
+    private AccessFilter getAccessFilter(long actorId, Option&lt;BaseTeam&gt; team, PatientConsent consent) {
+<span class="nc" id="L444">        return accessFilters.createAccessFilter(actorId, team, Option.of(consent));</span>
+    }
+
+    private boolean isSlowQuery(Duration elapsed) {
+<span class="pc bpc" id="L448" title="1 of 2 branches missed.">        return elapsed.compareTo(config.getSlowDocRefQueryAlertThreshold()) &gt; 0;</span>
+    }
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

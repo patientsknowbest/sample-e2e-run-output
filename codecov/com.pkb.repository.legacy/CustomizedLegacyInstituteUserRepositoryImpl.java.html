@@ -1,0 +1,381 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CustomizedLegacyInstituteUserRepositoryImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.repository.legacy</a> &gt; <span class="el_source">CustomizedLegacyInstituteUserRepositoryImpl.java</span></div><h1>CustomizedLegacyInstituteUserRepositoryImpl.java</h1><pre class="source lang-java linenums">package com.pkb.repository.legacy;
+
+import com.pkb.common.config.PhrConfig;
+import com.pkb.entities.enums.AccountUserStatus;
+import com.pkb.entities.enums.SponsorshipStatus;
+import com.pkb.entities.enums.UserType;
+import com.pkb.institute.entity.InstituteUserEntity;
+import com.pkb.institute.entity.Org;
+import com.pkb.institute.entity.Team;
+import com.pkb.user.entity.PKBPerson;
+import com.pkb.util.DbUtil;
+import org.apache.commons.lang3.ArrayUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.hibernate.cfg.NotYetImplementedException;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import javax.persistence.EntityGraph;
+import javax.persistence.EntityManager;
+import javax.persistence.Query;
+import javax.persistence.TypedQuery;
+import java.time.ZonedDateTime;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Date;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+<span class="fc" id="L34">public class CustomizedLegacyInstituteUserRepositoryImpl implements CustomizedLegacyInstituteUserRepository {</span>
+
+    private static final int ASSIGNED_PATIENT_BATCH_SIZE = 10000;
+
+    @Autowired
+    private EntityManager em;
+
+    @Override
+    public List&lt;InstituteUserEntity&gt; getPatientIdsForDataUploadByOrgLevelId(long personId, Team.Lazy... fields) {
+<span class="fc" id="L43">        StringBuilder select = getInstituteUserQueryBuilder(fields);</span>
+
+<span class="fc" id="L45">        return em.createQuery(select.toString(), InstituteUserEntity.class)</span>
+<span class="fc" id="L46">                .setParameter(&quot;personId&quot;, personId)</span>
+<span class="fc" id="L47">                .getResultList();</span>
+    }
+
+    private StringBuilder getInstituteUserQueryBuilder(Team.Lazy... fields) {
+<span class="fc" id="L51">        StringBuilder select = new StringBuilder(&quot;SELECT iu FROM InstituteUserEntity iu LEFT JOIN FETCH iu.institute i &quot;);</span>
+
+<span class="fc bfc" id="L53" title="All 2 branches covered.">        if (ArrayUtils.contains(fields, Team.Lazy.LIBRARY)) {</span>
+<span class="fc" id="L54">            select.append(&quot; LEFT JOIN FETCH i.libraryEntries &quot;);</span>
+        }
+<span class="fc bfc" id="L56" title="All 2 branches covered.">        if (ArrayUtils.contains(fields, Team.Lazy.SYMPTOMS)) {</span>
+<span class="fc" id="L57">            select.append(&quot; LEFT JOIN FETCH i.symptomsToMonitor &quot;);</span>
+        }
+
+<span class="fc" id="L60">        return select.append(&quot; WHERE iu.personId = :personId ORDER BY iu.id&quot;);</span>
+    }
+
+    @Override
+    public List&lt;Long&gt; fetchPatientIdsForDataUploadNoIdFilters(long teamId, EnumSet&lt;DataUploadOption&gt; options) {
+<span class="fc" id="L65">        String select = null;</span>
+
+<span class="fc" id="L67">        select = &quot;SELECT distinct iu.personId &quot;</span>
+                + &quot; FROM InstituteUserEntity iu&quot; +
+                &quot; WHERE iu.institute.id = :teamId &quot; +
+                &quot; AND iu.sponsorshipStatus = :sponsorshipStatus &quot;;
+
+<span class="pc bpc" id="L72" title="1 of 2 branches missed.">        if (options.contains(DataUploadOption.ExcludeDischarged)) {</span>
+<span class="nc" id="L73">            select += &quot;AND NOT EXISTS (SELECT 1 &quot; +</span>
+                    &quot;FROM PatientConsent pc &quot; +
+                    &quot;WHERE pc.accessingEntityType = 'TEAM' &quot; +
+                    &quot;AND   pc.accessingTeamSlashPersonId = :teamId &quot; +
+                    &quot;AND   pc.patientPersonId = iu.personId &quot; +
+                    &quot;AND   pc.discharged = true ) &quot;;
+        }
+
+<span class="fc" id="L81">        TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="fc" id="L82">        query.setParameter(&quot;teamId&quot;, teamId);</span>
+<span class="fc" id="L83">        query.setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.ACTIVE);</span>
+
+<span class="fc" id="L85">        return query.getResultList();</span>
+    }
+
+    @Override
+    public List&lt;Long&gt; findPersonIdsForTeamOrOrg(Team team, Org org) {
+<span class="fc" id="L90">        String select = &quot;SELECT distinct iu.personId FROM InstituteUserEntity iu&quot;;</span>
+
+<span class="fc bfc" id="L92" title="All 2 branches covered.">        if (team != null) {</span>
+<span class="fc" id="L93">            select += &quot; WHERE iu.institute.id = :teamId&quot;;</span>
+        } else {
+<span class="fc" id="L95">            select += &quot; WHERE iu.institute.org.id = :orgId&quot;;</span>
+        }
+<span class="fc" id="L97">        select += &quot;   AND iu.sponsorshipStatus = :sponsorshipStatus&quot;;</span>
+
+<span class="fc" id="L99">        TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">        if (team != null) {</span>
+<span class="fc" id="L101">            query.setParameter(&quot;teamId&quot;, team.getId());</span>
+        } else {
+<span class="fc" id="L103">            query.setParameter(&quot;orgId&quot;, org.getId());</span>
+        }
+
+<span class="fc" id="L106">        query.setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.ACTIVE);</span>
+
+<span class="fc" id="L108">        return query.getResultList();</span>
+    }
+
+    @Override
+    public List&lt;Long&gt; getPatientIdsForDataUploadByOrgLevelId(Team team, Org org,
+                                                             @Nullable ZonedDateTime filterStartDate,
+                                                             @Nullable ZonedDateTime filterEndDate,
+                                                             String filterOrgLevelId) {
+
+<span class="fc" id="L117">        Long orgId = null;</span>
+<span class="fc bfc" id="L118" title="All 2 branches covered.">        if (team != null) {</span>
+<span class="fc" id="L119">            orgId = team.getOrg().getId();</span>
+        } else {
+<span class="fc" id="L121">            orgId = org.getId();</span>
+        }
+
+<span class="fc" id="L124">        String select = &quot;SELECT distinct iu.personId FROM InstituteUserEntity iu, OrgLevelId oi&quot;;</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">        if (team != null) {</span>
+<span class="fc" id="L126">            select += &quot; WHERE iu.institute.id = :teamId&quot;;</span>
+        } else {
+<span class="fc" id="L128">            select += &quot; WHERE iu.institute.org.id = :orgId&quot;;</span>
+        }
+
+<span class="fc" id="L131">        select += &quot; AND iu.personId = oi.personId&quot; +</span>
+                &quot; AND oi.org.id = :orgId&quot; +
+                &quot; AND iu.sponsorshipStatus = :sponsorshipStatus&quot;;
+<span class="fc bfc" id="L134" title="All 2 branches covered.">        if (filterStartDate != null) {</span>
+<span class="fc" id="L135">            select += &quot; AND oi.editDate &gt;= :startDate&quot;;</span>
+        }
+<span class="fc bfc" id="L137" title="All 2 branches covered.">        if (filterEndDate != null) {</span>
+<span class="fc" id="L138">            select += &quot; AND oi.editDate &lt; :endDate&quot;;</span>
+        }
+<span class="fc bfc" id="L140" title="All 2 branches covered.">        if (filterOrgLevelId != null) {</span>
+<span class="fc" id="L141">            select += &quot; AND oi.value = :orgLevelId&quot;;</span>
+        }
+
+<span class="fc" id="L144">        TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">        if (team != null) {</span>
+<span class="fc" id="L146">            query.setParameter(&quot;teamId&quot;, team.getId());</span>
+        } else {
+<span class="fc" id="L148">            query.setParameter(&quot;orgId&quot;, org.getId());</span>
+        }
+
+<span class="fc" id="L151">        query.setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.ACTIVE);</span>
+<span class="fc" id="L152">        query.setParameter(&quot;orgId&quot;, orgId);</span>
+<span class="fc bfc" id="L153" title="All 2 branches covered.">        if (filterStartDate != null) {</span>
+<span class="fc" id="L154">            query.setParameter(&quot;startDate&quot;, Date.from(filterStartDate.toInstant()));</span>
+        }
+<span class="fc bfc" id="L156" title="All 2 branches covered.">        if (filterEndDate != null) {</span>
+<span class="fc" id="L157">            query.setParameter(&quot;endDate&quot;, Date.from(filterEndDate.toInstant()));</span>
+        }
+<span class="fc bfc" id="L159" title="All 2 branches covered.">        if (filterOrgLevelId != null) {</span>
+<span class="fc" id="L160">            query.setParameter(&quot;orgLevelId&quot;, filterOrgLevelId);</span>
+        }
+<span class="fc" id="L162">        return query.getResultList();</span>
+    }
+
+    @Override
+    public List&lt;Long&gt; fetchPatientIdsForDataUploadByTeamLevelId(Team team,
+                                                                @Nullable ZonedDateTime filterStartDate,
+                                                                @Nullable ZonedDateTime filterEndDate,
+                                                                String filterTeamLevelId) {
+<span class="fc" id="L170">        String select = null;</span>
+
+<span class="fc" id="L172">        select = &quot;SELECT distinct iu.personId FROM InstituteUserEntity iu, TeamLevelId ti&quot;</span>
+                + &quot; WHERE iu.institute.id = :teamId&quot;
+                + &quot; AND iu.personId = ti.personId&quot;
+                + &quot; AND ti.team.id = :teamId&quot;
+                + &quot; AND iu.sponsorshipStatus = :sponsorshipStatus&quot;;
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">        if (filterStartDate != null) {</span>
+<span class="nc" id="L178">            select += &quot; AND ti.editDate &gt;= :startDate&quot;;</span>
+        }
+<span class="pc bpc" id="L180" title="1 of 2 branches missed.">        if (filterEndDate != null) {</span>
+<span class="nc" id="L181">            select += &quot; AND ti.editDate &lt; :endDate&quot;;</span>
+        }
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">        if (filterTeamLevelId != null) {</span>
+<span class="nc" id="L184">            select += &quot; AND ti.value = :teamLevelId&quot;;</span>
+        }
+
+<span class="fc" id="L187">        TypedQuery&lt;Long&gt; query = em.createQuery(select, Long.class);</span>
+<span class="fc" id="L188">        query.setParameter(&quot;teamId&quot;, team.getId());</span>
+
+<span class="fc" id="L190">        query.setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.ACTIVE);</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">        if (filterStartDate != null) {</span>
+<span class="nc" id="L192">            query.setParameter(&quot;startDate&quot;, Date.from(filterStartDate.toInstant()));</span>
+        }
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">        if (filterEndDate != null) {</span>
+<span class="nc" id="L195">            query.setParameter(&quot;endDate&quot;, Date.from(filterEndDate.toInstant()));</span>
+        }
+<span class="pc bpc" id="L197" title="1 of 2 branches missed.">        if (filterTeamLevelId != null) {</span>
+<span class="nc" id="L198">            query.setParameter(&quot;teamLevelId&quot;, filterTeamLevelId);</span>
+        }
+
+<span class="fc" id="L201">        return query.getResultList();</span>
+    }
+
+    @Override
+    public Map&lt;Long, List&lt;InstituteUserEntity&gt;&gt; getInstituteUserEntityMap(PhrConfig config, List&lt;Long&gt; instituteUserIds) {
+<span class="fc" id="L206">        return DbUtil.getInStreamOfBatches(instituteUserIds, config.getInstituteUserFetchSize(),</span>
+<span class="fc" id="L207">                        instituteUserIdsBatch -&gt; em.createQuery(&quot;SELECT DISTINCT iu FROM InstituteUserEntity iu&quot;</span>
+                                        + &quot; WHERE iu.id IN (:instituteUserIds)&quot;, InstituteUserEntity.class)
+<span class="fc" id="L209">                                .setParameter(&quot;instituteUserIds&quot;, instituteUserIdsBatch)</span>
+<span class="fc" id="L210">                                .getResultList())</span>
+<span class="fc" id="L211">                .collect(Collectors.groupingBy(InstituteUserEntity::getPersonId));</span>
+    }
+
+    @Override
+    public List&lt;InstituteUserEntity&gt; findInstituteUsersForUserIds(Collection&lt;Long&gt; userIds) {
+<span class="fc" id="L216">        TypedQuery&lt;InstituteUserEntity&gt; query = em.createQuery(&quot;SELECT DISTINCT iu FROM InstituteUserEntity iu &quot;</span>
+                + &quot; WHERE sponsorshipstatus='ACTIVE' AND iu.personId IN (:userIds)&quot;, InstituteUserEntity.class);
+<span class="fc" id="L218">        query.setParameter(&quot;userIds&quot;, userIds);</span>
+<span class="fc" id="L219">        query.setHint(&quot;javax.persistence.loadgraph&quot;, constructInstituteUserEntityGraph());</span>
+<span class="fc" id="L220">        return query.getResultList();</span>
+    }
+
+    @Override
+    public boolean isAffilatedUser(long userId) {
+<span class="fc" id="L225">        Query query = em.createQuery(&quot;SELECT COUNT(iu.id) FROM InstituteUserEntity iu WHERE iu.personId = :userId&quot;);</span>
+<span class="fc" id="L226">        query.setParameter(&quot;userId&quot;, userId);</span>
+<span class="fc" id="L227">        int count = ((Long) query.getSingleResult()).intValue();</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">        return count &gt; 0;</span>
+    }
+
+    @Override
+    public List&lt;Long&gt; getColleagueIds(Long clinicianId,
+                                      Long teamId,
+                                      InstituteUserEntity.ContactOptions requireOptionOrNull) {
+<span class="fc" id="L235">        String select = &quot;SELECT iu.personId FROM InstituteUserEntity iu &quot;</span>
+                + &quot; WHERE iu.sponsorshipStatus = :sponsorshipStatus&quot;
+                + &quot; AND iu.personId != :clinicianId&quot;
+                + &quot; AND iu.institute.id = :teamId&quot; +
+                &quot; AND iu.userType = :userType&quot;;
+        TypedQuery&lt;Long&gt; query;
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">        if (requireOptionOrNull != null) {</span>
+<span class="fc" id="L242">            query = em.createQuery(select + &quot; AND iu.contactable in (:contactableList)&quot;, Long.class);</span>
+<span class="fc" id="L243">            query.setParameter(&quot;contactableList&quot;, Arrays.asList(InstituteUserEntity.ContactOptions.All, requireOptionOrNull));</span>
+        } else {
+<span class="nc" id="L245">            query = em.createQuery(select, Long.class);</span>
+        }
+
+<span class="fc" id="L248">        query.setParameter(&quot;clinicianId&quot;, clinicianId);</span>
+<span class="fc" id="L249">        query.setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.ACTIVE);</span>
+<span class="fc" id="L250">        query.setParameter(&quot;teamId&quot;, teamId);</span>
+<span class="fc" id="L251">        query.setParameter(&quot;userType&quot;, UserType.REG_CLINICIAN);</span>
+
+<span class="fc" id="L253">        return query.getResultList();</span>
+    }
+
+    @Override
+    public boolean isTeamUser(long userId) {
+<span class="fc" id="L258">        Query query = em</span>
+<span class="fc" id="L259">                .createQuery(</span>
+                        &quot;SELECT COUNT(iu.id) FROM InstituteUserEntity iu WHERE iu.personId = :userId AND iu.sponsorshipStatus &lt;&gt; :sponsorshipStatus&quot;);
+<span class="fc" id="L261">        query.setParameter(&quot;userId&quot;, userId);</span>
+<span class="fc" id="L262">        query.setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.INACTIVE);</span>
+<span class="fc" id="L263">        int count = ((Long) query.getSingleResult()).intValue();</span>
+<span class="fc bfc" id="L264" title="All 2 branches covered.">        return count &gt; 0;</span>
+    }
+
+    @Override
+    public boolean atLeastOneActiveInstituteUserExistsForUserId(Long userId) {
+<span class="fc" id="L269">        TypedQuery&lt;Long&gt; query = em</span>
+<span class="fc" id="L270">                .createQuery(&quot;SELECT count(user) FROM InstituteUserEntity user &quot;</span>
+                        + &quot;WHERE user.personId = :userId &quot;
+                        + &quot;AND user.sponsorshipStatus = :sponsorshipStatus &quot;, Long.class);
+
+<span class="fc" id="L274">        query.setParameter(&quot;userId&quot;, userId);</span>
+<span class="fc" id="L275">        query.setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.ACTIVE);</span>
+<span class="fc bfc" id="L276" title="All 2 branches covered.">        return query.getSingleResult() &gt; 0;</span>
+    }
+
+    @Override
+    public List&lt;Long&gt; findPersonIdsForPatientIdAndDefaultAccountIdAndContactOptions(Long patientId, Long defaultAccountId, InstituteUserEntity.ContactOptions contactOptions) {
+<span class="nc" id="L281">        TypedQuery&lt;Long&gt; query = em.createQuery(</span>
+                        &quot;SELECT au.personId FROM AccountUser au&quot; +
+                                &quot; LEFT OUTER JOIN InstituteUserEntity iu ON iu.personId = au.personId&quot; +
+                                &quot; WHERE au.account.id = :accountId&quot; +
+                                &quot; AND au.personId &lt;&gt; :patientId&quot; +
+                                &quot; AND au.status = :auStatus&quot; +
+                                &quot; AND ((iu.contactable IN (:contactableList) AND iu.sponsorshipStatus = :sponsorshipStatus) OR iu.contactable is NULL)&quot;,
+                        Long.class)
+<span class="nc" id="L289">                .setParameter(&quot;accountId&quot;, defaultAccountId)</span>
+<span class="nc" id="L290">                .setParameter(&quot;patientId&quot;, patientId)</span>
+<span class="nc" id="L291">                .setParameter(&quot;auStatus&quot;, AccountUserStatus.ACTIVE)</span>
+<span class="nc" id="L292">                .setParameter(&quot;contactableList&quot;, Arrays.asList(InstituteUserEntity.ContactOptions.All, contactOptions))</span>
+<span class="nc" id="L293">                .setParameter(&quot;sponsorshipStatus&quot;, SponsorshipStatus.ACTIVE);</span>
+<span class="nc" id="L294">        return query.getResultList();</span>
+    }
+
+    @Override
+    public Stream&lt;PKBPerson&gt; findPatientsByAccountId(Set&lt;Long&gt; accountIds, PKBPerson.Lazy... fields) {
+<span class="fc" id="L299">        return DbUtil.getInStreamOfBatches(accountIds, ASSIGNED_PATIENT_BATCH_SIZE, batchOfIds -&gt; em.createQuery(</span>
+                        &quot;SELECT DISTINCT pp FROM PKBPerson pp\n&quot; +
+                                &quot;LEFT JOIN FETCH pp.contacts\n&quot; +
+                                &quot;WHERE pp.defaultAccountId in (:accountIds)\n&quot; +
+                                &quot;AND pp.userType = :userType\n&quot; +
+                                &quot;ORDER BY pp.firstName ASC, pp.lastName ASC&quot;,
+                        PKBPerson.class)
+<span class="fc" id="L306">                .setParameter(&quot;accountIds&quot;, batchOfIds)</span>
+<span class="fc" id="L307">                .setParameter(&quot;userType&quot;, UserType.PATIENT)</span>
+<span class="fc" id="L308">                .setHint(&quot;javax.persistence.loadgraph&quot;, constructPersonEntityGraph(fields))</span>
+<span class="fc" id="L309">                .getResultList());</span>
+    }
+
+    @Override
+    public List&lt;Object[]&gt; findObsoleteToPrimaryIdMap(long orgId) {
+<span class="fc" id="L314">        Query query = em.createNativeQuery(&quot;SELECT merged_value, primary_value FROM emis_es_merged_org_level_id&quot; +</span>
+                        &quot; WHERE org_id = :orgId&quot;)
+<span class="fc" id="L316">                .setParameter(&quot;orgId&quot;, orgId);</span>
+
+<span class="fc" id="L318">        return (List&lt;Object[]&gt;) query.getResultList();</span>
+    }
+
+    @NotNull
+    private EntityGraph&lt;InstituteUserEntity&gt; constructInstituteUserEntityGraph() {
+<span class="fc" id="L323">        EntityGraph&lt;InstituteUserEntity&gt; entityGraph = em.createEntityGraph(InstituteUserEntity.class);</span>
+<span class="fc" id="L324">        entityGraph.addSubgraph(&quot;institute&quot;)</span>
+<span class="fc" id="L325">                .addAttributeNodes(&quot;org&quot;);</span>
+<span class="fc" id="L326">        entityGraph.addSubgraph(&quot;institute&quot;)</span>
+<span class="fc" id="L327">                .addAttributeNodes(&quot;symptomsToMonitor&quot;);</span>
+<span class="fc" id="L328">        entityGraph.addSubgraph(&quot;institute&quot;)</span>
+<span class="fc" id="L329">                .addAttributeNodes(&quot;libraryEntries&quot;);</span>
+<span class="fc" id="L330">        return entityGraph;</span>
+    }
+
+    @NotNull
+    private EntityGraph&lt;PKBPerson&gt; constructPersonEntityGraph(PKBPerson.Lazy... fields) {
+<span class="fc" id="L335">        EntityGraph&lt;PKBPerson&gt; personGraph = em.createEntityGraph(PKBPerson.class);</span>
+<span class="fc" id="L336">        Arrays.stream(fields)</span>
+<span class="fc" id="L337">                .map(PKBPerson.Lazy::getSubgraph)</span>
+<span class="fc" id="L338">                .flatMap(Collection::stream)</span>
+<span class="fc" id="L339">                .filter(StringUtils::isNotBlank)</span>
+<span class="fc" id="L340">                .forEach(subgraph -&gt; addPersonEntityGraphAttribute(personGraph, subgraph));</span>
+<span class="fc" id="L341">        personGraph.addAttributeNodes(&quot;optoutDetails&quot;, &quot;emisEsPersonGuid&quot;);</span>
+
+<span class="pc bpc" id="L343" title="2 of 4 branches missed.">        if (Arrays.stream(fields).anyMatch(f -&gt; f == PKBPerson.Lazy.CONTACTS_DEEP)) {</span>
+<span class="nc" id="L344">            throw new NotYetImplementedException(&quot;This code path will need implementing and testing - add a subgraph for contacts property and add attribute nodes refPerson&quot;);</span>
+        }
+<span class="fc" id="L346">        return personGraph;</span>
+    }
+
+    private void addPersonEntityGraphAttribute(EntityGraph&lt;PKBPerson&gt; personGraph, String subgraph) {
+<span class="fc bfc" id="L350" title="All 2 branches covered.">        if (subgraph.contains(&quot;.&quot;)) {</span>
+            // StringUtils avoids compiling a regex just to split on a dot.
+<span class="fc" id="L352">            String[] attributePath = StringUtils.split(subgraph, '.');</span>
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">            if (attributePath.length &gt; 2) {</span>
+<span class="nc" id="L354">                throw new UnsupportedOperationException(&quot;No subgraphs above 2 levels are supported&quot;);</span>
+            } else {
+<span class="fc" id="L356">                personGraph.addSubgraph(attributePath[0]).addAttributeNodes(attributePath[1]);</span>
+            }
+<span class="fc" id="L358">        } else {</span>
+<span class="fc" id="L359">            personGraph.addAttributeNodes(subgraph);</span>
+        }
+<span class="fc" id="L361">    }</span>
+
+    public static class InstituteUserIdPersonIdPair {
+        private long instituteUserId;
+        private long personId;
+
+<span class="fc" id="L367">        public InstituteUserIdPersonIdPair(Long instituteUserId, Long personId) {</span>
+<span class="fc" id="L368">            this.instituteUserId = instituteUserId;</span>
+<span class="fc" id="L369">            this.personId = personId;</span>
+<span class="fc" id="L370">        }</span>
+
+        public Long getInstituteUserId() {
+<span class="fc" id="L373">            return instituteUserId;</span>
+        }
+
+        public Long getPersonId() {
+<span class="fc" id="L377">            return personId;</span>
+        }
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>

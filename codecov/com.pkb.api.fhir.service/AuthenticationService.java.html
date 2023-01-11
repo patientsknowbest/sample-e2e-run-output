@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="en"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AuthenticationService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">E2E Tests Coverage Report</a> &gt; <a href="index.source.html" class="el_package">com.pkb.api.fhir.service</a> &gt; <span class="el_source">AuthenticationService.java</span></div><h1>AuthenticationService.java</h1><pre class="source lang-java linenums">package com.pkb.api.fhir.service;
+
+import ca.uhn.fhir.rest.api.server.RequestDetails;
+import ca.uhn.fhir.rest.server.exceptions.AuthenticationException;
+import com.pkb.api.fhir.util.FhirConstants;
+import com.pkb.authentication.AccessTokenMapper;
+import com.pkb.authentication.AuthenticatedIdentity;
+import com.pkb.authentication.DbBackedAccessTokenBasedLoginService;
+import com.pkb.authentication.Oauth2ServiceBackedJwtBasedLoginService;
+import com.pkb.internal.authentication.AccessTokenExpiredException;
+import com.pkb.internal.authentication.SessionExpiredException;
+import com.pkb.oauth2.client.model.ThirdPartyClientJwtVerificationRequest;
+import io.vavr.control.Either;
+import io.vavr.control.Option;
+import org.hl7.fhir.dstu3.model.OperationOutcome;
+import org.slf4j.Logger;
+
+import javax.security.auth.login.AccountException;
+import javax.security.auth.login.AccountNotFoundException;
+import javax.security.auth.login.LoginException;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.UUID;
+
+import static com.pkb.api.fhir.util.FhirAccessToken.badAuthentication;
+import static com.pkb.api.fhir.util.FhirAccessToken.createErrorOutcome;
+import static com.pkb.api.fhir.util.FhirAccessToken.extractAccessToken;
+import static com.pkb.oauth2.client.model.ImmutableThirdPartyClientJwtVerificationRequest.thirdPartyClientJwtVerificationRequest;
+import static io.vavr.API.$;
+import static io.vavr.API.Case;
+import static io.vavr.API.Match;
+import static io.vavr.API.Try;
+import static io.vavr.Predicates.instanceOf;
+import static java.lang.String.format;
+import static java.lang.invoke.MethodHandles.lookup;
+import static org.slf4j.LoggerFactory.getLogger;
+
+public class AuthenticationService {
+<span class="fc" id="L39">    private static final Logger LOGGER = getLogger(lookup().lookupClass());</span>
+    public static final String ORG_PUBLIC_ID_HEADER_NAME = &quot;X-Org-Public-Id&quot;;
+    
+    private final AccessTokenMapper accessTokenMapper;
+    private final DbBackedAccessTokenBasedLoginService dbBackedAccessTokenBasedLoginService;
+    private final Oauth2ServiceBackedJwtBasedLoginService oauth2ServiceBackedJwtBasedLoginService;
+
+    public AuthenticationService(
+            AccessTokenMapper accessTokenMapper,
+            DbBackedAccessTokenBasedLoginService dbBackedAccessTokenBasedLoginService,
+<span class="fc" id="L49">            Oauth2ServiceBackedJwtBasedLoginService oauth2ServiceBackedJwtBasedLoginService) {</span>
+<span class="fc" id="L50">        this.accessTokenMapper = accessTokenMapper;</span>
+<span class="fc" id="L51">        this.dbBackedAccessTokenBasedLoginService = dbBackedAccessTokenBasedLoginService;</span>
+<span class="fc" id="L52">        this.oauth2ServiceBackedJwtBasedLoginService = oauth2ServiceBackedJwtBasedLoginService;</span>
+<span class="fc" id="L53">    }</span>
+    
+    public AuthenticatedIdentity authenticateOrThrow(RequestDetails request) {
+<span class="fc" id="L56">        return authenticate(request).getOrElseThrow(e -&gt; e);</span>
+    }
+    
+    public Either&lt;AuthenticationException, AuthenticatedIdentity&gt; authenticate(RequestDetails request) {
+<span class="fc" id="L60">        return extractAccessToken(request)</span>
+<span class="fc" id="L61">                .toEither(notAuthenticated(new IllegalStateException(&quot;Token is either missing or not well formatted.&quot;)))</span>
+<span class="fc" id="L62">                .flatMap(accessToken -&gt; </span>
+<span class="fc" id="L63">                    findOrgPublicIdHeader(request)</span>
+<span class="fc" id="L64">                            .map(orgPublicId -&gt; loginWithJwt(accessToken, orgPublicId))</span>
+<span class="fc" id="L65">                            .getOrElse(() -&gt; loginWithAccessToken(accessToken))</span>
+                );
+    }
+
+    private Either&lt;AuthenticationException, AuthenticatedIdentity&gt; loginWithAccessToken(String accessToken) {
+<span class="fc" id="L70">        return accessTokenMapper.toAccessToken(accessToken)</span>
+<span class="fc" id="L71">                .toEither(notAuthenticated(new IllegalStateException(&quot;Access token is malformed&quot;)))</span>
+<span class="fc" id="L72">                .flatMap(t -&gt; dbBackedAccessTokenBasedLoginService.authenticate(t)</span>
+<span class="fc" id="L73">                    .mapLeft(e -&gt; Match(e)</span>
+<span class="fc" id="L74">                            .of(</span>
+<span class="fc" id="L75">                                    Case($(instanceOf(SessionExpiredException.class)), this::sessionExpired),</span>
+<span class="fc" id="L76">                                    Case($(instanceOf(AccessTokenExpiredException.class)), this::tokenExpired),</span>
+<span class="fc" id="L77">                                    Case($(instanceOf(AccountNotFoundException.class)), this::notAuthenticated),</span>
+<span class="fc" id="L78">                                    Case($(instanceOf(AccountException.class)), this::invalidApiSession),</span>
+<span class="fc" id="L79">                                    Case($(instanceOf(LoginException.class)), this::notAuthenticated),</span>
+<span class="fc" id="L80">                                    Case($(instanceOf(Exception.class)), this::notAuthenticated))</span>
+                    ));
+    }
+
+    private Either&lt;AuthenticationException, AuthenticatedIdentity&gt; loginWithJwt(String clientJwt, UUID orgPublicId) {
+<span class="fc" id="L85">        ThirdPartyClientJwtVerificationRequest thirdPartyClientJwtVerificationRequest = thirdPartyClientJwtVerificationRequest()</span>
+<span class="fc" id="L86">                .orgPublicId(orgPublicId)</span>
+<span class="fc" id="L87">                .clientJWT(clientJwt)</span>
+<span class="fc" id="L88">                .build();</span>
+<span class="fc" id="L89">        return oauth2ServiceBackedJwtBasedLoginService.authenticate(thirdPartyClientJwtVerificationRequest)</span>
+<span class="fc" id="L90">                .mapLeft(error -&gt; {</span>
+<span class="fc" id="L91">                    LOGGER.info(&quot;OAUTH2-API jwt login failed. Cause: {}&quot;, error.getMessage());</span>
+<span class="fc" id="L92">                    return notAuthenticated(error);</span>
+                });
+    }
+
+    private Option&lt;UUID&gt; findOrgPublicIdHeader(RequestDetails request) {
+<span class="fc" id="L97">        return Try(() -&gt; request.getHeader(ORG_PUBLIC_ID_HEADER_NAME))</span>
+<span class="fc" id="L98">                .map(UUID::fromString)</span>
+<span class="fc" id="L99">                .toOption();</span>
+    }
+
+    private AuthenticationException notAuthenticated(Throwable cause) {
+<span class="fc" id="L103">        AuthenticationException authenticationException = new AuthenticationException(cause.getMessage(), cause);</span>
+<span class="fc" id="L104">        authenticationException.setOperationOutcome(badAuthentication());</span>
+<span class="fc" id="L105">        return authenticationException;</span>
+    }
+
+    private AuthenticationException invalidApiSession(Exception cause) {
+<span class="fc" id="L109">        AuthenticationException authenticationException = new AuthenticationException(cause.getMessage(), cause);</span>
+<span class="fc" id="L110">        OperationOutcome operationOutcome = createErrorOutcome(</span>
+                &quot;API_SESSION_INVALID&quot;,
+                &quot;API session invalid&quot;,
+                &quot;This API session has been invalidated.&quot;);
+<span class="fc" id="L114">        authenticationException.setOperationOutcome(operationOutcome);</span>
+<span class="fc" id="L115">        return authenticationException;</span>
+    }
+
+    private AuthenticationException sessionExpired(SessionExpiredException cause) {
+<span class="fc" id="L119">        AuthenticationException authenticationException = new AuthenticationException(cause.getMessage(), cause);</span>
+<span class="fc" id="L120">        authenticationException.setOperationOutcome(createErrorOutcome(</span>
+                &quot;API_SESSION_EXPIRED&quot;,
+                &quot;API session expired&quot;,
+<span class="fc" id="L123">                format(&quot;This API session expired at %s&quot;, toFhirTimestampFormat(cause.getExpiredAt()))));</span>
+<span class="fc" id="L124">        return authenticationException;</span>
+    }
+
+    private AuthenticationException tokenExpired(AccessTokenExpiredException cause) {
+<span class="fc" id="L128">        AuthenticationException authenticationException = new AuthenticationException(cause.getMessage(), cause);</span>
+<span class="fc" id="L129">        authenticationException.setOperationOutcome(createErrorOutcome(</span>
+                &quot;ACC_TOKEN_EXPIRED&quot;,
+                &quot;Access token expired&quot;,
+<span class="fc" id="L132">                format(&quot;This access token expired at %s&quot;, toFhirTimestampFormat(cause.getExpiredAt()))));</span>
+<span class="fc" id="L133">        return authenticationException;</span>
+    }
+
+    private String toFhirTimestampFormat(Instant instant) {
+<span class="fc" id="L137">        return instant.atOffset(ZoneOffset.UTC).format(FhirConstants.TIMESTAMP_FORMATTER);</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.8.202204050719</span></div></body></html>
